@@ -55,6 +55,7 @@ Networking is provided by the existing environment. Where needed, [idy/tailsplit
 | [Design notes](docs/design-notes.md) | The original discussion, product intent, decisions, and deferred cascading scope |
 | [Frontend integration](docs/frontend.md) | Magpie assets, desktop integration, UI responsibilities, and future validation |
 | [Agent guidance](AGENTS.md) | Project-specific instructions for implementation work |
+| [Automated review](docs/review-workflow.md) | Shared OpenAI/Codex review triggers, trust boundaries, and result checks |
 
 ## Getting started
 

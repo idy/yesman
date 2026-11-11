@@ -1,6 +1,6 @@
 # Project guidance
 
-Read [README.md](README.md) when starting work in this repository. Read [docs/architecture.md](docs/architecture.md) before changing lead lifecycle, memory, task ownership, triage, execution adapters, or host connections. Read [docs/frontend.md](docs/frontend.md) before frontend or Tauri window integration work, and [docs/design-notes.md](docs/design-notes.md) when revisiting product scope.
+Read [README.md](README.md) when starting work in this repository. Read [docs/architecture.md](docs/architecture.md) before changing lead lifecycle, memory, task ownership, triage, execution adapters, or host connections. Read [docs/frontend.md](docs/frontend.md) before frontend or Tauri window integration work, and [docs/design-notes.md](docs/design-notes.md) when revisiting product scope. Read [docs/review-workflow.md](docs/review-workflow.md) before changing automated review or interpreting its checks.
 
 - The product and repository name is always lowercase: **yesman**.
 - Leads are permanent identities with independent long-term memory and multiple tasks. An execution session is replaceable; its lead is not.
