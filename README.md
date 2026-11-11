@@ -61,6 +61,12 @@ Networking is provided by the existing environment. Where needed, [idy/tailsplit
 
 There is no application entry point, development server, Cargo workspace, or frontend package yet. Reading the current repository requires no runtime dependencies. Start with the design documents; the first implementation milestone is a local discuss-delegate-deliver loop.
 
+## Contributing
+
+Use a lowercase `prefix: Subject` pull-request title and describe both the change and its relevant validation. Closing Issues are optional. For documentation-only changes, link and consistency checks are appropriate; do not claim application tests that cannot run yet.
+
+Ready pull requests receive automated OpenAI/Codex review through the shared workflow. See the [review guide](docs/review-workflow.md) for manual requests and how to interpret the three checks and completed review on the current head.
+
 ## License
 
 [MIT](LICENSE).
