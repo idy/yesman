@@ -1,0 +1,12 @@
+# Local machine files
+.DS_Store
+Thumbs.db
+
+# Local credentials and environment
+.env
+.env.*
+!.env.example
+
+# Local logs and agent settings
+*.log
+.claude/settings.local.json
