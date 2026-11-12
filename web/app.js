@@ -112,7 +112,13 @@ function pruneCaches() {
   }
 }
 
+// Records that arrive while the history loads are queued, then replayed on
+// top of it, skipping messages the history already has, so a turn in
+// progress keeps streaming and none shows twice.
+const messageKey = (m) => `${m?.role}:${m?.timestamp}`;
+
 async function loadConvo(c) {
+  c.queue = [];
   try {
     const data = await call('Messages', c.id);
     c.messages = data?.messages ?? [];
@@ -120,9 +126,22 @@ async function loadConvo(c) {
     c.live = null;
     c.loaded = true;
     c.error = null;
+    // The reply being written when the history was read...
+    for (const ev of data?.live ?? []) applyEvent(c, ev.data, true);
+    // ...then what arrived since. An event numbered at or before the
+    // history is in it, except a message that ended in between.
+    const seen = new Set(c.messages.map(messageKey));
+    for (const ev of c.queue) {
+      const e = ev.data;
+      if (ev.seq <= (data?.seq ?? 0) && !(e.type === 'message_end' && !seen.has(messageKey(e.message)))) continue;
+      if (e.type === 'message_end' && seen.has(messageKey(e.message))) continue;
+      applyEvent(c, e, true);
+      if (e.type === 'message_end') seen.add(messageKey(e.message));
+    }
   } catch (err) {
     c.error = errorText(err);
   }
+  c.queue = null;
   const a = selectedAgent();
   if (a && keyOf(a) === c.key) renderThread();
 }
@@ -304,7 +323,8 @@ function renderWorking() {
 }
 
 // Live records from an agent's pi process.
-function onAgentEvent({ agent: id, data: e }) {
+function onAgentEvent(ev) {
+  const { agent: id, data: e } = ev;
   if (e.type === 'extension_ui_request' && e.method === 'notify') {
     toast(`${id}: ${e.message}`);
     return;
@@ -315,8 +335,18 @@ function onAgentEvent({ agent: id, data: e }) {
   }
   const agent = agentById(id);
   const c = agent && state.convos.get(keyOf(agent));
-  if (!c || !c.loaded) return;
-  const visible = state.view.kind === 'agent' && state.view.id === id && $('#thread');
+  if (!c) return;
+  if (!c.loaded) {
+    c.queue?.push(ev);
+    return;
+  }
+  applyEvent(c, e, false);
+}
+
+// applyEvent updates a conversation with one record, and the thread when it
+// is shown, unless the record is being replayed before the thread renders.
+function applyEvent(c, e, replaying) {
+  const visible = !replaying && state.view.kind === 'agent' && state.view.id === c.id && $('#thread');
   const scroller = $('#scroll');
   if (visible && scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
 
@@ -520,6 +550,8 @@ function renderDock() {
 
   if (a.status === 'failed' && a.detail) {
     dock.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, 'This agent stopped'), h('p', null, a.detail))));
+  } else if (a.detail) {
+    dock.append(h('div', { class: 'mds-notice', role: 'status' }, h('div', null, h('strong', null, 'Needs a look'), h('p', null, a.detail))));
   }
   if (a.status === 'waiting' && a.dialog) dock.append(askEl(a));
 
@@ -893,9 +925,15 @@ async function start() {
   mygo.on('agents', onAgents);
   mygo.on('agent-event', onAgentEvent);
   mygo.on('changed', refreshSoon);
-  mygo.on('focus-agent', (id) => selectAgent(id));
+  mygo.on('focus-agent', (id) => {
+    call('TakeFocus').catch(() => {});
+    selectAgent(id);
+  });
   state.repos = await call('Repos').catch(() => []);
   await refreshState();
+  // A window opened by a notification click shows the agent it was about.
+  const focus = await call('TakeFocus').catch(() => '');
+  if (focus && agentById(focus)) selectAgent(focus);
 }
 
 start();

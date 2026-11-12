@@ -218,7 +218,12 @@ func (s *Server) checkout(_ context.Context, c caller, r *http.Request) (any, er
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	wt, err := Checkout(ctx, s.Pool, c.yesman, req)
+	var wt pool.Worktree
+	err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+		var err error
+		wt, err = Checkout(ctx, s.Pool, y, req)
+		return err
+	})
 	if err == nil {
 		s.changed()
 	}
@@ -236,7 +241,9 @@ func (s *Server) removeWorktree(ctx context.Context, c caller, r *http.Request) 
 	if !dirRE.MatchString(req.Dir) {
 		return nil, fmt.Errorf("%q is not a worktree directory of this workspace", req.Dir)
 	}
-	if err := s.Pool.RemoveWorktree(ctx, filepath.Join(c.yesman.Path, req.Dir), req.Force); err != nil {
+	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+		return s.Pool.RemoveWorktree(ctx, filepath.Join(y.Path, req.Dir), req.Force)
+	}); err != nil {
 		return nil, err
 	}
 	s.changed()

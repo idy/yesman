@@ -46,6 +46,9 @@ type app struct {
 	smu     sync.Mutex
 	last    map[string]agent.Status
 	release func() // ends KeepRunning while no agent works
+
+	fmu          sync.Mutex
+	pendingFocus string // the agent a notification click asked to show
 }
 
 // showWindow opens the main window, or brings it to the front.
@@ -173,8 +176,11 @@ func (a *app) agentsChanged(list []agent.Info) {
 		id := n.id
 		notification := mygo.NewNotification(mygo.NotificationOptions{ID: id, Title: n.title, Body: n.body, Group: id})
 		notification.OnClick(func() {
+			a.fmu.Lock()
+			a.pendingFocus = id
+			a.fmu.Unlock()
 			a.showWindow()
-			_ = focusEvent.Broadcast(id)
+			_ = focusEvent.Broadcast(id) // an open page shows it now; a new one calls TakeFocus
 		})
 		_ = notification.Show()
 	}

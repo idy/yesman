@@ -37,8 +37,9 @@ func fakePi() {
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		var cmd struct {
-			ID   string `json:"id"`
-			Type string `json:"type"`
+			ID      string `json:"id"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
 		}
 		if json.Unmarshal(sc.Bytes(), &cmd) != nil {
 			continue
@@ -46,7 +47,13 @@ func fakePi() {
 		if cmd.Type == "get_state" {
 			time.Sleep(delay)
 		}
-		write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": true, "data": map[string]any{"messages": []any{}}})
+		failPrompt := cmd.Type == "prompt" && (os.Getenv("FAKE_PI_FAIL_PROMPTS") != "" ||
+			os.Getenv("FAKE_PI_FAIL_REPORTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Worker"))
+		if failPrompt {
+			write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": false, "error": "rejected"})
+			continue
+		}
+		write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": true, "data": map[string]any{"messages": []any{}, "text": "done"}})
 		if cmd.Type == "prompt" {
 			write(map[string]any{"type": "agent_start"})
 			write(map[string]any{"type": "agent_settled", "aborted": false})
@@ -54,7 +61,7 @@ func fakePi() {
 	}
 }
 
-func newTestManager(t *testing.T, delay time.Duration) (*Manager, *yesmen.Store) {
+func newTestManager(t *testing.T, delay time.Duration, env ...string) (*Manager, *yesmen.Store) {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -68,7 +75,7 @@ func newTestManager(t *testing.T, delay time.Duration) (*Manager, *yesmen.Store)
 	m := New(Config{
 		Pi:        exe,
 		Extension: filepath.Join(tmp, "none.ts"),
-		Env:       []string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=" + delay.String()},
+		Env:       append([]string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=" + delay.String()}, env...),
 		Yesmen:    store,
 	})
 	t.Cleanup(m.StopAll)
@@ -161,5 +168,82 @@ func TestCredentials(t *testing.T) {
 	}
 	if i, _ := m.Get(worker); !strings.HasPrefix(i.ID, "alice/") || i.Since.IsZero() {
 		t.Errorf("worker identity %+v", i)
+	}
+}
+
+func TestFailedWorkerStartLeavesNoRecord(t *testing.T) {
+	m, store := newTestManager(t, 0, "FAKE_PI_FAIL_PROMPTS=1")
+	if _, err := m.StartWorker(context.Background(), "alice", "w1", "a task"); err == nil {
+		t.Fatal("a worker whose task was rejected started")
+	}
+	if ws, _ := store.Workers("alice"); len(ws) != 0 {
+		t.Errorf("workers after a failed start: %+v", ws)
+	}
+}
+
+func TestUndeliveredReportIsShown(t *testing.T) {
+	reportAttempts, reportBackoff = 2, time.Millisecond
+	t.Cleanup(func() { reportAttempts, reportBackoff = 3, 2*time.Second })
+	m, _ := newTestManager(t, 0, "FAKE_PI_FAIL_REPORTS=1")
+	if _, err := m.StartWorker(context.Background(), "alice", "w1", "a task"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if i, _ := m.Get(ID("alice", "w1")); strings.Contains(i.Detail, "did not reach the lead") {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	i, _ := m.Get(ID("alice", "w1"))
+	t.Fatalf("worker detail = %q", i.Detail)
+}
+
+// Stopping must not wait for OnChange, which in the app waits for the UI
+// thread, and the UI thread stops every agent when the app quits.
+func TestStopDoesNotWaitForOnChange(t *testing.T) {
+	m, _ := newTestManager(t, 0)
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	m.cfg.OnChange = func([]Info) { <-block }
+	id := ID("alice", yesmen.LeadName)
+	if err := m.Prompt(context.Background(), id, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		m.StopAll()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("StopAll waited for a blocked OnChange")
+	}
+}
+
+// Messages returns the reply in progress, which pi's history lacks, with
+// the number of the last event it reflects.
+func TestMessagesIncludesReplyInProgress(t *testing.T) {
+	m, _ := newTestManager(t, 0)
+	id := ID("alice", yesmen.LeadName)
+	if err := m.Prompt(context.Background(), id, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	a := m.agents[id]
+	m.mu.Unlock()
+	start := m.number(a, "message_start", json.RawMessage(`{"type":"message_start","message":{"role":"assistant","timestamp":1}}`))
+	m.number(a, "message_update", json.RawMessage(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"he"}}`))
+	conv, err := m.Messages(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conv.Live) != 2 || conv.Live[0].Seq != start.Seq || conv.Seq != start.Seq+1 {
+		t.Errorf("live = %+v, seq = %d (start %d)", conv.Live, conv.Seq, start.Seq)
+	}
+	m.number(a, "message_end", json.RawMessage(`{"type":"message_end","message":{"role":"assistant","timestamp":1}}`))
+	if conv, _ := m.Messages(context.Background(), id); len(conv.Live) != 0 {
+		t.Errorf("a finished reply is still live: %+v", conv.Live)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -69,8 +70,20 @@ type Info struct {
 
 // Event is one record an agent's pi process emitted.
 type Event struct {
-	Agent string          `json:"agent"`
-	Data  json.RawMessage `json:"data"`
+	Agent string `json:"agent"`
+	// Seq numbers an agent's events in order, across its restarts.
+	Seq  uint64          `json:"seq"`
+	Data json.RawMessage `json:"data"`
+}
+
+// Conversation is an agent's history, as pi's get_messages returns it,
+// with the events of the reply it is writing, which the history does not
+// hold yet. Seq is the last event it reflects: a client that queued
+// events while loading it replays only later ones.
+type Conversation struct {
+	Messages json.RawMessage `json:"messages"`
+	Live     []Event         `json:"live"`
+	Seq      uint64          `json:"seq"`
 }
 
 // Config configures a Manager.
@@ -87,7 +100,10 @@ type Config struct {
 	Yesmen *yesmen.Store
 	// OnEvent receives every record of every agent, in order per agent.
 	OnEvent func(Event)
-	// OnChange receives the agents whenever one's status changes.
+	// OnChange receives the agents whenever one's status changes. It runs
+	// on a goroutine of its own, never inside a Manager call, so it may
+	// wait for the UI thread while that thread waits for Stop; bursts of
+	// changes are coalesced into one call with the latest agents.
 	OnChange func([]Info)
 }
 
@@ -98,12 +114,16 @@ type Manager struct {
 	mu     sync.Mutex
 	agents map[string]*agent
 	tokens map[string]string // credential -> agent ID, while its process runs
+
+	notify chan struct{} // wakes the goroutine that calls OnChange
 }
 
 type agent struct {
 	info     Info
 	proc     *proc
 	token    string
+	seq      uint64        // the last event's number
+	turn     []Event       // the events of the assistant message in progress
 	starting chan struct{} // closed when a start finishes, nil otherwise
 	stopping bool
 }
@@ -119,7 +139,13 @@ func New(cfg Config) *Manager {
 	if cfg.OnChange == nil {
 		cfg.OnChange = func([]Info) {}
 	}
-	return &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}}
+	m := &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}, notify: make(chan struct{}, 1)}
+	go func() {
+		for range m.notify {
+			m.cfg.OnChange(m.List())
+		}
+	}()
+	return m
 }
 
 // ID joins a yesman and an agent name.
@@ -183,7 +209,13 @@ func (m *Manager) Authenticate(token string) (Info, error) {
 	return m.Get(id)
 }
 
-func (m *Manager) changed() { m.cfg.OnChange(m.List()) }
+// changed schedules OnChange without waiting for it.
+func (m *Manager) changed() {
+	select {
+	case m.notify <- struct{}{}:
+	default: // one is pending, and will read the latest state
+	}
+}
 
 // setStatus records a status, unless the process it comes from was replaced.
 func (m *Manager) setStatus(a *agent, p *proc, s Status, detail string) {
@@ -206,10 +238,22 @@ func (m *Manager) ensure(id string) (*agent, *proc, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	y, err := m.cfg.Yesmen.Get(ys)
-	if err != nil {
-		return nil, nil, err
-	}
+	var (
+		a *agent
+		p *proc
+	)
+	// Starting inside Use keeps a dismissal from archiving the workspace
+	// under a starting agent, or an agent from starting in an archived one.
+	err = m.cfg.Yesmen.Use(ys, func(y yesmen.Yesman) error {
+		var err error
+		a, p, err = m.ensureIn(y, id, name)
+		return err
+	})
+	return a, p, err
+}
+
+func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, error) {
+	ys := y.Name
 	role := RoleLead
 	if name != yesmen.LeadName {
 		role = RoleWorker
@@ -375,7 +419,35 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			m.changed()
 		}
 	}
-	m.cfg.OnEvent(Event{Agent: a.info.ID, Data: raw})
+	m.cfg.OnEvent(m.number(a, kind, raw))
+}
+
+// number gives an event its sequence number and keeps the events of the
+// assistant message in progress, for Messages.
+func (m *Manager) number(a *agent, kind string, raw json.RawMessage) Event {
+	var role string
+	if kind == "message_start" || kind == "message_end" {
+		var e struct {
+			Message struct {
+				Role string `json:"role"`
+			} `json:"message"`
+		}
+		_ = json.Unmarshal(raw, &e)
+		role = e.Message.Role
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a.seq++
+	ev := Event{Agent: a.info.ID, Seq: a.seq, Data: raw}
+	switch {
+	case kind == "message_start" && role == "assistant":
+		a.turn = []Event{ev}
+	case kind == "message_end" && role == "assistant":
+		a.turn = nil
+	case kind == "message_update" && a.turn != nil:
+		a.turn = append(a.turn, ev)
+	}
+	return ev
 }
 
 // watch follows a process until it exits.
@@ -429,18 +501,27 @@ func (m *Manager) Abort(ctx context.Context, id string) error {
 	return err
 }
 
-// Messages returns the agent's conversation, starting it if needed, as
-// pi's get_messages data: {"messages": [...]}.
-func (m *Manager) Messages(ctx context.Context, id string) (json.RawMessage, error) {
-	_, p, err := m.ensure(id)
+// Messages returns the agent's conversation, starting it if needed.
+func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error) {
+	a, p, err := m.ensure(id)
 	if err != nil {
-		return nil, err
+		return Conversation{}, err
 	}
 	r, err := p.call(ctx, map[string]any{"type": "get_messages"})
 	if err != nil {
-		return nil, err
+		return Conversation{}, err
 	}
-	return r.Data, nil
+	var data struct {
+		Messages json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(r.Data, &data); err != nil {
+		return Conversation{}, err
+	}
+	// pi answered after emitting every earlier event, and the reader
+	// numbered those before delivering the answer.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return Conversation{Messages: data.Messages, Live: append([]Event(nil), a.turn...), Seq: a.seq}, nil
 }
 
 // Answer answers the dialog an agent waits on. answer holds the response's
@@ -561,6 +642,9 @@ func (m *Manager) StartWorker(ctx context.Context, yesman, name, task string) (I
 	}
 	id := ID(yesman, name)
 	if err := m.prompt(ctx, id, task, "followUp"); err != nil {
+		// Leave no worker that never got its task, so the name can be
+		// used again.
+		_ = m.RemoveWorker(yesman, name)
 		return Info{}, err
 	}
 	return m.Get(id)
@@ -583,25 +667,49 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 }
 
 // reportToLead hands a worker's final message to its lead, which starts a
-// run or reads it after the current one.
+// run or reads it after the current one. A report that cannot be delivered
+// after a few tries is shown on the worker, for the user.
 func (m *Manager) reportToLead(a *agent, p *proc) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	r, err := p.call(ctx, map[string]any{"type": "get_last_assistant_text"})
-	if err != nil {
-		return
-	}
-	var data struct {
-		Text *string `json:"text"`
-	}
-	_ = json.Unmarshal(r.Data, &data)
 	report := "(no final message)"
-	if data.Text != nil && strings.TrimSpace(*data.Text) != "" {
-		report = *data.Text
+	if r, err := p.call(ctx, map[string]any{"type": "get_last_assistant_text"}); err != nil {
+		report = "(its final message could not be read: " + err.Error() + ")"
+	} else {
+		var data struct {
+			Text *string `json:"text"`
+		}
+		_ = json.Unmarshal(r.Data, &data)
+		if data.Text != nil && strings.TrimSpace(*data.Text) != "" {
+			report = *data.Text
+		}
 	}
 	msg := fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report)
-	_ = m.prompt(ctx, ID(a.info.Yesman, yesmen.LeadName), msg, "followUp")
+	lead := ID(a.info.Yesman, yesmen.LeadName)
+	var err error
+	for attempt := range reportAttempts {
+		if err = m.prompt(ctx, lead, msg, "followUp"); err == nil {
+			return
+		}
+		if attempt < reportAttempts-1 {
+			select {
+			case <-time.After(time.Duration(attempt+1) * reportBackoff):
+			case <-ctx.Done():
+			}
+		}
+	}
+	log.Printf("yesman: report of %s to its lead failed: %v", a.info.ID, err)
+	m.mu.Lock()
+	a.info.Detail, a.info.UpdatedAt = "Its last report did not reach the lead: "+err.Error(), time.Now()
+	m.mu.Unlock()
+	m.changed()
 }
+
+// How often, and how patiently, a worker's report is offered to its lead.
+var (
+	reportAttempts = 3
+	reportBackoff  = 2 * time.Second
+)
 
 func hasSession(dir string) bool {
 	matches, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))

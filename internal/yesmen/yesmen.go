@@ -68,10 +68,44 @@ type Worker struct {
 type Store struct {
 	root, archive string
 	mu            sync.Mutex
+
+	lmu   sync.Mutex
+	locks map[string]*sync.RWMutex // per yesman: Use reads, Archive writes
 }
 
 // New returns the store of workspaces under root, archiving into archive.
-func New(root, archive string) *Store { return &Store{root: root, archive: archive} }
+func New(root, archive string) *Store {
+	return &Store{root: root, archive: archive, locks: map[string]*sync.RWMutex{}}
+}
+
+func (s *Store) lockFor(name string) *sync.RWMutex {
+	s.lmu.Lock()
+	defer s.lmu.Unlock()
+	l := s.locks[name]
+	if l == nil {
+		l = &sync.RWMutex{}
+		s.locks[name] = l
+	}
+	return l
+}
+
+// Use runs fn with a yesman's workspace, which is not archived until fn
+// returns. It fails when the yesman does not exist, or no longer does.
+// Work that writes into a workspace, such as a checkout or starting an
+// agent, runs inside Use so that it cannot outlive a dismissal.
+func (s *Store) Use(name string, fn func(Yesman) error) error {
+	if err := ValidName(name); err != nil {
+		return err
+	}
+	l := s.lockFor(name)
+	l.RLock()
+	defer l.RUnlock()
+	y, err := s.Get(name)
+	if err != nil {
+		return err
+	}
+	return fn(y)
+}
 
 const indexTemplate = `# Knowledge
 
@@ -149,11 +183,23 @@ func (s *Store) List() ([]Yesman, error) {
 }
 
 // Archive moves a yesman's workspace into the archive and returns where it
-// went. Its files stay; the pool forgets its worktrees on its next prune.
-func (s *Store) Archive(name string) (string, error) {
+// went. It waits for work inside Use to finish, and runs before, when not
+// nil, while none can start, just before the move.
+func (s *Store) Archive(name string, before func(Yesman) error) (string, error) {
+	if err := ValidName(name); err != nil {
+		return "", err
+	}
+	l := s.lockFor(name)
+	l.Lock()
+	defer l.Unlock()
 	y, err := s.Get(name)
 	if err != nil {
 		return "", err
+	}
+	if before != nil {
+		if err := before(y); err != nil {
+			return "", err
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

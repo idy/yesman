@@ -129,21 +129,21 @@ func TestWithPi(t *testing.T) {
 	}
 	waitSettled(agent.ID("alice", "echo"), 1)
 	waitSettled(lead, 3) // its own turn, then the run the report started
-	data, err := m.Messages(ctx, lead)
+	conv, err := m.Messages(ctx, lead)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `Worker \"echo\" finished`) {
+	if !strings.Contains(string(conv.Messages), `Worker \"echo\" finished`) {
 		t.Errorf("the lead never received the worker's report")
 	}
 
 	// A restarted lead resumes its session.
 	m.Stop(lead)
-	data, err = m.Messages(ctx, lead)
+	conv, err = m.Messages(ctx, lead)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "DONE") {
+	if !strings.Contains(string(conv.Messages), "DONE") {
 		t.Errorf("the restarted lead lost its conversation")
 	}
 	mu.Lock()

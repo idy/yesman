@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"path/filepath"
@@ -74,13 +73,15 @@ func (s *service) Dismiss(name string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	y, _ := a.yesmen.Get(name)
-	wts, err := a.pool.Worktrees(ctx, y.Path)
-	if err != nil {
-		return "", err
-	}
-	a.agents.StopYesman(name)
-	dest, err := a.yesmen.Archive(name)
+	// While Archive holds the workspace no agent can start in it and no
+	// checkout can run, so the worktrees listed here are all it has.
+	var wts []pool.Worktree
+	dest, err := a.yesmen.Archive(name, func(y yesmen.Yesman) error {
+		a.agents.StopYesman(name)
+		var err error
+		wts, err = a.pool.Worktrees(ctx, y.Path)
+		return err
+	})
 	if err != nil {
 		return "", err
 	}
@@ -134,13 +135,14 @@ func (s *service) FetchRepo(name string) (pool.Repo, error) {
 
 // Checkout checks a worktree out into a yesman's workspace.
 func (s *service) Checkout(yesman string, req server.CheckoutRequest) (pool.Worktree, error) {
-	y, err := s.app.yesmen.Get(yesman)
-	if err != nil {
-		return pool.Worktree{}, err
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	wt, err := server.Checkout(ctx, s.app.pool, y, req)
+	var wt pool.Worktree
+	err := s.app.yesmen.Use(yesman, func(y yesmen.Yesman) error {
+		var err error
+		wt, err = server.Checkout(ctx, s.app.pool, y, req)
+		return err
+	})
 	if err == nil {
 		s.app.notifyChanged()
 	}
@@ -148,9 +150,9 @@ func (s *service) Checkout(yesman string, req server.CheckoutRequest) (pool.Work
 }
 
 // Messages returns an agent's conversation, starting it if needed.
-func (s *service) Messages(ctx context.Context, id string) (json.RawMessage, error) {
+func (s *service) Messages(ctx context.Context, id string) (agent.Conversation, error) {
 	if s.app.piErr != nil {
-		return nil, s.app.piErr
+		return agent.Conversation{}, s.app.piErr
 	}
 	return s.app.agents.Messages(ctx, id)
 }
@@ -185,6 +187,18 @@ func (s *service) RemoveWorker(id string) error {
 		return err
 	}
 	return s.app.agents.RemoveWorker(y, name)
+}
+
+// TakeFocus returns the agent a notification click asked to show, once.
+// A window opened by that click asks for it when its page is ready, since
+// the click's focus-agent event can arrive before the page listens.
+func (s *service) TakeFocus() string {
+	a := s.app
+	a.fmu.Lock()
+	defer a.fmu.Unlock()
+	id := a.pendingFocus
+	a.pendingFocus = ""
+	return id
 }
 
 // OpenURL opens a web link from a reply in the default browser.
