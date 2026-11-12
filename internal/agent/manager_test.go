@@ -230,9 +230,23 @@ func TestMessagesIncludesReplyInProgress(t *testing.T) {
 	if err := m.Prompt(context.Background(), id, "hi"); err != nil {
 		t.Fatal(err)
 	}
-	m.mu.Lock()
-	a := m.agents[id]
-	m.mu.Unlock()
+	// Wait until the fake's own run (agent_start, agent_settled) has been
+	// numbered, or its settle could clear the reply simulated below.
+	var a *agent
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		m.mu.Lock()
+		a = m.agents[id]
+		done := a.seq >= 2
+		m.mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the fake's run was never numbered")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	start := m.number(a, "message_start", json.RawMessage(`{"type":"message_start","message":{"role":"assistant","timestamp":1}}`))
 	m.number(a, "message_update", json.RawMessage(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"he"}}`))
 	conv, err := m.Messages(context.Background(), id)
