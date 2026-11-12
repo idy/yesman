@@ -49,6 +49,9 @@ type app struct {
 
 	fmu          sync.Mutex
 	pendingFocus string // the agent a notification click asked to show
+
+	setmu    sync.Mutex
+	settings Settings
 }
 
 // showWindow opens the main window, or brings it to the front.

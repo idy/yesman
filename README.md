@@ -24,6 +24,8 @@ Every agent runs your installed `pi` with your usual pi configuration (models, p
 
 The app keeps running in the tray with its window closed. Agents are child processes of the app, so quitting it stops them; they resume from their sessions next time.
 
+Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool), and About (the versions yesman runs with).
+
 ## Requirements
 
 - Go 1.27 or later, and git
@@ -67,6 +69,7 @@ go build -tags e2e -o /tmp/yesman . && YESMAN_HOME=/tmp/yesman-home MYGO_AUTOMAT
 | Path | Contents |
 | --- | --- |
 | `main.go`, `app.go`, `service.go` | App startup, tray, window and notifications; the methods the page calls |
+| `settings.go` | The settings file and the Settings and About pages' methods |
 | `internal/pool` | The repo pool and its worktrees |
 | `internal/yesmen` | Workspaces, workers and their files |
 | `internal/agent` | pi processes in RPC mode and their status |

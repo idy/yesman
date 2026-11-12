@@ -6,6 +6,7 @@
 //	yesmen/    one workspace directory per hired yesman
 //	archive/   workspaces of dismissed yesmen
 //	.runtime/  files yesman writes on each start, such as its pi extension
+//	settings.json  the user's choices in Settings
 package home
 
 import (
@@ -46,6 +47,9 @@ func (h Home) Archive() string { return filepath.Join(h.Root, "archive") }
 
 // Runtime holds files rewritten on every start.
 func (h Home) Runtime() string { return filepath.Join(h.Root, ".runtime") }
+
+// Settings is the file of the user's choices in Settings.
+func (h Home) Settings() string { return filepath.Join(h.Root, "settings.json") }
 
 // Ensure creates the directories.
 func (h Home) Ensure() error {

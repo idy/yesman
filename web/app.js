@@ -37,6 +37,12 @@ function icon(name, cls = 'mds-icon') {
     folder: 'M216 72h-84.69L104 44.69A15.86 15.86 0 0 0 92.69 40H40a16 16 0 0 0-16 16v144.62A15.4 15.4 0 0 0 39.38 216h177.51A15.13 15.13 0 0 0 232 200.89V88a16 16 0 0 0-16-16ZM40 56h52.69l16 16H40Zm176 144H40V88h176Z',
     panel: 'M216 40H40a16 16 0 0 0-16 16v144a16 16 0 0 0 16 16h176a16 16 0 0 0 16-16V56a16 16 0 0 0-16-16ZM40 56h112v144H40Zm176 144h-48V56h48v144Z',
     power: 'M120 128V48a8 8 0 0 1 16 0v80a8 8 0 0 1-16 0Zm67.41-74.07a8 8 0 0 0-8.82 13.36C201.4 82.33 216 106.23 216 128a88 88 0 0 1-176 0c0-21.77 14.6-45.67 37.41-60.71a8 8 0 1 0-8.82-13.36C40.62 72.36 24 99.42 24 128a104 104 0 0 0 208 0c0-28.58-16.62-55.64-44.59-74.07Z',
+    gear: 'M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm109.94-52.79a8,8,0,0,0-3.89-5.4l-29.83-17-.12-33.62a8,8,0,0,0-2.83-6.08,111.91,111.91,0,0,0-36.72-20.67,8,8,0,0,0-6.46.59L128,41.85,97.88,25a8,8,0,0,0-6.47-.6A112.1,112.1,0,0,0,54.73,45.15a8,8,0,0,0-2.83,6.07l-.15,33.65-29.83,17a8,8,0,0,0-3.89,5.4,106.47,106.47,0,0,0,0,41.56,8,8,0,0,0,3.89,5.4l29.83,17,.12,33.62a8,8,0,0,0,2.83,6.08,111.91,111.91,0,0,0,36.72,20.67,8,8,0,0,0,6.46-.59L128,214.15,158.12,231a7.91,7.91,0,0,0,3.9,1,8.09,8.09,0,0,0,2.57-.42,112.1,112.1,0,0,0,36.68-20.73,8,8,0,0,0,2.83-6.07l.15-33.65,29.83-17a8,8,0,0,0,3.89-5.4A106.47,106.47,0,0,0,237.94,107.21Zm-15,34.91-28.57,16.25a8,8,0,0,0-3,3c-.58,1-1.19,2.06-1.81,3.06a7.94,7.94,0,0,0-1.22,4.21l-.15,32.25a95.89,95.89,0,0,1-25.37,14.3L134,199.13a8,8,0,0,0-3.91-1h-.19c-1.21,0-2.43,0-3.64,0a8.08,8.08,0,0,0-4.1,1l-28.84,16.1A96,96,0,0,1,67.88,201l-.11-32.2a8,8,0,0,0-1.22-4.22c-.62-1-1.23-2-1.8-3.06a8.09,8.09,0,0,0-3-3.06l-28.6-16.29a90.49,90.49,0,0,1,0-28.26L61.67,97.63a8,8,0,0,0,3-3c.58-1,1.19-2.06,1.81-3.06a7.94,7.94,0,0,0,1.22-4.21l.15-32.25a95.89,95.89,0,0,1,25.37-14.3L122,56.87a8,8,0,0,0,4.1,1c1.21,0,2.43,0,3.64,0a8.08,8.08,0,0,0,4.1-1l28.84-16.1A96,96,0,0,1,188.12,55l.11,32.2a8,8,0,0,0,1.22,4.22c.62,1,1.23,2,1.8,3.06a8.09,8.09,0,0,0,3,3.06l28.6,16.29A90.49,90.49,0,0,1,222.9,142.12Z',
+    sliders: 'M40,88H73a32,32,0,0,0,62,0h81a8,8,0,0,0,0-16H135a32,32,0,0,0-62,0H40a8,8,0,0,0,0,16Zm64-24A16,16,0,1,1,88,80,16,16,0,0,1,104,64ZM216,168H199a32,32,0,0,0-62,0H40a8,8,0,0,0,0,16h97a32,32,0,0,0,62,0h17a8,8,0,0,0,0-16Zm-48,24a16,16,0,1,1,16-16A16,16,0,0,1,168,192Z',
+    about: 'M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm16-40a8,8,0,0,1-8,8,16,16,0,0,1-16-16V128a8,8,0,0,1,0-16,16,16,0,0,1,16,16v40A8,8,0,0,1,144,176ZM112,84a12,12,0,1,1,12,12A12,12,0,0,1,112,84Z',
+    branch: 'M232,64a32,32,0,1,0-40,31v17a8,8,0,0,1-8,8H96a23.84,23.84,0,0,0-8,1.38V95a32,32,0,1,0-16,0v66a32,32,0,1,0,16,0V144a8,8,0,0,1,8-8h88a24,24,0,0,0,24-24V95A32.06,32.06,0,0,0,232,64ZM64,64A16,16,0,1,1,80,80,16,16,0,0,1,64,64ZM96,192a16,16,0,1,1-16-16A16,16,0,0,1,96,192ZM200,80a16,16,0,1,1,16-16A16,16,0,0,1,200,80Z',
+    search: 'M229.66,218.34l-50.07-50.06a88.11,88.11,0,1,0-11.31,11.31l50.06,50.07a8,8,0,0,0,11.32-11.32ZM40,112a72,72,0,1,1,72,72A72.08,72.08,0,0,1,40,112Z',
+    plus: 'M224,128a8,8,0,0,1-8,8H136v80a8,8,0,0,1-16,0V136H40a8,8,0,0,1,0-16h80V40a8,8,0,0,1,16,0v80h80A8,8,0,0,1,224,128Z',
   };
   if (paths[name]) {
     svg.setAttribute('viewBox', '0 0 256 256');
@@ -73,6 +79,12 @@ const state = {
   drafts: new Map(),
   infoOpen: false,
   repos: [],
+  settingsPage: 'general',
+  settings: null, // Yesman.Settings, for the General page
+  about: null, // Yesman.About
+  repoQuery: '',
+  fetching: new Set(), // repositories being fetched
+  addRepo: null, // the add form's draft while it is open
 };
 
 const agentById = (id) => state.snap.agents.find((a) => a.id === id);
@@ -545,7 +557,7 @@ function renderSidebar() {
     if (lead) list.append(agentRow(lead, 'agent-row--yesman', y.name));
     for (const w of agents.filter((a) => a.role === 'worker')) list.append(agentRow(w, 'agent-row--worker', w.name));
   }
-  $('#repos-button').toggleAttribute('aria-current', state.view.kind === 'repos');
+  renderSideFoot();
 }
 
 // ---------- Main column ----------
@@ -554,8 +566,10 @@ function renderBar() {
   const bar = $('#bar');
   bar.replaceChildren();
   const a = selectedAgent();
-  if (state.view.kind === 'repos') {
-    bar.append(h('div', { class: 'bar-title' }, h('strong', null, 'Repo pool'), h('span', null, state.snap.pool ?? '')));
+  if (state.view.kind === 'settings') {
+    const page = SETTINGS.find((s) => s.page === state.view.page);
+    bar.append(h('nav', { class: 'mds-crumbs bar-crumbs', 'aria-label': 'Breadcrumb' },
+      h('span', null, 'Settings'), h('span', { class: 'mds-crumb-sep', 'aria-hidden': 'true' }, '/'), h('strong', { 'aria-current': 'page' }, page.label)));
     return;
   }
   if (!a) {
@@ -582,8 +596,18 @@ function renderBar() {
 
 function renderBody() {
   const body = $('#body');
+  // A refresh while typing, say in the search box, keeps the caret there.
+  const active = body.contains(document.activeElement) ? document.activeElement : null;
   body.replaceChildren();
-  if (state.view.kind === 'repos') return renderRepos(body);
+  if (state.view.kind === 'settings') {
+    renderSettings(body);
+    const again = active?.id && document.getElementById(active.id);
+    if (again) {
+      again.focus();
+      if (again.tagName === 'INPUT') again.setSelectionRange(active.selectionStart, active.selectionEnd);
+    }
+    return;
+  }
   const a = selectedAgent();
   if (!a) return renderWelcome(body);
 
@@ -702,7 +726,132 @@ function renderWelcome(body) {
   input.focus();
 }
 
-// ---------- Repo pool ----------
+// ---------- Settings ----------
+
+const SETTINGS = [
+  { page: 'general', label: 'General', icon: 'sliders' },
+  { page: 'repositories', label: 'Repositories', icon: 'branch' },
+  { page: 'about', label: 'About', icon: 'about' },
+];
+
+// The footer is built once so its submenu can slide open and closed.
+function buildSideFoot() {
+  const nav = h('nav', { class: 'mds-subnav', id: 'settings-nav', 'aria-label': 'Settings' },
+    SETTINGS.map((s) => h('button', { class: 'mds-nav-item', type: 'button', 'data-page': s.page, onclick: () => showSettings(s.page) },
+      icon(s.icon), h('span', null, s.label))));
+  $('#side-foot').replaceChildren(h('div', { class: 'mds-nav-branch settings-branch' },
+    h('div', { class: 'settings-drawer' }, h('div', { class: 'settings-clip' }, nav)),
+    h('button', { class: 'mds-nav-item mds-nav-parent', id: 'settings-button', type: 'button', 'aria-controls': 'settings-nav', onclick: () => showSettings(state.settingsPage) },
+      icon('gear'), h('span', null, 'Settings'))));
+}
+
+function renderSideFoot() {
+  const open = state.view.kind === 'settings';
+  $('.settings-branch').toggleAttribute('data-open', open);
+  $('#settings-button').toggleAttribute('data-active', open);
+  $('#settings-button').setAttribute('aria-expanded', String(open));
+  $('#settings-nav').inert = !open;
+  for (const item of document.querySelectorAll('#settings-nav .mds-nav-item')) {
+    if (open && item.dataset.page === state.view.page) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
+  }
+}
+
+function showSettings(page) {
+  state.settingsPage = page;
+  state.view = { kind: 'settings', page };
+  render();
+  loadSettingsPage(page);
+}
+
+// Pages render what they last had at once and refresh it from the app.
+async function loadSettingsPage(page) {
+  try {
+    if (page === 'general') state.settings = await call('Settings');
+    else if (page === 'about') state.about = await call('About');
+    else if (page === 'repositories') state.repos = await call('Repos');
+  } catch (err) {
+    fail(err);
+    return;
+  }
+  if (state.view.kind === 'settings' && state.view.page === page) renderBody();
+}
+
+function renderSettings(body) {
+  const inner = h('div', { class: 'page-inner' });
+  body.append(h('div', { class: 'page' }, inner));
+  if (state.view.page === 'repositories') renderRepositories(inner);
+  else if (state.view.page === 'about') renderAbout(inner);
+  else renderGeneral(inner);
+}
+
+function settingsSection(title, hint, ...rows) {
+  return h('section', { class: 'settings-section' },
+    h('div', { class: 'mds-section-heading' }, h('h2', null, title), hint ? h('p', null, hint) : null),
+    h('div', { class: 'mds-group' }, rows));
+}
+
+function preferenceRow(label, hint, control) {
+  return h('div', { class: 'mds-row mds-row--preference' },
+    h('div', { class: 'mds-row-label' }, h('h3', null, label), hint),
+    h('div', { class: 'mds-row-control row-end' }, control));
+}
+
+function revealButton(path) {
+  return h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => call('Reveal', path).catch(fail) }, icon('folder'), 'Reveal');
+}
+
+function renderGeneral(inner) {
+  const v = state.settings;
+  if (!v) return;
+  const appearance = h('select', { class: 'mds-select', 'aria-label': 'Appearance', onchange: async (e) => {
+    const select = e.currentTarget;
+    try {
+      await call('SetAppearance', select.value);
+      v.appearance = select.value;
+    } catch (err) {
+      fail(err);
+      select.value = v.appearance;
+    }
+  } }, [['system', 'Match the system'], ['light', 'Light'], ['dark', 'Dark']].map(([value, label]) =>
+    h('option', { value, selected: value === v.appearance }, label)));
+  inner.append(
+    settingsSection('Appearance', null,
+      preferenceRow('Theme', h('p', null, 'The window and its menus follow this.'), appearance)),
+    settingsSection('Storage', 'Everything yesman keeps is in one folder. Start yesman with YESMAN_HOME set to keep it somewhere else.',
+      preferenceRow('yesman folder', h('p', { class: 'path' }, v.home), revealButton(v.home)),
+      preferenceRow('Archive', h('p', null, 'Workspaces of dismissed yesmen, with their worktrees. ', h('span', { class: 'path' }, v.archive)), revealButton(v.archive))),
+    settingsSection('Agents', null,
+      preferenceRow('pi',
+        v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null, 'Every lead and worker runs this pi. Set YESMAN_PI to use another. ', h('span', { class: 'path' }, v.pi)),
+        h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : 'idle' }, h('i', { class: 'mds-dot' }), h('span', null, v.piError ? 'Not found' : 'Found')))),
+  );
+}
+
+function renderAbout(inner) {
+  const v = state.about;
+  const row = (label, ...value) => h('div', { class: 'mds-row about-row' },
+    h('div', { class: 'mds-row-label' }, h('label', null, label)),
+    h('div', { class: 'mds-row-control about-value' }, value));
+  const faint = (text) => h('span', { class: 'about-faint' }, text);
+  let build = faint('Checking…');
+  if (v) {
+    const date = v.time ? new Date(v.time).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+    const detail = [v.revision ? v.revision.slice(0, 12) : '', date, v.modified ? 'with local changes' : ''].filter(Boolean).join(' · ');
+    build = [v.version || 'Development build', detail ? faint(` ${detail}`) : null];
+  }
+  inner.append(
+    settingsSection('yesman', 'Hires yesmen: pi agents that each take on one project in a workspace of their own.',
+      row('Build', build),
+      row('pi', v ? (v.pi || h('span', { class: 'danger' }, v.piError)) : faint('Checking…')),
+      row('MyGo', v ? v.mygo || faint('unknown') : faint('Checking…')),
+      row('Magpie', v ? v.magpie || faint('unknown') : faint('Checking…')),
+      row('Go', v ? v.go : faint('Checking…'))),
+    h('div', null, h('button', { class: 'mds-link-button', type: 'button', onclick: () => call('OpenURL', 'https://github.com/idy/yesman').catch(fail) }, 'Source on GitHub')),
+  );
+}
+
+// ---------- Repositories ----------
 
 function ago(iso) {
   if (!iso) return 'never fetched';
@@ -713,69 +862,114 @@ function ago(iso) {
   return `fetched ${Math.round(s / 86400)} d ago`;
 }
 
-function renderRepos(body) {
-  const url = h('input', { class: 'mds-input mds-mono', name: 'url', placeholder: 'https://github.com/owner/repo', required: true, spellcheck: 'false' });
-  const upstream = h('input', { class: 'mds-input mds-mono', name: 'upstream', placeholder: 'optional', spellcheck: 'false' });
-  const add = h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, 'Add');
-  const list = h('div', { class: 'repo-list' }, h('div', { class: 'empty-line' }, 'Loading…'));
-  const form = h('form', { class: 'form-row', onsubmit: async (e) => {
-    e.preventDefault();
-    add.disabled = true;
-    add.textContent = 'Cloning…';
-    try {
-      const repo = await call('AddRepo', url.value.trim(), upstream.value.trim());
-      toast(`${repo.name} is in the pool`);
-      url.value = upstream.value = '';
-      await refreshRepos(list);
-    } catch (err) {
-      fail(err);
-    } finally {
-      add.disabled = false;
-      add.textContent = 'Add';
-    }
-  } },
-    h('label', { class: 'field' }, h('span', null, 'Repository URL'), url),
-    h('label', { class: 'field' }, h('span', null, 'Upstream, for a fork'), upstream),
-    add);
-  body.append(h('div', { class: 'page' }, h('div', { class: 'page-inner' },
-    h('div', null,
-      h('p', { class: 'page-lead' }, 'Bare repositories every yesman checks worktrees out of. Only yesman writes here; a repository is fetched whenever someone checks it out. Agents can add repositories too.')),
-    form, list)));
-  renderRepoList(list);
+function renderRepositories(inner) {
+  const search = state.repos.length > 1
+    ? h('label', { class: 'search' }, icon('search'),
+        h('input', { class: 'mds-input', id: 'repo-search', type: 'search', placeholder: 'Find a repository', 'aria-label': 'Find a repository', spellcheck: 'false', value: state.repoQuery,
+          oninput: (e) => { state.repoQuery = e.currentTarget.value; renderRepoList(); } }))
+    : null;
+  inner.append(
+    h('div', { class: 'mds-toolbar' },
+      h('p', { class: 'toolbar-lead' }, 'Bare repositories the yesmen check worktrees out of. Only yesman writes here, and it fetches a repository whenever one is checked out.'),
+      h('div', { class: 'mds-toolbar-actions' }, search,
+        h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Reveal the repo pool', 'aria-label': 'Reveal the repo pool', onclick: () => call('Reveal', state.snap.pool).catch(fail) }, icon('folder')))),
+    h('div', { class: 'card-list', id: 'repo-list', role: 'list', 'aria-label': 'Repositories' }),
+    h('div', { id: 'repo-add' }));
+  renderRepoList();
+  renderRepoAdd();
 }
 
-async function refreshRepos(list) {
+function repoRow(r) {
+  const worktrees = state.snap.yesmen.flatMap((y) => y.worktrees.filter((w) => w.repo === r.name).map((w) => ({ yesman: y.name, dir: w.dir || w.path })));
+  const users = [...new Set(worktrees.map((w) => w.yesman))];
+  const busy = state.fetching.has(r.name);
+  const meta = [r.url, r.upstream ? `forked from ${r.upstream}` : null, r.defaultBranch ? `default ${r.defaultBranch}` : null, busy ? 'fetching…' : ago(r.fetchedAt)].filter(Boolean).join(' · ');
+  return h('div', { class: 'card-row', role: 'listitem' },
+    h('span', { class: 'card-row-icon' }, icon('branch')),
+    h('div', { class: 'card-row-text' }, h('strong', null, r.name), h('span', null, meta)),
+    users.length
+      ? h('span', { class: 'card-row-aside', title: worktrees.map((w) => `${w.yesman}: ${w.dir}`).join('\n') },
+          `${worktrees.length} worktree${worktrees.length === 1 ? '' : 's'} · ${users.join(', ')}`)
+      : null,
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: `Fetch ${r.name}`, 'aria-label': `Fetch ${r.name}`, disabled: busy, onclick: () => fetchRepo(r.name) },
+      busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload')));
+}
+
+function renderRepoList() {
+  const list = $('#repo-list');
+  if (!list) return;
+  const q = state.repoQuery.trim().toLowerCase();
+  const repos = q ? state.repos.filter((r) => `${r.name} ${r.url} ${r.upstream ?? ''}`.toLowerCase().includes(q)) : state.repos;
+  if (!state.repos.length) {
+    list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, 'No repositories yet'), h('span', null, 'Add one by URL, or let a yesman add the ones it needs.')));
+  } else if (!repos.length) {
+    list.replaceChildren(h('div', { class: 'card-empty' }, h('span', null, `No repository matches “${state.repoQuery.trim()}”.`)));
+  } else {
+    list.replaceChildren(...repos.map(repoRow));
+  }
+}
+
+async function fetchRepo(name) {
+  state.fetching.add(name);
+  renderRepoList();
   try {
+    await call('FetchRepo', name);
     state.repos = await call('Repos');
   } catch (err) {
     fail(err);
+  } finally {
+    state.fetching.delete(name);
+    renderRepoList();
   }
-  renderRepoList(list);
 }
 
-function renderRepoList(list) {
-  if (!list?.isConnected) return;
-  list.replaceChildren();
-  if (!state.repos.length) {
-    list.append(h('div', { class: 'empty-line' }, 'No repositories yet. Add one by URL.'));
+// Adding opens a form under the list, as a row of its own, rather than a
+// dialog: nothing else needs to stop while it clones.
+function renderRepoAdd() {
+  const box = $('#repo-add');
+  if (!box) return;
+  const draft = state.addRepo;
+  if (!draft) {
+    box.replaceChildren(h('button', { class: 'mds-link-button add-link', type: 'button', onclick: () => {
+      state.addRepo = { url: '', upstream: '', error: '', busy: false };
+      renderRepoAdd();
+      $('#repo-url')?.focus();
+    } }, icon('plus'), 'Add repository'));
     return;
   }
-  for (const r of state.repos) {
-    const fetchButton = h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: async () => {
-      fetchButton.disabled = true;
+  const url = h('input', { class: 'mds-input mds-mono', id: 'repo-url', placeholder: 'https://github.com/owner/repo', required: true, spellcheck: 'false', autocomplete: 'off', value: draft.url, disabled: draft.busy, 'aria-invalid': draft.error ? 'true' : null,
+    oninput: (e) => { draft.url = e.currentTarget.value; } });
+  const upstream = h('input', { class: 'mds-input mds-mono', placeholder: 'https://github.com/original/repo', spellcheck: 'false', autocomplete: 'off', value: draft.upstream, disabled: draft.busy, 'aria-describedby': 'repo-upstream-hint',
+    oninput: (e) => { draft.upstream = e.currentTarget.value; } });
+  const cancel = () => { state.addRepo = null; renderRepoAdd(); $('.add-link')?.focus(); };
+  box.replaceChildren(h('form', { class: 'add-form', 'aria-label': 'Add a repository',
+    onkeydown: (e) => { if (e.key === 'Escape' && !draft.busy) cancel(); },
+    onsubmit: async (e) => {
+      e.preventDefault();
+      draft.busy = true;
+      draft.error = '';
+      renderRepoAdd();
       try {
-        await call('FetchRepo', r.name);
-        await refreshRepos(list);
+        const repo = await call('AddRepo', draft.url.trim(), draft.upstream.trim());
+        state.addRepo = null;
+        state.repos = await call('Repos');
+        toast(`${repo.name} is in the pool`);
+        renderRepoList();
       } catch (err) {
-        fail(err);
-        fetchButton.disabled = false;
+        draft.error = errorText(err);
+        draft.busy = false;
       }
-    } }, icon('reload'), 'Fetch');
-    list.append(h('div', { class: 'repo' },
-      h('span', { class: 'repo-name' }, r.name),
-      h('span', { class: 'repo-meta' }, [r.url, r.upstream ? `upstream ${r.upstream}` : null, r.defaultBranch ? `default ${r.defaultBranch}` : null, ago(r.fetchedAt)].filter(Boolean).join(' · ')),
-      h('div', { class: 'repo-actions' }, fetchButton)));
-  }
+      renderRepoAdd();
+      if (state.addRepo) $('#repo-url')?.focus();
+    } },
+    h('label', { class: 'field' }, h('span', null, 'Repository URL'), url),
+    h('label', { class: 'field' }, h('span', null, 'Forked from', h('span', { class: 'mds-optional' }, 'optional')), upstream,
+      h('span', { class: 'mds-hint', id: 'repo-upstream-hint' }, 'If the URL is your fork, the original repository. yesman fetches it as upstream, so agents can branch from upstream/main.')),
+    draft.error ? h('p', { class: 'mds-hint', 'data-tone': 'error', role: 'alert' }, draft.error) : null,
+    h('div', { class: 'add-actions' },
+      h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', disabled: draft.busy, onclick: cancel }, 'Cancel'),
+      h('button', { class: 'mds-button mds-button--small mds-button--primary', type: 'submit', disabled: draft.busy },
+        draft.busy ? [h('span', { class: 'mds-spinner on-accent', 'aria-hidden': 'true' }), 'Cloning…'] : 'Add'))));
 }
 
 // ---------- Workspace panel ----------
@@ -853,11 +1047,6 @@ function selectAgent(id) {
   if (!c.loaded && !c.loading) {
     c.loading = loadConvo(c).finally(() => { c.loading = null; });
   }
-  render();
-}
-
-function showRepos() {
-  state.view = { kind: 'repos' };
   render();
 }
 
@@ -952,6 +1141,7 @@ function onAgents(agents) {
 }
 
 function render() {
+  $('.main').dataset.view = state.view.kind;
   renderSidebar();
   renderBar();
   renderBody();
@@ -969,7 +1159,7 @@ async function start() {
     const result = await openDialog($('#hire-dialog'));
     if (result === 'hire') hire(form.elements.name.value.trim());
   });
-  $('#repos-button').addEventListener('click', showRepos);
+  buildSideFoot();
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href]');
     if (!link) return;

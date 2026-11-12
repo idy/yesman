@@ -39,6 +39,12 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .side-group { margin: 14px 8px 4px; color: var(--mds-muted); font-size: var(--mds-text-caption); font-family: var(--mds-font-heading); }
 .side-foot { padding: 8px 10px 12px; border-top: 1px solid var(--mds-line); }
 .side-foot .mds-nav-item { width: 100%; }
+.settings-branch { gap: 0; }
+.settings-drawer { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 220ms var(--mds-ease); }
+.settings-branch[data-open] .settings-drawer { grid-template-rows: 1fr; }
+.settings-clip { min-height: 0; overflow: hidden; }
+.settings-clip > .mds-subnav { margin: 4px 0 8px 14px; }
+@media (prefers-reduced-motion: reduce) { .settings-drawer { transition: none; } }
 
 .agent-row {
   display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; gap: 8px;
@@ -160,19 +166,54 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .ask p { margin: 0; color: var(--mds-warn-detail); font-size: var(--mds-text-note); white-space: pre-wrap; }
 .ask-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
-/* Pages: repo pool, welcome */
+/* Pages: settings, welcome */
 .page { flex: 1 1 auto; overflow-y: auto; }
-.page-inner { max-width: 880px; margin: 0 auto; padding: 28px 28px 48px; display: grid; gap: 20px; }
-.page-lead { margin: 4px 0 0; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.6; }
-.form-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1.4fr) auto; gap: 8px; align-items: end; }
+.page-inner { max-width: 880px; margin: 0 auto; padding: 24px 28px 48px; display: grid; gap: 16px; align-content: start; }
 .field { display: grid; gap: 6px; font-size: var(--mds-text-caption); color: var(--mds-ink-subtle); }
-.repo-list { display: grid; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-lg); background: var(--mds-surface); overflow: hidden; }
-.repo { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px; align-items: center; padding: 12px 16px; }
-.repo + .repo { border-top: 1px solid var(--mds-line); }
-.repo-name { font-family: var(--mds-mono); font-size: var(--mds-text-note); color: var(--mds-ink-strong); overflow-wrap: anywhere; }
-.repo-meta { grid-column: 1; color: var(--mds-muted); font-size: var(--mds-text-caption); overflow-wrap: anywhere; }
-.repo-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 6px; }
-.empty-line { padding: 16px; color: var(--mds-muted); font-size: var(--mds-text-note); }
+
+/* Settings pages sit on the canvas, as Magpie's own settings do, so their
+   groups and card lists read as surfaces. */
+.main[data-view="settings"] { background: var(--mds-canvas); }
+.bar-crumbs { flex: 1 1 auto; }
+.settings-section + .settings-section { margin-top: 12px; }
+.settings-section .mds-section-heading { margin-bottom: 10px; }
+.settings-section .mds-section-heading h2 { font-size: var(--mds-text-body); }
+.row-end { display: flex; justify-content: flex-end; }
+.mds-row-label .path { display: block; margin-top: 2px; }
+.about-row { align-items: center; }
+.about-row .mds-row-label { padding-top: 0; }
+.about-value { color: var(--mds-ink); font-size: var(--mds-text-note); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.about-faint { color: var(--mds-muted); }
+
+/* A card list: one bordered surface, a row per item. */
+.toolbar-lead { margin: 0; max-width: 60ch; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.55; }
+.search { position: relative; display: block; width: 240px; }
+.search .mds-icon { position: absolute; top: 50%; left: 10px; width: 14px; height: 14px; color: var(--mds-faint); transform: translateY(-50%); pointer-events: none; }
+.search .mds-input { min-height: 32px; padding-block: 4px; padding-left: 30px; }
+.card-list { display: grid; overflow: hidden; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-lg); background: var(--mds-surface); }
+.card-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto auto; align-items: center; gap: 14px; min-height: 58px; padding: 10px 14px 10px 16px; }
+.card-row + .card-row { border-top: 1px solid var(--mds-line); }
+.card-row-icon { display: grid; place-items: center; color: var(--mds-ink-subtle); }
+.card-row-icon .mds-icon { width: 18px; height: 18px; }
+.card-row-text { display: grid; gap: 2px; min-width: 0; }
+.card-row-text > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-row-text strong { color: var(--mds-ink-strong); font-size: var(--mds-text-body); font-weight: 400; }
+.card-row-text span { color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.card-row-aside { max-width: 240px; overflow: hidden; color: var(--mds-muted); font-size: var(--mds-text-caption); text-overflow: ellipsis; white-space: nowrap; }
+.card-row .mds-spinner { width: 14px; height: 14px; }
+.card-empty { display: grid; gap: 4px; padding: 20px 16px; color: var(--mds-muted); font-size: var(--mds-text-note); }
+.card-empty strong { color: var(--mds-ink); font-size: var(--mds-text-body); font-weight: 400; }
+.add-link { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; }
+.add-link .mds-icon { width: 14px; height: 14px; }
+.add-form { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); align-items: start; gap: 12px; padding: 14px 16px; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-lg); background: var(--mds-surface); }
+.add-form .mds-hint, .add-actions { grid-column: 1 / -1; margin: 0; }
+.add-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.mds-button .mds-spinner { width: 13px; height: 13px; }
+.mds-spinner.on-accent { background: currentColor; }
+@media (max-width: 720px) {
+  .card-row-aside { display: none; }
+  .add-form { grid-template-columns: minmax(0, 1fr); }
+}
 
 .welcome { max-width: 460px; margin: 16vh auto 0; display: grid; gap: 14px; text-align: center; padding: 0 24px; }
 .welcome .mds-title { margin: 0; color: var(--mds-ink-strong); }
