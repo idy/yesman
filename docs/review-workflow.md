@@ -12,7 +12,7 @@ uses: GizClaw/github-workflows/.github/workflows/codex-openai-review.yml@latest
 
 The repository's Actions secret `OPENAI_API_KEY` is forwarded explicitly. Never put its value in this repository, workflow inputs, PR comments, or logs. Do not replace the explicit secret mapping with `secrets: inherit`.
 
-Model selection, reasoning effort, CLI version, and shared review policy are maintained upstream. Repository-specific instructions cover the permanent lead model, independent memory, human triage, host ownership, Herdr, Magpie, and the current design-only stage.
+Model selection, reasoning effort, CLI version, and shared review policy are maintained upstream. Repository-specific instructions point the reviewer at `AGENTS.md` and the current pre-implementation stage.
 
 ## Triggers
 

@@ -2,71 +2,84 @@
 
 **the agent that says yes and gets things done.**
 
-yesman is the person you hope to meet: someone who takes responsibility and makes things happen. It handles the coordination while other agents do the work.
+yesman is a tray app for hiring yesmen. A yesman takes on one project: it gets a workspace directory of its own, checks out whichever repositories the project needs from a shared repo pool, keeps notes its agents share, and starts workers when the job splits up. You talk to its lead in a Claude Code-style window.
 
-Discuss a goal with a lead. The lead turns it into tasks, assigns the right agents, and keeps delivery moving through implementation, commits, merges, and releases. You make the decisions that need a person; yesman follows through on the rest.
-
-> Status: design documentation. The stack and architecture below are selected design decisions; there is no runnable application yet.
+> Status: early prototype. Hiring, the repo pool, worktrees, lead and worker agents, shared knowledge, and the window work on macOS. The app also compiles for Linux and Windows, but only macOS has been run. Watching pull requests and managing service keys are not built yet.
 
 ## How it works
 
-1. **Discuss a goal.** Talk with a permanent lead about the outcome, scope, and acceptance criteria.
-2. **Delegate the work.** The lead creates tasks and selects an execution agent for each one, such as Codex, Claude Code TUI, or pi.
-3. **Keep tasks focused.** Each task session works toward one deliverable. Discoveries become linked findings or tasks instead of silently expanding its scope.
-4. **Make the calls.** Anything needing your decision goes to **to triage**. Discuss it with the responsible lead and decide what happens next.
-5. **Follow delivery.** The lead tracks evidence from task sessions and delivery systems until the required work is committed, merged, or released.
-
-This is getting things done through coordination: the lead owns the follow-through, and execution agents produce the deliverables.
-
-## Permanent leads
-
-A lead is a permanent identity, not a task or a temporary conversation. Completing a task never removes its lead.
-
-Each lead maintains independent long-term memory, an ongoing conversation, repository scope, and a task board. One host can run several leads; each lead can manage several repositories and tasks concurrently. Its runtime can restart or be replaced while the lead's identity and state remain intact.
-
-## Stack
-
-| Layer | Choice |
+| Piece | What it is |
 | --- | --- |
-| Desktop shell | Tauri 2 |
-| Frontend | TypeScript/HTML with [idy/magpie-design-system](https://github.com/idy/magpie-design-system) |
-| Backend | Rust host service and Tauri bridge |
-| Persistence | SQLite with independent memory namespaces for each lead |
-| Agent runtime | [herdr-core](https://github.com/herdrdev/herdr-core), using its CLI and event stream |
+| Repo pool | Bare repositories under `repos/`, written only by yesman. A repository is fetched whenever someone checks it out of the pool. Forks can carry an `upstream` remote. |
+| Yesman | A workspace directory under `yesmen/<name>/`. Its worktrees, of any pool repositories, are checked out into it with `git worktree`, each on its own branch. |
+| Lead | A [pi](https://pi.dev) agent in RPC mode, working in the workspace. You talk to it; it plans, keeps knowledge, and delegates. |
+| Workers | More pi agents in the same workspace, started by the lead for one task each. A worker's final message is sent to its lead when it finishes a run. |
+| Knowledge | `.yesman/knowledge/`, notes every agent of the yesman reads and writes, listed in `INDEX.md`. |
+| Sessions | Each agent's pi session log in `.yesman/sessions/<agent>/`. Agents resume their latest session when they restart. |
 
-Herdr runs lead and task sessions. yesman owns permanent identities, task records, memory, human triage, and delivery tracking. Different tasks can use different configured coding agents.
+Every agent runs your installed `pi` with your usual pi configuration (models, plugins, MCP servers), plus yesman's extension, [`pi/yesman.ts`](pi/yesman.ts). Before each run the extension gives the agent its yesman's context: the workspace, its worktrees, the pool, the knowledge index and the other agents. It also adds these tools, which call the app's loopback API:
 
-## Local and LAN hosts
+- `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`
+- for leads: `yesman_worker_start`, `yesman_worker_send`, `yesman_worker_remove`
 
-The first version targets local execution and explicitly configured, flat LAN host connections. See connected hosts' tasks and status in a combined board, or select a lead to discuss its work directly.
+The app keeps running in the tray with its window closed. Agents are child processes of the app, so quitting it stops them; they resume from their sessions next time.
 
-- Each task has one owning lead and one owning host.
-- Worktrees, implementation, commits, and delivery operations remain owned by that host.
-- Viewing another host's board does not move its sessions or repository changes.
-- Hierarchical cascading and automatic host-to-host delegation are deferred.
+## Requirements
 
-Networking is provided by the existing environment. Where needed, [idy/tailsplit](https://github.com/idy/tailsplit) and network configuration supply a reachable host address. yesman does not build a VPN, relay, routing system, or NAT traversal layer.
+- Go 1.27 or later, and git
+- [pi](https://pi.dev) 1.5 or later on the `PATH` (`npm install -g @earendil-works/pi-coding-agent`), with a model configured
 
-## Design documents
+The window uses [MyGo](https://github.com/egoist/mygo) v0.9.0 with a vanilla JavaScript page and the [Magpie design system](https://github.com/idy/magpie-design-system) v0.4.4, vendored in `web/mds/`. There is no frontend build step.
 
-| Document | Purpose |
+## Run
+
+```bash
+go run .
+```
+
+| Variable | Effect |
 | --- | --- |
-| [Architecture](docs/architecture.md) | Processes, domain model, storage, Herdr integration, host API, recovery, and implementation sequence |
-| [Design notes](docs/design-notes.md) | The original discussion, product intent, decisions, and deferred cascading scope |
-| [Frontend integration](docs/frontend.md) | Magpie assets, desktop integration, UI responsibilities, and future validation |
-| [Agent guidance](AGENTS.md) | Project-specific instructions for implementation work |
-| [Automated review](docs/review-workflow.md) | Shared OpenAI/Codex review triggers, trust boundaries, and result checks |
+| `YESMAN_HOME` | Data directory, default `~/yesman` |
+| `YESMAN_PI` | The pi executable, default `pi` from the `PATH` (the app adds your login shell's `PATH`) |
+| `YESMAN_WEB_DIR` | Serve the page from this directory instead of the embedded copy, to edit it without rebuilding |
+| `YESMAN_HIDDEN` | Start in the tray without opening the window |
 
-## Getting started
+## Test
 
-There is no application entry point, development server, Cargo workspace, or frontend package yet. Reading the current repository requires no runtime dependencies. Start with the design documents; the first implementation milestone is a local discuss-delegate-deliver loop.
+```bash
+go test ./...
+```
+
+The end-to-end test starts real pi agents and calls your configured model:
+
+```bash
+YESMAN_IT=1 go test ./internal/server -run WithPi -v
+```
+
+To drive the real window, build with the `e2e` tag and attach [`mygo-automation`](https://github.com/egoist/mygo/tree/main/plugins/automation):
+
+```bash
+go build -tags e2e -o /tmp/yesman . && YESMAN_HOME=/tmp/yesman-home MYGO_AUTOMATION=/tmp/yesman.sock /tmp/yesman
+```
+
+## Key files
+
+| Path | Contents |
+| --- | --- |
+| `main.go`, `app.go`, `service.go` | App startup, tray, window and notifications; the methods the page calls |
+| `internal/pool` | The repo pool and its worktrees |
+| `internal/yesmen` | Workspaces, workers and their files |
+| `internal/agent` | pi processes in RPC mode and their status |
+| `internal/server` | The loopback API for the extension, and the context each agent gets |
+| `pi/yesman.ts` | yesman's pi extension |
+| `web/` | The page: `index.html`, `app.js`, `markdown.js`, `app.css`, and Magpie in `mds/` |
 
 ## Contributing
 
-Use a lowercase `prefix: Subject` pull-request title and describe both the change and its relevant validation. Closing Issues are optional. For documentation-only changes, link and consistency checks are appropriate; do not claim application tests that cannot run yet.
+Use a lowercase `prefix: Subject` pull-request title and describe both the change and its relevant validation. Closing Issues are optional.
 
 Ready pull requests receive automated OpenAI/Codex review through the shared workflow. See the [review guide](docs/review-workflow.md) for manual requests and how to interpret the three checks and completed review on the current head.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). Magpie's files in `web/mds/` keep their own licenses.

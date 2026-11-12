@@ -124,16 +124,14 @@ jobs:
     uses: GizClaw/github-workflows/.github/workflows/codex-openai-review.yml@latest
     with:
       review-instructions: >-
-        Review the complete diff against the trusted-base AGENTS.md and design
-        documents for actionable correctness, lifecycle, concurrency, persistence,
-        ownership, permission, and desktop compatibility findings. Preserve
-        permanent leads, independent memory, human-only triage, host-local task
-        ownership, Herdr execution, and the Magpie frontend contract. Distinguish
-        planned design from implemented behavior; documentation-only changes do
-        not require a runnable application or invented implementation tests.
+        Review the complete diff against the trusted-base AGENTS.md for
+        actionable correctness, lifecycle, concurrency, persistence, ownership,
+        permission, and desktop compatibility findings. Distinguish planned
+        design from implemented behavior; documentation-only changes do not
+        require a runnable application or invented implementation tests.
       issue-review-instructions: >-
-        Follow the trusted-base AGENTS.md hierarchy and referenced design
-        documents. Require linked implementation Issues to state their goal,
+        Follow the trusted-base AGENTS.md hierarchy. Require linked
+        implementation Issues to state their goal,
         scope, design, file ownership, and observable validation appropriate to
         the current project stage, without exposing credentials.
       pr-readiness-instructions: >-
@@ -213,16 +211,14 @@ jobs:
     uses: GizClaw/github-workflows/.github/workflows/codex-openai-review.yml@latest
     with:
       review-instructions: >-
-        Review the complete diff against the trusted-base AGENTS.md and design
-        documents for actionable correctness, lifecycle, concurrency, persistence,
-        ownership, permission, and desktop compatibility findings. Preserve
-        permanent leads, independent memory, human-only triage, host-local task
-        ownership, Herdr execution, and the Magpie frontend contract. Distinguish
-        planned design from implemented behavior; documentation-only changes do
-        not require a runnable application or invented implementation tests.
+        Review the complete diff against the trusted-base AGENTS.md for
+        actionable correctness, lifecycle, concurrency, persistence, ownership,
+        permission, and desktop compatibility findings. Distinguish planned
+        design from implemented behavior; documentation-only changes do not
+        require a runnable application or invented implementation tests.
       issue-review-instructions: >-
-        Follow the trusted-base AGENTS.md hierarchy and referenced design
-        documents. Require linked implementation Issues to state their goal,
+        Follow the trusted-base AGENTS.md hierarchy. Require linked
+        implementation Issues to state their goal,
         scope, design, file ownership, and observable validation appropriate to
         the current project stage, without exposing credentials.
       pr-readiness-instructions: >-

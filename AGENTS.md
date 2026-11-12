@@ -1,13 +1,11 @@
 # Project guidance
 
-Read [README.md](README.md) when starting work in this repository. Read [docs/architecture.md](docs/architecture.md) before changing lead lifecycle, memory, task ownership, triage, execution adapters, or host connections. Read [docs/frontend.md](docs/frontend.md) before frontend or Tauri window integration work, and [docs/design-notes.md](docs/design-notes.md) when revisiting product scope. Read [docs/review-workflow.md](docs/review-workflow.md) before changing automated review or interpreting its checks.
+Read [README.md](README.md) when starting work in this repository. Read [docs/review-workflow.md](docs/review-workflow.md) before changing automated review or interpreting its checks.
 
 - The product and repository name is always lowercase: **yesman**.
-- Leads are permanent identities with independent long-term memory and multiple tasks. An execution session is replaceable; its lead is not.
-- Leads coordinate. Task sessions perform implementation and delivery work.
-- Items in **to triage** require the user's decision.
-- Each task has one owning lead and host. Aggregate views preserve that ownership.
-- Use Tauri 2 and Rust, with TypeScript/HTML and `idy/magpie-design-system` for the frontend. Use herdr-core for lead and worker runtimes.
-- The first version supports flat, explicitly configured LAN hosts. Lead-to-lead cascading and automatic host-to-host delegation are deferred.
-- Networking and any cross-network reachability come from the existing environment and `idy/tailsplit`; do not introduce a VPN, relay, or routing layer.
-- Keep implemented behavior distinct from planned behavior. The repository currently contains design documentation only.
+- A yesman is one workspace directory for one project, with a lead agent, workers, and shared knowledge. Its worktrees may come from any repository in the pool.
+- The repo pool holds bare repositories that only yesman writes. Agents get worktrees through yesman, never by cloning into or writing to the pool.
+- Agents are pi processes in RPC mode, children of the app. herdr is not used.
+- The app is Go with MyGo v0.9.0. The page is vanilla JavaScript without a framework or build step, styled with Magpie v0.4.4 vendored in `web/mds/`; follow Magpie's tokens and typography rather than adding fonts or weights.
+- Keep the app cross-platform: macOS, Linux and Windows must build (`GOOS=linux go build ./...`, `GOOS=windows go build ./...`).
+- Pull request watching, service keys, and agents acting without the user are not designed yet. Confirm the direction with the user before building them.

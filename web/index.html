@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>yesman</title>
+  <link rel="stylesheet" href="/mds/css/magpie.css">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="side" aria-label="Yesmen">
+      <div class="side-top drag"></div>
+      <div class="side-head">
+        <span class="brand mds-title">yesman</span>
+        <button class="mds-icon-button mds-icon-button--compact" id="hire-button" type="button" aria-label="Hire a yesman" title="Hire a yesman">
+          <svg class="mds-icon" viewBox="0 0 256 256" aria-hidden="true"><path fill="currentColor" d="M224 128a8 8 0 0 1-8 8h-80v80a8 8 0 0 1-16 0v-80H40a8 8 0 0 1 0-16h80V40a8 8 0 0 1 16 0v80h80a8 8 0 0 1 8 8Z"/></svg>
+        </button>
+      </div>
+      <nav class="side-list" id="yesmen"></nav>
+      <div class="side-foot">
+        <button class="mds-nav-item" id="repos-button" type="button">
+          <svg class="mds-icon" aria-hidden="true"><use href="/mds/icons/icons.svg#code"/></svg>
+          <span>Repo pool</span>
+        </button>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="bar drag" id="bar"></header>
+      <div class="body" id="body"></div>
+    </main>
+    <aside class="info" id="info" hidden></aside>
+  </div>
+
+  <dialog class="mds-dialog" id="hire-dialog">
+    <form method="dialog" id="hire-form">
+      <h2 class="mds-heading">Hire a yesman</h2>
+      <p class="dialog-hint">A yesman gets a workspace of its own and a lead you talk to. Name it after the project or the job.</p>
+      <label class="field">
+        <span>Name</span>
+        <input class="mds-input" name="name" required autocomplete="off" spellcheck="false"
+               pattern="[a-z0-9][a-z0-9\-]{0,31}" placeholder="checkout-v2">
+      </label>
+      <p class="dialog-hint">Lowercase letters, digits and dashes.</p>
+      <div class="mds-dialog-actions">
+        <button class="mds-button" value="cancel" formnovalidate>Cancel</button>
+        <button class="mds-button mds-button--primary" value="hire">Hire</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="mds-dialog" id="confirm-dialog">
+    <form method="dialog">
+      <h2 class="mds-heading" id="confirm-title"></h2>
+      <p class="dialog-hint" id="confirm-body"></p>
+      <div class="mds-dialog-actions">
+        <button class="mds-button" value="cancel">Cancel</button>
+        <button class="mds-button mds-button--primary" value="ok" id="confirm-ok"></button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
