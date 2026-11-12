@@ -10,6 +10,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/server"
 	"github.com/idy/yesman/internal/yesmen"
@@ -113,11 +114,16 @@ func (s *service) Repos() ([]pool.Repo, error) {
 	return repos, err
 }
 
-// AddRepo clones a remote into the pool.
-func (s *service) AddRepo(url, upstream string) (pool.Repo, error) {
+// AddRepo clones a GitHub repository into the pool: owner/repo or its
+// URL. A fork's parent is fetched too, as its upstream remote.
+func (s *service) AddRepo(repo string) (pool.Repo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
-	r, err := s.app.pool.Add(ctx, url, upstream)
+	gh, err := github.Resolve(ctx, repo)
+	if err != nil {
+		return pool.Repo{}, err
+	}
+	r, err := s.app.pool.Add(ctx, gh.URL, gh.Upstream)
 	if err == nil {
 		s.app.notifyChanged()
 	}

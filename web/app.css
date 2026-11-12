@@ -205,14 +205,16 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .card-empty strong { color: var(--mds-ink); font-size: var(--mds-text-body); font-weight: 400; }
 .add-link { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; }
 .add-link .mds-icon { width: 14px; height: 14px; }
-.add-form { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); align-items: start; gap: 12px; padding: 14px 16px; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-lg); background: var(--mds-surface); }
-.add-form .mds-hint, .add-actions { grid-column: 1 / -1; margin: 0; }
-.add-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.add-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 8px; padding: 14px 16px; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-lg); background: var(--mds-surface); }
+.add-label { grid-column: 1 / -1; color: var(--mds-ink-subtle); font-size: var(--mds-text-caption); }
+.add-form .mds-hint { grid-column: 1 / -1; margin: 0; }
+.add-actions { display: flex; gap: 8px; }
 .mds-button .mds-spinner { width: 13px; height: 13px; }
 .mds-spinner.on-accent { background: currentColor; }
 @media (max-width: 720px) {
   .card-row-aside { display: none; }
   .add-form { grid-template-columns: minmax(0, 1fr); }
+  .add-actions { justify-content: flex-end; }
 }
 
 .welcome { max-width: 460px; margin: 16vh auto 0; display: grid; gap: 14px; text-align: center; padding: 0 24px; }

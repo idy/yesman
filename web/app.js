@@ -862,6 +862,10 @@ function ago(iso) {
   return `fetched ${Math.round(s / 86400)} d ago`;
 }
 
+// owner/repo for a GitHub URL, which is all a pool repository can be;
+// repositories added before yesman took only GitHub keep their URL.
+const githubName = (url) => /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url ?? '')?.[1] ?? '';
+
 function renderRepositories(inner) {
   const search = state.repos.length > 1
     ? h('label', { class: 'search' }, icon('search'),
@@ -870,7 +874,7 @@ function renderRepositories(inner) {
     : null;
   inner.append(
     h('div', { class: 'mds-toolbar' },
-      h('p', { class: 'toolbar-lead' }, 'Bare repositories the yesmen check worktrees out of. Only yesman writes here, and it fetches a repository whenever one is checked out.'),
+      h('p', { class: 'toolbar-lead' }, 'GitHub repositories the yesmen check worktrees out of. Only yesman writes here, and it fetches a repository whenever one is checked out.'),
       h('div', { class: 'mds-toolbar-actions' }, search,
         h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Reveal the repo pool', 'aria-label': 'Reveal the repo pool', onclick: () => call('Reveal', state.snap.pool).catch(fail) }, icon('folder')))),
     h('div', { class: 'card-list', id: 'repo-list', role: 'list', 'aria-label': 'Repositories' }),
@@ -883,10 +887,11 @@ function repoRow(r) {
   const worktrees = state.snap.yesmen.flatMap((y) => y.worktrees.filter((w) => w.repo === r.name).map((w) => ({ yesman: y.name, dir: w.dir || w.path })));
   const users = [...new Set(worktrees.map((w) => w.yesman))];
   const busy = state.fetching.has(r.name);
-  const meta = [r.url, r.upstream ? `forked from ${r.upstream}` : null, r.defaultBranch ? `default ${r.defaultBranch}` : null, busy ? 'fetching…' : ago(r.fetchedAt)].filter(Boolean).join(' · ');
+  const name = githubName(r.url);
+  const meta = [name ? null : r.url, r.upstream ? `fork of ${githubName(r.upstream) || r.upstream}` : null, r.defaultBranch ? `default ${r.defaultBranch}` : null, busy ? 'fetching…' : ago(r.fetchedAt)].filter(Boolean).join(' · ');
   return h('div', { class: 'card-row', role: 'listitem' },
     h('span', { class: 'card-row-icon' }, icon('branch')),
-    h('div', { class: 'card-row-text' }, h('strong', null, r.name), h('span', null, meta)),
+    h('div', { class: 'card-row-text' }, h('strong', { title: r.name }, name || r.name), h('span', null, meta)),
     users.length
       ? h('span', { class: 'card-row-aside', title: worktrees.map((w) => `${w.yesman}: ${w.dir}`).join('\n') },
           `${worktrees.length} worktree${worktrees.length === 1 ? '' : 's'} · ${users.join(', ')}`)
@@ -901,7 +906,7 @@ function renderRepoList() {
   const q = state.repoQuery.trim().toLowerCase();
   const repos = q ? state.repos.filter((r) => `${r.name} ${r.url} ${r.upstream ?? ''}`.toLowerCase().includes(q)) : state.repos;
   if (!state.repos.length) {
-    list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, 'No repositories yet'), h('span', null, 'Add one by URL, or let a yesman add the ones it needs.')));
+    list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, 'No repositories yet'), h('span', null, 'Add one from GitHub, or let a yesman add the ones it needs.')));
   } else if (!repos.length) {
     list.replaceChildren(h('div', { class: 'card-empty' }, h('span', null, `No repository matches “${state.repoQuery.trim()}”.`)));
   } else {
@@ -931,16 +936,15 @@ function renderRepoAdd() {
   const draft = state.addRepo;
   if (!draft) {
     box.replaceChildren(h('button', { class: 'mds-link-button add-link', type: 'button', onclick: () => {
-      state.addRepo = { url: '', upstream: '', error: '', busy: false };
+      state.addRepo = { repo: '', error: '', busy: false };
       renderRepoAdd();
-      $('#repo-url')?.focus();
+      $('#repo-input')?.focus();
     } }, icon('plus'), 'Add repository'));
     return;
   }
-  const url = h('input', { class: 'mds-input mds-mono', id: 'repo-url', placeholder: 'https://github.com/owner/repo', required: true, spellcheck: 'false', autocomplete: 'off', value: draft.url, disabled: draft.busy, 'aria-invalid': draft.error ? 'true' : null,
-    oninput: (e) => { draft.url = e.currentTarget.value; } });
-  const upstream = h('input', { class: 'mds-input mds-mono', placeholder: 'https://github.com/original/repo', spellcheck: 'false', autocomplete: 'off', value: draft.upstream, disabled: draft.busy, 'aria-describedby': 'repo-upstream-hint',
-    oninput: (e) => { draft.upstream = e.currentTarget.value; } });
+  const input = h('input', { class: 'mds-input mds-mono', id: 'repo-input', placeholder: 'owner/repo', required: true, spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off',
+    value: draft.repo, disabled: draft.busy, 'aria-invalid': draft.error ? 'true' : null, 'aria-describedby': draft.error ? 'repo-error' : 'repo-hint',
+    oninput: (e) => { draft.repo = e.currentTarget.value; } });
   const cancel = () => { state.addRepo = null; renderRepoAdd(); $('.add-link')?.focus(); };
   box.replaceChildren(h('form', { class: 'add-form', 'aria-label': 'Add a repository',
     onkeydown: (e) => { if (e.key === 'Escape' && !draft.busy) cancel(); },
@@ -950,26 +954,27 @@ function renderRepoAdd() {
       draft.error = '';
       renderRepoAdd();
       try {
-        const repo = await call('AddRepo', draft.url.trim(), draft.upstream.trim());
+        const repo = await call('AddRepo', draft.repo.trim());
         state.addRepo = null;
         state.repos = await call('Repos');
-        toast(`${repo.name} is in the pool`);
+        toast(`${githubName(repo.url) || repo.name} is in the pool`);
         renderRepoList();
       } catch (err) {
         draft.error = errorText(err);
         draft.busy = false;
       }
       renderRepoAdd();
-      if (state.addRepo) $('#repo-url')?.focus();
+      if (state.addRepo) $('#repo-input')?.focus();
     } },
-    h('label', { class: 'field' }, h('span', null, 'Repository URL'), url),
-    h('label', { class: 'field' }, h('span', null, 'Forked from', h('span', { class: 'mds-optional' }, 'optional')), upstream,
-      h('span', { class: 'mds-hint', id: 'repo-upstream-hint' }, 'If the URL is your fork, the original repository. yesman fetches it as upstream, so agents can branch from upstream/main.')),
-    draft.error ? h('p', { class: 'mds-hint', 'data-tone': 'error', role: 'alert' }, draft.error) : null,
+    h('label', { class: 'add-label', for: 'repo-input' }, 'GitHub repository'),
+    input,
     h('div', { class: 'add-actions' },
       h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', disabled: draft.busy, onclick: cancel }, 'Cancel'),
       h('button', { class: 'mds-button mds-button--small mds-button--primary', type: 'submit', disabled: draft.busy },
-        draft.busy ? [h('span', { class: 'mds-spinner on-accent', 'aria-hidden': 'true' }), 'Cloning…'] : 'Add'))));
+        draft.busy ? [h('span', { class: 'mds-spinner on-accent', 'aria-hidden': 'true' }), 'Cloning…'] : 'Add')),
+    draft.error
+      ? h('p', { class: 'mds-hint', id: 'repo-error', 'data-tone': 'error', role: 'alert' }, draft.error)
+      : h('p', { class: 'mds-hint', id: 'repo-hint' }, 'owner/repo, or a link to it. For a fork, yesman also fetches the repository it was forked from.')));
 }
 
 // ---------- Workspace panel ----------
