@@ -18,7 +18,6 @@ async function call(method: "GET" | "POST", path: string, body?: unknown, signal
 		method,
 		headers: {
 			Authorization: `Bearer ${TOKEN}`,
-			"X-Yesman-Agent": AGENT ?? "",
 			...(body === undefined ? {} : { "Content-Type": "application/json" }),
 		},
 		body: body === undefined ? undefined : JSON.stringify(body),

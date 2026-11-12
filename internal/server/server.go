@@ -1,7 +1,7 @@
 // Package server is the local HTTP API that yesman's pi extension calls
 // from inside each agent. It listens on loopback; every request carries the
-// app's token and the calling agent's ID, which pi received in its
-// environment when yesman started it.
+// calling agent's own credential, YESMAN_TOKEN, which the agent manager
+// issued when it started that agent and maps back to it.
 package server
 
 import (
@@ -27,7 +27,6 @@ type Server struct {
 	Pool   *pool.Pool
 	Yesmen *yesmen.Store
 	Agents *agent.Manager
-	Token  string
 	// Changed is told when the pool or a workspace's worktrees change.
 	Changed func()
 
@@ -74,13 +73,14 @@ type handlerFunc func(ctx context.Context, c caller, r *http.Request) (any, erro
 
 func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+s.Token {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok {
+			writeError(w, http.StatusUnauthorized, errors.New("no agent credential"))
 			return
 		}
-		info, err := s.Agents.Get(r.Header.Get("X-Yesman-Agent"))
+		info, err := s.Agents.Authenticate(token)
 		if err != nil {
-			writeError(w, http.StatusForbidden, err)
+			writeError(w, http.StatusUnauthorized, err)
 			return
 		}
 		y, err := s.Yesmen.Get(info.Yesman)

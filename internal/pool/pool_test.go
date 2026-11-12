@@ -188,6 +188,27 @@ func TestPool(t *testing.T) {
 		t.Errorf("after removing two: %+v", wts)
 	}
 
+	// A moved workspace keeps its worktrees once repaired, and a prune
+	// leaves them alone.
+	archived := filepath.Join(tmp, "archive", "alice")
+	if err := os.MkdirAll(filepath.Dir(archived), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(ws, archived); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(archived, filepath.Base(wt2.Path))
+	if err := p.Repair(ctx, []string{moved}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if wts, _ := p.Worktrees(ctx, archived); len(wts) != 1 || wts[0].Branch != "feature" {
+		t.Errorf("worktrees after archiving = %+v", wts)
+	}
+	run(t, moved, "status", "--short")
+
 	// The upstream of a fork is added to an existing repository.
 	up := filepath.Join(tmp, "src", "upstream")
 	newOrigin(t, up)

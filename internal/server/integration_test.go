@@ -52,14 +52,14 @@ func TestWithPi(t *testing.T) {
 	var mu sync.Mutex
 	settled := map[string]int{}
 	var log []string
-	srv := &Server{Pool: p, Yesmen: store, Token: "test-token"}
+	srv := &Server{Pool: p, Yesmen: store}
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
 	}
 	m := agent.New(agent.Config{
 		Pi:        piPath,
 		Extension: ext,
-		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_TOKEN=test-token", "YESMAN_HOME=" + tmp},
+		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + tmp},
 		Yesmen:    store,
 		OnEvent: func(e agent.Event) {
 			var head struct {

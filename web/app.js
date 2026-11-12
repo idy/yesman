@@ -82,8 +82,9 @@ const selectedAgent = () => (state.view.kind === 'agent' ? agentById(state.view.
 // ---------- Conversations ----------
 
 class Convo {
-  constructor(id) {
-    this.id = id;
+  constructor(a) {
+    this.id = a.id;
+    this.key = keyOf(a);
     this.messages = [];
     this.loaded = false;
     this.error = null;
@@ -92,10 +93,23 @@ class Convo {
   }
 }
 
-function convo(id) {
-  let c = state.convos.get(id);
-  if (!c) state.convos.set(id, (c = new Convo(id)));
+// An agent's name can be reused: a dismissed yesman's name can be hired
+// again, and a lead can start a new worker with a removed one's name. Its
+// hiring or start time tells those agents apart.
+const keyOf = (a) => `${a.id}@${a.since ?? ''}`;
+
+function convo(a) {
+  let c = state.convos.get(keyOf(a));
+  if (!c) state.convos.set(keyOf(a), (c = new Convo(a)));
   return c;
+}
+
+// Forget conversations and drafts of agents that are gone.
+function pruneCaches() {
+  const keys = new Set(state.snap.agents.map(keyOf));
+  for (const map of [state.convos, state.drafts]) {
+    for (const key of map.keys()) if (!keys.has(key)) map.delete(key);
+  }
 }
 
 async function loadConvo(c) {
@@ -109,7 +123,8 @@ async function loadConvo(c) {
   } catch (err) {
     c.error = errorText(err);
   }
-  if (state.view.kind === 'agent' && state.view.id === c.id) renderThread();
+  const a = selectedAgent();
+  if (a && keyOf(a) === c.key) renderThread();
 }
 
 const textOf = (content) =>
@@ -239,7 +254,7 @@ function renderThread() {
   const thread = $('#thread');
   const a = selectedAgent();
   if (!thread || !a) return;
-  const c = convo(a.id);
+  const c = convo(a);
   thread.replaceChildren();
   if (c.error) {
     thread.append(h('div', { class: 'note note--error' }, c.error));
@@ -298,7 +313,8 @@ function onAgentEvent({ agent: id, data: e }) {
     toast(`${id}: extension error: ${e.error}`, { duration: 6000 });
     return;
   }
-  const c = state.convos.get(id);
+  const agent = agentById(id);
+  const c = agent && state.convos.get(keyOf(agent));
   if (!c || !c.loaded) return;
   const visible = state.view.kind === 'agent' && state.view.id === id && $('#thread');
   const scroller = $('#scroll');
@@ -512,7 +528,7 @@ function renderDock() {
     rows: 1, 'aria-label': 'Message',
     placeholder: a.role === 'lead' ? `Message ${a.yesman}…` : `Message worker ${a.name}…`,
   });
-  textarea.value = state.drafts.get(a.id) ?? '';
+  textarea.value = state.drafts.get(keyOf(a)) ?? '';
   const send = h('button', { class: 'round', type: 'submit', 'aria-label': 'Send', title: working ? 'Send: delivered after its current step' : 'Send' }, icon('send'));
   const stop = working ? h('button', { class: 'round round--stop', type: 'button', 'aria-label': 'Stop', title: 'Stop the current run', onclick: () => call('Abort', a.id).catch(fail) }, icon('stop')) : null;
   const sync = () => {
@@ -520,14 +536,14 @@ function renderDock() {
     textarea.style.height = 'auto';
     textarea.style.height = `${textarea.scrollHeight}px`;
   };
-  textarea.addEventListener('input', () => { state.drafts.set(a.id, textarea.value); sync(); });
+  textarea.addEventListener('input', () => { state.drafts.set(keyOf(a), textarea.value); sync(); });
   textarea.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       form.requestSubmit();
     }
   });
-  const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a.id, textarea); } },
+  const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea); } },
     textarea,
     h('div', { class: 'composer-row' },
       h('span', { class: 'composer-hint' }, working ? 'Working. A new message steers it after its current step.' : 'Enter to send, Shift+Enter for a new line'),
@@ -538,17 +554,17 @@ function renderDock() {
   if (focused || !keep) textarea.focus();
 }
 
-async function sendMessage(id, textarea) {
+async function sendMessage(a, textarea) {
   const text = textarea.value.trim();
   if (!text) return;
   textarea.value = '';
-  state.drafts.delete(id);
+  state.drafts.delete(keyOf(a));
   textarea.dispatchEvent(new Event('input'));
   try {
-    await call('Send', id, text);
+    await call('Send', a.id, text);
   } catch (err) {
     textarea.value = text;
-    state.drafts.set(id, text);
+    state.drafts.set(keyOf(a), text);
     textarea.dispatchEvent(new Event('input'));
     fail(err);
   }
@@ -738,7 +754,12 @@ function renderInfo() {
 
 function selectAgent(id) {
   state.view = { kind: 'agent', id };
-  const c = convo(id);
+  const a = agentById(id);
+  if (!a) {
+    render();
+    return;
+  }
+  const c = convo(a);
   if (!c.loaded && !c.loading) {
     c.loading = loadConvo(c).finally(() => { c.loading = null; });
   }
@@ -810,6 +831,7 @@ async function refreshState() {
     fail(err);
     return;
   }
+  pruneCaches();
   if (state.view.kind === 'agent' && !agentById(state.view.id)) state.view = { kind: 'none' };
   if (state.view.kind === 'none' && state.snap.yesmen.length) {
     state.view = { kind: 'agent', id: `${state.snap.yesmen[0].name}/lead` };
@@ -823,6 +845,7 @@ async function refreshState() {
 function onAgents(agents) {
   const before = selectedAgent();
   state.snap.agents = agents;
+  pruneCaches();
   renderSidebar();
   const after = selectedAgent();
   if (state.view.kind === 'agent' && !after) {
@@ -833,7 +856,7 @@ function onAgents(agents) {
     renderBar();
     renderDock();
     renderWorking();
-    if (before?.status === 'stopped' && after.status !== 'stopped' && !convo(after.id).loaded) selectAgent(after.id);
+    if (before?.status === 'stopped' && after.status !== 'stopped' && !convo(after).loaded) selectAgent(after.id);
   }
   if (state.infoOpen) renderInfo();
 }

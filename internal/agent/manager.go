@@ -9,6 +9,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,6 +56,9 @@ type Info struct {
 	Role   string `json:"role"`
 	Task   string `json:"task,omitempty"`
 	Status Status `json:"status"`
+	// Since is when the yesman was hired, for a lead, or the worker
+	// started. With ID it identifies an agent across reuses of a name.
+	Since time.Time `json:"since,omitzero"`
 	// Detail explains a failure.
 	Detail string `json:"detail,omitempty"`
 	// Dialog is the extension_ui_request a Waiting agent waits on.
@@ -75,6 +80,8 @@ type Config struct {
 	// Extension is the path of yesman's pi extension, loaded with -e.
 	Extension string
 	// Env is added to every agent's environment, after the app's own.
+	// Each agent also gets YESMAN_TOKEN, a credential of its own for the
+	// app's API, which Authenticate maps back to it.
 	Env []string
 	// Yesmen knows the workspaces.
 	Yesmen *yesmen.Store
@@ -90,14 +97,19 @@ type Manager struct {
 
 	mu     sync.Mutex
 	agents map[string]*agent
+	tokens map[string]string // credential -> agent ID, while its process runs
 }
 
 type agent struct {
 	info     Info
 	proc     *proc
+	token    string
 	starting chan struct{} // closed when a start finishes, nil otherwise
 	stopping bool
 }
+
+// errStopped is returned to a start that Stop interrupted.
+var errStopped = errors.New("the agent was stopped")
 
 // New returns a Manager.
 func New(cfg Config) *Manager {
@@ -107,7 +119,7 @@ func New(cfg Config) *Manager {
 	if cfg.OnChange == nil {
 		cfg.OnChange = func([]Info) {}
 	}
-	return &Manager{cfg: cfg, agents: map[string]*agent{}}
+	return &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}}
 }
 
 // ID joins a yesman and an agent name.
@@ -130,11 +142,11 @@ func (m *Manager) List() []Info {
 	defer m.mu.Unlock()
 	var out []Info
 	for _, y := range ys {
-		out = append(out, m.infoLocked(ID(y.Name, yesmen.LeadName), RoleLead, ""))
+		out = append(out, m.infoLocked(ID(y.Name, yesmen.LeadName), RoleLead, "", y.HiredAt))
 		ws, _ := m.cfg.Yesmen.Workers(y.Name)
 		sort.SliceStable(ws, func(i, j int) bool { return ws[i].StartedAt.Before(ws[j].StartedAt) })
 		for _, w := range ws {
-			out = append(out, m.infoLocked(ID(y.Name, w.Name), RoleWorker, w.Task))
+			out = append(out, m.infoLocked(ID(y.Name, w.Name), RoleWorker, w.Task, w.StartedAt))
 		}
 	}
 	return out
@@ -150,14 +162,25 @@ func (m *Manager) Get(id string) (Info, error) {
 	return Info{}, fmt.Errorf("no agent %s", id)
 }
 
-func (m *Manager) infoLocked(id, role, task string) Info {
+func (m *Manager) infoLocked(id, role, task string, since time.Time) Info {
 	if a := m.agents[id]; a != nil {
 		i := a.info
-		i.Role, i.Task = role, task
+		i.Role, i.Task, i.Since = role, task, since
 		return i
 	}
 	y, n, _ := SplitID(id)
-	return Info{ID: id, Yesman: y, Name: n, Role: role, Task: task, Status: Stopped}
+	return Info{ID: id, Yesman: y, Name: n, Role: role, Task: task, Since: since, Status: Stopped}
+}
+
+// Authenticate returns the running agent a YESMAN_TOKEN belongs to.
+func (m *Manager) Authenticate(token string) (Info, error) {
+	m.mu.Lock()
+	id, ok := m.tokens[token]
+	m.mu.Unlock()
+	if !ok || token == "" {
+		return Info{}, errors.New("unknown agent credential")
+	}
+	return m.Get(id)
 }
 
 func (m *Manager) changed() { m.cfg.OnChange(m.List()) }
@@ -209,8 +232,14 @@ func (m *Manager) ensure(id string) (*agent, *proc, error) {
 		}
 		if a.proc != nil {
 			p := a.proc
-			m.mu.Unlock()
-			return a, p, nil
+			select {
+			case <-p.done:
+				// Exited, and watch has not cleared it yet.
+				m.clearLocked(a, p)
+			default:
+				m.mu.Unlock()
+				return a, p, nil
+			}
 		}
 		if a.starting != nil {
 			wait := a.starting
@@ -227,8 +256,23 @@ func (m *Manager) ensure(id string) (*agent, *proc, error) {
 		p, model, err := m.spawn(a, y, name, role)
 
 		m.mu.Lock()
+		if err == nil && a.stopping {
+			// Stop came during the start: end what it started before
+			// letting Stop return.
+			m.mu.Unlock()
+			p.stop(10 * time.Second)
+			m.mu.Lock()
+			m.clearLocked(a, p)
+			err = errStopped
+		}
 		close(a.starting)
 		a.starting = nil
+		if errors.Is(err, errStopped) {
+			a.info.Status, a.info.Detail, a.info.UpdatedAt = Stopped, "", time.Now()
+			m.mu.Unlock()
+			m.changed()
+			return nil, nil, err
+		}
 		if err != nil {
 			a.info.Status, a.info.Detail, a.info.UpdatedAt = Failed, err.Error(), time.Now()
 			m.mu.Unlock()
@@ -255,8 +299,10 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, st
 	} else {
 		args = append(args, "--name", ID(y.Name, name))
 	}
+	token := newToken()
 	env := append(os.Environ(), m.cfg.Env...)
 	env = append(env,
+		"YESMAN_TOKEN="+token,
 		"YESMAN_AGENT="+ID(y.Name, name),
 		"YESMAN_AGENT_NAME="+name,
 		"YESMAN_YESMAN="+y.Name,
@@ -269,12 +315,19 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, st
 	if err != nil {
 		return nil, "", err
 	}
+	m.mu.Lock()
+	a.token = token
+	m.tokens[token] = a.info.ID
+	m.mu.Unlock()
 	// get_state answers once pi has loaded its session and extensions.
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	r, err := p.call(ctx, map[string]any{"type": "get_state"})
 	if err != nil {
 		p.stop(2 * time.Second)
+		m.mu.Lock()
+		m.clearLocked(a, p)
+		m.mu.Unlock()
 		if msg := p.stderr.String(); msg != "" {
 			return nil, "", fmt.Errorf("pi did not start: %v: %s", err, lastLines(msg, 6))
 		}
@@ -333,7 +386,7 @@ func (m *Manager) watch(a *agent, p *proc) {
 		m.mu.Unlock()
 		return
 	}
-	a.proc = nil
+	m.clearLocked(a, p)
 	if a.stopping {
 		a.info.Status, a.info.Detail = Stopped, ""
 	} else {
@@ -415,19 +468,52 @@ func (m *Manager) Answer(id, requestID string, answer map[string]any) error {
 	return nil
 }
 
-// Stop ends the agent's process. Its session stays, to resume later.
+// Stop ends the agent's process, including one that is starting, and
+// returns once it has exited. Its session stays, to resume later.
 func (m *Manager) Stop(id string) {
 	m.mu.Lock()
 	a := m.agents[id]
-	var p *proc
-	if a != nil {
-		p = a.proc
-		a.stopping = true
+	if a == nil {
+		m.mu.Unlock()
+		return
+	}
+	a.stopping = true
+	wait := a.starting
+	m.mu.Unlock()
+	if wait != nil {
+		<-wait // the start sees stopping and ends its process
+	}
+	m.mu.Lock()
+	p := a.proc
+	m.mu.Unlock()
+	if p == nil {
+		return
+	}
+	p.stop(10 * time.Second)
+	m.mu.Lock()
+	if a.proc == p {
+		m.clearLocked(a, p)
+		a.info.Status, a.info.Detail, a.info.Dialog, a.info.UpdatedAt = Stopped, "", nil, time.Now()
 	}
 	m.mu.Unlock()
-	if p != nil {
-		p.stop(10 * time.Second)
+	m.changed()
+}
+
+// clearLocked forgets an agent's process and its credential.
+func (m *Manager) clearLocked(a *agent, p *proc) {
+	if a.proc == p {
+		a.proc = nil
 	}
+	if a.token != "" {
+		delete(m.tokens, a.token)
+		a.token = ""
+	}
+}
+
+func newToken() string {
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // StopYesman stops every agent of a yesman.

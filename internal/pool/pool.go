@@ -519,6 +519,24 @@ func (p *Pool) RemoveWorktree(ctx context.Context, path string, force bool) erro
 	return err
 }
 
+// Repair points the pool's records of worktrees at their directories
+// after they were moved, such as when a workspace is archived, so that
+// Prune keeps them.
+func (p *Pool) Repair(ctx context.Context, paths []string) error {
+	var errs []error
+	for _, path := range paths {
+		repoDir, err := p.owner(path)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if _, err := git(ctx, repoDir, "worktree", "repair", path); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Prune forgets worktrees whose directories are gone.
 func (p *Pool) Prune(ctx context.Context) error {
 	repos, err := p.List()

@@ -7,9 +7,7 @@
 package main
 
 import (
-	"crypto/rand"
 	"embed"
-	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"log"
@@ -57,14 +55,14 @@ func main() {
 	a := &app{home: h, pool: pool.New(h.Repos()), yesmen: yesmen.New(h.Yesmen(), h.Archive())}
 	a.pi, a.piErr = findPi()
 
-	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Token: randomToken(), Changed: a.notifyChanged}
+	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}
 	a.agents = agent.New(agent.Config{
 		Pi:        a.pi,
 		Extension: extension,
-		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_TOKEN=" + srv.Token, "YESMAN_HOME=" + h.Root},
+		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root},
 		Yesmen:    a.yesmen,
 		OnEvent:   func(e agent.Event) { _ = agentEvent.Broadcast(e) },
 		OnChange:  a.agentsChanged,
@@ -107,10 +105,4 @@ func findPi() (string, error) {
 		return "pi", fmt.Errorf("pi is not installed or not on the PATH: install it with npm install -g @earendil-works/pi-coding-agent")
 	}
 	return p, nil
-}
-
-func randomToken() string {
-	b := make([]byte, 24)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }

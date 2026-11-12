@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
+	"path/filepath"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -70,14 +72,30 @@ func (s *service) Dismiss(name string) (string, error) {
 	if _, err := a.yesmen.Get(name); err != nil {
 		return "", err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	y, _ := a.yesmen.Get(name)
+	wts, err := a.pool.Worktrees(ctx, y.Path)
+	if err != nil {
+		return "", err
+	}
 	a.agents.StopYesman(name)
 	dest, err := a.yesmen.Archive(name)
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	_ = a.pool.Prune(ctx)
+	// The pool still records the worktrees at their old paths: point it at
+	// the archive before pruning, or the prune would delete their records
+	// and break the archived checkouts.
+	moved := make([]string, 0, len(wts))
+	for _, wt := range wts {
+		moved = append(moved, filepath.Join(dest, wt.Dir))
+	}
+	if err := a.pool.Repair(ctx, moved); err != nil {
+		log.Print("repair archived worktrees: ", err)
+	} else {
+		_ = a.pool.Prune(ctx)
+	}
 	a.notifyChanged()
 	a.agentsChanged(a.agents.List())
 	return dest, nil
