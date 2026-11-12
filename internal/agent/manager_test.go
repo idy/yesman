@@ -246,4 +246,11 @@ func TestMessagesIncludesReplyInProgress(t *testing.T) {
 	if conv, _ := m.Messages(context.Background(), id); len(conv.Live) != 0 {
 		t.Errorf("a finished reply is still live: %+v", conv.Live)
 	}
+
+	// A reply cut off by its process exiting is not live after a restart.
+	m.number(a, "message_start", json.RawMessage(`{"type":"message_start","message":{"role":"assistant","timestamp":2}}`))
+	m.Stop(id)
+	if conv, err := m.Messages(context.Background(), id); err != nil || len(conv.Live) != 0 {
+		t.Errorf("after a restart: live = %+v, %v", conv.Live, err)
+	}
 }

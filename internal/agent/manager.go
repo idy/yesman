@@ -446,6 +446,8 @@ func (m *Manager) number(a *agent, kind string, raw json.RawMessage) Event {
 		a.turn = nil
 	case kind == "message_update" && a.turn != nil:
 		a.turn = append(a.turn, ev)
+	case kind == "agent_settled":
+		a.turn = nil // nothing is in progress any more
 	}
 	return ev
 }
@@ -580,11 +582,13 @@ func (m *Manager) Stop(id string) {
 	m.changed()
 }
 
-// clearLocked forgets an agent's process and its credential.
+// clearLocked forgets an agent's process, its credential, and the reply
+// it was writing, which a new process will not continue.
 func (m *Manager) clearLocked(a *agent, p *proc) {
 	if a.proc == p {
 		a.proc = nil
 	}
+	a.turn = nil
 	if a.token != "" {
 		delete(m.tokens, a.token)
 		a.token = ""
