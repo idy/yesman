@@ -6,7 +6,21 @@
   --info-width: 320px;
   --titlebar: var(--mygo-titlebar-height, 0px);
   --thread-width: 760px;
+  /* Derived from Magpie's ink so they weigh the same in both themes; its
+     line-strong and switch-off are solid mid-grey in light but faint in dark. */
+  --app-rule: color-mix(in srgb, var(--mds-ink) 14%, transparent);
+  --app-quiet: color-mix(in srgb, var(--mds-ink) 8%, transparent);
+  --app-focus: color-mix(in srgb, var(--mds-accent-ink) 55%, transparent);
+  /* The reading pane is the brightest layer in light, under a grey sidebar;
+     in dark it stays on the canvas. Inset blocks sit one step off it. */
+  --app-pane: var(--mds-surface);
+  --app-inset: var(--mds-canvas);
 }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --app-pane: var(--mds-canvas); --app-inset: var(--mds-surface); }
+}
+:root[data-theme="dark"] { --app-pane: var(--mds-canvas); --app-inset: var(--mds-surface); }
 
 html, body { height: 100%; overflow: hidden; }
 body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-family: var(--mds-font); }
@@ -50,7 +64,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 @media (prefers-reduced-motion: reduce) { [data-status="working"] .mds-dot { animation: none; } }
 
 /* Main column */
-.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--app-pane); }
 .bar {
   flex: 0 0 auto; display: flex; align-items: center; gap: 12px;
   min-height: max(var(--titlebar), 52px); padding: 0 calc(16px + var(--mygo-titlebar-inset-right, 0px)) 0 20px;
@@ -83,7 +97,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .md h3 { font-size: 1.05rem; } .md h4 { font-size: 1rem; } .md h5, .md h6 { font-size: var(--mds-text-body); }
 .md ul, .md ol { padding-left: 1.4em; }
 .md li + li { margin-top: .25em; }
-.md blockquote { padding-left: 12px; border-left: 3px solid var(--mds-line-strong); color: var(--mds-ink-secondary); }
+.md blockquote { padding-left: 12px; border-left: 3px solid var(--app-rule); color: var(--mds-ink-secondary); }
 .md a { color: var(--mds-accent-ink); }
 .md hr { border: 0; border-top: 1px solid var(--mds-line); }
 .md code { font-family: var(--mds-mono); font-size: .9em; }
@@ -116,7 +130,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .tool-body { margin: 4px 0 6px 30px; display: grid; gap: 6px; }
 .tool-body pre { margin: 0; max-height: 320px; overflow: auto; padding: 8px 10px; border-radius: var(--mds-radius-sm); background: var(--mds-code); border: 1px solid var(--mds-line); font: var(--mds-text-caption)/1.5 var(--mds-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.note { align-self: stretch; padding: 10px 14px; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-md); background: var(--mds-surface); font-size: var(--mds-text-note); }
+.note { align-self: stretch; padding: 10px 14px; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-md); background: var(--app-inset); font-size: var(--mds-text-note); }
 .note > summary { cursor: default; color: var(--mds-ink-secondary); font-family: var(--mds-font-heading); }
 .note > .md { margin-top: 8px; }
 .note--error { border-color: var(--mds-error-line); background: var(--mds-error-bg); color: var(--mds-error-detail); }
@@ -127,8 +141,8 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 /* Composer */
 .dock { flex: 0 0 auto; padding: 0 24px 18px; }
 .dock-inner { max-width: var(--thread-width); margin: 0 auto; display: grid; gap: 10px; }
-.composer { border: 1px solid var(--mds-line-strong); border-radius: 16px; background: var(--mds-field); padding: 10px 10px 8px 14px; }
-.composer:focus-within { border-color: var(--mds-accent-ink); }
+.composer { border: 1px solid var(--app-rule); border-radius: 16px; background: var(--mds-field); padding: 10px 10px 8px 14px; }
+.composer:focus-within { border-color: var(--app-focus); }
 .composer textarea {
   display: block; width: 100%; max-height: 40vh; min-height: 24px; padding: 2px 0; border: 0; outline: 0; resize: none;
   background: transparent; color: var(--mds-ink); font: var(--mds-text-body)/1.6 var(--mds-font);
@@ -137,7 +151,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .composer-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
 .composer-hint { color: var(--mds-faint); font-size: var(--mds-text-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .round { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; border: 0; background: var(--mds-accent); color: var(--mds-on-accent); }
-.round:disabled { background: var(--mds-switch-off); color: var(--mds-faint); }
+.round:disabled { background: var(--app-quiet); color: var(--mds-faint); }
 .round--stop { background: var(--mds-ink); color: var(--mds-canvas); }
 .round svg { width: 16px; height: 16px; }
 

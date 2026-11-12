@@ -76,6 +76,12 @@ func (a *app) showWindow() {
 		StateKey:      "main",
 	})
 	a.win = w
+	w.Page().OnContextMenu(func(e *mygo.ContextMenuEvent) {
+		// App rows provide their own menus. Elsewhere retain native text
+		// editing actions without exposing browser navigation/debug items.
+		e.Menu.Remove(mygo.ContextMenuReload, mygo.ContextMenuInspect,
+			mygo.ContextMenuBack, mygo.ContextMenuForward, mygo.ContextMenuStop)
+	})
 	w.OnClosed(func() {
 		a.wmu.Lock()
 		if a.win == w {

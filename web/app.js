@@ -485,10 +485,49 @@ function agentRow(a, cls, label) {
   const current = state.view.kind === 'agent' && state.view.id === a.id;
   const meta = a.status === 'idle' || a.status === 'stopped' ? '' : STATUS[a.status] ?? a.status;
   return h('button', {
-    class: `agent-row ${cls}`, type: 'button', 'data-status': a.status, 'aria-current': current ? 'page' : null,
+    class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': a.status, 'aria-current': current ? 'page' : null,
+    'aria-haspopup': 'menu',
     title: `${a.id}: ${STATUS[a.status] ?? a.status}${a.detail ? `\n${a.detail}` : ''}`,
     onclick: () => selectAgent(a.id),
+    oncontextmenu: (e) => openAgentMenu(e, a),
+    onkeydown: (e) => {
+      if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) openAgentMenu(e, a);
+    },
   }, statusDot(a.status), h('span', { class: 'name' }, label), h('span', { class: 'meta' }, meta));
+}
+
+async function openAgentMenu(e, a) {
+  e.preventDefault();
+  e.stopPropagation();
+  const row = e.currentTarget;
+  const rect = row.getBoundingClientRect();
+  const pointer = e.type === 'contextmenu' && (e.clientX !== 0 || e.clientY !== 0);
+  const x = Math.round(pointer ? e.clientX : rect.left + 20);
+  const y = Math.round(pointer ? e.clientY : rect.bottom);
+  try {
+    const action = await call('AgentMenu', a.id, x, y);
+    const current = agentById(a.id);
+    if (!current || keyOf(current) !== keyOf(a)) return;
+    const workspace = yesmanOf(a.id);
+    switch (action) {
+      case 'open': selectAgent(a.id); break;
+      case 'workspace':
+        state.infoOpen = true;
+        selectAgent(a.id);
+        break;
+      case 'reveal': await call('Reveal', workspace.path); break;
+      case 'knowledge': await call('Reveal', `${workspace.path}/.yesman/knowledge/INDEX.md`); break;
+      case 'logs': await call('Reveal', `${workspace.path}/.yesman/sessions/${a.name}`); break;
+      case 'abort': await call('Abort', a.id); break;
+      case 'sleep': await call('Stop', a.id); break;
+      case 'archive': await dismiss(a.yesman); break;
+      case 'remove': await removeWorker(a); break;
+      default:
+        document.querySelector(`.agent-row[data-agent="${CSS.escape(a.id)}"]`)?.focus({ preventScroll: true });
+    }
+  } catch (err) {
+    fail(err);
+  }
 }
 
 function renderSidebar() {
