@@ -527,7 +527,16 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	if err != nil {
 		return Conversation{}, err
 	}
-	r, err := p.call(ctx, map[string]any{"type": "get_messages"})
+	// pi answers after emitting every earlier event, and the reader numbers
+	// those first. Capture the reply in progress and the last number on the
+	// reader as the answer arrives: events it handles next are not in the
+	// history, and the client replays them.
+	var conv Conversation
+	r, err := p.callAt(ctx, map[string]any{"type": "get_messages"}, func() {
+		m.mu.Lock()
+		conv.Live, conv.Seq = append([]Event(nil), a.turn...), a.seq
+		m.mu.Unlock()
+	})
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -537,11 +546,8 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	if err := json.Unmarshal(r.Data, &data); err != nil {
 		return Conversation{}, err
 	}
-	// pi answered after emitting every earlier event, and the reader
-	// numbered those before delivering the answer.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return Conversation{Messages: data.Messages, Live: append([]Event(nil), a.turn...), Seq: a.seq}, nil
+	conv.Messages = data.Messages
+	return conv, nil
 }
 
 // Answer answers the dialog an agent waits on. answer holds the response's

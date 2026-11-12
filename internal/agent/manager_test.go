@@ -17,7 +17,9 @@ import (
 
 // The test binary doubles as a fake pi in RPC mode when YESMAN_FAKE_PI is
 // set: it answers every command, delays get_state by FAKE_PI_DELAY, runs a
-// trivial turn for each prompt, and exits when its input closes.
+// trivial turn for each prompt, and exits when its input closes. With
+// FAKE_PI_TRAIL it starts a reply right after answering get_messages; with
+// FAKE_PI_DEAF it never reads its input.
 func TestMain(m *testing.M) {
 	if os.Getenv("YESMAN_FAKE_PI") != "" {
 		fakePi()
@@ -27,6 +29,10 @@ func TestMain(m *testing.M) {
 }
 
 func fakePi() {
+	if os.Getenv("FAKE_PI_DEAF") != "" {
+		time.Sleep(time.Hour)
+		return
+	}
 	delay, _ := time.ParseDuration(os.Getenv("FAKE_PI_DELAY"))
 	out := bufio.NewWriter(os.Stdout)
 	write := func(v any) {
@@ -54,6 +60,9 @@ func fakePi() {
 			continue
 		}
 		write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": true, "data": map[string]any{"messages": []any{}, "text": "done"}})
+		if cmd.Type == "get_messages" && os.Getenv("FAKE_PI_TRAIL") != "" {
+			write(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant"}})
+		}
 		if cmd.Type == "prompt" {
 			write(map[string]any{"type": "agent_start"})
 			write(map[string]any{"type": "agent_settled", "aborted": false})
@@ -266,5 +275,73 @@ func TestMessagesIncludesReplyInProgress(t *testing.T) {
 	m.Stop(id)
 	if conv, err := m.Messages(context.Background(), id); err != nil || len(conv.Live) != 0 {
 		t.Errorf("after a restart: live = %+v, %v", conv.Live, err)
+	}
+}
+
+// Messages reflects the events pi emitted before its answer, not those the
+// reader handles after it while Messages waits for the lock.
+func TestMessagesWatermarkIsTheAnswer(t *testing.T) {
+	m, _ := newTestManager(t, 0, "FAKE_PI_TRAIL=1")
+	// Hold the reader after it numbers the reply that follows the answer.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) }) // runs before StopAll
+	m.cfg.OnEvent = func(Event) { <-release }
+	for range 20 {
+		m.mu.Lock()
+		a := m.agents[ID("alice", yesmen.LeadName)]
+		before, live := uint64(0), 0
+		if a != nil {
+			before, live = a.seq, len(a.turn)
+		}
+		m.mu.Unlock()
+		conv, err := m.Messages(context.Background(), ID("alice", yesmen.LeadName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if conv.Seq != before || len(conv.Live) != live {
+			t.Fatalf("seq = %d, live = %d; want %d and %d", conv.Seq, len(conv.Live), before, live)
+		}
+		release <- struct{}{} // let the reader finish the trailing event
+	}
+}
+
+// Stopping must not wait for a write that pi, no longer reading, blocks.
+func TestStopInterruptsBlockedSend(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(), "YESMAN_FAKE_PI=1", "FAKE_PI_DEAF=1")
+	p, err := startProc(spec{Path: exe, Env: env}, func(*proc, string, json.RawMessage) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := make(chan error, 1)
+	go func() { sent <- p.send(map[string]string{"pad": strings.Repeat("x", 8<<20)}) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for p.wmu.TryLock() { // until the send holds it
+		p.wmu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("the send never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		p.stop(50 * time.Millisecond)
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stop waited for a blocked write")
+	}
+	select {
+	case err := <-sent:
+		if err == nil {
+			t.Error("the interrupted write succeeded")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the blocked write never ended")
 	}
 }

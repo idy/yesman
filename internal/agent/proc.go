@@ -32,6 +32,14 @@ type response struct {
 	Data    json.RawMessage `json:"data"`
 }
 
+// waiter is a command waiting for its response.
+type waiter struct {
+	ch chan response
+	// at runs on the reader when the response arrives, before any later
+	// record is handled.
+	at func()
+}
+
 // errExited is returned for commands to a pi process that has exited.
 var errExited = errors.New("the agent's pi process has exited")
 
@@ -43,7 +51,7 @@ type proc struct {
 	wmu   sync.Mutex
 
 	mu      sync.Mutex
-	pending map[string]chan response
+	pending map[string]waiter
 	seq     atomic.Int64
 
 	done   chan struct{}
@@ -58,7 +66,7 @@ func startProc(s spec, onRecord func(p *proc, kind string, raw json.RawMessage))
 	cmd.Dir = s.Dir
 	cmd.Env = s.Env
 	setProcessGroup(cmd)
-	p := &proc{cmd: cmd, pending: map[string]chan response{}, done: make(chan struct{})}
+	p := &proc{cmd: cmd, pending: map[string]waiter{}, done: make(chan struct{})}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -96,8 +104,8 @@ func (p *proc) read(stdout io.Reader, onRecord func(*proc, string, json.RawMessa
 		waitErr = errExited
 	}
 	p.err = waitErr
-	for id, ch := range p.pending {
-		close(ch)
+	for id, w := range p.pending {
+		close(w.ch)
 		delete(p.pending, id)
 	}
 	p.mu.Unlock()
@@ -116,11 +124,14 @@ func (p *proc) handle(line []byte, onRecord func(*proc, string, json.RawMessage)
 		var r response
 		if json.Unmarshal(line, &r) == nil {
 			p.mu.Lock()
-			ch := p.pending[head.ID]
+			w, ok := p.pending[head.ID]
 			delete(p.pending, head.ID)
 			p.mu.Unlock()
-			if ch != nil {
-				ch <- r
+			if ok {
+				if w.at != nil {
+					w.at()
+				}
+				w.ch <- r
 				return
 			}
 		}
@@ -130,6 +141,12 @@ func (p *proc) handle(line []byte, onRecord func(*proc, string, json.RawMessage)
 
 // call sends a command and waits for its response.
 func (p *proc) call(ctx context.Context, cmd map[string]any) (response, error) {
+	return p.callAt(ctx, cmd, nil)
+}
+
+// callAt is call with at run on the reader as the response arrives, to
+// capture state that later records would change.
+func (p *proc) callAt(ctx context.Context, cmd map[string]any, at func()) (response, error) {
 	id := "y" + strconv.FormatInt(p.seq.Add(1), 10)
 	cmd["id"] = id
 	ch := make(chan response, 1)
@@ -138,7 +155,7 @@ func (p *proc) call(ctx context.Context, cmd map[string]any) (response, error) {
 		p.mu.Unlock()
 		return response{}, errExited
 	}
-	p.pending[id] = ch
+	p.pending[id] = waiter{ch: ch, at: at}
 	p.mu.Unlock()
 	if err := p.send(cmd); err != nil {
 		p.mu.Lock()
@@ -183,9 +200,10 @@ func (p *proc) send(v any) error {
 // stop asks pi to shut down by closing its input, and kills it and its
 // children when it has not exited after grace.
 func (p *proc) stop(grace time.Duration) {
-	p.wmu.Lock()
-	_ = p.stdin.Close()
-	p.wmu.Unlock()
+	// Close without wmu and without waiting: a send blocked on a pipe pi no
+	// longer reads holds wmu, and the grace and kill below must still run.
+	// The kill breaks the pipe, which ends that write and lets Close finish.
+	go p.stdin.Close()
 	select {
 	case <-p.done:
 	case <-time.After(grace):

@@ -888,7 +888,7 @@ async function dismiss(name) {
   try {
     const dest = await call('Dismiss', name);
     toast(`Archived to ${dest}`);
-    state.view = { kind: 'none' };
+    // A view of its agents falls back to the first yesman once they are gone.
     await refreshState();
   } catch (err) {
     fail(err);
@@ -899,8 +899,9 @@ async function removeWorker(a) {
   if (!(await confirmAction(`Remove ${a.name}?`, 'It stops and leaves this yesman. Its worktrees and session log stay in the workspace.', 'Remove'))) return;
   try {
     await call('RemoveWorker', a.id);
-    state.view = { kind: 'agent', id: `${a.yesman}/lead` };
-    render();
+    // selectAgent loads the lead's conversation if this window has not yet.
+    if (state.view.kind === 'agent' && state.view.id === a.id) selectAgent(`${a.yesman}/lead`);
+    else render();
   } catch (err) {
     fail(err);
   }
