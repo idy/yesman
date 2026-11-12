@@ -44,12 +44,14 @@ func (s *service) State(ctx context.Context) (State, error) {
 	if err != nil {
 		return st, err
 	}
-	for _, y := range ys {
-		wts, _ := a.pool.Worktrees(ctx, y.Path)
-		if wts == nil {
-			wts = []pool.Worktree{}
+	if len(ys) > 0 {
+		snapshot, scanErr := a.pool.Snapshot(ctx)
+		if scanErr != nil {
+			snapshot.Worktrees = nil
 		}
-		st.Yesmen = append(st.Yesmen, YesmanView{Yesman: y, Worktrees: wts})
+		for _, y := range ys {
+			st.Yesmen = append(st.Yesmen, YesmanView{Yesman: y, Worktrees: snapshot.Under(y.Path)})
+		}
 	}
 	return st, nil
 }

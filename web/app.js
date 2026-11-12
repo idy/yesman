@@ -89,7 +89,7 @@ class Convo {
     this.loaded = false;
     this.error = null;
     this.live = null; // { message, el, blocks: Map(index -> el) }
-    this.tools = new Map(); // toolCallId -> { name, args, status, result }
+    this.tools = new Map(); // toolCallId -> { args, status, result }
   }
 }
 
@@ -123,6 +123,7 @@ async function loadConvo(c) {
     const data = await call('Messages', c.id);
     c.messages = data?.messages ?? [];
     c.tools.clear();
+    for (const message of c.messages) indexMessage(c, message);
     c.live = null;
     c.loaded = true;
     c.error = null;
@@ -149,7 +150,27 @@ async function loadConvo(c) {
 const textOf = (content) =>
   typeof content === 'string' ? content : (content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
 
-function toolSummary(name, args) {
+// Tool state is built from history and live events; rendering only reads it.
+function indexTool(c, block) {
+  const tool = c.tools.get(block.id) ?? { status: 'pending' };
+  tool.args = block.arguments ?? tool.args ?? {};
+  c.tools.set(block.id, tool);
+}
+
+function indexMessage(c, message) {
+  if (message.role === 'assistant') {
+    for (const block of message.content ?? []) {
+      if (block.type === 'toolCall') indexTool(c, block);
+    }
+  } else if (message.role === 'toolResult') {
+    const tool = c.tools.get(message.toolCallId) ?? {};
+    tool.status = message.isError ? 'error' : 'done';
+    tool.result = resultText(message);
+    c.tools.set(message.toolCallId, tool);
+  }
+}
+
+function toolSummary(args) {
   if (!args || typeof args !== 'object') return '';
   for (const key of ['command', 'path', 'file_path', 'pattern', 'url', 'query', 'repo', 'name', 'dir', 'message']) {
     if (typeof args[key] === 'string' && args[key]) return args[key].split('\n')[0];
@@ -165,16 +186,13 @@ function resultText(result) {
 }
 
 function toolEl(c, block) {
-  const t = c.tools.get(block.id) ?? { status: 'pending' };
-  t.name = block.name;
-  t.args = block.arguments ?? t.args ?? {};
-  c.tools.set(block.id, t);
+  const t = c.tools.get(block.id);
   const el = h('details', { class: 'tool', 'data-tool': block.id, 'data-status': t.status });
   el.append(
     h('summary', null,
       icon(t.status === 'done' ? 'check' : t.status === 'error' ? 'alert' : 'spinner', 'mds-icon tool-mark'),
       h('span', { class: 'tool-name' }, block.name.replace(/^yesman_/, 'yesman · ')),
-      h('span', { class: 'tool-sum' }, toolSummary(block.name, t.args)),
+      h('span', { class: 'tool-sum' }, toolSummary(t.args)),
       h('span', { class: 'tool-state' }, t.status === 'error' ? 'failed' : '')),
   );
   el.addEventListener('toggle', () => {
@@ -198,7 +216,7 @@ function updateTool(c, id) {
   const mark = el.querySelector('.tool-mark');
   mark?.replaceWith(icon(t.status === 'done' ? 'check' : t.status === 'error' ? 'alert' : 'spinner', 'mds-icon tool-mark'));
   el.querySelector('.tool-state').textContent = t.status === 'error' ? 'failed' : '';
-  el.querySelector('.tool-sum').textContent = toolSummary(t.name, t.args);
+  el.querySelector('.tool-sum').textContent = toolSummary(t.args);
   if (el.open) el.dispatchEvent(new Event('toggle'));
 }
 
@@ -241,13 +259,8 @@ function messageEl(c, m) {
       }
       return el.childNodes.length ? el : null;
     }
-    case 'toolResult': {
-      const t = c.tools.get(m.toolCallId) ?? { name: m.toolName };
-      t.status = m.isError ? 'error' : 'done';
-      t.result = resultText(m);
-      c.tools.set(m.toolCallId, t);
-      return null;
-    }
+    case 'toolResult':
+      return null; // shown with its tool call
     case 'compactionSummary':
     case 'branchSummary':
       return h('div', { class: 'note note--quiet' }, 'Earlier conversation was summarized to save context.');
@@ -292,7 +305,6 @@ function renderThread() {
       const el = messageEl(c, m);
       if (el) thread.append(el);
     }
-    for (const id of c.tools.keys()) updateTool(c, id);
     if (c.live) {
       // Rebuild the streaming message: deltas that arrived while another
       // agent was shown only updated its data.
@@ -353,7 +365,7 @@ function applyEvent(c, e, replaying) {
   switch (e.type) {
     case 'message_start': {
       if (e.message?.role !== 'assistant') break;
-      c.live = { message: { ...e.message, content: [] }, el: h('div', { class: 'msg-assistant' }), blocks: new Map(), raw: new Map() };
+      c.live = { message: { ...e.message, content: [] }, el: h('div', { class: 'msg-assistant' }), blocks: new Map() };
       if (visible) {
         const working = $('#thread .working-live');
         if (working) working.before(c.live.el);
@@ -377,11 +389,13 @@ function applyEvent(c, e, replaying) {
         case 'toolcall_end': blocks[i] = u.toolCall; break;
         default: break;
       }
+      if (blocks[i]?.type === 'toolCall') indexTool(c, blocks[i]);
       if (visible) scheduleLive(c, i);
       break;
     }
     case 'message_end': {
       const m = e.message;
+      indexMessage(c, m);
       c.messages.push(m);
       if (m.role === 'assistant') {
         const old = c.live?.el;
@@ -390,16 +404,17 @@ function applyEvent(c, e, replaying) {
         if (visible) {
           if (old?.isConnected) el ? old.replaceWith(el) : old.remove();
           else if (el) $('#thread').append(el);
-          for (const block of m.content ?? []) if (block.type === 'toolCall') updateTool(c, block.id);
         }
-      } else {
-        const el = messageEl(c, m);
+      } else if (visible) {
         if (m.role === 'toolResult') {
-          if (visible) updateTool(c, m.toolCallId);
-        } else if (visible && el) {
-          const working = $('#thread .working-live');
-          working ? working.before(el) : $('#thread').append(el);
-          $('#thread .thread-empty')?.remove();
+          updateTool(c, m.toolCallId);
+        } else {
+          const el = messageEl(c, m);
+          if (el) {
+            const working = $('#thread .working-live');
+            working ? working.before(el) : $('#thread').append(el);
+            $('#thread .thread-empty')?.remove();
+          }
         }
       }
       break;
@@ -407,7 +422,7 @@ function applyEvent(c, e, replaying) {
     case 'tool_execution_start':
     case 'tool_execution_update':
     case 'tool_execution_end': {
-      const t = c.tools.get(e.toolCallId) ?? { name: e.toolName, args: e.args };
+      const t = c.tools.get(e.toolCallId) ?? { args: e.args };
       t.args = e.args ?? t.args;
       if (e.type === 'tool_execution_end') {
         t.status = e.isError ? 'error' : 'done';
@@ -444,12 +459,12 @@ function scheduleLive(c, index) {
     if (!cv.live) return;
     for (const i of indexes) {
       const block = cv.live.message.content[i];
-      const fresh = block && blockEl(cv, block);
       const old = cv.live.blocks.get(i);
       if (old && block?.type === 'toolCall' && old.dataset?.tool === block.id) {
         updateTool(cv, block.id);
         continue;
       }
+      const fresh = block && blockEl(cv, block);
       if (fresh) {
         if (old) old.replaceWith(fresh);
         else cv.live.el.append(fresh);
@@ -659,7 +674,7 @@ function ago(iso) {
   return `fetched ${Math.round(s / 86400)} d ago`;
 }
 
-async function renderRepos(body) {
+function renderRepos(body) {
   const url = h('input', { class: 'mds-input mds-mono', name: 'url', placeholder: 'https://github.com/owner/repo', required: true, spellcheck: 'false' });
   const upstream = h('input', { class: 'mds-input mds-mono', name: 'upstream', placeholder: 'optional', spellcheck: 'false' });
   const add = h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, 'Add');
@@ -687,7 +702,7 @@ async function renderRepos(body) {
     h('div', null,
       h('p', { class: 'page-lead' }, 'Bare repositories every yesman checks worktrees out of. Only yesman writes here; a repository is fetched whenever someone checks it out. Agents can add repositories too.')),
     form, list)));
-  await refreshRepos(list);
+  renderRepoList(list);
 }
 
 async function refreshRepos(list) {
@@ -696,6 +711,10 @@ async function refreshRepos(list) {
   } catch (err) {
     fail(err);
   }
+  renderRepoList(list);
+}
+
+function renderRepoList(list) {
   if (!list?.isConnected) return;
   list.replaceChildren();
   if (!state.repos.length) {
@@ -871,7 +890,6 @@ async function refreshState() {
     return;
   }
   render();
-  if (state.view.kind === 'repos') renderBody();
 }
 
 function onAgents(agents) {
@@ -929,7 +947,6 @@ async function start() {
     call('TakeFocus').catch(() => {});
     selectAgent(id);
   });
-  state.repos = await call('Repos').catch(() => []);
   await refreshState();
   // A window opened by a notification click shows the agent it was about.
   const focus = await call('TakeFocus').catch(() => '');

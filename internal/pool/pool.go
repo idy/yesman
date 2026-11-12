@@ -274,16 +274,14 @@ func (p *Pool) Add(ctx context.Context, rawURL, upstream string) (Repo, error) {
 	}
 	tmp := dir + ".partial"
 	_ = os.RemoveAll(tmp)
+	defer os.RemoveAll(tmp)
 	if _, err := git(ctx, "", "clone", "--bare", "--quiet", rawURL, tmp); err != nil {
-		_ = os.RemoveAll(tmp)
 		return Repo{}, err
 	}
 	if err := configure(ctx, tmp, upstream); err != nil {
-		_ = os.RemoveAll(tmp)
 		return Repo{}, err
 	}
 	if err := os.Rename(tmp, dir); err != nil {
-		_ = os.RemoveAll(tmp)
 		return Repo{}, err
 	}
 	p.mu.Lock()
@@ -337,6 +335,10 @@ func (p *Pool) Fetch(ctx context.Context, name string, force bool) error {
 	if err != nil {
 		return err
 	}
+	return p.fetch(ctx, r, force)
+}
+
+func (p *Pool) fetch(ctx context.Context, r Repo, force bool) error {
 	l := p.lock(r.Name)
 	l.Lock()
 	defer l.Unlock()
@@ -357,8 +359,6 @@ func (p *Pool) Fetch(ctx context.Context, name string, force bool) error {
 
 // WorktreeOptions describes a checkout.
 type WorktreeOptions struct {
-	// Repo is a pool name, or a unique trailing part of one.
-	Repo string
 	// Dest is the absolute path of the new worktree.
 	Dest string
 	// Branch is checked out, or created when it does not exist yet.
@@ -371,12 +371,9 @@ type WorktreeOptions struct {
 	Ref string
 }
 
-// AddWorktree fetches the repository, then checks a worktree out of it.
-func (p *Pool) AddWorktree(ctx context.Context, opts WorktreeOptions) (Worktree, error) {
-	r, err := p.Get(opts.Repo)
-	if err != nil {
-		return Worktree{}, err
-	}
+// AddWorktree fetches a resolved pool repository, then checks a worktree
+// out of it. Resolve it once with Get before preparing checkout options.
+func (p *Pool) AddWorktree(ctx context.Context, r Repo, opts WorktreeOptions) (Worktree, error) {
 	if !filepath.IsAbs(opts.Dest) {
 		return Worktree{}, fmt.Errorf("worktree path %q is not absolute", opts.Dest)
 	}
@@ -384,7 +381,7 @@ func (p *Pool) AddWorktree(ctx context.Context, opts WorktreeOptions) (Worktree,
 		return Worktree{}, fmt.Errorf("%s already exists", opts.Dest)
 	}
 	var warning string
-	if err := p.Fetch(ctx, r.Name, false); err != nil {
+	if err := p.fetch(ctx, r, false); err != nil {
 		warning = "fetch failed, so the pool's copy of the remote may be stale: " + err.Error()
 	}
 
@@ -435,29 +432,52 @@ func (p *Pool) AddWorktree(ctx context.Context, opts WorktreeOptions) (Worktree,
 	return Worktree{Repo: r.Name, Path: opts.Dest, Dir: filepath.Base(opts.Dest), Branch: opts.Branch, Warning: warning}, nil
 }
 
-// Worktrees returns the pool's worktrees inside a directory.
-func (p *Pool) Worktrees(ctx context.Context, under string) ([]Worktree, error) {
+// Snapshot is one scan of the pool's repositories and worktrees. Callers
+// can select several workspaces from it without repeating git commands.
+type Snapshot struct {
+	Repos     []Repo
+	Worktrees []Worktree
+}
+
+// Snapshot reads each repository and its worktree list once.
+func (p *Pool) Snapshot(ctx context.Context) (Snapshot, error) {
 	repos, err := p.List()
 	if err != nil {
-		return nil, err
+		return Snapshot{}, err
 	}
-	under = realPath(under)
-	var out []Worktree
+	snapshot := Snapshot{Repos: repos}
 	for _, r := range repos {
 		wts, err := p.worktrees(ctx, r)
 		if err != nil {
-			return nil, err
+			return snapshot, err
 		}
-		for _, wt := range wts {
-			real := realPath(wt.Path)
-			if within(real, under) {
-				wt.Dir, _ = filepath.Rel(under, real)
-				out = append(out, wt)
-			}
+		snapshot.Worktrees = append(snapshot.Worktrees, wts...)
+	}
+	sort.Slice(snapshot.Worktrees, func(i, j int) bool { return snapshot.Worktrees[i].Path < snapshot.Worktrees[j].Path })
+	return snapshot, nil
+}
+
+// Under selects worktrees inside a directory, with paths relative to it.
+func (s Snapshot) Under(dir string) []Worktree {
+	dir = realPath(dir)
+	out := []Worktree{}
+	for _, wt := range s.Worktrees {
+		real := realPath(wt.Path)
+		if within(real, dir) {
+			wt.Dir, _ = filepath.Rel(dir, real)
+			out = append(out, wt)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, nil
+	return out
+}
+
+// Worktrees returns the pool's worktrees inside a directory.
+func (p *Pool) Worktrees(ctx context.Context, under string) ([]Worktree, error) {
+	snapshot, err := p.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.Under(under), nil
 }
 
 func (p *Pool) worktrees(ctx context.Context, r Repo) ([]Worktree, error) {

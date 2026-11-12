@@ -102,7 +102,7 @@ func TestPool(t *testing.T) {
 	ws := filepath.Join(tmp, "yesmen", "alice")
 
 	// A new branch starts from the remote's default branch.
-	wt, err := p.AddWorktree(ctx, WorktreeOptions{Repo: "origin", Dest: filepath.Join(ws, "origin--work"), Branch: "yesman/alice/work"})
+	wt, err := p.AddWorktree(ctx, r, WorktreeOptions{Dest: filepath.Join(ws, "origin--work"), Branch: "yesman/alice/work"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestPool(t *testing.T) {
 	}
 
 	// A branch the remote has is continued and tracked.
-	wt2, err := p.AddWorktree(ctx, WorktreeOptions{Repo: "origin", Dest: filepath.Join(ws, "origin--feature"), Branch: "feature"})
+	wt2, err := p.AddWorktree(ctx, r, WorktreeOptions{Dest: filepath.Join(ws, "origin--feature"), Branch: "feature"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestPool(t *testing.T) {
 	}
 
 	// A ref is checked out detached.
-	wt3, err := p.AddWorktree(ctx, WorktreeOptions{Repo: "origin", Dest: filepath.Join(ws, "origin@v1"), Ref: "v1"})
+	wt3, err := p.AddWorktree(ctx, r, WorktreeOptions{Dest: filepath.Join(ws, "origin@v1"), Ref: "v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestPool(t *testing.T) {
 	}
 
 	// An existing destination is refused.
-	if _, err := p.AddWorktree(ctx, WorktreeOptions{Repo: "origin", Dest: wt.Path, Branch: "other"}); err == nil {
+	if _, err := p.AddWorktree(ctx, r, WorktreeOptions{Dest: wt.Path, Branch: "other"}); err == nil {
 		t.Error("checking out over an existing directory succeeded")
 	}
 

@@ -17,6 +17,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -180,12 +181,29 @@ func (m *Manager) List() []Info {
 
 // Get returns one agent.
 func (m *Manager) Get(id string) (Info, error) {
-	for _, i := range m.List() {
-		if i.ID == id {
-			return i, nil
-		}
+	yesman, name, err := SplitID(id)
+	if err != nil {
+		return Info{}, err
 	}
-	return Info{}, fmt.Errorf("no agent %s", id)
+	y, err := m.cfg.Yesmen.Get(yesman)
+	if err != nil {
+		return Info{}, err
+	}
+	role, task, since := RoleLead, "", y.HiredAt
+	if name != yesmen.LeadName {
+		workers, err := m.cfg.Yesmen.Workers(yesman)
+		if err != nil {
+			return Info{}, err
+		}
+		i := slices.IndexFunc(workers, func(w yesmen.Worker) bool { return w.Name == name })
+		if i < 0 {
+			return Info{}, fmt.Errorf("no agent %s", id)
+		}
+		role, task, since = RoleWorker, workers[i].Task, workers[i].StartedAt
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.infoLocked(id, role, task, since), nil
 }
 
 func (m *Manager) infoLocked(id, role, task string, since time.Time) Info {

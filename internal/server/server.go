@@ -123,15 +123,11 @@ func (s *Server) changed() {
 }
 
 func (s *Server) repos(ctx context.Context, c caller, _ *http.Request) (any, error) {
-	repos, err := s.Pool.List()
+	snapshot, err := s.Pool.Snapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	wts, err := s.Pool.Worktrees(ctx, c.yesman.Path)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"repos": repos, "worktrees": wts}, nil
+	return map[string]any{"repos": snapshot.Repos, "worktrees": snapshot.Under(c.yesman.Path)}, nil
 }
 
 func (s *Server) addRepo(_ context.Context, _ caller, r *http.Request) (any, error) {
@@ -189,8 +185,7 @@ func Checkout(ctx context.Context, p *pool.Pool, y yesmen.Yesman, req CheckoutRe
 	if branch == "" && req.Ref == "" {
 		branch = "yesman/" + y.Name + "/" + dir
 	}
-	return p.AddWorktree(ctx, pool.WorktreeOptions{
-		Repo:   repo.Name,
+	return p.AddWorktree(ctx, repo, pool.WorktreeOptions{
 		Dest:   filepath.Join(y.Path, dir),
 		Branch: branch,
 		Base:   req.Base,
@@ -349,7 +344,8 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	w("- Get a worktree with yesman_checkout, never with git clone or git worktree add. Each worktree is on its own branch; ")
 	w("give every piece of parallel work (each PR) its own worktree, and never edit a worktree another agent is using.\n")
 	w("- Never write to the pool (%s). Commits, pushes and pull requests happen in worktrees as usual.\n", p.Root())
-	if wts, err := p.Worktrees(ctx, y.Path); err == nil && len(wts) > 0 {
+	snapshot, scanErr := p.Snapshot(ctx)
+	if wts := snapshot.Under(y.Path); scanErr == nil && len(wts) > 0 {
 		w("\nWorktrees here:\n")
 		for _, wt := range wts {
 			where := "branch " + wt.Branch
@@ -361,7 +357,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	} else {
 		w("\nNo worktrees yet.\n")
 	}
-	if repos, err := p.List(); err == nil {
+	if repos := snapshot.Repos; repos != nil || scanErr == nil {
 		if len(repos) == 0 {
 			w("\nThe repo pool is empty. Add a repository with yesman_repo_add.\n")
 		} else {
