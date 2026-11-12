@@ -1,0 +1,347 @@
+package agent
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/idy/yesman/internal/yesmen"
+)
+
+// The test binary doubles as a fake pi in RPC mode when YESMAN_FAKE_PI is
+// set: it answers every command, delays get_state by FAKE_PI_DELAY, runs a
+// trivial turn for each prompt, and exits when its input closes. With
+// FAKE_PI_TRAIL it starts a reply right after answering get_messages; with
+// FAKE_PI_DEAF it never reads its input.
+func TestMain(m *testing.M) {
+	if os.Getenv("YESMAN_FAKE_PI") != "" {
+		fakePi()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func fakePi() {
+	if os.Getenv("FAKE_PI_DEAF") != "" {
+		time.Sleep(time.Hour)
+		return
+	}
+	delay, _ := time.ParseDuration(os.Getenv("FAKE_PI_DELAY"))
+	out := bufio.NewWriter(os.Stdout)
+	write := func(v any) {
+		data, _ := json.Marshal(v)
+		out.Write(append(data, '\n'))
+		out.Flush()
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		var cmd struct {
+			ID      string `json:"id"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(sc.Bytes(), &cmd) != nil {
+			continue
+		}
+		if cmd.Type == "get_state" {
+			time.Sleep(delay)
+		}
+		failPrompt := cmd.Type == "prompt" && (os.Getenv("FAKE_PI_FAIL_PROMPTS") != "" ||
+			os.Getenv("FAKE_PI_FAIL_REPORTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Worker"))
+		if failPrompt {
+			write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": false, "error": "rejected"})
+			continue
+		}
+		write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": true, "data": map[string]any{"messages": []any{}, "text": "done"}})
+		if cmd.Type == "get_messages" && os.Getenv("FAKE_PI_TRAIL") != "" {
+			write(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant"}})
+		}
+		if cmd.Type == "prompt" {
+			write(map[string]any{"type": "agent_start"})
+			write(map[string]any{"type": "agent_settled", "aborted": false})
+		}
+	}
+}
+
+func newTestManager(t *testing.T, delay time.Duration, env ...string) (*Manager, *yesmen.Store) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	store := yesmen.New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
+	if _, err := store.Hire("alice"); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Config{
+		Pi:        exe,
+		Extension: filepath.Join(tmp, "none.ts"),
+		Env:       append([]string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=" + delay.String()}, env...),
+		Yesmen:    store,
+	})
+	t.Cleanup(m.StopAll)
+	return m, store
+}
+
+func waitStatus(t *testing.T, m *Manager, id string, want Status) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if i, err := m.Get(id); err == nil && i.Status == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	i, _ := m.Get(id)
+	t.Fatalf("%s is %s, want %s", id, i.Status, want)
+}
+
+func TestStopDuringStart(t *testing.T) {
+	m, _ := newTestManager(t, 2*time.Second)
+	id := ID("alice", yesmen.LeadName)
+	errc := make(chan error, 1)
+	go func() { errc <- m.Prompt(context.Background(), id, "hi") }()
+	waitStatus(t, m, id, Starting)
+
+	m.Stop(id)
+	if p := m.running(id); p != nil {
+		t.Fatal("a process still runs after Stop returned")
+	}
+	if i, _ := m.Get(id); i.Status != Stopped {
+		t.Errorf("status after Stop = %s", i.Status)
+	}
+	if err := <-errc; !errors.Is(err, errStopped) {
+		t.Errorf("the interrupted prompt returned %v", err)
+	}
+	m.mu.Lock()
+	tokens := len(m.tokens)
+	m.mu.Unlock()
+	if tokens != 0 {
+		t.Errorf("%d credentials outlive their processes", tokens)
+	}
+}
+
+func TestRestartAfterStop(t *testing.T) {
+	m, _ := newTestManager(t, 0)
+	id := ID("alice", yesmen.LeadName)
+	ctx := context.Background()
+	for i := range 3 {
+		if err := m.Prompt(ctx, id, fmt.Sprint("turn ", i)); err != nil {
+			t.Fatalf("prompt %d: %v", i, err)
+		}
+		m.Stop(id)
+	}
+	if err := m.Prompt(ctx, id, "again"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCredentials(t *testing.T) {
+	m, store := newTestManager(t, 0)
+	if err := store.AddWorker("alice", yesmen.Worker{Name: "w1", Task: "t", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	lead, worker := ID("alice", yesmen.LeadName), ID("alice", "w1")
+	for _, id := range []string{lead, worker} {
+		if err := m.Prompt(ctx, id, "hi"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.mu.Lock()
+	leadToken, workerToken := m.agents[lead].token, m.agents[worker].token
+	m.mu.Unlock()
+	if leadToken == "" || leadToken == workerToken {
+		t.Fatalf("agents share or lack credentials: %q %q", leadToken, workerToken)
+	}
+	if i, err := m.Authenticate(workerToken); err != nil || i.ID != worker || i.Role != RoleWorker {
+		t.Errorf("worker credential = %+v, %v", i, err)
+	}
+	if i, err := m.Authenticate(leadToken); err != nil || i.ID != lead {
+		t.Errorf("lead credential = %+v, %v", i, err)
+	}
+	if _, err := m.Authenticate("forged"); err == nil {
+		t.Error("an unknown credential authenticated")
+	}
+	m.Stop(worker)
+	if _, err := m.Authenticate(workerToken); err == nil {
+		t.Error("a stopped worker's credential still authenticates")
+	}
+	if i, _ := m.Get(worker); !strings.HasPrefix(i.ID, "alice/") || i.Since.IsZero() {
+		t.Errorf("worker identity %+v", i)
+	}
+}
+
+func TestFailedWorkerStartLeavesNoRecord(t *testing.T) {
+	m, store := newTestManager(t, 0, "FAKE_PI_FAIL_PROMPTS=1")
+	if _, err := m.StartWorker(context.Background(), "alice", "w1", "a task"); err == nil {
+		t.Fatal("a worker whose task was rejected started")
+	}
+	if ws, _ := store.Workers("alice"); len(ws) != 0 {
+		t.Errorf("workers after a failed start: %+v", ws)
+	}
+}
+
+func TestUndeliveredReportIsShown(t *testing.T) {
+	reportAttempts, reportBackoff = 2, time.Millisecond
+	t.Cleanup(func() { reportAttempts, reportBackoff = 3, 2*time.Second })
+	m, _ := newTestManager(t, 0, "FAKE_PI_FAIL_REPORTS=1")
+	if _, err := m.StartWorker(context.Background(), "alice", "w1", "a task"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if i, _ := m.Get(ID("alice", "w1")); strings.Contains(i.Detail, "did not reach the lead") {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	i, _ := m.Get(ID("alice", "w1"))
+	t.Fatalf("worker detail = %q", i.Detail)
+}
+
+// Stopping must not wait for OnChange, which in the app waits for the UI
+// thread, and the UI thread stops every agent when the app quits.
+func TestStopDoesNotWaitForOnChange(t *testing.T) {
+	m, _ := newTestManager(t, 0)
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	m.cfg.OnChange = func([]Info) { <-block }
+	id := ID("alice", yesmen.LeadName)
+	if err := m.Prompt(context.Background(), id, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		m.StopAll()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("StopAll waited for a blocked OnChange")
+	}
+}
+
+// Messages returns the reply in progress, which pi's history lacks, with
+// the number of the last event it reflects.
+func TestMessagesIncludesReplyInProgress(t *testing.T) {
+	m, _ := newTestManager(t, 0)
+	id := ID("alice", yesmen.LeadName)
+	if err := m.Prompt(context.Background(), id, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	// Wait until the fake's own run (agent_start, agent_settled) has been
+	// numbered, or its settle could clear the reply simulated below.
+	var a *agent
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		m.mu.Lock()
+		a = m.agents[id]
+		done := a.seq >= 2
+		m.mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the fake's run was never numbered")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	start := m.number(a, "message_start", json.RawMessage(`{"type":"message_start","message":{"role":"assistant","timestamp":1}}`))
+	m.number(a, "message_update", json.RawMessage(`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"he"}}`))
+	conv, err := m.Messages(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conv.Live) != 2 || conv.Live[0].Seq != start.Seq || conv.Seq != start.Seq+1 {
+		t.Errorf("live = %+v, seq = %d (start %d)", conv.Live, conv.Seq, start.Seq)
+	}
+	m.number(a, "message_end", json.RawMessage(`{"type":"message_end","message":{"role":"assistant","timestamp":1}}`))
+	if conv, _ := m.Messages(context.Background(), id); len(conv.Live) != 0 {
+		t.Errorf("a finished reply is still live: %+v", conv.Live)
+	}
+
+	// A reply cut off by its process exiting is not live after a restart.
+	m.number(a, "message_start", json.RawMessage(`{"type":"message_start","message":{"role":"assistant","timestamp":2}}`))
+	m.Stop(id)
+	if conv, err := m.Messages(context.Background(), id); err != nil || len(conv.Live) != 0 {
+		t.Errorf("after a restart: live = %+v, %v", conv.Live, err)
+	}
+}
+
+// Messages reflects the events pi emitted before its answer, not those the
+// reader handles after it while Messages waits for the lock.
+func TestMessagesWatermarkIsTheAnswer(t *testing.T) {
+	m, _ := newTestManager(t, 0, "FAKE_PI_TRAIL=1")
+	// Hold the reader after it numbers the reply that follows the answer.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) }) // runs before StopAll
+	m.cfg.OnEvent = func(Event) { <-release }
+	for range 20 {
+		m.mu.Lock()
+		a := m.agents[ID("alice", yesmen.LeadName)]
+		before, live := uint64(0), 0
+		if a != nil {
+			before, live = a.seq, len(a.turn)
+		}
+		m.mu.Unlock()
+		conv, err := m.Messages(context.Background(), ID("alice", yesmen.LeadName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if conv.Seq != before || len(conv.Live) != live {
+			t.Fatalf("seq = %d, live = %d; want %d and %d", conv.Seq, len(conv.Live), before, live)
+		}
+		release <- struct{}{} // let the reader finish the trailing event
+	}
+}
+
+// Stopping must not wait for a write that pi, no longer reading, blocks.
+func TestStopInterruptsBlockedSend(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(), "YESMAN_FAKE_PI=1", "FAKE_PI_DEAF=1")
+	p, err := startProc(spec{Path: exe, Env: env}, func(*proc, string, json.RawMessage) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := make(chan error, 1)
+	go func() { sent <- p.send(map[string]string{"pad": strings.Repeat("x", 8<<20)}) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for p.wmu.TryLock() { // until the send holds it
+		p.wmu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("the send never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		p.stop(50 * time.Millisecond)
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stop waited for a blocked write")
+	}
+	select {
+	case err := <-sent:
+		if err == nil {
+			t.Error("the interrupted write succeeded")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the blocked write never ended")
+	}
+}
