@@ -2,61 +2,12 @@
 // the live event stream of the agents' pi processes.
 //
 //   mygo.call("Yesman.<Method>", ...)  services in service.go
-//   mygo.on("agents" | "agent-event" | "changed" | "focus-agent", fn)
+//   mygo.on("agents" | "agent-event" | "changed" | "focus-agent" | "update" | "files", fn)
 
 import { renderMarkdown } from './markdown.js';
+import { $, h, icon } from './dom.js';
+import { createFiles } from './files.js';
 import { toast, openDialog } from './mds/js/magpie.js';
-
-const $ = (selector, root = document) => root.querySelector(selector);
-
-function h(tag, props, ...children) {
-  const el = document.createElement(tag);
-  for (const [key, value] of Object.entries(props ?? {})) {
-    if (value == null || value === false) continue;
-    if (key === 'class') el.className = value;
-    else if (key === 'html') el.innerHTML = value; // only rendered Markdown, which escapes its input
-    else if (key.startsWith('on')) el.addEventListener(key.slice(2), value);
-    else if (value === true) el.setAttribute(key, '');
-    else el.setAttribute(key, value);
-  }
-  for (const child of children.flat(Infinity)) {
-    if (child == null || child === false) continue;
-    el.append(child instanceof Node ? child : String(child));
-  }
-  return el;
-}
-
-const SVG = 'http://www.w3.org/2000/svg';
-function icon(name, cls = 'mds-icon') {
-  const svg = document.createElementNS(SVG, 'svg');
-  svg.setAttribute('class', cls);
-  svg.setAttribute('aria-hidden', 'true');
-  const paths = {
-    send: 'M205.66 117.66a8 8 0 0 1-11.32 0L136 59.31V216a8 8 0 0 1-16 0V59.31l-58.34 58.35a8 8 0 0 1-11.32-11.32l72-72a8 8 0 0 1 11.32 0l72 72a8 8 0 0 1 0 11.32Z',
-    stop: 'M200 56v144a16 16 0 0 1-16 16H72a16 16 0 0 1-16-16V56a16 16 0 0 1 16-16h112a16 16 0 0 1 16 16Z',
-    folder: 'M216 72h-84.69L104 44.69A15.86 15.86 0 0 0 92.69 40H40a16 16 0 0 0-16 16v144.62A15.4 15.4 0 0 0 39.38 216h177.51A15.13 15.13 0 0 0 232 200.89V88a16 16 0 0 0-16-16ZM40 56h52.69l16 16H40Zm176 144H40V88h176Z',
-    panel: 'M216 40H40a16 16 0 0 0-16 16v144a16 16 0 0 0 16 16h176a16 16 0 0 0 16-16V56a16 16 0 0 0-16-16ZM40 56h112v144H40Zm176 144h-48V56h48v144Z',
-    power: 'M120 128V48a8 8 0 0 1 16 0v80a8 8 0 0 1-16 0Zm67.41-74.07a8 8 0 0 0-8.82 13.36C201.4 82.33 216 106.23 216 128a88 88 0 0 1-176 0c0-21.77 14.6-45.67 37.41-60.71a8 8 0 1 0-8.82-13.36C40.62 72.36 24 99.42 24 128a104 104 0 0 0 208 0c0-28.58-16.62-55.64-44.59-74.07Z',
-    gear: 'M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm109.94-52.79a8,8,0,0,0-3.89-5.4l-29.83-17-.12-33.62a8,8,0,0,0-2.83-6.08,111.91,111.91,0,0,0-36.72-20.67,8,8,0,0,0-6.46.59L128,41.85,97.88,25a8,8,0,0,0-6.47-.6A112.1,112.1,0,0,0,54.73,45.15a8,8,0,0,0-2.83,6.07l-.15,33.65-29.83,17a8,8,0,0,0-3.89,5.4,106.47,106.47,0,0,0,0,41.56,8,8,0,0,0,3.89,5.4l29.83,17,.12,33.62a8,8,0,0,0,2.83,6.08,111.91,111.91,0,0,0,36.72,20.67,8,8,0,0,0,6.46-.59L128,214.15,158.12,231a7.91,7.91,0,0,0,3.9,1,8.09,8.09,0,0,0,2.57-.42,112.1,112.1,0,0,0,36.68-20.73,8,8,0,0,0,2.83-6.07l.15-33.65,29.83-17a8,8,0,0,0,3.89-5.4A106.47,106.47,0,0,0,237.94,107.21Zm-15,34.91-28.57,16.25a8,8,0,0,0-3,3c-.58,1-1.19,2.06-1.81,3.06a7.94,7.94,0,0,0-1.22,4.21l-.15,32.25a95.89,95.89,0,0,1-25.37,14.3L134,199.13a8,8,0,0,0-3.91-1h-.19c-1.21,0-2.43,0-3.64,0a8.08,8.08,0,0,0-4.1,1l-28.84,16.1A96,96,0,0,1,67.88,201l-.11-32.2a8,8,0,0,0-1.22-4.22c-.62-1-1.23-2-1.8-3.06a8.09,8.09,0,0,0-3-3.06l-28.6-16.29a90.49,90.49,0,0,1,0-28.26L61.67,97.63a8,8,0,0,0,3-3c.58-1,1.19-2.06,1.81-3.06a7.94,7.94,0,0,0,1.22-4.21l.15-32.25a95.89,95.89,0,0,1,25.37-14.3L122,56.87a8,8,0,0,0,4.1,1c1.21,0,2.43,0,3.64,0a8.08,8.08,0,0,0,4.1-1l28.84-16.1A96,96,0,0,1,188.12,55l.11,32.2a8,8,0,0,0,1.22,4.22c.62,1,1.23,2,1.8,3.06a8.09,8.09,0,0,0,3,3.06l28.6,16.29A90.49,90.49,0,0,1,222.9,142.12Z',
-    sliders: 'M40,88H73a32,32,0,0,0,62,0h81a8,8,0,0,0,0-16H135a32,32,0,0,0-62,0H40a8,8,0,0,0,0,16Zm64-24A16,16,0,1,1,88,80,16,16,0,0,1,104,64ZM216,168H199a32,32,0,0,0-62,0H40a8,8,0,0,0,0,16h97a32,32,0,0,0,62,0h17a8,8,0,0,0,0-16Zm-48,24a16,16,0,1,1,16-16A16,16,0,0,1,168,192Z',
-    about: 'M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm16-40a8,8,0,0,1-8,8,16,16,0,0,1-16-16V128a8,8,0,0,1,0-16,16,16,0,0,1,16,16v40A8,8,0,0,1,144,176ZM112,84a12,12,0,1,1,12,12A12,12,0,0,1,112,84Z',
-    branch: 'M232,64a32,32,0,1,0-40,31v17a8,8,0,0,1-8,8H96a23.84,23.84,0,0,0-8,1.38V95a32,32,0,1,0-16,0v66a32,32,0,1,0,16,0V144a8,8,0,0,1,8-8h88a24,24,0,0,0,24-24V95A32.06,32.06,0,0,0,232,64ZM64,64A16,16,0,1,1,80,80,16,16,0,0,1,64,64ZM96,192a16,16,0,1,1-16-16A16,16,0,0,1,96,192ZM200,80a16,16,0,1,1,16-16A16,16,0,0,1,200,80Z',
-    search: 'M229.66,218.34l-50.07-50.06a88.11,88.11,0,1,0-11.31,11.31l50.06,50.07a8,8,0,0,0,11.32-11.32ZM40,112a72,72,0,1,1,72,72A72.08,72.08,0,0,1,40,112Z',
-    plus: 'M224,128a8,8,0,0,1-8,8H136v80a8,8,0,0,1-16,0V136H40a8,8,0,0,1,0-16h80V40a8,8,0,0,1,16,0v80h80A8,8,0,0,1,224,128Z',
-  };
-  if (paths[name]) {
-    svg.setAttribute('viewBox', '0 0 256 256');
-    const path = document.createElementNS(SVG, 'path');
-    path.setAttribute('fill', 'currentColor');
-    path.setAttribute('d', paths[name]);
-    svg.append(path);
-  } else {
-    const use = document.createElementNS(SVG, 'use');
-    use.setAttribute('href', `/mds/icons/icons.svg#${name}`);
-    svg.append(use);
-  }
-  return svg;
-}
 
 const mygo = window.mygo;
 const call = (method, ...args) => mygo.call(`Yesman.${method}`, ...args);
@@ -595,7 +546,7 @@ function renderBarActions() {
       ? button('power', 'Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.', () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', 'Remove worker', () => removeWorker(a)) : null,
-    a ? button('panel', 'Workspace', toggleInfo, { 'aria-pressed': String(state.infoOpen) }) : null,
+    a ? button('panel', state.infoOpen ? 'Hide the files' : 'Show the files', toggleInfo, { 'aria-pressed': String(state.infoOpen) }) : null,
   ].filter(Boolean));
 }
 
@@ -1062,66 +1013,60 @@ function renderRepoAdd() {
       : h('p', { class: 'mds-hint', id: 'repo-hint' }, 'owner/repo, or a link to it. For a fork, yesman also fetches the repository it was forked from.')));
 }
 
-// ---------- Workspace panel ----------
+// ---------- Files pane ----------
+
+// The pane shows the workspace of the yesman whose agent is shown.
+const files = createFiles({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.infoOpen,
+  setOpen: (on) => {
+    state.infoOpen = on;
+    files.render();
+    renderBarActions();
+  },
+  checkout: (y) => openCheckout(y),
+  dismiss: (name) => dismiss(name),
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+});
 
 function toggleInfo() {
   state.infoOpen = !state.infoOpen;
-  renderInfo();
-  renderBar();
+  files.render();
+  renderBarActions();
 }
 
 function renderInfo() {
-  const info = $('#info');
-  const a = selectedAgent();
-  const y = a && yesmanOf(a.id);
-  info.hidden = !state.infoOpen || !y;
-  if (info.hidden) return;
-  const workers = state.snap.agents.filter((x) => x.yesman === y.name && x.role === 'worker');
+  files.render();
+}
 
-  const repoSelect = h('select', { class: 'mds-select', 'aria-label': 'Repository' },
-    state.repos.length ? state.repos.map((r) => h('option', { value: r.name }, r.name)) : h('option', { value: '' }, 'The pool is empty'));
-  const branch = h('input', { class: 'mds-input mds-mono', placeholder: `branch (default yesman/${y.name}/…)`, spellcheck: 'false', 'aria-label': 'Branch' });
-  const checkout = h('button', { class: 'mds-button mds-button--small', type: 'submit', disabled: !state.repos.length }, 'Check out');
-
-  info.replaceChildren(
-    h('div', { class: 'info-top' }, h('strong', null, 'Workspace')),
-    h('section', { class: 'info-section' },
-      h('h3', null, 'Workspace'),
-      h('span', { class: 'path' }, y.path),
-      h('div', null, h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => call('Reveal', y.path).catch(fail) }, icon('folder'), 'Reveal'))),
-    h('section', { class: 'info-section' },
-      h('h3', null, `Worktrees (${y.worktrees.length})`),
-      y.worktrees.length
-        ? y.worktrees.map((w) => h('div', { class: 'wt' },
-            h('span', { class: 'wt-dir' }, w.dir || w.path),
-            h('span', { class: 'wt-meta' }, `${w.repo} · ${w.detached ? `detached ${w.head?.slice(0, 8)}` : w.branch}`),
-            h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Reveal', 'aria-label': 'Reveal', onclick: () => call('Reveal', w.path).catch(fail) }, icon('folder'))))
-        : h('span', { class: 'wt-meta' }, 'None yet. The agents check out what they need, or check one out here.'),
-      h('form', { class: 'stack', onsubmit: async (e) => {
-        e.preventDefault();
-        checkout.disabled = true;
-        try {
-          const wt = await call('Checkout', y.name, { repo: repoSelect.value, branch: branch.value.trim() });
-          toast(`Checked out ${wt.dir || wt.path}`);
-          branch.value = '';
-        } catch (err) {
-          fail(err);
-        } finally {
-          checkout.disabled = false;
-        }
-      } }, repoSelect, branch, h('div', null, checkout))),
-    h('section', { class: 'info-section' },
-      h('h3', null, 'Knowledge'),
-      h('span', { class: 'wt-meta' }, 'Notes every agent of this yesman reads and writes.'),
-      h('div', null, h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => call('Reveal', `${y.path}/.yesman/knowledge/INDEX.md`).catch(fail) }, icon('file'), 'Reveal notes'))),
-    h('section', { class: 'info-section' },
-      h('h3', null, `Workers (${workers.length})`),
-      workers.length
-        ? workers.map((w) => h('div', { class: 'wt' }, h('span', { class: 'wt-dir' }, w.name), h('span', { class: 'wt-meta' }, `${STATUS[w.status] ?? w.status}${w.task ? ` · ${w.task.slice(0, 90)}` : ''}`)))
-        : h('span', { class: 'wt-meta' }, 'The lead starts workers when the job splits up.')),
-    h('section', { class: 'info-section' },
-      h('div', null, h('button', { class: 'mds-button mds-button--small danger', type: 'button', onclick: () => dismiss(y.name) }, 'Dismiss yesman'))),
-  );
+async function openCheckout(y) {
+  try {
+    state.repos = await call('Repos');
+  } catch (err) {
+    fail(err);
+    return;
+  }
+  if (!state.repos.length) {
+    toast('Add a repository to the pool first.');
+    showSettings('repositories');
+    return;
+  }
+  const form = $('#checkout-form');
+  form.reset();
+  form.elements.repo.replaceChildren(...state.repos.map((r) => h('option', { value: r.name }, r.name)));
+  form.elements.branch.placeholder = `yesman/${y.name}/…`;
+  if ((await openDialog($('#checkout-dialog'))) !== 'checkout') return;
+  try {
+    const wt = await call('Checkout', y.name, { repo: form.elements.repo.value, branch: form.elements.branch.value.trim() });
+    toast(`Checked out ${wt.dir || wt.path}`);
+  } catch (err) {
+    fail(err);
+  }
 }
 
 // ---------- Actions ----------
@@ -1227,7 +1172,6 @@ function onAgents(agents) {
     renderWorking();
     if (before?.status === 'stopped' && after.status !== 'stopped' && !convo(after).loaded) selectAgent(after.id);
   }
-  if (state.infoOpen) renderInfo();
 }
 
 function render() {
@@ -1251,7 +1195,8 @@ async function start() {
     if (!link) return;
     e.preventDefault();
     if (link.dataset.path) {
-      call('Reveal', link.dataset.path).catch(fail);
+      // A file of the workspace shown opens in the files pane.
+      if (!files.openPath(link.dataset.path)) call('Reveal', link.dataset.path).catch(fail);
       return;
     }
     if (/^(https?:|mailto:)/.test(link.getAttribute('href'))) call('OpenURL', link.getAttribute('href')).catch(fail);
@@ -1260,6 +1205,8 @@ async function start() {
   mygo.on('agent-event', onAgentEvent);
   mygo.on('changed', refreshSoon);
   mygo.on('update', onUpdate);
+  mygo.on('files', (change) => files.onChange(change));
+  document.addEventListener('keydown', (e) => files.onKey(e));
   call('Update').then(onUpdate, () => {});
   mygo.on('focus-agent', (id) => {
     call('TakeFocus').catch(() => {});
