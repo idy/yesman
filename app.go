@@ -56,6 +56,11 @@ type app struct {
 	setmu    sync.Mutex
 	settings Settings
 	storage  *storageLocation
+	// setTheme puts an appearance into effect: mygo.Theme.SetSource, or
+	// nil in tests, which have no window to paint.
+	setTheme func(mygo.ThemeSource)
+
+	cfgmu sync.Mutex // one import at a time
 
 	updates *updates
 

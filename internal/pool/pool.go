@@ -170,7 +170,7 @@ func (p *Pool) List() ([]Repo, error) {
 		if !d.IsDir() || path == p.root {
 			return nil
 		}
-		if strings.HasSuffix(path, ".partial") {
+		if strings.HasSuffix(path, ".partial") || strings.HasSuffix(path, ".removing") {
 			return filepath.SkipDir
 		}
 		if strings.HasSuffix(path, ".git") && fileExists(filepath.Join(path, "HEAD")) {
@@ -326,6 +326,103 @@ func configure(ctx context.Context, dir, upstream string) error {
 		}
 	}
 	return nil
+}
+
+// InUseError is why Remove kept a repository: work depends on it.
+type InUseError struct {
+	Repo   string
+	Reason string
+}
+
+func (e *InUseError) Error() string { return e.Repo + " is in use: " + e.Reason }
+
+// InUse says what work depends on a repository, or "" when none does: a
+// worktree checked out of it, in a workspace or the archive, or a local
+// branch with commits that no remote has.
+func (p *Pool) InUse(ctx context.Context, r Repo) (string, error) {
+	l := p.lock(r.Name)
+	l.Lock()
+	defer l.Unlock()
+	return p.inUse(ctx, r)
+}
+
+func (p *Pool) inUse(ctx context.Context, r Repo) (string, error) {
+	wts, err := p.worktrees(ctx, r)
+	if err != nil {
+		return "", err
+	}
+	if n := len(wts); n == 1 {
+		return "a worktree is checked out of it", nil
+	} else if n > 1 {
+		return fmt.Sprintf("%d worktrees are checked out of it", n), nil
+	}
+	unpushed, err := git(ctx, r.Path, "rev-list", "-n", "1", "--branches", "--not", "--remotes")
+	if err != nil {
+		return "", err
+	}
+	if unpushed != "" {
+		return "a branch has commits that no remote has", nil
+	}
+	return "", nil
+}
+
+// Remove deletes a repository from the pool, unless work depends on it, as
+// InUse says; then it returns an *InUseError and leaves it.
+func (p *Pool) Remove(ctx context.Context, name string) error {
+	r, err := p.Get(name)
+	if err != nil {
+		return err
+	}
+	if r.Name != name {
+		return fmt.Errorf("repository %q is not in the pool", name)
+	}
+	l := p.lock(r.Name)
+	l.Lock()
+	defer l.Unlock()
+	reason, err := p.inUse(ctx, r)
+	if err != nil {
+		return err
+	}
+	if reason != "" {
+		return &InUseError{Repo: r.Name, Reason: reason}
+	}
+	// Move it out of List's sight first, so that a deletion cut short never
+	// leaves a broken repository in the pool.
+	gone := r.Path + ".removing"
+	if err := removeAll(gone); err != nil {
+		return err
+	}
+	if err := os.Rename(r.Path, gone); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	delete(p.fetched, r.Name)
+	p.mu.Unlock()
+	if err := removeAll(gone); err != nil {
+		return err
+	}
+	// Owner and host directories left empty go too.
+	for dir := filepath.Dir(r.Path); dir != p.root && within(dir, p.root); dir = filepath.Dir(dir) {
+		if os.Remove(dir) != nil {
+			break
+		}
+	}
+	return nil
+}
+
+// removeAll deletes a directory tree. Git writes its objects read-only,
+// which Windows does not delete, so a second try makes everything writable.
+func removeAll(path string) error {
+	if err := os.RemoveAll(path); err == nil {
+		return nil
+	}
+	_ = filepath.WalkDir(path, func(p string, _ fs.DirEntry, err error) error {
+		if err == nil {
+			_ = os.Chmod(p, 0o700)
+		}
+		return nil
+	})
+	return os.RemoveAll(path)
 }
 
 // Fetch updates a repository from all its remotes, unless it was fetched

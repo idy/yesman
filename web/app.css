@@ -231,6 +231,17 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
   .card-row-aside { display: none; }
 }
 
+/* Import and export: the last result in a row, and what an import would change. */
+.config-imported { display: grid; gap: 2px; }
+.import-dialog { width: min(560px, calc(100vw - 32px)); }
+.import-dialog .path { margin-top: -4px; }
+.import-body { display: grid; gap: 14px; max-height: min(420px, 56vh); margin-bottom: 4px; overflow-y: auto; overscroll-behavior: contain; }
+.import-part h3 { margin: 0 0 4px; color: var(--mds-ink-strong); font-family: var(--mds-font-heading); font-size: var(--mds-text-note); font-weight: 400; }
+.import-part p, .import-list { margin: 0; color: var(--mds-ink-secondary); font-size: var(--mds-text-note); line-height: 1.6; }
+.import-list { padding-left: 18px; }
+.import-names { color: var(--mds-ink-strong); overflow-wrap: anywhere; }
+.import-faint { color: var(--mds-muted); font-size: var(--mds-text-note); }
+
 /* The add dialog: an owner's repositories to tick. */
 .repo-dialog { width: min(600px, calc(100vw - 32px)); }
 .picker-search { width: auto; }

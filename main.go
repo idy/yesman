@@ -56,6 +56,7 @@ func main() {
 	a := &app{home: h, storage: storage, pool: pool.New(h.Repos()), yesmen: yesmen.New(h.Yesmen(), h.Archive())}
 	a.pi, a.piErr = findPi()
 	a.settings = loadSettings(h.Settings())
+	a.setTheme = mygo.Theme.SetSource
 	a.updates = newUpdates()
 	if a.settings.Appearance != "" {
 		mygo.Theme.SetSource(a.settings.Appearance) // before Run, so the window opens in it
