@@ -152,12 +152,7 @@ func (s *service) SetAppearance(source string) error {
 	defer a.setmu.Unlock()
 	next := a.settings
 	next.Appearance = t
-	if err := next.save(a.home.Settings()); err != nil {
-		return fmt.Errorf("save settings: %w", err)
-	}
-	a.settings = next
-	mygo.Theme.SetSource(t)
-	return nil
+	return a.putSettingsLocked(next)
 }
 
 // SetAutoFetch sets how many minutes apart the pool's repositories are
@@ -171,11 +166,32 @@ func (s *service) SetAutoFetch(minutes int) error {
 	defer a.setmu.Unlock()
 	next := a.settings
 	next.AutoFetch = minutes
+	return a.putSettingsLocked(next)
+}
+
+// themeOf is the appearance settings put into effect: none chosen follows
+// the system.
+func themeOf(s Settings) mygo.ThemeSource {
+	if s.Appearance == "" {
+		return mygo.ThemeSystem
+	}
+	return s.Appearance
+}
+
+// putSettingsLocked saves the settings and puts them into effect. a.setmu
+// is held.
+func (a *app) putSettingsLocked(next Settings) error {
 	if err := next.save(a.home.Settings()); err != nil {
 		return fmt.Errorf("save settings: %w", err)
 	}
+	prev := a.settings
 	a.settings = next
-	a.fetcher.SetInterval(time.Duration(minutes) * time.Minute)
+	if themeOf(next) != themeOf(prev) && a.setTheme != nil {
+		a.setTheme(next.Appearance)
+	}
+	if next.AutoFetch != prev.AutoFetch {
+		a.fetcher.SetInterval(time.Duration(next.AutoFetch) * time.Minute)
+	}
 	return nil
 }
 

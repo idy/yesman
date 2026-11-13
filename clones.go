@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,11 @@ type Clone struct {
 	Error string     `json:"error,omitempty"`
 
 	input string // as it was asked for, which may name a protocol
+
+	agents    int                // agents waiting for it, through Add
+	cancel    context.CancelFunc // stops it while it clones for the page
+	done      chan struct{}      // closed when the page's clone of it ends
+	withdrawn bool               // Withdraw stopped it: it leaves no failure
 }
 
 // CloneState is where a clone stands.
@@ -138,36 +144,72 @@ func (c *clones) startLocked() {
 			return
 		}
 		if j.State == CloneQueued {
-			j.State = CloneCloning
+			ctx, cancel := context.WithTimeout(context.Background(), cloneTimeout)
+			j.State, j.cancel, j.done = CloneCloning, cancel, make(chan struct{})
 			c.active++
-			go c.run(j.Repo, j.input)
+			go c.run(ctx, j)
 		}
 	}
 }
 
-func (c *clones) run(name, input string) {
-	ctx, cancel := context.WithTimeout(context.Background(), cloneTimeout)
-	_, err := c.add(ctx, input)
-	cancel()
+func (c *clones) run(ctx context.Context, j *Clone) {
+	_, err := c.add(ctx, j.input)
+	j.cancel()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.active--
-	if i, j := c.find(name); err != nil && j != nil {
+	if i := slices.Index(c.jobs, j); err != nil && !j.withdrawn {
 		j.State, j.Error = CloneFailed, err.Error()
 	} else if i >= 0 {
-		c.jobs = append(c.jobs[:i], c.jobs[i+1:]...)
+		c.jobs = slices.Delete(c.jobs, i, i+1)
 	}
+	j.cancel, j.withdrawn = nil, false
+	close(j.done)
 	c.startLocked()
 	c.emitLocked(err == nil)
 }
 
-func (c *clones) remove(name string, arrived bool) {
+// Withdraw stops the page's clones of the repositories keep turns down, as
+// replacing the configuration does: queued and failed ones are forgotten,
+// and one under way is cancelled and waited for. A clone cancelled too
+// late may still land in the pool, as does one an agent asks for while it
+// stops, which the agent clones anew. It returns the repositories it
+// stopped, and those it left because an agent waits for them.
+func (c *clones) Withdraw(ctx context.Context, keep func(repo string) bool) (stopped, held []string, err error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if i, _ := c.find(name); i >= 0 {
-		c.jobs = append(c.jobs[:i], c.jobs[i+1:]...)
+	var wait []chan struct{}
+	next := make([]*Clone, 0, len(c.jobs))
+	for _, j := range c.jobs {
+		switch {
+		case keep(j.Repo):
+			next = append(next, j)
+		case j.agents > 0:
+			held = append(held, j.Repo)
+			next = append(next, j)
+		case j.State == CloneCloning && j.cancel != nil:
+			// It stays listed until it ends, which drops it.
+			j.withdrawn = true
+			j.cancel()
+			wait = append(wait, j.done)
+			stopped = append(stopped, j.Repo)
+			next = append(next, j)
+		default:
+			stopped = append(stopped, j.Repo)
+		}
 	}
-	c.emitLocked(arrived)
+	if len(next) != len(c.jobs) {
+		c.jobs = next
+		c.emitLocked(false)
+	}
+	c.mu.Unlock()
+	for _, done := range wait {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return stopped, held, ctx.Err()
+		}
+	}
+	return stopped, held, nil
 }
 
 // Retry queues a clone that failed again, as it was first asked for.
@@ -204,10 +246,14 @@ func (c *clones) Add(ctx context.Context, input string) (pool.Repo, error) {
 	_, j := c.find(name)
 	mine := j == nil || j.State != CloneCloning
 	if j == nil {
-		c.jobs = append(c.jobs, &Clone{Repo: name, State: CloneCloning, input: input})
+		j = &Clone{Repo: name, State: CloneCloning, input: input}
+		c.jobs = append(c.jobs, j)
 	} else if mine {
 		j.State, j.Error = CloneCloning, ""
 	}
+	// While an agent waits for a clone, the page's own included, replacing
+	// the configuration leaves it alone.
+	j.agents++
 	if mine {
 		c.emitLocked(false)
 	}
@@ -215,8 +261,16 @@ func (c *clones) Add(ctx context.Context, input string) (pool.Repo, error) {
 	// The pool clones a repository once: when the page's clone of it is
 	// under way, this one waits for it and then finds it in the pool.
 	repo, err := c.add(ctx, input)
+	// The agent's own job leaves under the same lock, so that Withdraw
+	// never sees it listed with no one waiting and nothing to cancel.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	j.agents--
 	if mine {
-		c.remove(name, err == nil)
+		if i := slices.Index(c.jobs, j); i >= 0 {
+			c.jobs = slices.Delete(c.jobs, i, i+1)
+		}
+		c.emitLocked(err == nil)
 	}
 	return repo, err
 }

@@ -37,6 +37,7 @@ const state = {
   settings: null, // Yesman.Settings, for the General page
   storageDraft: null, // destination and inline feedback while changing folders
   about: null, // Yesman.About
+  config: { busy: false, exported: null, imported: null }, // the last export and import, for Import and export
   repoQuery: '',
   fetches: { fetching: [], errors: {} }, // Yesman.Fetches: repositories being fetched, and their last errors
   clones: [], // Yesman.Clones: repositories on their way into the pool
@@ -825,6 +826,7 @@ function renderWelcome(body) {
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
+  { page: 'config', label: 'Import and export', icon: 'transfer' },
   { page: 'about', label: 'About', icon: 'about' },
 ];
 
@@ -875,6 +877,7 @@ function renderSettings(body) {
   const inner = h('div', { class: 'page-inner' });
   body.append(h('div', { class: 'page' }, inner));
   if (state.view.page === 'repositories') renderRepositories(inner);
+  else if (state.view.page === 'config') renderConfig(inner);
   else if (state.view.page === 'about') renderAbout(inner);
   else renderGeneral(inner);
 }
@@ -1048,6 +1051,131 @@ function renderAbout(inner) {
       row('Go', v ? v.go : faint('Checking…'))),
     h('div', null, h('button', { class: 'mds-link-button', type: 'button', onclick: () => call('OpenURL', 'https://github.com/idy/yesman').catch(fail) }, 'Source on GitHub')),
   );
+}
+
+// ---------- Import and export ----------
+
+// A configuration file carries the settings and the repo pool. Importing it
+// shows what it would change first, then merges it or replaces with it.
+
+const THEMES = { system: 'Match the system', light: 'Light', dark: 'Dark' };
+const autoFetchLabel = (minutes) => AUTO_FETCH.find(([m]) => m === minutes)?.[1] ?? `Every ${minutes} minutes`;
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const fileName = (path) => path.split(/[\\/]/).pop();
+
+function renderConfig(inner) {
+  const c = state.config;
+  const action = (label, onclick) => h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: c.busy, onclick }, label);
+  const e = c.exported;
+  const exportHint = e
+    ? h('p', null, `Exported ${plural(e.repos, 'repository', 'repositories')} and the settings to `, h('span', { class: 'path', title: e.path }, e.path),
+        e.skipped.length ? `. Left out, as they are not from GitHub: ${e.skipped.join(', ')}.` : '')
+    : h('p', null, 'The theme, the fetch schedule and every GitHub repository in the pool, as a TOML file.');
+  const i = c.imported;
+  const importHint = i ? h('div', { class: 'config-imported' }, i.lines.map((line) => h('p', { class: line.danger ? 'danger' : null }, line.text)))
+    : h('p', null, 'A file exported from yesman. You see what it changes, then merge it or replace with it.');
+  inner.append(
+    settingsSection('Configuration', 'Back up yesman’s settings and repo pool, or carry them to another computer. Workspaces, their knowledge and conversations are not included.',
+      preferenceRow('Export', exportHint, h('div', { class: 'storage-actions' }, e ? revealButton(e.path, 'the exported file') : null, action('Export…', exportConfig))),
+      preferenceRow('Import', importHint, action('Import…', importConfig))));
+}
+
+async function exportConfig() {
+  const c = state.config;
+  c.busy = true;
+  renderBody();
+  try {
+    const result = await call('ExportConfig');
+    if (result.path) c.exported = result;
+  } catch (err) {
+    fail(err);
+  } finally {
+    c.busy = false;
+    if (state.view.kind === 'settings' && state.view.page === 'config') renderBody();
+  }
+}
+
+async function importConfig() {
+  const c = state.config;
+  c.busy = true;
+  renderBody();
+  try {
+    const path = await call('ChooseConfigFile');
+    if (!path) return;
+    const plan = await call('PreviewImport', path);
+    const mode = await askImport(plan);
+    if (mode !== 'merge' && mode !== 'replace') return;
+    const result = await call('ImportConfig', path, mode);
+    c.imported = { lines: importLines(plan, result) };
+    state.settings = null; // the next General or Repositories page reads them again
+    refreshState();
+  } catch (err) {
+    fail(err);
+  } finally {
+    c.busy = false;
+    if (state.view.kind === 'settings' && state.view.page === 'config') renderBody();
+  }
+}
+
+// What a plan changes in the settings, a line for each: merging and
+// replacing differ only for a setting the file leaves out, which replacing
+// resets.
+function settingChanges(plan) {
+  const fields = [['appearance', 'Theme', (v) => THEMES[v] ?? v], ['autoFetch', 'Fetch automatically', autoFetchLabel]];
+  const lines = [];
+  for (const [key, label, show] of fields) {
+    const now = plan.current[key];
+    if (plan.merge[key] !== now) lines.push({ text: `${label}: ${show(now)} → ${show(plan.merge[key])}` });
+    else if (plan.replace[key] !== now) lines.push({ text: `${label}: ${show(now)} → ${show(plan.replace[key])}`, replaceOnly: true });
+  }
+  return lines;
+}
+
+// askImport shows what importing would change and resolves to merge,
+// replace or cancel.
+function askImport(plan) {
+  const dialog = $('#import-dialog');
+  const part = (title, ...children) => h('section', { class: 'import-part' }, h('h3', null, title), children);
+  const list = (items) => h('ul', { class: 'import-list' }, items);
+  const settings = settingChanges(plan);
+  const extra = plan.extra;
+  const removable = extra.filter((r) => !r.inUse).length;
+  const replaceDiffers = removable > 0 || settings.some((s) => s.replaceOnly);
+  dialog.replaceChildren(h('form', { method: 'dialog' },
+    h('h2', { class: 'mds-heading', id: 'import-title' }, `Import ${fileName(plan.path)}`),
+    h('p', { class: 'dialog-hint path', title: plan.path }, plan.path),
+    h('div', { class: 'import-body' },
+      part('Settings', settings.length
+        ? list(settings.map((s) => h('li', null, s.text, s.replaceOnly ? h('span', { class: 'import-faint' }, ' · Replace only') : null)))
+        : h('p', null, 'Unchanged.')),
+      part('Repositories',
+        plan.add.length ? h('p', null, `Clones ${plural(plan.add.length, 'repository', 'repositories')}: `, h('span', { class: 'import-names' }, plan.add.join(', '))) : null,
+        h('p', null, plan.present.length ? `${plural(plan.present.length, 'repository', 'repositories')} of the file ${plan.present.length === 1 ? 'is' : 'are'} in the pool already.` : plan.add.length ? '' : 'The file lists none.')),
+      extra.length ? part(`Only in this pool (${extra.length})`,
+        h('p', null, 'Merge keeps them. Replace removes them, except those that work depends on.'),
+        list(extra.map((r) => h('li', null, h('span', { class: 'import-names', title: r.name }, r.label),
+          h('span', { class: 'import-faint' }, r.inUse ? ` · kept: ${r.inUse}` : r.clone ? ` · ${r.clone === 'failed' ? 'failed to clone' : 'cloning'}, stopped with Replace` : ' · removed with Replace'))))) : null,
+      plan.ignored.length ? h('p', { class: 'import-faint' }, `Ignored, as this yesman does not know them: ${plan.ignored.join(', ')}`) : null),
+    h('div', { class: 'mds-dialog-actions' },
+      h('button', { class: 'mds-button', value: 'cancel' }, 'Cancel'),
+      replaceDiffers ? h('button', { class: 'mds-button', value: 'replace', title: 'Also reset the settings the file leaves out and remove the repositories it does not list' }, 'Replace') : null,
+      h('button', { class: 'mds-button mds-button--primary', value: 'merge' }, 'Merge'))));
+  const answer = openDialog(dialog);
+  dialog.querySelector('.mds-button--primary').focus();
+  return answer;
+}
+
+// What an import did, in lines for the Import row.
+function importLines(plan, result) {
+  const verb = result.mode === 'replace' ? 'Replaced with' : 'Merged';
+  const parts = [];
+  if (settingChanges(plan).some((s) => result.mode === 'replace' || !s.replaceOnly)) parts.push('settings changed');
+  if (result.cloning.length) parts.push(`${plural(result.cloning.length, 'repository', 'repositories')} cloning`);
+  if (result.removed.length) parts.push(`${result.removed.length} removed`);
+  if (result.stopped.length) parts.push(`${plural(result.stopped.length, 'clone')} stopped`);
+  const lines = [{ text: `${verb} ${fileName(plan.path)}: ${parts.length ? parts.join(' · ') : 'nothing to change'}.` }];
+  for (const r of result.kept) lines.push({ text: `Kept ${r.label}: ${r.inUse}.`, danger: r.inUse.startsWith('removing it failed') });
+  return lines;
 }
 
 // ---------- Repositories ----------

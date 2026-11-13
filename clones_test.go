@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -13,22 +14,27 @@ import (
 // fakeAdds blocks each add until the test releases it.
 type fakeAdds struct {
 	mu      sync.Mutex
-	running map[string]chan error
+	running map[string][]chan error // per repository, oldest first
 	started chan string
 }
 
 func newFakeAdds() *fakeAdds {
-	return &fakeAdds{running: map[string]chan error{}, started: make(chan string, 16)}
+	return &fakeAdds{running: map[string][]chan error{}, started: make(chan string, 16)}
 }
 
 func (f *fakeAdds) add(ctx context.Context, repo string) (pool.Repo, error) {
 	done := make(chan error)
 	f.mu.Lock()
-	f.running[repo] = done
+	f.running[repo] = append(f.running[repo], done)
 	f.mu.Unlock()
 	f.started <- repo
-	if err := <-done; err != nil {
-		return pool.Repo{}, err
+	select {
+	case err := <-done:
+		if err != nil {
+			return pool.Repo{}, err
+		}
+	case <-ctx.Done():
+		return pool.Repo{}, ctx.Err()
 	}
 	return pool.Repo{Name: "github.com/" + repo}, nil
 }
@@ -36,8 +42,13 @@ func (f *fakeAdds) add(ctx context.Context, repo string) (pool.Repo, error) {
 func (f *fakeAdds) finish(t *testing.T, repo string, err error) {
 	t.Helper()
 	f.mu.Lock()
-	done := f.running[repo]
-	delete(f.running, repo)
+	var done chan error
+	if q := f.running[repo]; len(q) > 0 {
+		done, f.running[repo] = q[0], q[1:]
+	}
+	if len(f.running[repo]) == 0 {
+		delete(f.running, repo)
+	}
 	f.mu.Unlock()
 	if done == nil {
 		t.Fatalf("%s is not cloning", repo)
@@ -222,4 +233,83 @@ func TestClonesAddForAnAgent(t *testing.T) {
 		t.Fatalf("Add = %v", err)
 	}
 	waitForClones(t, c, map[string]CloneState{})
+}
+
+// Withdraw stops every clone but those kept and an agent's: queued and
+// failed ones go at once, one under way once its cancelled clone ends.
+func TestClonesWithdraw(t *testing.T) {
+	f := newFakeAdds()
+	c := newClones(f.add, nil)
+	if _, err := c.Queue([]string{"a/keep", "a/run", "a/fail", "a/wait1", "a/wait2"}); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		f.waitStarted(t)
+	}
+	f.finish(t, "a/fail", errors.New("boom"))
+	f.waitStarted(t) // a/wait1 takes the slot
+	agent := make(chan error, 1)
+	go func() {
+		_, err := c.Add(context.Background(), "a/agent")
+		agent <- err
+	}()
+	f.waitStarted(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stopped, held, err := c.Withdraw(ctx, func(repo string) bool { return repo == "a/keep" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a/run", "a/fail", "a/wait1", "a/wait2"}; !slices.Equal(stopped, want) {
+		t.Errorf("stopped %q, want %q", stopped, want)
+	}
+	if !slices.Equal(held, []string{"a/agent"}) {
+		t.Errorf("held %q", held)
+	}
+	// A cancelled clone leaves no failure behind, and wait2 never starts.
+	waitForClones(t, c, map[string]CloneState{"a/keep": CloneCloning, "a/agent": CloneCloning})
+	f.finish(t, "a/keep", nil)
+	f.finish(t, "a/agent", nil)
+	if err := <-agent; err != nil {
+		t.Errorf("the agent's clone = %v", err)
+	}
+	waitForClones(t, c, map[string]CloneState{})
+}
+
+// An agent that joins a clone the page started keeps it from Withdraw.
+func TestClonesWithdrawKeepsJoinedClone(t *testing.T) {
+	f := newFakeAdds()
+	c := newClones(f.add, nil)
+	if _, err := c.Queue([]string{"a/shared"}); err != nil {
+		t.Fatal(err)
+	}
+	f.waitStarted(t)
+	agent := make(chan error, 1)
+	go func() {
+		_, err := c.Add(context.Background(), "a/shared")
+		agent <- err
+	}()
+	f.waitStarted(t) // the agent's own add, which the pool would make wait
+	stopped, held, err := c.Withdraw(context.Background(), func(string) bool { return false })
+	if err != nil || len(stopped) != 0 || !slices.Equal(held, []string{"a/shared"}) {
+		t.Fatalf("Withdraw = %q, %q, %v; want the joined clone held", stopped, held, err)
+	}
+	waitForClones(t, c, map[string]CloneState{"a/shared": CloneCloning})
+	f.finish(t, "a/shared", nil)
+	f.finish(t, "a/shared", nil)
+	if err := <-agent; err != nil {
+		t.Errorf("the agent's clone = %v", err)
+	}
+	waitForClones(t, c, map[string]CloneState{})
+	// Once the agent is done, the clone no longer counts as its.
+	if _, err := c.Queue([]string{"a/shared"}); err != nil {
+		t.Fatal(err)
+	}
+	f.waitStarted(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if stopped, held, err := c.Withdraw(ctx, func(string) bool { return false }); err != nil || !slices.Equal(stopped, []string{"a/shared"}) || len(held) != 0 {
+		t.Errorf("Withdraw after the agent = %q, %q, %v", stopped, held, err)
+	}
 }
