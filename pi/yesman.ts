@@ -254,6 +254,7 @@ export default function yesman(pi: ExtensionAPI) {
 			"Answer the question one of your workers is waiting on, which yesman sent you as a [yesman] message: value for a choice (one of its options) or for text, confirmed for a yes or no, or cancelled to dismiss it. Workers' questions come to you, not the user: decide yourself whenever you can.",
 		parameters: Type.Object({
 			name: Type.String({ description: "The worker's name" }),
+			requestId: Type.String({ description: "The original question's requestId, from its notification; never substitute a newer question" }),
 			value: Type.Optional(Type.String({ description: "The option chosen, as offered, or the text asked for" })),
 			confirmed: Type.Optional(Type.Boolean({ description: "The answer to a yes or no question" })),
 			cancelled: Type.Optional(Type.Boolean({ description: "Dismiss the question without an answer" })),

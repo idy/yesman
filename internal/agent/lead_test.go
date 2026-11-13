@@ -48,7 +48,7 @@ func TestWorkerQuestionGoesToLead(t *testing.T) {
 	lead, worker := ID("alice", yesmen.LeadName), ID("alice", "w1")
 	waitPrompt(t, prompts, lead, `[yesman] Worker "w1" asks:`)
 	question := prompts(lead)[0]
-	for _, want := range []string{"Allow rm -rf build?", "- Allow\n- Block\n", "after 1m0s", "yesman_worker_answer"} {
+	for _, want := range []string{"Allow rm -rf build?", "- Allow\n- Block\n", "after 1m0s", "yesman_worker_answer", `requestId "q1"`} {
 		if !strings.Contains(question, want) {
 			t.Errorf("the question lacks %q:\n%s", want, question)
 		}
@@ -56,15 +56,15 @@ func TestWorkerQuestionGoesToLead(t *testing.T) {
 	waitStatus(t, m, worker, Waiting)
 
 	yes := true
-	for _, bad := range []DialogReply{{Value: str("Maybe")}, {Confirmed: &yes}, {}} {
+	for _, bad := range []DialogReply{{RequestID: "q1", Value: str("Maybe")}, {RequestID: "q1", Confirmed: &yes}, {RequestID: "q1"}, {Value: str("Block")}} {
 		if err := m.AnswerDialog(worker, bad); err == nil {
 			t.Errorf("reply %+v was accepted", bad)
 		}
 	}
-	if err := m.AnswerDialog(worker, DialogReply{Value: str(" block ")}); err != nil {
+	if err := m.AnswerDialog(worker, DialogReply{RequestID: "q1", Value: str(" block ")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.AnswerDialog(worker, DialogReply{Value: str("Allow")}); err == nil {
+	if err := m.AnswerDialog(worker, DialogReply{RequestID: "q1", Value: str("Allow")}); err == nil {
 		t.Error("a question was answered twice")
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -78,8 +78,39 @@ func TestWorkerQuestionGoesToLead(t *testing.T) {
 	if a := answers(worker); len(a) != 1 || json.Unmarshal(a[0], &got) != nil || got.ID != "q1" || got.Value != "Block" {
 		t.Fatalf("the worker received %s", answers(worker))
 	}
-	if err := m.AnswerDialog(lead, DialogReply{Value: str("x")}); err == nil {
+	if err := m.AnswerDialog(lead, DialogReply{RequestID: "q1", Value: str("x")}); err == nil {
 		t.Error("answered an agent that asked nothing")
+	}
+}
+
+// An answer to a question the user already handled must never approve a
+// newer dialog, even when both questions accept the same answer type.
+func TestWorkerAnswerCannotConsumeANewerQuestion(t *testing.T) {
+	m, _ := newTestManager(t, 0, "FAKE_PI_ASK_WORKERS=1")
+	if _, err := m.StartWorker(context.Background(), "alice", "w1", "Build", "a task"); err != nil {
+		t.Fatal(err)
+	}
+	id := ID("alice", "w1")
+	waitStatus(t, m, id, Waiting)
+	m.mu.Lock()
+	a, p := m.agents[id], m.agents[id].proc
+	m.mu.Unlock()
+	m.record(a, p, "extension_ui_request", json.RawMessage(`{"type":"extension_ui_request","id":"q2","method":"confirm","title":"Approve a different operation?"}`))
+	yes := true
+	if err := m.AnswerDialog(id, DialogReply{RequestID: "q1", Confirmed: &yes}); err == nil {
+		t.Fatal("a stale lead answer approved a newer question")
+	}
+	if err := m.Answer(id, "q1", map[string]any{"confirmed": true}); err == nil {
+		t.Fatal("a stale UI answer approved a newer question")
+	}
+	info, _ := m.Get(id)
+	var current dialog
+	_ = json.Unmarshal(info.Dialog, &current)
+	if info.Status != Waiting || current.ID != "q2" {
+		t.Fatalf("stale answer consumed the current dialog: %+v", info)
+	}
+	if err := m.AnswerDialog(id, DialogReply{RequestID: "q2", Cancelled: true}); err != nil {
+		t.Fatal(err)
 	}
 }
 

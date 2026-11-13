@@ -695,23 +695,35 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 func (m *Manager) Answer(id, requestID string, answer map[string]any) error {
 	m.mu.Lock()
 	a := m.agents[id]
-	var p *proc
-	if a != nil {
-		p = a.proc
-	}
-	m.mu.Unlock()
-	if p == nil {
+	if a == nil || a.proc == nil {
+		m.mu.Unlock()
 		return fmt.Errorf("%s is not running", id)
 	}
+	var d dialog
+	if a.info.Status != Waiting || json.Unmarshal(a.info.Dialog, &d) != nil || d.ID == "" || d.ID != requestID {
+		m.mu.Unlock()
+		return fmt.Errorf("%s is no longer waiting on question %q", id, requestID)
+	}
+	p, raw := a.proc, a.info.Dialog
+	// Reserve the question before sending. A second answer cannot consume
+	// it, and events after the response (including a new question) stay put.
+	a.info.Status, a.info.Dialog, a.info.UpdatedAt = Working, nil, time.Now()
+	m.mu.Unlock()
 	msg := map[string]any{}
 	for k, v := range answer {
 		msg[k] = v
 	}
 	msg["type"], msg["id"] = "extension_ui_response", requestID
 	if err := p.send(msg); err != nil {
+		m.mu.Lock()
+		if a.proc == p && a.info.Status == Working && a.info.Dialog == nil {
+			a.info.Status, a.info.Dialog = Waiting, raw
+		}
+		m.mu.Unlock()
+		m.changed()
 		return err
 	}
-	m.setStatus(a, p, Working, "")
+	m.changed()
 	return nil
 }
 

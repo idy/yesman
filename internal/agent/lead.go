@@ -19,6 +19,7 @@ import (
 // DialogReply answers the dialog a worker waits on: Value for a choice or
 // text, Confirmed for a yes or no, or Cancelled to dismiss it.
 type DialogReply struct {
+	RequestID string  `json:"requestId"`
 	Value     *string `json:"value,omitempty"`
 	Confirmed *bool   `json:"confirmed,omitempty"`
 	Cancelled bool    `json:"cancelled,omitempty"`
@@ -81,13 +82,16 @@ func describeQuestion(worker string, d dialog) string {
 	if d.Timeout > 0 {
 		fmt.Fprintf(&b, "It goes on without an answer after %s.\n", time.Duration(d.Timeout)*time.Millisecond)
 	}
-	b.WriteString("\nAnswer it with yesman_worker_answer. Decide it yourself whenever you can; only if you cannot, ask the user and answer with theirs.")
+	fmt.Fprintf(&b, "\nAnswer it with yesman_worker_answer, name %q, requestId %q. Decide it yourself whenever you can; only if you cannot, ask the user and answer with theirs.", worker, d.ID)
 	return b.String()
 }
 
 // AnswerDialog answers the dialog a worker waits on, once the reply fits
 // its question.
 func (m *Manager) AnswerDialog(id string, r DialogReply) error {
+	if r.RequestID == "" {
+		return errors.New("give the original question's requestId")
+	}
 	m.mu.Lock()
 	var raw json.RawMessage
 	if a := m.agents[id]; a != nil && a.info.Status == Waiting {
@@ -100,6 +104,9 @@ func (m *Manager) AnswerDialog(id string, r DialogReply) error {
 	var d dialog
 	if err := json.Unmarshal(raw, &d); err != nil || d.ID == "" {
 		return fmt.Errorf("the question %s waits on cannot be read", id)
+	}
+	if r.RequestID != d.ID {
+		return fmt.Errorf("%s is no longer waiting on question %q", id, r.RequestID)
 	}
 	answer, err := d.reply(r)
 	if err != nil {

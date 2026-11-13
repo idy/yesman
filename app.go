@@ -56,9 +56,10 @@ type app struct {
 	win  *mygo.Window
 	tray *mygo.Tray
 
-	smu     sync.Mutex
-	last    map[string]agent.Status
-	release func() // ends KeepRunning while no agent works
+	smu         sync.Mutex
+	last        map[string]agent.Status
+	release     func() // ends KeepRunning while no agent works
+	completions completionNotices
 	// working and waiting count the agents, for the tray's tooltip.
 	working, waiting int
 
@@ -205,7 +206,6 @@ func (a *app) agentsChanged(list []agent.Info) {
 	working, waiting := 0, 0
 	type note struct{ id, title, body string }
 	var notes []note
-	var settled []agent.Info
 	a.smu.Lock()
 	if a.last == nil {
 		a.last = map[string]agent.Status{}
@@ -228,8 +228,6 @@ func (a *app) agentsChanged(list []agent.Info) {
 			notes = append(notes, note{i.ID, tr("%s needs you", i.Yesman), tr("It asked a question and is waiting for your answer.")})
 		case i.Status == agent.Failed:
 			notes = append(notes, note{i.ID, tr("%s stopped", i.Yesman), i.Detail})
-		case prev == agent.Working && i.Status == agent.Idle:
-			settled = append(settled, i)
 		}
 	}
 	if working > 0 && a.release == nil {
@@ -252,13 +250,11 @@ func (a *app) agentsChanged(list []agent.Info) {
 	// A lead that ends a run often carries on at once, with a worker's
 	// report or a reminder of open tasks: tell the user only once the whole
 	// yesman has stayed settled for a moment.
-	for _, i := range settled {
-		time.AfterFunc(settleGrace, func() {
-			if a.yesmanSettled(i.Yesman) {
-				a.notify(i.ID, i.Yesman, tr("Finished and waiting for you."))
-			}
-		})
-	}
+	a.completions.update(list, func(i agent.Info) {
+		if a.yesmanSettled(i.Yesman) {
+			a.notify(i.ID, i.Yesman, tr("Finished and waiting for you."))
+		}
+	})
 	for _, n := range notes {
 		a.notify(n.id, n.title, n.body)
 	}
