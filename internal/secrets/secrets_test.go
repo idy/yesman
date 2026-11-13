@@ -199,11 +199,15 @@ func TestParseAndFormat(t *testing.T) {
 		"secrets:\n  A: [x]\n",
 		"variables:\n  A: x\n", // a variables file is not a secrets file
 		"version: 2\nsecrets: {}\n",
+		"secrets:\n  TOKEN_unencrypted: x\n", // sops would keep it in the clear
 		"secrets: [\n",
 	} {
 		if _, err := Parse(KindSecrets, []byte(bad)); err == nil {
 			t.Errorf("Parse accepted %q", bad)
 		}
+	}
+	if got, err := Parse(KindVariables, []byte("variables:\n  NOTE_unencrypted: x\n")); err != nil || len(got) != 1 {
+		t.Errorf("a variable may end in the suffix: %#v, %v", got, err)
 	}
 	var e *Error
 	if _, err := Parse(KindSecrets, []byte("secrets:\n  A-B: x\n")); !errors.As(err, &e) {
@@ -253,6 +257,9 @@ func TestVault(t *testing.T) {
 	v.Lock()
 	if _, err := v.Entries(); !errors.Is(err, ErrLocked) {
 		t.Errorf("Entries while locked: %v", err)
+	}
+	if err := v.Save([]Entry{{Name: "KEY_unencrypted", Value: "x"}}); err == nil || errors.Is(err, ErrLocked) {
+		t.Errorf("Save of a name sops keeps plain: %v", err)
 	}
 	if err := v.Save(nil); !errors.Is(err, ErrLocked) {
 		t.Errorf("Save while locked: %v", err)

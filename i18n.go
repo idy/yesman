@@ -161,6 +161,7 @@ var zhHans = map[string]string{
 	"%q is not an environment variable name: use letters, digits and underscores, not starting with a digit": "%q 不是环境变量名：请使用字母、数字和下划线，且不要以数字开头",
 	"%s is set by the system, so it cannot be set here":                                                      "%s 由系统设置，不能在这里设置",
 	"%s is set by yesman or pi, so it cannot be set here":                                                    "%s 由 yesman 或 pi 设置，不能在这里设置",
+	"%s ends in %s, which sops keeps unencrypted: name the secret otherwise":                                 "%s 以 %s 结尾，sops 会以明文保存它：请换一个名称",
 	"%s is there twice": "%s 出现了两次",
 	"the value of %s has a NUL character, which an environment variable cannot hold":     "%s 的值含有 NUL 字符，环境变量无法保存它",
 	"the file should be a mapping with version and %s":                                   "文件应是包含 version 和 %s 的映射",

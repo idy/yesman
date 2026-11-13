@@ -255,6 +255,7 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
   // keeps it there.
   async function switchTo(mode) {
     if (mode === s.mode) return true;
+    if (s.busy) return false; // a save is on its way
     try {
       if (mode === 'yaml') {
         s.text = await call('FormatEntries', kind, strip(s.rows));
@@ -288,14 +289,16 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
     s.error = '';
     paintActions();
     paintError();
+    // What is sent: edits made while it saves stay, and show unsaved.
+    const submitted = s.mode === 'yaml' ? currentText() : null;
     try {
-      const view = s.mode === 'yaml'
-        ? await call(secret ? 'SaveSecretsText' : 'SaveVariablesText', currentText())
+      const view = submitted !== null
+        ? await call(secret ? 'SaveSecretsText' : 'SaveVariablesText', submitted)
         : await call(secret ? 'SaveSecrets' : 'SaveVariables', strip(s.rows));
       s.view = view;
       s.saved = JSON.stringify(view.entries);
       s.savedText = view.text;
-      if (s.mode === 'yaml') {
+      if (submitted !== null && currentText() === submitted) {
         // The editor shows the file as kept, without the edits' comments.
         s.text = view.text;
         editor?.replace(key, view.text);

@@ -308,7 +308,7 @@ func (v *Vault) loadLocked() ([]Entry, error) {
 // Save replaces the secrets. The file stays encrypted to the other age
 // recipients it had, such as a key sops was given.
 func (v *Vault) Save(entries []Entry) error {
-	if err := Check(entries); err != nil {
+	if err := Check(KindSecrets, entries); err != nil {
 		return err
 	}
 	v.mu.Lock()

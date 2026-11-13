@@ -46,9 +46,22 @@ function json(value: unknown) {
 	return JSON.stringify(value, null, 2);
 }
 
-// The secrets' values, and lines of them, as the app last gave them,
-// longest first, which output shows as [secret NAME].
+// Every secret value, or line of one, the app has given this agent,
+// longest first, which output shows as [secret NAME]. A value stays here
+// for the agent's life, once the secret is changed, removed or locked
+// away too: a file or log a command wrote may still hold it.
 let hidden: { value: string; name: string }[] = [];
+const seen = new Map<string, string>(); // value -> name
+
+function remember(list?: { value: string; name: string }[]) {
+	let added = false;
+	for (const h of list ?? []) {
+		if (seen.get(h.value) === h.name) continue;
+		seen.set(h.value, h.name);
+		added = true;
+	}
+	if (added) hidden = [...seen].map(([value, name]) => ({ value, name })).sort((x, y) => y.value.length - x.value.length);
+}
 
 function hide(text: string): string {
 	for (const h of hidden) {
@@ -78,9 +91,7 @@ function hideJSON(value: unknown): unknown {
 async function commandEnv(signal?: AbortSignal): Promise<{ env: Record<string, string>; note?: string }> {
 	try {
 		const r = await call("GET", "/v1/env", undefined, signal);
-		// Locked, the app has no values to give: keep hiding those this
-		// agent may have seen, as in a file a command wrote.
-		hidden = r.locked && !r.hide?.length ? hidden : (r.hide ?? []);
+		remember(r.hide);
 		const note = r.errors?.length ? `yesman could not read some secrets or variables: ${r.errors.join("; ")}` : undefined;
 		return { env: r.env ?? {}, note };
 	} catch (err) {

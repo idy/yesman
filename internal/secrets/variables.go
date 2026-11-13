@@ -58,7 +58,7 @@ func (v *Variables) Entries() ([]Entry, error) {
 
 // Save replaces the variables.
 func (v *Variables) Save(entries []Entry) error {
-	if err := Check(entries); err != nil {
+	if err := Check(KindVariables, entries); err != nil {
 		return err
 	}
 	v.mu.Lock()

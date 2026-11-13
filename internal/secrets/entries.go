@@ -69,13 +69,17 @@ func CheckName(name string) error {
 	return nil
 }
 
-// Check says whether entries can be kept: each well named, once, with a
-// value an environment can hold.
-func Check(entries []Entry) error {
+// Check says whether entries of a kind can be kept: each well named, once,
+// with a value an environment can hold. A secret's name must not end in
+// sops's unencrypted suffix, which would keep its value in the clear.
+func Check(kind Kind, entries []Entry) error {
 	seen := map[string]bool{}
 	for _, e := range entries {
 		if err := CheckName(e.Name); err != nil {
 			return err
+		}
+		if kind == KindSecrets && strings.HasSuffix(e.Name, unencryptedSuffix) {
+			return errorf("%s ends in %s, which sops keeps unencrypted: name the secret otherwise", e.Name, unencryptedSuffix)
 		}
 		if seen[e.Name] {
 			return errorf("%s is there twice", e.Name)
@@ -158,7 +162,7 @@ func fromNode(kind Kind, doc *yaml.Node) ([]Entry, error) {
 			return nil, errorf("line %d: %q is not a key of this file; it has version and %s", k.Line, k.Value, string(kind))
 		}
 	}
-	return entries, Check(entries)
+	return entries, Check(kind, entries)
 }
 
 func entryOf(k, v *yaml.Node) (Entry, error) {

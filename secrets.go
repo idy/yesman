@@ -128,7 +128,7 @@ func (a *app) checkApart(kind secrets.Kind, entries []secrets.Entry) error {
 
 // save keeps the entries of a kind.
 func (a *app) save(kind secrets.Kind, entries []secrets.Entry) error {
-	if err := secrets.Check(entries); err != nil {
+	if err := secrets.Check(kind, entries); err != nil {
 		return trError(err)
 	}
 	a.envmu.Lock()
