@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/egoist/mygo"
 
@@ -31,6 +32,8 @@ var (
 	// fetchesEvent carries where fetching the pool stands whenever a fetch
 	// starts or ends.
 	fetchesEvent = mygo.NewEvent[FetchState]("fetches")
+	// boardEvent names a yesman whose board changed.
+	boardEvent = mygo.NewEvent[string]("board")
 	// piJobsEvent carries the changes to pi's packages under way, whenever
 	// one starts, finishes or fails.
 	piJobsEvent = mygo.NewEvent[PiJobs]("pi-packages")
@@ -53,9 +56,10 @@ type app struct {
 	win  *mygo.Window
 	tray *mygo.Tray
 
-	smu     sync.Mutex
-	last    map[string]agent.Status
-	release func() // ends KeepRunning while no agent works
+	smu         sync.Mutex
+	last        map[string]agent.Status
+	release     func() // ends KeepRunning while no agent works
+	completions completionNotices
 	// working and waiting count the agents, for the tray's tooltip.
 	working, waiting int
 
@@ -193,7 +197,9 @@ func trayToolTip(working, waiting int) string {
 func (a *app) notifyChanged() { _ = changedEvent.Broadcast(true) }
 
 // agentsChanged tells the page, updates the tray, keeps the app awake while
-// agents work, and notifies the user when an agent needs them.
+// agents work, and notifies the user when a yesman needs them. Only a lead
+// does: its workers' questions and failures go to the lead, which answers
+// for them.
 func (a *app) agentsChanged(list []agent.Info) {
 	_ = agentsEvent.Broadcast(list)
 
@@ -207,22 +213,21 @@ func (a *app) agentsChanged(list []agent.Info) {
 	for _, i := range list {
 		prev := a.last[i.ID]
 		a.last[i.ID] = i.Status
-		switch i.Status {
-		case agent.Working:
+		lead := i.Role == agent.RoleLead
+		switch {
+		case i.Status == agent.Working:
 			working++
-		case agent.Waiting:
+		case i.Status == agent.Waiting && lead:
 			waiting++
 		}
-		if prev == i.Status || prev == "" && i.Status != agent.Waiting {
+		if !lead || prev == i.Status || prev == "" && i.Status != agent.Waiting {
 			continue
 		}
 		switch {
 		case i.Status == agent.Waiting:
-			notes = append(notes, note{i.ID, tr("%s needs you", i.ID), tr("It asked a question and is waiting for your answer.")})
+			notes = append(notes, note{i.ID, tr("%s needs you", i.Yesman), tr("It asked a question and is waiting for your answer.")})
 		case i.Status == agent.Failed:
-			notes = append(notes, note{i.ID, tr("%s stopped", i.ID), i.Detail})
-		case prev == agent.Working && i.Status == agent.Idle && i.Role == agent.RoleLead:
-			notes = append(notes, note{i.ID, i.Yesman, tr("Finished and waiting for you.")})
+			notes = append(notes, note{i.ID, tr("%s stopped", i.Yesman), i.Detail})
 		}
 	}
 	if working > 0 && a.release == nil {
@@ -242,19 +247,53 @@ func (a *app) agentsChanged(list []agent.Info) {
 		a.tray.SetTitle(title)
 		a.tray.SetToolTip(trayToolTip(working, waiting))
 	}
+	// A lead that ends a run often carries on at once, with a worker's
+	// report or a reminder of open tasks: tell the user only once the whole
+	// yesman has stayed settled for a moment.
+	a.completions.update(list, func(i agent.Info) {
+		if a.yesmanSettled(i.Yesman) {
+			a.notify(i.ID, i.Yesman, tr("Finished and waiting for you."))
+		}
+	})
+	for _, n := range notes {
+		a.notify(n.id, n.title, n.body)
+	}
+}
+
+// settleGrace is how long a yesman stays settled before the user hears it
+// finished.
+const settleGrace = 4 * time.Second
+
+// yesmanSettled reports whether a yesman's lead is idle and none of its
+// workers works, starts or waits for an answer.
+func (a *app) yesmanSettled(yesman string) bool {
+	for _, i := range a.agents.List() {
+		if i.Yesman != yesman {
+			continue
+		}
+		switch {
+		case i.Role == agent.RoleLead && i.Status != agent.Idle:
+			return false
+		case i.Status == agent.Working || i.Status == agent.Starting || i.Status == agent.Waiting:
+			return false
+		}
+	}
+	return true
+}
+
+// notify shows a notification about an agent, unless the window has focus;
+// clicking it shows that agent.
+func (a *app) notify(id, title, body string) {
 	if a.windowFocused() {
 		return
 	}
-	for _, n := range notes {
-		id := n.id
-		notification := mygo.NewNotification(mygo.NotificationOptions{ID: id, Title: n.title, Body: n.body, Group: id})
-		notification.OnClick(func() {
-			a.fmu.Lock()
-			a.pendingFocus = id
-			a.fmu.Unlock()
-			a.showWindow()
-			_ = focusEvent.Broadcast(id) // an open page shows it now; a new one calls TakeFocus
-		})
-		_ = notification.Show()
-	}
+	notification := mygo.NewNotification(mygo.NotificationOptions{ID: id, Title: title, Body: body, Group: id})
+	notification.OnClick(func() {
+		a.fmu.Lock()
+		a.pendingFocus = id
+		a.fmu.Unlock()
+		a.showWindow()
+		_ = focusEvent.Broadcast(id) // an open page shows it now; a new one calls TakeFocus
+	})
+	_ = notification.Show()
 }

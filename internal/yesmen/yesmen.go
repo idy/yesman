@@ -7,6 +7,7 @@
 //	  .yesman/
 //	    yesman.json        when it was hired
 //	    workers.json       the workers its lead started
+//	    board.json         the task board its agents keep
 //	    knowledge/         notes every agent reads and writes; INDEX.md lists them
 //	    sessions/<agent>/  each agent's pi session log
 //	  <repo>--<topic>/     worktrees
@@ -21,6 +22,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -59,9 +61,42 @@ func (y Yesman) SessionDir(agent string) string {
 
 // Worker is an agent a yesman's lead started for one task.
 type Worker struct {
-	Name      string    `json:"name"`
+	Name string `json:"name"`
+	// Number counts the yesman's workers in the order they started, from
+	// 1, so the user can tell them apart at a glance as a1, a2, …
+	Number int `json:"number,omitempty"`
+	// Title is the subject of its work in a few words, as the user sees it.
+	Title     string    `json:"title,omitempty"`
 	Task      string    `json:"task"`
 	StartedAt time.Time `json:"startedAt"`
+	// FinishedAt is when its last run's report reached its lead, after
+	// which its process was closed; zero while it has work.
+	FinishedAt time.Time `json:"finishedAt,omitzero"`
+}
+
+// Subject names a worker's work for the user: its title, else the title of
+// the board task it owns, else the first line of its task.
+func (w Worker) Subject(b Board) string {
+	if w.Title != "" {
+		return w.Title
+	}
+	var owned *Task
+	for i := range b.Tasks {
+		t := &b.Tasks[i]
+		if t.Owner != w.Name {
+			continue
+		}
+		// An open task it owns wins over finished ones; among the same, the
+		// one changed last.
+		if owned == nil || t.Open() && !owned.Open() || t.Open() == owned.Open() && t.UpdatedAt.After(owned.UpdatedAt) {
+			owned = t
+		}
+	}
+	if owned != nil {
+		return owned.Title
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(w.Task), "\n")
+	return line
 }
 
 // Store keeps the workspaces under a directory.
@@ -232,7 +267,26 @@ func (s *Store) workers(name string) ([]Worker, error) {
 	if err := readJSON(filepath.Join(y.MetaDir(), "workers.json"), &ws); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	number(ws)
 	return ws, nil
+}
+
+// number numbers workers recorded before workers had numbers, after the
+// others, in the order they started.
+func number(ws []Worker) {
+	next := 0
+	var missing []int
+	for i, w := range ws {
+		next = max(next, w.Number)
+		if w.Number == 0 {
+			missing = append(missing, i)
+		}
+	}
+	sort.SliceStable(missing, func(a, b int) bool { return ws[missing[a]].StartedAt.Before(ws[missing[b]].StartedAt) })
+	for _, i := range missing {
+		next++
+		ws[i].Number = next
+	}
 }
 
 // AddWorker records a new worker.
@@ -252,8 +306,50 @@ func (s *Store) AddWorker(name string, w Worker) error {
 	if slices.ContainsFunc(ws, func(x Worker) bool { return x.Name == w.Name }) {
 		return fmt.Errorf("%s already has a worker named %s", name, w.Name)
 	}
+	w.Number = 1
+	for _, x := range ws {
+		w.Number = max(w.Number, x.Number+1)
+	}
 	y, _ := s.Get(name)
 	return writeJSON(filepath.Join(y.MetaDir(), "workers.json"), append(ws, w))
+}
+
+// FinishWorker records that a worker finished: its report reached its lead.
+func (s *Store) FinishWorker(name, worker string, at time.Time) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		w.FinishedAt = at
+		return true
+	})
+	return err
+}
+
+// ReopenWorker records that a finished worker has work again. It reports
+// whether the worker was finished.
+func (s *Store) ReopenWorker(name, worker string) (bool, error) {
+	return s.updateWorker(name, worker, func(w *Worker) bool {
+		if w.FinishedAt.IsZero() {
+			return false
+		}
+		w.FinishedAt = time.Time{}
+		return true
+	})
+}
+
+// updateWorker changes a worker's record, writing it only when fn reports a
+// change. A worker no longer listed is left alone.
+func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ws, err := s.workers(name)
+	if err != nil {
+		return false, err
+	}
+	i := slices.IndexFunc(ws, func(x Worker) bool { return x.Name == worker })
+	if i < 0 || !fn(&ws[i]) {
+		return false, nil
+	}
+	y, _ := s.Get(name)
+	return true, writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws)
 }
 
 // RemoveWorker forgets a worker. Its session log stays.
