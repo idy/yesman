@@ -71,6 +71,17 @@ func inUseText(reason string) string {
 // zhHans translates the English messages Go shows to Simplified Chinese.
 // Each keeps the verbs of its English message, in their order.
 var zhHans = map[string]string{
+	// Settings › pi: sources refused before pi sees them
+	"enter a package source, such as npm:pi-web-access": "请输入包来源，例如 npm:pi-web-access",
+	"%q is not a package source":                        "%q 不是包来源",
+	"a package source is one line":                      "包来源只能有一行",
+	"%q names no version after @":                       "%q 的 @ 后面没有版本",
+	"%q is not an npm package name":                     "%q 不是 npm 包名",
+	"%q is not a version":                               "%q 不是版本号",
+	"%q is not a git source":                            "%q 不是 git 来源",
+	"%q is not a package source: use npm:name, git:host/path, a URL or a local path": "%q 不是包来源：请使用 npm:名称、git:主机/路径、URL 或本地路径",
+	"pi %s took too long": "pi %s 超时",
+
 	// The tray
 	"Open yesman":                            "打开 yesman",
 	"Quit yesman":                            "退出 yesman",

@@ -2,13 +2,14 @@
 // the live event stream of the agents' pi processes.
 //
 //   mygo.call("Yesman.<Method>", ...)  services in service.go
-//   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "focus-agent" | "update" | "files", fn)
+//   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
+import { createPiPage } from './pi.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
@@ -834,6 +835,7 @@ const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
   { page: 'storage', label: 'Storage', icon: 'folder' },
+  { page: 'pi', label: 'pi', icon: 'package' },
   { page: 'config', label: 'Import and export', icon: 'transfer' },
   { page: 'about', label: 'About', icon: 'about' },
 ];
@@ -875,6 +877,7 @@ async function loadSettingsPage(page) {
     if (page === 'general' || page === 'storage') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
+    else if (page === 'pi') { await piPage.load(); return; }
   } catch (err) {
     fail(err);
     return;
@@ -887,6 +890,7 @@ function renderSettings(body) {
   body.append(h('div', { class: 'page' }, inner));
   if (state.view.page === 'repositories') renderRepositories(inner);
   else if (state.view.page === 'storage') renderStorage(inner);
+  else if (state.view.page === 'pi') piPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
   else if (state.view.page === 'about') renderAbout(inner);
   else renderGeneral(inner);
@@ -928,6 +932,19 @@ function choiceSelect(v, key, method, label, choices) {
   } }, choices.map(([value, text]) => h('option', { value, selected: value === v[key] }, text)));
 }
 
+// Settings › pi, in pi.js.
+const piPage = createPiPage({
+  call,
+  fail,
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  agents: () => state.snap.agents,
+  shown: () => state.view.kind === 'settings' && state.view.page === 'pi',
+  rerender: () => renderBody(),
+  ago: (iso, verb) => ago(iso, verb),
+  preferenceRow,
+  revealButton,
+});
+
 function renderGeneral(inner) {
   const v = state.settings;
   if (!v) return;
@@ -939,10 +956,6 @@ function renderGeneral(inner) {
     settingsSection(t('Appearance'), null,
       preferenceRow(t('Theme'), h('p', null, t('The window and its menus follow this.')), appearance),
       preferenceRow(t('Language'), h('p', null, t('The window, its menus and notifications use this. Match the system follows the languages of your system settings.')), language)),
-    settingsSection(t('Agents'), null,
-      preferenceRow('pi',
-        v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null, t('Every lead and worker runs this pi. Set YESMAN_PI to use another.'), ' ', h('span', { class: 'path' }, v.pi)),
-        h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : 'idle' }, h('i', { class: 'mds-dot' }), h('span', null, v.piError ? t('Not found') : t('Found'))))),
   );
 }
 
@@ -1227,6 +1240,7 @@ function importLines(plan, result) {
 const AGO = {
   fetched: ['never fetched', 'fetched just now', 'fetched {n} min ago', 'fetched {n} h ago', 'fetched {n} d ago'],
   checked: ['never checked', 'checked just now', 'checked {n} min ago', 'checked {n} h ago', 'checked {n} d ago'],
+  published: ['never published', 'published just now', 'published {n} min ago', 'published {n} h ago', 'published {n} d ago'],
 };
 
 function ago(iso, what = 'fetched') {
@@ -1812,6 +1826,7 @@ function onAgents(agents) {
   state.snap.agents = agents;
   pruneCaches();
   renderSidebar();
+  piPage.onAgents();
   const after = selectedAgent();
   if (after?.status === 'idle' && before?.status === 'starting') loadModelOptions(after);
   if (state.view.kind === 'agent' && !after) {
@@ -1869,6 +1884,7 @@ async function start() {
   mygo.on('changed', refreshSoon);
   mygo.on('clones', onClones);
   mygo.on('fetches', onFetches);
+  mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => files.onChange(change));
   document.addEventListener('keydown', (e) => files.onKey(e));

@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.11
+
+- Settings › pi manages pi's packages: the extensions, skills, prompt templates and themes every agent loads. Info shows the pi yesman runs, a summary of its packages and pi's own settings file. Installed lists each package with its version, source and what it provides, says when npm has a newer version, and updates or removes it. Browse searches the packages of pi's gallery, most popular first, and shows a package's README, links and preview before you install it. Install from source takes any npm package, git repository or folder pi takes.
+- yesman installs, updates and removes packages with pi's own commands, one at a time in the background, for you as a whole: they load into every yesman agent and into pi wherever you run it. A change that fails stays listed with pi's or npm's reason until you try it again or dismiss it.
+- pi loads packages when it starts, so the page says which agents still run with the packages as they were, and puts the idle ones to sleep. They load the change and resume their sessions when you next talk to them.
+- The pi row moves from Settings › General to the pi page.
+
 ## 0.1.10
 
 - yesman speaks Simplified Chinese as well as English. Choose the language in Settings › General, or Match the system to follow the languages of your system settings. The window, its menus, the tray and notifications switch at once.
