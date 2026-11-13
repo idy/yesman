@@ -1,8 +1,23 @@
-# yesman
+<p align="center"><img src="resources/icon.svg" width="128" height="128" alt=""></p>
 
-**the agent that says yes and gets things done.**
+<h1 align="center">yesman</h1>
 
-[Website](https://yesman.idy.dev/) · [Downloads](https://github.com/idy/yesman/releases/latest) · [Website maintenance](WEBSITE.md)
+<p align="center"><strong>Yes-man Ships!</strong></p>
+
+<p align="center">AI has a reputation for saying yes to everything. Put that yes-man energy to work:<br><strong>hire a yesman to help you ship to production.</strong></p>
+
+<p align="center"><a href="https://yesman.idy.dev/">Website</a> · <a href="https://github.com/idy/yesman/releases/latest">Downloads</a> · <a href="WEBSITE.md">Website maintenance</a></p>
+
+## What makes a yesman different
+
+- **A manager, not a coder.** The lead has no shell and never does the work itself. It only talks with you, plans and manages, so it is always free to answer.
+- **It takes the whole job.** It turns your goal into tasks on a board and hands each to a worker, without waiting on any of them.
+- **It manages upward, so you don't have to manage down.** Workers bring their questions, failures and reports to the lead, which answers them itself. Workers never interrupt you.
+- **It does everything it can, and leaves you only the hard calls.** The decisions it cannot make reach you together, once everything else is done.
+- **It works on a project, not a repository.** A yesman checks out worktrees of whichever repositories the project needs into its own workspace, one per worker, each on its own branch.
+- **One pool of bare repositories.** Each repository is cloned once, written only by yesman, and shared by every yesman.
+- **It picks up where it left off.** Shared knowledge, the board and every agent's session survive restarts.
+- **Coming next: always on.** A yesman connected to a channel, talking with users and customers, turning what they need into tasks, and shipping release after release.
 
 yesman is a tray app for hiring yesmen. A yesman takes on one project: it gets a workspace directory of its own, checks out whichever repositories the project needs from a shared repo pool, keeps notes its agents share, and starts workers when the job splits up. You talk to its lead in a Claude Code-style window.
 

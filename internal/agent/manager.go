@@ -131,9 +131,11 @@ type Config struct {
 type Manager struct {
 	cfg Config
 
-	mu     sync.Mutex
-	agents map[string]*agent
-	tokens map[string]string // credential -> agent ID, while its process runs
+	mu       sync.Mutex
+	agents   map[string]*agent
+	tokens   map[string]string // credential -> agent ID, while its process runs
+	closed   bool              // StopAll permanently prevents further starts; guarded by mu
+	shutdown chan struct{}     // closed by StopAll to wake pending report retries
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
 }
@@ -165,7 +167,7 @@ type agent struct {
 	inbox, settledInbox uint64
 }
 
-// errStopped is returned to a start that Stop interrupted.
+// errStopped is returned when Stop interrupts a start or the manager has quit.
 var errStopped = errors.New("the agent was stopped")
 
 // New returns a Manager.
@@ -176,7 +178,7 @@ func New(cfg Config) *Manager {
 	if cfg.OnChange == nil {
 		cfg.OnChange = func([]Info) {}
 	}
-	m := &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}, notify: make(chan struct{}, 1)}
+	m := &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}, shutdown: make(chan struct{}), notify: make(chan struct{}, 1)}
 	go func() {
 		for range m.notify {
 			m.cfg.OnChange(m.List())
@@ -337,6 +339,10 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 
 	for {
 		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return nil, nil, errStopped
+		}
 		a := m.agents[id]
 		if a == nil {
 			a = &agent{info: Info{ID: id, Yesman: ys, Name: name, Role: role, Status: Stopped}}
@@ -370,7 +376,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		p, state, err := m.spawn(a, y, name, role)
 
 		m.mu.Lock()
-		if err == nil && a.stopping {
+		if err == nil && (a.stopping || m.closed) {
 			// Stop came during the start: end what it started before
 			// letting Stop return.
 			m.mu.Unlock()
@@ -856,9 +862,13 @@ func (m *Manager) StopYesman(name string) {
 	wg.Wait()
 }
 
-// StopAll stops every agent, for quitting.
+// StopAll permanently closes the manager and stops every agent, for quitting.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		close(m.shutdown)
+	}
 	ids := make([]string, 0, len(m.agents))
 	for id := range m.agents {
 		ids = append(ids, id)
@@ -1007,13 +1017,28 @@ func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, msg string) erro
 	m.unnudge(lead)
 	var err error
 	for attempt := range reportAttempts {
+		select {
+		case <-m.shutdown:
+			return errStopped
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if err = m.prompt(ctx, lead, msg, "followUp"); err == nil {
 			return nil
+		}
+		select {
+		case <-m.shutdown:
+			return errStopped
+		default:
 		}
 		if attempt < reportAttempts-1 {
 			select {
 			case <-time.After(time.Duration(attempt+1) * reportBackoff):
+			case <-m.shutdown:
+				return errStopped
 			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}
