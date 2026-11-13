@@ -19,6 +19,19 @@ func testUpdates(find func(context.Context) (*found, error)) (*updates, chan Upd
 	return u, seen
 }
 
+// A version a check finds downloads at once, and then waits for a restart.
+func TestFoundUpdateInstallsItself(t *testing.T) {
+	u, seen := testUpdates(func(context.Context) (*found, error) {
+		return &found{version: "0.2.0", install: func(context.Context, func(int64, int64)) error { return nil }}, nil
+	})
+	u.autoInstall = true
+	v, err := u.check(context.Background())
+	if err != nil || v.Version != "0.2.0" || v.State != updateDownloading && v.State != updateReady {
+		t.Fatalf("check = %+v, %v", v, err)
+	}
+	waitState(t, seen, updateReady)
+}
+
 func waitFor(t *testing.T, seen chan UpdateView, what string, ok func(UpdateView) bool) UpdateView {
 	t.Helper()
 	timeout := time.After(5 * time.Second)

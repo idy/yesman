@@ -57,6 +57,9 @@ type updates struct {
 	enabled func() bool
 	find    func(ctx context.Context) (*found, error)
 	changed func(UpdateView)
+	// autoInstall downloads and installs a version as soon as a check
+	// finds it, so that it only waits for a restart.
+	autoInstall bool
 
 	mu      sync.Mutex
 	view    UpdateView
@@ -76,8 +79,9 @@ func newUpdates() *updates {
 			}
 			return &found{version: up.Version, notes: up.Notes, install: up.Install}, nil
 		},
-		changed: func(v UpdateView) { _ = updateEvent.Broadcast(v) },
-		view:    UpdateView{State: updateIdle},
+		changed:     func(v UpdateView) { _ = updateEvent.Broadcast(v) },
+		autoInstall: true,
+		view:        UpdateView{State: updateIdle},
 	}
 }
 
@@ -91,6 +95,7 @@ func (u *updates) start() {
 	if !enabled {
 		return
 	}
+	log.Printf("updates: checking for versions newer than %s every %s", mygo.App.Version(), updateInterval)
 	go func() {
 		time.Sleep(10 * time.Second) // after the window has opened
 		for {
@@ -163,14 +168,19 @@ func (u *updates) check(ctx context.Context) (UpdateView, error) {
 		u.view.CheckError, u.view.CheckedAt = "", time.Now()
 	}
 	v = u.view
+	// A failed install waits to be tried again from the titlebar.
+	install := u.autoInstall && v.State == updateAvailable
 	u.mu.Unlock()
 	u.changed(v)
+	if install && u.install() == nil {
+		v = u.snapshot()
+	}
 	return v, err
 }
 
 // install downloads and installs the version a check found, in the
-// background. The running app is not touched: the new version runs after
-// a restart.
+// background; checks start it themselves. The running app is not touched:
+// the new version runs after a restart, or at the next launch.
 func (u *updates) install() error {
 	u.mu.Lock()
 	f := u.pending

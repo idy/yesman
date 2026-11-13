@@ -179,6 +179,9 @@ func (s *service) About(ctx context.Context) AboutView {
 			}
 		}
 	}
+	if !mygo.IsDev() {
+		v.Version = mygo.App.Version() // mygo build stamps mygo.json's version
+	}
 	if data, err := fs.ReadFile(webFS, "web/mds/VERSION"); err == nil {
 		if f := strings.Fields(string(data)); len(f) > 0 {
 			v.Magpie = f[0]
