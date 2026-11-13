@@ -84,6 +84,7 @@ func fakePi() {
 		failPrompt := cmd.Type == "prompt" && (os.Getenv("FAKE_PI_FAIL_PROMPTS") != "" ||
 			os.Getenv("FAKE_PI_FAIL_REPORTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Worker"))
 		if failPrompt {
+			write(map[string]any{"type": "test_prompt_rejected"})
 			write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": false, "error": "rejected"})
 			continue
 		}
@@ -255,6 +256,96 @@ func TestStopDuringStart(t *testing.T) {
 	m.mu.Unlock()
 	if tokens != 0 {
 		t.Errorf("%d credentials outlive their processes", tokens)
+	}
+}
+
+// Quitting is permanent for the manager, unlike putting one agent to sleep.
+func TestStopAllPreventsStarts(t *testing.T) {
+	for _, startFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("running=%t", startFirst), func(t *testing.T) {
+			m, store := newTestManager(t, 0)
+			ctx := context.Background()
+			if _, err := store.Hire("bob"); err != nil {
+				t.Fatal(err)
+			}
+			id := ID("alice", yesmen.LeadName)
+			if startFirst {
+				if err := m.Prompt(ctx, id, "hi"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m.StopAll()
+			for _, name := range []string{"alice", "bob"} {
+				if err := m.Prompt(ctx, ID(name, yesmen.LeadName), "after quitting"); !errors.Is(err, errStopped) {
+					t.Errorf("prompt after StopAll for %s = %v, want errStopped", name, err)
+				}
+			}
+		})
+	}
+}
+
+func TestStopAllDuringStart(t *testing.T) {
+	m, _ := newTestManager(t, 100*time.Millisecond)
+	id := ID("alice", yesmen.LeadName)
+	done := make(chan error, 1)
+	go func() { done <- m.Prompt(context.Background(), id, "hi") }()
+	waitStatus(t, m, id, Starting)
+	m.StopAll()
+	if err := <-done; !errors.Is(err, errStopped) {
+		t.Errorf("interrupted start = %v, want errStopped", err)
+	}
+	if p := m.running(id); p != nil {
+		t.Fatal("a process outlived StopAll")
+	}
+	m.mu.Lock()
+	tokens := len(m.tokens)
+	m.mu.Unlock()
+	if tokens != 0 {
+		t.Errorf("%d credentials outlived StopAll", tokens)
+	}
+}
+
+// A rejected report may be between retries when quitting starts. It must
+// wake promptly and must not restart the lead after StopAll has returned.
+func TestStopAllCancelsReportRetry(t *testing.T) {
+	m, _ := newTestManager(t, 0, "FAKE_PI_FAIL_REPORTS=1")
+	rejected := make(chan struct{}, 1)
+	m.cfg.OnEvent = func(e Event) {
+		var event struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(e.Data, &event) == nil && event.Type == "test_prompt_rejected" {
+			select {
+			case rejected <- struct{}{}:
+			default:
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		w := &agent{info: Info{ID: ID("alice", "w1"), Yesman: "alice", Name: "w1", Role: RoleWorker}}
+		done <- m.tellLeadWithin(ctx, w, "[yesman] Worker w1 finished a run")
+	}()
+	select {
+	case <-rejected:
+	case <-ctx.Done():
+		t.Fatal("the report never reached the lead")
+	}
+	m.StopAll()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errStopped) {
+			t.Errorf("report after quitting = %v, want errStopped", err)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("report retry did not wake when the manager quit")
+	}
+	if p := m.running(ID("alice", yesmen.LeadName)); p != nil {
+		t.Fatal("report retry restarted the lead after quitting")
 	}
 }
 
