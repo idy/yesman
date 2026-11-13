@@ -12,8 +12,13 @@ import (
 )
 
 // Automation cannot reach native dialogs: YESMAN_E2E_SAVE and
-// YESMAN_E2E_OPEN answer the configuration file's.
+// YESMAN_E2E_OPEN answer the configuration file's. YESMAN_E2E_NAME names
+// the app otherwise, so that it runs beside another yesman rather than
+// handing over to it.
 func init() {
+	if name := os.Getenv("YESMAN_E2E_NAME"); name != "" {
+		appName = name
+	}
 	if path := os.Getenv("YESMAN_E2E_SAVE"); path != "" {
 		configSaveDialog = func(mygo.SaveDialogOptions) (string, error) { return path, nil }
 	}

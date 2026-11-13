@@ -2,12 +2,19 @@
 
 Each release's section is what installed copies show as its release notes.
 
-## 0.1.13
+## 0.1.14
 
 - Settings › Secrets keeps API keys, tokens and other secrets, and Settings › Variables keeps settings such as an account or a region. Every command of every agent gets each as an environment variable; agents read what each is for with the new `yesman_env` tool.
 - Edit them as a form, or as YAML in the editor. Each has a value and a description that tells agents what it is for.
 - Secrets are encrypted with sops and age and open with a password that yesman never stores; after each launch they stay locked until you unlock them. A secret's value never reaches an agent's context: output shows it as `[secret NAME]`. The sops command can edit the same file with the exported key.
 - Export secrets sealed with a password of their own, or as plain text, and variables as YAML. Importing shows what changes, then merges or replaces.
+
+## 0.1.13
+
+- An info panel sits between the conversation and the files. Knowledge opens the agents' notes, rendered and read-only. Worktrees lists each worktree with the lines it changed, uncommitted edits too, or, when its branch is in a pull request, that pull request with its state and checks. Storage folds into one row with the disk the workspace takes, and opens to its largest parts.
+- A worktree opens in the files pane, as its files or its changes. Changes shows the changed files as a tree beside each file's diff, and stays quick with thousands of files: the tree arrives a folder at a time, and a diff is read when you choose it and drawn as you scroll.
+- The tree can show folders alone: choose a folder to list what changed in it, to see what the agents changed without reading every diff.
+- The files pane's bar is one row: the part shown, which switches to all files, the knowledge or another worktree, then the path, each folder a menu of its contents, holding only what changed in Changes.
 
 ## 0.1.12
 

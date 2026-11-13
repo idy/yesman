@@ -299,8 +299,9 @@ func isText(data []byte, cut bool) bool {
 
 // FindFiles finds files of a yesman's workspace whose path has the
 // query's characters in order, best matches first: those whose name
-// holds the query, then whose path does.
-func (s *service) FindFiles(ctx context.Context, yesman, query string) ([]string, error) {
+// holds the query, then whose path does. under limits it to a folder of
+// the workspace, such as a worktree; "" is all of it.
+func (s *service) FindFiles(ctx context.Context, yesman, query, under string) ([]string, error) {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {
 		return []string{}, nil
@@ -318,14 +319,15 @@ func (s *service) FindFiles(ctx context.Context, yesman, query string) ([]string
 	}
 	var hits []hit
 	visits := 0
-	err = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+	start := cleanRel(under)
+	err = fs.WalkDir(root.FS(), start, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip what cannot be read
 		}
 		if visits++; visits > maxFindVisits || ctx.Err() != nil {
 			return fs.SkipAll
 		}
-		if p == "." {
+		if p == start {
 			return nil
 		}
 		if hiddenFile(d.Name()) || unwatched(p, d.IsDir()) {
@@ -337,7 +339,8 @@ func (s *service) FindFiles(ctx context.Context, yesman, query string) ([]string
 		if d.IsDir() {
 			return nil
 		}
-		if rank := matchRank(strings.ToLower(p), q); rank >= 0 {
+		// Matched below the folder searched, which every path shares.
+		if rank := matchRank(strings.ToLower(strings.TrimPrefix(p, start+"/")), q); rank >= 0 {
 			hits = append(hits, hit{p, rank})
 		}
 		return nil
