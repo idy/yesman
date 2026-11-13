@@ -256,9 +256,9 @@ func TestRestartAfterStop(t *testing.T) {
 }
 
 func TestCredentials(t *testing.T) {
-	closeWhenDone = false
-	t.Cleanup(func() { closeWhenDone = true })
-	m, store := newTestManager(t, 0)
+	// Keep the worker running until its credentials have been checked:
+	// a finished worker reports and closes, revoking its credential.
+	m, store := newTestManager(t, 0, "FAKE_PI_ASK_WORKERS=1")
 	if err := store.AddWorker("alice", yesmen.Worker{Name: "w1", Task: "t", StartedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}

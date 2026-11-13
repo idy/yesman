@@ -890,7 +890,7 @@ func (m *Manager) reportToLead(a *agent, p *proc) {
 			report = *data.Text
 		}
 	}
-	if m.tellLeadWithin(ctx, a, fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report)) == nil && closeWhenDone {
+	if m.tellLeadWithin(ctx, a, fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report)) == nil {
 		m.closeIfFinished(a, p, time.Now().UTC())
 	}
 }
@@ -925,10 +925,6 @@ func (m *Manager) closeIfFinished(a *agent, p *proc, finishedAt time.Time) {
 	// Prompts wait for modelMu, held here, and start it again once it closed.
 	m.Stop(a.info.ID)
 }
-
-// closeWhenDone closes a worker once its report reaches its lead; tests that
-// look at a worker after its run turn it off.
-var closeWhenDone = true
 
 const titleLimit = 80
 
