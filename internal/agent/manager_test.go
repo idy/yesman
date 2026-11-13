@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/idy/yesman/internal/yesmen"
@@ -84,6 +85,7 @@ func fakePi() {
 		failPrompt := cmd.Type == "prompt" && (os.Getenv("FAKE_PI_FAIL_PROMPTS") != "" ||
 			os.Getenv("FAKE_PI_FAIL_REPORTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Worker"))
 		if failPrompt {
+			write(map[string]any{"type": "test_prompt_rejected"})
 			write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": false, "error": "rejected"})
 			continue
 		}
@@ -256,6 +258,118 @@ func TestStopDuringStart(t *testing.T) {
 	if tokens != 0 {
 		t.Errorf("%d credentials outlive their processes", tokens)
 	}
+}
+
+// Quitting is permanent for the manager, unlike putting one agent to sleep.
+func TestStopAllPreventsStarts(t *testing.T) {
+	for _, startFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("running=%t", startFirst), func(t *testing.T) {
+			m, store := newTestManager(t, 0)
+			ctx := context.Background()
+			if _, err := store.Hire("bob"); err != nil {
+				t.Fatal(err)
+			}
+			id := ID("alice", yesmen.LeadName)
+			if startFirst {
+				if err := m.Prompt(ctx, id, "hi"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m.StopAll()
+			for _, name := range []string{"alice", "bob"} {
+				if err := m.Prompt(ctx, ID(name, yesmen.LeadName), "after quitting"); !errors.Is(err, errStopped) {
+					t.Errorf("prompt after StopAll for %s = %v, want errStopped", name, err)
+				}
+			}
+		})
+	}
+}
+
+func TestStopAllDuringStart(t *testing.T) {
+	m, _ := newTestManager(t, 100*time.Millisecond)
+	id := ID("alice", yesmen.LeadName)
+	done := make(chan error, 1)
+	go func() { done <- m.Prompt(context.Background(), id, "hi") }()
+	waitStatus(t, m, id, Starting)
+	m.StopAll()
+	// Inspect before waiting for the caller: its eventual cleanup must not
+	// hide StopAll returning before the in-flight process actually exits.
+	m.mu.Lock()
+	a := m.agents[id]
+	starting, running, tokens := a.starting != nil, a.proc != nil, len(m.tokens)
+	m.mu.Unlock()
+	if starting || running || tokens != 0 {
+		t.Errorf("StopAll returned with starting=%t, running=%t, credentials=%d", starting, running, tokens)
+	}
+	if err := <-done; !errors.Is(err, errStopped) {
+		t.Errorf("interrupted start = %v, want errStopped", err)
+	}
+}
+
+// A rejected report may be between retries when quitting starts. It must
+// wake promptly and must not restart the lead after StopAll has returned.
+func TestStopAllCancelsReportRetry(t *testing.T) {
+	m, _ := newTestManager(t, 0, "FAKE_PI_FAIL_REPORTS=1")
+	rejected := make(chan struct{}, 1)
+	m.cfg.OnEvent = func(e Event) {
+		var event struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(e.Data, &event) == nil && event.Type == "test_prompt_rejected" {
+			select {
+			case rejected <- struct{}{}:
+			default:
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		w := &agent{info: Info{ID: ID("alice", "w1"), Yesman: "alice", Name: "w1", Role: RoleWorker}}
+		done <- m.tellLeadWithin(ctx, w, "[yesman] Worker w1 finished a run")
+	}()
+	select {
+	case <-rejected:
+	case <-ctx.Done():
+		t.Fatal("the report never reached the lead")
+	}
+	m.StopAll()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errStopped) {
+			t.Errorf("report after quitting = %v, want errStopped", err)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("report retry did not wake when the manager quit")
+	}
+	if p := m.running(ID("alice", yesmen.LeadName)); p != nil {
+		t.Fatal("report retry restarted the lead after quitting")
+	}
+}
+
+// Use virtual time to stop exactly during backoff, without a process or
+// a wall-clock sleep: shutdown must wake the timer wait immediately.
+func TestStopAllWakesReportBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := &Manager{cfg: Config{Yesmen: yesmen.New("", "")}, shutdown: make(chan struct{})}
+		w := &agent{info: Info{Yesman: "invalid name"}}
+		done := make(chan error, 1)
+		go func() { done <- m.tellLeadWithin(context.Background(), w, "report") }()
+		synctest.Wait() // invalid name fails synchronously; the retry is asleep
+		m.StopAll()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			if !errors.Is(err, errStopped) {
+				t.Errorf("retry after quitting = %v, want errStopped", err)
+			}
+		default:
+			t.Fatal("report is still waiting for its backoff timer after shutdown")
+		}
+	})
 }
 
 func TestRestartAfterStop(t *testing.T) {
