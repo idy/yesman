@@ -1,7 +1,7 @@
 // A roomy model chooser using Magpie's select surfaces and keyboard pattern.
 import { h } from './dom.js';
+import { t, formatNumber } from './i18n.js';
 
-const contextSize = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 let serial = 0;
 let activeMenu = null;
 
@@ -11,10 +11,10 @@ export function createModelPicker({ models, provider, model, disabled, onSelect 
   const choice = models[selected];
   const trigger = h('button', {
     class: 'mds-select mds-select--text mds-select-trigger composer-model', type: 'button', role: 'combobox',
-    'aria-label': 'Model', 'aria-haspopup': 'listbox', 'aria-expanded': 'false', 'aria-controls': id,
+    'aria-label': t('Model'), 'aria-haspopup': 'listbox', 'aria-expanded': 'false', 'aria-controls': id,
     disabled: disabled || !models.length, title: `${provider}/${model}`,
-  }, choice?.name || model || 'No models available');
-  const menu = h('div', { class: 'mds-select-menu model-menu', id, role: 'listbox', 'aria-label': 'Model', hidden: true });
+  }, choice?.name || model || t('No models available'));
+  const menu = h('div', { class: 'mds-select-menu model-menu', id, role: 'listbox', 'aria-label': t('Model'), hidden: true });
   const topLayer = typeof menu.showPopover === 'function';
   if (topLayer) menu.setAttribute('popover', 'manual');
   const controller = new AbortController();
@@ -32,7 +32,7 @@ export function createModelPicker({ models, provider, model, disabled, onSelect 
       parent = groups.get(m.provider);
     }
     const label = m.name || m.id;
-    const context = m.contextWindow > 0 ? `${contextSize.format(m.contextWindow)} context window` : null;
+    const context = m.contextWindow > 0 ? t('{size} context window', { size: formatNumber(m.contextWindow, { notation: 'compact', maximumFractionDigits: 1 }) }) : null;
     const row = h('div', {
       class: 'mds-select-option model-option', id: `${id}-${index}`, role: 'option', 'data-index': index,
       'aria-selected': String(index === selected), title: context ? `${label}\n${context}` : label,

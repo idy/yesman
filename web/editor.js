@@ -5,6 +5,15 @@
 // One view shows one file at a time; each open file keeps its own state,
 // with its undo history and selection, while it has a tab.
 
+import { t, locale } from './i18n.js';
+
+// CodeMirror's own words, in its search and fold panels, which it says in
+// the page's language through EditorState.phrases.
+const PHRASES = ['Find', 'Replace', 'next', 'previous', 'all', 'match case', 'regexp', 'by word', 'replace', 'replace all', 'close',
+  'current match', 'on line', 'replaced match on line $', 'replaced $ matches', 'Go to line', 'go', 'Folded lines', 'Unfolded lines',
+  'to', 'folded code', 'unfold', 'Fold line', 'Unfold line', 'Control character', 'Selection deleted'];
+const phrases = () => Object.fromEntries(PHRASES.map((p) => [p, t(p)]));
+
 let cm = null;
 async function load() {
   cm ??= await import('./vendor/codemirror/codemirror.js');
@@ -79,6 +88,14 @@ export async function createEditor({ onChange, onSave }) {
   const wrapping = new Compartment();
   const editable = new Compartment();
   const readOnlyOf = (on) => [EditorState.readOnly.of(on), EditorView.editable.of(!on)];
+  // words are what a file's editor says, in the page's language: a file
+  // made in another says them again when it shows (show).
+  const words = new Compartment();
+  const wordsOf = (k) => [
+    EditorState.phrases.of(phrases()),
+    EditorView.contentAttributes.of({ 'aria-label': t('Contents of {file}', { file: k.slice(k.indexOf('\n') + 1) }) }),
+  ];
+  const said = new Map(); // key -> the language its words are in
   let wrap = true;
   let key = null;
 
@@ -98,7 +115,7 @@ export async function createEditor({ onChange, onSave }) {
   function extensions(k, readOnly) {
     return [
       lineNumbers(), foldGutter(), highlightActiveLineGutter(), highlightSpecialChars(), history(), drawSelection(), dropCursor(),
-      EditorState.allowMultipleSelections.of(true), indentOnInput(), bracketMatching(), closeBrackets(),
+      EditorState.allowMultipleSelections.of(true), words.of(wordsOf(k)), indentOnInput(), bracketMatching(), closeBrackets(),
       rectangularSelection(), crosshairCursor(), highlightActiveLine(), highlightSelectionMatches(), search({ top: true }),
       keymap.of([
         { key: 'Mod-s', preventDefault: true, run: () => { onSave(k); return true; } },
@@ -111,7 +128,6 @@ export async function createEditor({ onChange, onSave }) {
       EditorView.updateListener.of((u) => {
         if (u.docChanged && !u.transactions.every((tr) => tr.annotation(fromDisk))) onChange(k);
       }),
-      EditorView.contentAttributes.of({ 'aria-label': `Contents of ${k}` }),
     ];
   }
 
@@ -142,6 +158,7 @@ export async function createEditor({ onChange, onSave }) {
       if (fresh) {
         state = EditorState.create({ doc: text, extensions: extensions(k, readOnly) });
         states.set(k, state);
+        said.set(k, locale());
       }
       if (key !== k) {
         key = k;
@@ -149,6 +166,10 @@ export async function createEditor({ onChange, onSave }) {
       }
       const effects = [wrapping.reconfigure(wrap ? EditorView.lineWrapping : [])];
       if (view.state.facet(EditorState.readOnly) !== readOnly) effects.push(editable.reconfigure(readOnlyOf(readOnly)));
+      if (said.get(k) !== locale()) {
+        effects.push(words.reconfigure(wordsOf(k)));
+        said.set(k, locale());
+      }
       view.dispatch({ effects });
       if (fresh) setLanguage(k, lang);
       view.requestMeasure();
@@ -184,6 +205,7 @@ export async function createEditor({ onChange, onSave }) {
     },
     forget(k) {
       states.delete(k);
+      said.delete(k);
       tops.delete(k);
       if (key === k) key = null;
     },

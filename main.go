@@ -33,6 +33,7 @@ var extensionSource []byte
 
 func main() {
 	mygo.App.SetName("yesman")
+	mygo.App.SetLanguages(languages...)
 	if !mygo.App.RequestSingleInstanceLock() {
 		return // the running instance shows its window
 	}
@@ -59,6 +60,7 @@ func main() {
 	a.piJobs = newPiJobs(a.runPi, func(j PiJobs) { _ = piJobsEvent.Broadcast(j) })
 	a.settings = loadSettings(h.Settings())
 	a.setTheme = mygo.Theme.SetSource
+	a.chosenLocale, a.setLocale = mygo.App.ChosenLocale, mygo.App.SetLocale
 	a.updates = newUpdates()
 	if a.settings.Appearance != "" {
 		mygo.Theme.SetSource(a.settings.Appearance) // before Run, so the window opens in it

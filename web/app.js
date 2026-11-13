@@ -11,6 +11,7 @@ import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
+import { t, tn, tNodes, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
 const mygo = window.mygo;
 const call = (method, ...args) => mygo.call(`Yesman.${method}`, ...args);
@@ -25,6 +26,7 @@ const STATUS = {
   waiting: 'Needs you',
   failed: 'Stopped',
 };
+const statusText = (status) => (STATUS[status] ? t(STATUS[status]) : status);
 
 const state = {
   snap: { yesmen: [], agents: [] },
@@ -159,14 +161,14 @@ function resultText(result) {
 }
 
 function toolEl(c, block) {
-  const t = c.tools.get(block.id);
-  const el = h('details', { class: 'tool', 'data-tool': block.id, 'data-status': t.status });
+  const tool = c.tools.get(block.id);
+  const el = h('details', { class: 'tool', 'data-tool': block.id, 'data-status': tool.status });
   el.append(
     h('summary', null,
-      icon(t.status === 'done' ? 'check' : t.status === 'error' ? 'alert' : 'spinner', 'mds-icon tool-mark'),
+      icon(tool.status === 'done' ? 'check' : tool.status === 'error' ? 'alert' : 'spinner', 'mds-icon tool-mark'),
       h('span', { class: 'tool-name' }, block.name.replace(/^yesman_/, 'yesman · ')),
-      h('span', { class: 'tool-sum' }, toolSummary(t.args)),
-      h('span', { class: 'tool-state' }, t.status === 'error' ? 'failed' : '')),
+      h('span', { class: 'tool-sum' }, toolSummary(tool.args)),
+      h('span', { class: 'tool-state' }, tool.status === 'error' ? t('failed') : '')),
   );
   el.addEventListener('toggle', () => {
     if (!el.open) return;
@@ -182,14 +184,14 @@ function toolEl(c, block) {
 }
 
 function updateTool(c, id) {
-  const t = c.tools.get(id);
+  const tool = c.tools.get(id);
   const el = document.querySelector(`#thread [data-tool="${CSS.escape(id)}"]`);
-  if (!t || !el) return;
-  el.dataset.status = t.status;
+  if (!tool || !el) return;
+  el.dataset.status = tool.status;
   const mark = el.querySelector('.tool-mark');
-  mark?.replaceWith(icon(t.status === 'done' ? 'check' : t.status === 'error' ? 'alert' : 'spinner', 'mds-icon tool-mark'));
-  el.querySelector('.tool-state').textContent = t.status === 'error' ? 'failed' : '';
-  el.querySelector('.tool-sum').textContent = toolSummary(t.args);
+  mark?.replaceWith(icon(tool.status === 'done' ? 'check' : tool.status === 'error' ? 'alert' : 'spinner', 'mds-icon tool-mark'));
+  el.querySelector('.tool-state').textContent = tool.status === 'error' ? t('failed') : '';
+  el.querySelector('.tool-sum').textContent = toolSummary(tool.args);
   if (el.open) el.dispatchEvent(new Event('toggle'));
 }
 
@@ -197,7 +199,7 @@ function blockEl(c, block) {
   if (block.type === 'text') return h('div', { class: 'md', html: renderMarkdown(block.text) });
   if (block.type === 'thinking') {
     if (!block.thinking?.trim()) return null;
-    return h('details', { class: 'thinking' }, h('summary', null, 'Thinking'), h('div', null, block.thinking));
+    return h('details', { class: 'thinking' }, h('summary', null, t('Thinking')), h('div', null, block.thinking));
   }
   if (block.type === 'toolCall') return toolEl(c, block);
   return null;
@@ -210,12 +212,12 @@ function messageEl(c, m) {
       const report = text.match(/^\[yesman\] Worker "([^"]+)" finished a run\. Its final message:\n\n([\s\S]*)$/);
       if (report) {
         return h('details', { class: 'note', open: true },
-          h('summary', null, `Report from worker ${report[1]}`),
+          h('summary', null, t('Report from worker {name}', { name: report[1] })),
           h('div', { class: 'md', html: renderMarkdown(report[2]) }));
       }
       const fromLead = text.match(/^\[from your lead\] ([\s\S]*)$/);
       if (fromLead) {
-        return h('div', { class: 'note' }, h('strong', null, 'From the lead'), h('div', { class: 'md', html: renderMarkdown(fromLead[1]) }));
+        return h('div', { class: 'note' }, h('strong', null, t('From the lead')), h('div', { class: 'md', html: renderMarkdown(fromLead[1]) }));
       }
       return h('div', { class: 'msg-user' }, text);
     }
@@ -228,7 +230,7 @@ function messageEl(c, m) {
       if (m.stopReason === 'error' && m.errorMessage) {
         el.append(h('div', { class: 'note note--error' }, m.errorMessage));
       } else if (m.stopReason === 'aborted') {
-        el.append(h('div', { class: 'note note--quiet' }, 'Stopped.'));
+        el.append(h('div', { class: 'note note--quiet' }, t('Stopped.')));
       }
       return el.childNodes.length ? el : null;
     }
@@ -236,7 +238,7 @@ function messageEl(c, m) {
       return null; // shown with its tool call
     case 'compactionSummary':
     case 'branchSummary':
-      return h('div', { class: 'note note--quiet' }, 'Earlier conversation was summarized to save context.');
+      return h('div', { class: 'note note--quiet' }, t('Earlier conversation was summarized to save context.'));
     default: {
       if (m.display === false) return null;
       const text = textOf(m.content);
@@ -264,14 +266,14 @@ function renderThread() {
   if (c.error) {
     thread.append(h('div', { class: 'note note--error' }, c.error));
   } else if (!c.loaded) {
-    thread.append(h('div', { class: 'working' }, icon('spinner', 'mds-icon tool-mark'), 'Waking up…'));
+    thread.append(h('div', { class: 'working' }, icon('spinner', 'mds-icon tool-mark'), t('Waking up…')));
   } else if (!c.messages.length && !c.live) {
     const y = yesmanOf(a.id);
     thread.append(
       a.role === 'lead'
-        ? h('div', { class: 'thread-empty' }, h('strong', null, `${a.yesman} is ready`),
-            `Tell ${a.yesman} what you want done. It works in ${y?.path ?? 'its workspace'}, checks out repos from the pool, and starts workers when the job splits up.`)
-        : h('div', { class: 'thread-empty' }, h('strong', null, a.name), 'This worker has not started yet.'),
+        ? h('div', { class: 'thread-empty' }, h('strong', null, t('{name} is ready', { name: a.yesman })),
+            t('Tell {name} what you want done. It works in {path}, checks out repos from the pool, and starts workers when the job splits up.', { name: a.yesman, path: y?.path ?? t('its workspace') }))
+        : h('div', { class: 'thread-empty' }, h('strong', null, a.name), t('This worker has not started yet.')),
     );
   } else {
     for (const m of c.messages) {
@@ -303,7 +305,7 @@ function renderWorking() {
   thread.querySelector('.working-live')?.remove();
   const a = selectedAgent();
   if (a?.status === 'working') {
-    thread.append(h('div', { class: 'working working-live', 'data-status': 'working' }, h('i', { class: 'mds-dot' }), 'Working…'));
+    thread.append(h('div', { class: 'working working-live', 'data-status': 'working' }, h('i', { class: 'mds-dot' }), t('Working…')));
   }
 }
 
@@ -315,7 +317,7 @@ function onAgentEvent(ev) {
     return;
   }
   if (e.type === 'extension_error') {
-    toast(`${id}: extension error: ${e.error}`, { duration: 6000 });
+    toast(t('{agent}: extension error: {error}', { agent: id, error: e.error }), { duration: 6000 });
     return;
   }
   const agent = agentById(id);
@@ -396,24 +398,24 @@ function applyEvent(c, e, replaying) {
     case 'tool_execution_start':
     case 'tool_execution_update':
     case 'tool_execution_end': {
-      const t = c.tools.get(e.toolCallId) ?? { args: e.args };
-      t.args = e.args ?? t.args;
+      const tool = c.tools.get(e.toolCallId) ?? { args: e.args };
+      tool.args = e.args ?? tool.args;
       if (e.type === 'tool_execution_end') {
-        t.status = e.isError ? 'error' : 'done';
-        t.result = resultText(e.result);
+        tool.status = e.isError ? 'error' : 'done';
+        tool.result = resultText(e.result);
       } else {
-        t.status = 'running';
-        if (e.partialResult) t.result = resultText(e.partialResult);
+        tool.status = 'running';
+        if (e.partialResult) tool.result = resultText(e.partialResult);
       }
-      c.tools.set(e.toolCallId, t);
+      c.tools.set(e.toolCallId, tool);
       if (visible) updateTool(c, e.toolCallId);
       break;
     }
     case 'compaction_start':
-      if (visible) $('#thread').append(h('div', { class: 'note note--quiet' }, 'Summarizing earlier conversation to save context…'));
+      if (visible) $('#thread').append(h('div', { class: 'note note--quiet' }, t('Summarizing earlier conversation to save context…')));
       break;
     case 'auto_retry_start':
-      if (visible) toast(`Retrying after: ${e.errorMessage}`);
+      if (visible) toast(t('Retrying after: {error}', { error: e.errorMessage }));
       break;
     default:
       break;
@@ -457,11 +459,11 @@ function statusDot(status) {
 
 function agentRow(a, cls, label) {
   const current = state.view.kind === 'agent' && state.view.id === a.id;
-  const meta = a.status === 'idle' || a.status === 'stopped' ? '' : STATUS[a.status] ?? a.status;
+  const meta = a.status === 'idle' || a.status === 'stopped' ? '' : statusText(a.status);
   return h('button', {
     class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': a.status, 'aria-current': current ? 'page' : null,
     'aria-haspopup': 'menu',
-    title: `${a.id}: ${STATUS[a.status] ?? a.status}${a.detail ? `\n${a.detail}` : ''}`,
+    title: `${a.id}: ${statusText(a.status)}${a.detail ? `\n${a.detail}` : ''}`,
     onclick: () => selectAgent(a.id),
     oncontextmenu: (e) => openAgentMenu(e, a),
     onkeydown: (e) => {
@@ -509,11 +511,11 @@ function renderSidebar() {
   list.replaceChildren();
   const waiting = state.snap.agents.filter((a) => a.status === 'waiting');
   if (waiting.length) {
-    list.append(h('p', { class: 'side-group' }, 'Needs you'));
+    list.append(h('p', { class: 'side-group' }, t('Needs you')));
     for (const a of waiting) list.append(agentRow(a, '', a.role === 'lead' ? a.yesman : a.id));
   }
-  list.append(h('div', { class: 'side-group' }, h('span', null, 'Yesmen'),
-    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Hire a yesman', 'aria-label': 'Hire a yesman', onclick: openHire }, icon('plus'))));
+  list.append(h('div', { class: 'side-group' }, h('span', null, t('Yesmen')),
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Hire a yesman'), 'aria-label': t('Hire a yesman'), onclick: openHire }, icon('plus'))));
   for (const y of state.snap.yesmen) {
     const agents = state.snap.agents.filter((a) => a.yesman === y.name);
     const lead = agents.find((a) => a.role === 'lead');
@@ -532,7 +534,7 @@ function renderBar() {
   const a = selectedAgent();
   if (state.view.kind === 'settings') {
     const page = SETTINGS.find((s) => s.page === state.view.page);
-    crumbs.replaceChildren(h('span', null, 'Settings'), sep(), h('span', { 'aria-current': 'page' }, page.label));
+    crumbs.replaceChildren(h('span', null, t('Settings')), sep(), h('span', { 'aria-current': 'page' }, t(page.label)));
   } else if (a) {
     const y = yesmanOf(a.id);
     const here = h('span', { 'aria-current': 'page', title: y?.path ?? '' }, a.role === 'lead' ? a.yesman : a.name);
@@ -549,13 +551,13 @@ function renderBarActions() {
   const button = (iconName, label, onclick, extra = {}) =>
     h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: label, 'aria-label': label, onclick, ...extra }, icon(iconName));
   actions.replaceChildren(...[
-    a ? h('span', { class: 'mds-status', 'data-status': a.status, role: 'status' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, STATUS[a.status] ?? a.status)) : null,
+    a ? h('span', { class: 'mds-status', 'data-status': a.status, role: 'status' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, statusText(a.status))) : null,
     updatePill(),
     a && a.status !== 'stopped'
-      ? button('power', 'Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.', () => call('Stop', a.id).catch(fail))
+      ? button('power', t('Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.'), () => call('Stop', a.id).catch(fail))
       : null,
-    a?.role === 'worker' ? button('x', 'Remove worker', () => removeWorker(a)) : null,
-    a ? button('panel', state.infoOpen ? 'Hide the files' : 'Show the files', toggleInfo, { 'aria-pressed': String(state.infoOpen) }) : null,
+    a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
+    a ? button('panel', state.infoOpen ? t('Hide the files') : t('Show the files'), toggleInfo, { 'aria-pressed': String(state.infoOpen) }) : null,
   ].filter(Boolean));
 }
 
@@ -566,10 +568,10 @@ function updatePill() {
   const pill = (iconName, label, title, extra) => h('button', { class: 'mds-pill mds-pill--responsive', type: 'button', title, ...extra },
     icon(iconName), h('span', { class: 'mds-pill-label' }, label));
   switch (u.state) {
-    case 'available': return pill('up', `Update ${u.version}`, `Install yesman ${u.version}`, { onclick: installUpdate });
-    case 'downloading': return pill('reload', `Updating ${Math.round((u.progress ?? 0) * 100)}%`, `Installing yesman ${u.version}`, { disabled: true, 'aria-busy': 'true' });
-    case 'ready': return pill('up', 'Restart to update', `Restart into yesman ${u.version}`, { onclick: restartToUpdate });
-    case 'failed': return pill('alert', 'Update failed', `Installing yesman ${u.version} failed: ${u.error}\nClick to try again.`, { 'data-tone': 'error', onclick: installUpdate });
+    case 'available': return pill('up', t('Update {version}', { version: u.version }), t('Install yesman {version}', { version: u.version }), { onclick: installUpdate });
+    case 'downloading': return pill('reload', t('Updating {percent}%', { percent: Math.round((u.progress ?? 0) * 100) }), t('Installing yesman {version}', { version: u.version }), { disabled: true, 'aria-busy': 'true' });
+    case 'ready': return pill('up', t('Restart to update'), t('Restart into yesman {version}', { version: u.version }), { onclick: restartToUpdate });
+    case 'failed': return pill('alert', t('Update failed'), `${t('Installing yesman {version} failed: {error}', { version: u.version, error: u.error })}\n${t('Click to try again.')}`, { 'data-tone': 'error', onclick: installUpdate });
     default: return null;
   }
 }
@@ -580,9 +582,10 @@ function installUpdate() {
 
 async function restartToUpdate() {
   const busy = state.snap.agents.filter((a) => a.status === 'working' || a.status === 'waiting').length;
-  if (busy && !(await confirmAction('Restart yesman?',
-    `${busy === 1 ? 'An agent is' : `${busy} agents are`} working. Restarting stops ${busy === 1 ? 'it' : 'them'}; ${busy === 1 ? 'it picks up its' : 'they pick up their'} session when you next talk to ${busy === 1 ? 'it' : 'them'}.`,
-    'Restart'))) return;
+  if (busy && !(await confirmAction(t('Restart yesman?'),
+    tn(busy, 'An agent is working. Restarting stops it; it picks up its session when you next talk to it.',
+      '{n} agents are working. Restarting stops them; they pick up their sessions when you next talk to them.'),
+    t('Restart')))) return;
   call('RestartToUpdate').catch(fail);
 }
 
@@ -645,7 +648,7 @@ function modelOptionsEl(a, working) {
       class: 'mds-link-button', type: 'button', disabled: !entry?.error,
       title: entry?.error,
       onclick: () => { state.modelOptions.delete(keyOf(a)); loadModelOptions(a); renderDock(); },
-    }, entry?.error ? 'Retry loading models' : 'Loading models…');
+    }, entry?.error ? t('Retry loading models') : t('Loading models…'));
   }
   const disabled = entry.busy || working || a.status === 'starting';
   const picker = createModelPicker({
@@ -655,16 +658,19 @@ function modelOptionsEl(a, working) {
   composerSelects.push(picker);
   const levels = a.effortLevels ?? [];
   const effort = h('select', {
-    class: 'mds-select mds-select--text', 'aria-label': 'Effort', disabled: disabled || levels.length < 2,
-    title: levels.length < 2 ? 'This model has no adjustable reasoning effort' : 'Reasoning effort',
+    class: 'mds-select mds-select--text', 'aria-label': t('Effort'), disabled: disabled || levels.length < 2,
+    title: levels.length < 2 ? t('This model has no adjustable reasoning effort') : t('Reasoning effort'),
     onchange: () => changeModelOption(a, 'SetEffort', effort.value),
-  }, levels.map((level) => h('option', { value: level }, level === 'xhigh' ? 'Extra high' : level[0].toUpperCase() + level.slice(1))));
-  if (!levels.length) effort.append(h('option', { value: '' }, 'Unavailable'));
+  }, levels.map((level) => h('option', { value: level }, effortLabel(level))));
+  if (!levels.length) effort.append(h('option', { value: '' }, t('Unavailable')));
   effort.value = a.effort ?? '';
   return h('div', { class: 'composer-options', 'aria-busy': String(entry.busy) },
     h('span', { class: 'composer-choice composer-choice--model' }, picker.trigger),
-    h('label', { class: 'composer-choice' }, h('span', null, 'Effort'), effort));
+    h('label', { class: 'composer-choice' }, h('span', null, t('Effort')), effort));
 }
+
+const EFFORT = { off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high' };
+const effortLabel = (level) => (EFFORT[level] ? t(EFFORT[level]) : level[0].toUpperCase() + level.slice(1));
 
 // ---------- Composer ----------
 
@@ -715,20 +721,20 @@ function renderDock() {
   dock.replaceChildren();
 
   if (a.status === 'failed' && a.detail) {
-    dock.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, 'This agent stopped'), h('p', null, a.detail))));
+    dock.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('This agent stopped')), h('p', null, a.detail))));
   } else if (a.detail) {
-    dock.append(h('div', { class: 'mds-notice', role: 'status' }, h('div', null, h('strong', null, 'Needs a look'), h('p', null, a.detail))));
+    dock.append(h('div', { class: 'mds-notice', role: 'status' }, h('div', null, h('strong', null, t('Needs a look')), h('p', null, a.detail))));
   }
   if (a.status === 'waiting' && a.dialog) dock.append(askEl(a));
 
   const working = a.status === 'working' || a.status === 'waiting';
   const textarea = h('textarea', {
-    rows: 1, 'aria-label': 'Message',
-    placeholder: a.role === 'lead' ? `Message ${a.yesman}…` : `Message worker ${a.name}…`,
+    rows: 1, 'aria-label': t('Message'),
+    placeholder: a.role === 'lead' ? t('Message {name}…', { name: a.yesman }) : t('Message worker {name}…', { name: a.name }),
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
-  const send = h('button', { class: 'round', type: 'submit', 'aria-label': 'Send', title: working ? 'Send: delivered after its current step' : 'Send' }, icon('enter'));
-  const stop = working ? h('button', { class: 'round round--stop', type: 'button', 'aria-label': 'Stop', title: 'Stop the current run', onclick: () => call('Abort', a.id).catch(fail) }, icon('stop')) : null;
+  const send = h('button', { class: 'round', type: 'submit', 'aria-label': t('Send'), title: working ? t('Send: delivered after its current step') : t('Send') }, icon('enter'));
+  const stop = working ? h('button', { class: 'round round--stop', type: 'button', 'aria-label': t('Stop'), title: t('Stop the current run'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop')) : null;
   const sync = () => {
     send.disabled = !textarea.value.trim() || !!state.modelOptions.get(keyOf(a))?.busy;
     textarea.style.height = 'auto';
@@ -780,18 +786,18 @@ async function sendMessage(a, textarea) {
 function askEl(a) {
   const d = a.dialog;
   const answer = (payload) => call('Answer', a.id, d.id, payload).catch(fail);
-  const box = h('div', { class: 'ask', role: 'alert' }, h('strong', null, d.title || 'Question'), d.message ? h('p', null, d.message) : null);
+  const box = h('div', { class: 'ask', role: 'alert' }, h('strong', null, d.title || t('Question')), d.message ? h('p', null, d.message) : null);
   const actions = h('div', { class: 'ask-actions' });
   if (d.method === 'confirm') {
     actions.append(
-      h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', onclick: () => answer({ confirmed: true }) }, 'Yes'),
-      h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => answer({ confirmed: false }) }, 'No'),
+      h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', onclick: () => answer({ confirmed: true }) }, t('Yes')),
+      h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => answer({ confirmed: false }) }, t('No')),
     );
   } else if (d.method === 'select') {
     for (const option of d.options ?? []) {
       actions.append(h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => answer({ value: option }) }, option));
     }
-    actions.append(h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => answer({ cancelled: true }) }, 'Cancel'));
+    actions.append(h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => answer({ cancelled: true }) }, t('Cancel')));
   } else {
     const input = d.method === 'editor'
       ? h('textarea', { class: 'mds-textarea', rows: 5 })
@@ -799,8 +805,8 @@ function askEl(a) {
     input.value = d.prefill ?? '';
     box.append(input);
     actions.append(
-      h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', onclick: () => answer({ value: input.value }) }, 'Submit'),
-      h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => answer({ cancelled: true }) }, 'Cancel'),
+      h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', onclick: () => answer({ value: input.value }) }, t('Submit')),
+      h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => answer({ cancelled: true }) }, t('Cancel')),
     );
   }
   box.append(actions);
@@ -808,15 +814,15 @@ function askEl(a) {
 }
 
 function renderWelcome(body) {
-  const input = h('input', { class: 'mds-input', placeholder: 'name, e.g. checkout-v2', pattern: '[a-z0-9][a-z0-9\\-]{0,31}', required: true, spellcheck: 'false', 'aria-label': 'Name' });
+  const input = h('input', { class: 'mds-input', placeholder: t('name, e.g. checkout-v2'), pattern: '[a-z0-9][a-z0-9\\-]{0,31}', required: true, spellcheck: 'false', 'aria-label': t('Name') });
   body.append(
     h('div', { class: 'page' },
       h('div', { class: 'welcome' },
-        h('h1', { class: 'mds-title' }, 'Hire a yesman'),
-        h('p', null, 'A yesman takes on a project. It gets a workspace of its own, checks out the repositories it needs from the shared pool, remembers what it learns, and starts workers when the job splits up.'),
-        state.snap.piError ? h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, 'pi was not found'), h('p', null, state.snap.piError))) : null,
+        h('h1', { class: 'mds-title' }, t('Hire a yesman')),
+        h('p', null, t('A yesman takes on a project. It gets a workspace of its own, checks out the repositories it needs from the shared pool, remembers what it learns, and starts workers when the job splits up.')),
+        state.snap.piError ? h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('pi was not found')), h('p', null, state.snap.piError))) : null,
         h('form', { onsubmit: (e) => { e.preventDefault(); hire(input.value.trim()); } },
-          input, h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, 'Hire')),
+          input, h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, t('Hire'))),
       )),
   );
   input.focus();
@@ -824,23 +830,26 @@ function renderWelcome(body) {
 
 // ---------- Settings ----------
 
+// The pages, labelled in English: each is said in the page's language.
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
+  { page: 'storage', label: 'Storage', icon: 'folder' },
   { page: 'pi', label: 'pi', icon: 'package' },
   { page: 'config', label: 'Import and export', icon: 'transfer' },
   { page: 'about', label: 'About', icon: 'about' },
 ];
 
-// The footer is built once so its submenu can slide open and closed.
+// The footer is built once so its submenu can slide open and closed, and
+// again in a new language.
 function buildSideFoot() {
-  const nav = h('nav', { class: 'mds-subnav', id: 'settings-nav', 'aria-label': 'Settings' },
+  const nav = h('nav', { class: 'mds-subnav', id: 'settings-nav', 'aria-label': t('Settings') },
     SETTINGS.map((s) => h('button', { class: 'mds-nav-item', type: 'button', 'data-page': s.page, onclick: () => showSettings(s.page) },
-      icon(s.icon), h('span', null, s.label))));
+      icon(s.icon), h('span', null, t(s.label)))));
   $('#side-foot').replaceChildren(h('div', { class: 'mds-nav-branch settings-branch' },
     h('div', { class: 'settings-drawer' }, h('div', { class: 'settings-clip' }, nav)),
     h('button', { class: 'mds-nav-item mds-nav-parent', id: 'settings-button', type: 'button', 'aria-controls': 'settings-nav', onclick: () => showSettings(state.settingsPage) },
-      icon('gear'), h('span', null, 'Settings'))));
+      icon('gear'), h('span', null, t('Settings')))));
 }
 
 function renderSideFoot() {
@@ -865,7 +874,7 @@ function showSettings(page) {
 // Pages render what they last had at once and refresh it from the app.
 async function loadSettingsPage(page) {
   try {
-    if (page === 'general') state.settings = await call('Settings');
+    if (page === 'general' || page === 'storage') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
     else if (page === 'pi') { await piPage.load(); return; }
@@ -880,6 +889,7 @@ function renderSettings(body) {
   const inner = h('div', { class: 'page-inner' });
   body.append(h('div', { class: 'page' }, inner));
   if (state.view.page === 'repositories') renderRepositories(inner);
+  else if (state.view.page === 'storage') renderStorage(inner);
   else if (state.view.page === 'pi') piPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
   else if (state.view.page === 'about') renderAbout(inner);
@@ -899,7 +909,27 @@ function preferenceRow(label, hint, control) {
 }
 
 function revealButton(path, label) {
-  return h('button', { class: 'mds-button mds-button--small', type: 'button', title: path, 'aria-label': label ? `Reveal ${label}` : null, onclick: () => call('Reveal', path).catch(fail) }, icon('folder'), 'Reveal');
+  return h('button', { class: 'mds-button mds-button--small', type: 'button', title: path, 'aria-label': label ? t('Reveal {name}', { name: label }) : null, onclick: () => call('Reveal', path).catch(fail) }, icon('folder'), t('Reveal'));
+}
+
+// choiceSelect is a select of choices, [value, label], that keeps the one
+// chosen in v[key] and calls method with it, or goes back on failure. It
+// keeps it first: a new language draws the page again before the call
+// returns.
+function choiceSelect(v, key, method, label, choices) {
+  return h('select', { class: 'mds-select', 'aria-label': label, onchange: async (e) => {
+    const select = e.currentTarget;
+    const before = v[key];
+    v[key] = select.value;
+    try {
+      await call(method, select.value);
+    } catch (err) {
+      fail(err);
+      v[key] = before;
+      if (select.isConnected) select.value = before;
+      else if (state.view.kind === 'settings') renderBody();
+    }
+  } }, choices.map(([value, text]) => h('option', { value, selected: value === v[key] }, text)));
 }
 
 // Settings › pi, in pi.js.
@@ -918,22 +948,23 @@ const piPage = createPiPage({
 function renderGeneral(inner) {
   const v = state.settings;
   if (!v) return;
-  const appearance = h('select', { class: 'mds-select', 'aria-label': 'Appearance', onchange: async (e) => {
-    const select = e.currentTarget;
-    try {
-      await call('SetAppearance', select.value);
-      v.appearance = select.value;
-    } catch (err) {
-      fail(err);
-      select.value = v.appearance;
-    }
-  } }, [['system', 'Match the system'], ['light', 'Light'], ['dark', 'Dark']].map(([value, label]) =>
-    h('option', { value, selected: value === v.appearance }, label)));
+  // A new language draws the page again, when the mygo:locale event says so.
+  const language = choiceSelect(v, 'language', 'SetLanguage', t('Language'), [['system', t('Match the system')], ...LANGUAGES]);
+  const appearance = choiceSelect(v, 'appearance', 'SetAppearance', t('Appearance'),
+    [['system', t('Match the system')], ['light', t('Light')], ['dark', t('Dark')]]);
   inner.append(
-    settingsSection('Appearance', null,
-      preferenceRow('Theme', h('p', null, 'The window and its menus follow this.'), appearance)),
-    settingsSection('Storage', 'Choose where yesman keeps its data.',
-      ...storageRows(v),
+    settingsSection(t('Appearance'), null,
+      preferenceRow(t('Theme'), h('p', null, t('The window and its menus follow this.')), appearance),
+      preferenceRow(t('Language'), h('p', null, t('The window, its menus and notifications use this. Match the system follows the languages of your system settings.')), language)),
+  );
+}
+
+function renderStorage(inner) {
+  const v = state.settings;
+  if (!v) return;
+  inner.append(
+    settingsSection(t('Data folder'), t('Choose where yesman keeps its data.'), ...storageRows(v)),
+    settingsSection(t('Locations'), t('What yesman keeps, and where. Hover over a row for its full path.'),
       ...[
         ['Repositories', 'The shared pool of bare Git repositories.', v.pool],
         ['Workspaces', 'The parent folder for all yesman workspaces.', v.yesmen],
@@ -941,7 +972,7 @@ function renderGeneral(inner) {
         ['Runtime', 'Files yesman generates when it starts.', v.runtime],
         ['Settings file', 'Appearance and repository fetch preferences.', v.settingsFile],
         ['Storage configuration', 'Remembers the data folder across launches.', v.storageConfig],
-      ].filter(([, , path]) => path).map(([label, hint, path]) => storagePathRow(label, hint, path))),
+      ].filter(([, , path]) => path).map(([label, hint, path]) => storagePathRow(t(label), t(hint), path))),
   );
 }
 
@@ -958,16 +989,16 @@ function storageRows(v) {
     state.storageDraft = { path: '', error: '', busy: false };
     renderBody();
     $('#storage-path')?.focus();
-  } }, 'Change…');
-  const current = preferenceRow('yesman folder',
+  } }, t('Change…'));
+  const current = preferenceRow(t('yesman folder'),
     h('div', null, h('p', { class: 'path', title: v.home }, v.home),
-      v.homeOverride ? h('p', null, 'Set by YESMAN_HOME. Unset it and restart to change the folder here.') : null),
+      v.homeOverride ? h('p', null, t('Set by YESMAN_HOME. Unset it and restart to change the folder here.')) : null),
     h('div', { class: 'storage-actions' }, revealButton(v.home), change));
   current.classList.add('storage-home-row');
   const rows = [current];
   if (d) {
     const input = h('input', { class: 'mds-input', id: 'storage-path', required: true, value: d.path,
-      placeholder: 'Full path to a folder', autocomplete: 'off', spellcheck: 'false',
+      placeholder: t('Full path to a folder'), autocomplete: 'off', spellcheck: 'false',
       disabled: d.busy, 'aria-describedby': 'storage-hint storage-error', 'aria-invalid': d.error ? 'true' : null,
       oninput: (e) => { d.path = e.currentTarget.value; } });
     const browse = h('button', { class: 'mds-button', type: 'button', disabled: d.busy, onclick: async () => {
@@ -977,23 +1008,23 @@ function storageRows(v) {
         if (path) { d.path = path; d.error = ''; }
       } catch (err) { d.error = errorText(err); }
       finally {
-        if (state.view.kind === 'settings' && state.view.page === 'general' && state.storageDraft === d) {
+        if (state.view.kind === 'settings' && state.view.page === 'storage' && state.storageDraft === d) {
           renderBody();
           $('#storage-path')?.focus();
         }
       }
-    } }, icon('folder'), 'Browse…');
+    } }, icon('folder'), t('Browse…'));
     rows.push(h('form', { class: 'storage-edit', 'aria-busy': String(d.busy), onsubmit: (e) => { e.preventDefault(); changeStorageFolder(d); } },
-      h('label', { class: 'field', for: 'storage-path' }, 'New yesman folder'),
+      h('label', { class: 'field', for: 'storage-path' }, t('New yesman folder')),
       h('div', { class: 'storage-input' }, input, browse),
-      h('p', { class: 'mds-hint', id: 'storage-hint' }, 'Files are not moved. To keep your data, copy the current folder yourself before switching.'),
+      h('p', { class: 'mds-hint', id: 'storage-hint' }, t('Files are not moved. To keep your data, copy the current folder yourself before switching.')),
       h('p', { class: 'danger', id: 'storage-error', role: 'alert', hidden: !d.error }, d.error),
       h('div', { class: 'storage-actions' },
         h('button', { class: 'mds-button', type: 'button', disabled: d.busy, onclick: () => {
           state.storageDraft = null; renderBody();
           $('.storage-actions button:last-child')?.focus();
-        } }, 'Cancel'),
-        h('button', { class: 'mds-button mds-button--primary', type: 'submit', disabled: d.busy }, d.busy ? 'Please wait…' : 'Use folder and restart'))));
+        } }, t('Cancel')),
+        h('button', { class: 'mds-button mds-button--primary', type: 'submit', disabled: d.busy }, d.busy ? t('Please wait…') : t('Use folder and restart')))));
   }
   return rows;
 }
@@ -1006,14 +1037,17 @@ async function changeStorageFolder(d) {
   try {
     const destination = await call('CheckStorageFolder', d.path.trim());
     const active = state.snap.agents.filter((a) => ['working', 'starting', 'waiting'].includes(a.status)).length;
-    const agents = active ? ` ${active === 1 ? 'The active agent stops' : `${active} active agents stop`}; their sessions resume when you next talk to them.` : '';
-    if (!(await confirmAction('Use this yesman folder?', `Restart yesman using ${destination}.${agents} Files are not copied. Save your edits and copy any data you want to use there first.`, 'Use folder and restart'))) return;
+    const body = active
+      ? tn(active, 'Restart yesman using {path}. The active agent stops; its session resumes when you next talk to it. Files are not copied. Save your edits and copy any data you want to use there first.',
+        'Restart yesman using {path}. {n} active agents stop; their sessions resume when you next talk to them. Files are not copied. Save your edits and copy any data you want to use there first.', { path: destination })
+      : t('Restart yesman using {path}. Files are not copied. Save your edits and copy any data you want to use there first.', { path: destination });
+    if (!(await confirmAction(t('Use this yesman folder?'), body, t('Use folder and restart')))) return;
     await call('SetStorageFolder', destination);
   } catch (err) {
     d.error = errorText(err);
   } finally {
     d.busy = false;
-    if (state.view.kind === 'settings' && state.view.page === 'general') {
+    if (state.view.kind === 'settings' && state.view.page === 'storage') {
       renderBody();
       if (d.error) $('#storage-path')?.focus();
     }
@@ -1024,21 +1058,21 @@ async function changeStorageFolder(d) {
 function updateStatus() {
   const u = state.update;
   const faint = (text) => h('span', { class: 'about-faint' }, text);
-  if (!u) return faint('Checking…');
-  if (!u.enabled) return faint('Release builds update themselves from GitHub. This build does not.');
+  if (!u) return faint(t('Checking…'));
+  if (!u.enabled) return faint(t('Release builds update themselves from GitHub. This build does not.'));
   const action = (label, onclick) => h('button', { class: 'mds-button mds-button--small', type: 'button', onclick }, label);
   const check = () => call('CheckForUpdates').catch(fail);
   switch (u.state) {
-    case 'available': return h('span', { class: 'about-update' }, h('span', null, `yesman ${u.version} is available`), action('Install', installUpdate));
-    case 'downloading': return faint(`Installing ${u.version}, ${Math.round((u.progress ?? 0) * 100)}%`);
-    case 'ready': return h('span', { class: 'about-update' }, h('span', null, `${u.version} is installed`), action('Restart', restartToUpdate));
-    case 'failed': return h('span', { class: 'about-update' }, h('span', { class: 'danger' }, `Installing ${u.version} failed: ${u.error}`), action('Try again', installUpdate));
+    case 'available': return h('span', { class: 'about-update' }, h('span', null, t('yesman {version} is available', { version: u.version })), action(t('Install'), installUpdate));
+    case 'downloading': return faint(t('Installing {version}, {percent}%', { version: u.version, percent: Math.round((u.progress ?? 0) * 100) }));
+    case 'ready': return h('span', { class: 'about-update' }, h('span', null, t('{version} is installed', { version: u.version })), action(t('Restart'), restartToUpdate));
+    case 'failed': return h('span', { class: 'about-update' }, h('span', { class: 'danger' }, t('Installing {version} failed: {error}', { version: u.version, error: u.error })), action(t('Try again'), installUpdate));
     default:
       return h('span', { class: 'about-update' },
-        u.checking ? faint('Checking…')
-          : u.checkError ? h('span', { class: 'danger' }, `The last check failed: ${u.checkError}`)
-          : h('span', null, u.checkedAt ? `Up to date, ${ago(u.checkedAt, 'checked')}` : 'Not checked yet'),
-        u.checking ? null : action('Check now', check));
+        u.checking ? faint(t('Checking…'))
+          : u.checkError ? h('span', { class: 'danger' }, t('The last check failed: {error}', { error: u.checkError }))
+          : h('span', null, u.checkedAt ? t('Up to date, {when}', { when: ago(u.checkedAt, 'checked') }) : t('Not checked yet')),
+        u.checking ? null : action(t('Check now'), check));
   }
 }
 
@@ -1048,21 +1082,22 @@ function renderAbout(inner) {
     h('div', { class: 'mds-row-label' }, h('label', null, label)),
     h('div', { class: 'mds-row-control about-value' }, value));
   const faint = (text) => h('span', { class: 'about-faint' }, text);
-  let build = faint('Checking…');
+  const checking = () => faint(t('Checking…'));
+  let build = checking();
   if (v) {
-    const date = v.time ? new Date(v.time).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
-    const detail = [v.revision ? v.revision.slice(0, 12) : '', date, v.modified ? 'with local changes' : ''].filter(Boolean).join(' · ');
-    build = [v.version || 'Development build', detail ? faint(` ${detail}`) : null];
+    const date = v.time ? new Date(v.time).toLocaleDateString(locale(), { year: 'numeric', month: 'short', day: 'numeric' }) : '';
+    const detail = [v.revision ? v.revision.slice(0, 12) : '', date, v.modified ? t('with local changes') : ''].filter(Boolean).join(' · ');
+    build = [v.version || t('Development build'), detail ? faint(` ${detail}`) : null];
   }
   inner.append(
-    settingsSection('yesman', 'Hires yesmen: pi agents that each take on one project in a workspace of their own.',
-      row('Build', build),
-      row('Updates', updateStatus()),
-      row('pi', v ? (v.pi || h('span', { class: 'danger' }, v.piError)) : faint('Checking…')),
-      row('MyGo', v ? v.mygo || faint('unknown') : faint('Checking…')),
-      row('Magpie', v ? v.magpie || faint('unknown') : faint('Checking…')),
-      row('Go', v ? v.go : faint('Checking…'))),
-    h('div', null, h('button', { class: 'mds-link-button', type: 'button', onclick: () => call('OpenURL', 'https://github.com/idy/yesman').catch(fail) }, 'Source on GitHub')),
+    settingsSection('yesman', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
+      row(t('Build'), build),
+      row(t('Updates'), updateStatus()),
+      row('pi', v ? (v.pi || h('span', { class: 'danger' }, v.piError)) : checking()),
+      row('MyGo', v ? v.mygo || faint(t('unknown')) : checking()),
+      row('Magpie', v ? v.magpie || faint(t('unknown')) : checking()),
+      row('Go', v ? v.go : checking())),
+    h('div', null, h('button', { class: 'mds-link-button', type: 'button', onclick: () => call('OpenURL', 'https://github.com/idy/yesman').catch(fail) }, t('Source on GitHub'))),
   );
 }
 
@@ -1072,8 +1107,12 @@ function renderAbout(inner) {
 // shows what it would change first, then merges it or replaces with it.
 
 const THEMES = { system: 'Match the system', light: 'Light', dark: 'Dark' };
-const autoFetchLabel = (minutes) => AUTO_FETCH.find(([m]) => m === minutes)?.[1] ?? `Every ${minutes} minutes`;
-const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const themeLabel = (theme) => (THEMES[theme] ? t(THEMES[theme]) : theme);
+const autoFetchLabel = (minutes) => {
+  const label = AUTO_FETCH.find(([m]) => m === minutes)?.[1];
+  return label ? t(label) : tn(minutes, 'Every minute', 'Every {n} minutes');
+};
+const repositories = (n) => tn(n, '{n} repository', '{n} repositories');
 const fileName = (path) => path.split(/[\\/]/).pop();
 
 function renderConfig(inner) {
@@ -1081,16 +1120,16 @@ function renderConfig(inner) {
   const action = (label, onclick) => h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: c.busy, onclick }, label);
   const e = c.exported;
   const exportHint = e
-    ? h('p', null, `Exported ${plural(e.repos, 'repository', 'repositories')} and the settings to `, h('span', { class: 'path', title: e.path }, e.path),
-        e.skipped.length ? `. Left out, as they are not from GitHub: ${e.skipped.join(', ')}.` : '')
-    : h('p', null, 'The theme, the fetch schedule and every GitHub repository in the pool, as a TOML file.');
+    ? h('p', null, tNodes('Exported {repos} and the settings to {path}.', { repos: repositories(e.repos), path: h('span', { class: 'path', title: e.path }, e.path) }),
+        e.skipped.length ? [' ', t('Left out, as they are not from GitHub: {names}.', { names: e.skipped.join(', ') })] : null)
+    : h('p', null, t('The theme, the fetch schedule and every GitHub repository in the pool, as a TOML file.'));
   const i = c.imported;
   const importHint = i ? h('div', { class: 'config-imported' }, i.lines.map((line) => h('p', { class: line.danger ? 'danger' : null }, line.text)))
-    : h('p', null, 'A file exported from yesman. You see what it changes, then merge it or replace with it.');
+    : h('p', null, t('A file exported from yesman. You see what it changes, then merge it or replace with it.'));
   inner.append(
-    settingsSection('Configuration', 'Back up yesman’s settings and repo pool, or carry them to another computer. Workspaces, their knowledge and conversations are not included.',
-      preferenceRow('Export', exportHint, h('div', { class: 'storage-actions' }, e ? revealButton(e.path, 'the exported file') : null, action('Export…', exportConfig))),
-      preferenceRow('Import', importHint, action('Import…', importConfig))));
+    settingsSection(t('Configuration'), t('Back up yesman’s settings and repo pool, or carry them to another computer. Workspaces, their knowledge and conversations are not included.'),
+      preferenceRow(t('Export'), exportHint, h('div', { class: 'storage-actions' }, e ? revealButton(e.path, t('the exported file')) : null, action(t('Export…'), exportConfig))),
+      preferenceRow(t('Import'), importHint, action(t('Import…'), importConfig))));
 }
 
 async function exportConfig() {
@@ -1134,12 +1173,12 @@ async function importConfig() {
 // replacing differ only for a setting the file leaves out, which replacing
 // resets.
 function settingChanges(plan) {
-  const fields = [['appearance', 'Theme', (v) => THEMES[v] ?? v], ['autoFetch', 'Fetch automatically', autoFetchLabel]];
+  const fields = [['appearance', t('Theme'), themeLabel], ['autoFetch', t('Fetch automatically'), autoFetchLabel]];
   const lines = [];
   for (const [key, label, show] of fields) {
     const now = plan.current[key];
-    if (plan.merge[key] !== now) lines.push({ text: `${label}: ${show(now)} → ${show(plan.merge[key])}` });
-    else if (plan.replace[key] !== now) lines.push({ text: `${label}: ${show(now)} → ${show(plan.replace[key])}`, replaceOnly: true });
+    if (plan.merge[key] !== now) lines.push({ text: t('{setting}: {from} → {to}', { setting: label, from: show(now), to: show(plan.merge[key]) }) });
+    else if (plan.replace[key] !== now) lines.push({ text: t('{setting}: {from} → {to}', { setting: label, from: show(now), to: show(plan.replace[key]) }), replaceOnly: true });
   }
   return lines;
 }
@@ -1155,24 +1194,28 @@ function askImport(plan) {
   const removable = extra.filter((r) => !r.inUse).length;
   const replaceDiffers = removable > 0 || settings.some((s) => s.replaceOnly);
   dialog.replaceChildren(h('form', { method: 'dialog' },
-    h('h2', { class: 'mds-heading', id: 'import-title' }, `Import ${fileName(plan.path)}`),
+    h('h2', { class: 'mds-heading', id: 'import-title' }, t('Import {file}', { file: fileName(plan.path) })),
     h('p', { class: 'dialog-hint path', title: plan.path }, plan.path),
     h('div', { class: 'import-body' },
-      part('Settings', settings.length
-        ? list(settings.map((s) => h('li', null, s.text, s.replaceOnly ? h('span', { class: 'import-faint' }, ' · Replace only') : null)))
-        : h('p', null, 'Unchanged.')),
-      part('Repositories',
-        plan.add.length ? h('p', null, `Clones ${plural(plan.add.length, 'repository', 'repositories')}: `, h('span', { class: 'import-names' }, plan.add.join(', '))) : null,
-        h('p', null, plan.present.length ? `${plural(plan.present.length, 'repository', 'repositories')} of the file ${plan.present.length === 1 ? 'is' : 'are'} in the pool already.` : plan.add.length ? '' : 'The file lists none.')),
-      extra.length ? part(`Only in this pool (${extra.length})`,
-        h('p', null, 'Merge keeps them. Replace removes them, except those that work depends on.'),
+      part(t('Settings'), settings.length
+        ? list(settings.map((s) => h('li', null, s.text, s.replaceOnly ? h('span', { class: 'import-faint' }, ` · ${t('Replace only')}`) : null)))
+        : h('p', null, t('Unchanged.'))),
+      part(t('Repositories'),
+        plan.add.length ? h('p', null, tNodes('Clones {repos}: {names}', { repos: repositories(plan.add.length), names: h('span', { class: 'import-names' }, plan.add.join(', ')) })) : null,
+        h('p', null, plan.present.length
+          ? tn(plan.present.length, '1 repository of the file is in the pool already.', '{n} repositories of the file are in the pool already.')
+          : plan.add.length ? '' : t('The file lists none.'))),
+      extra.length ? part(t('Only in this pool ({n})', { n: extra.length }),
+        h('p', null, t('Merge keeps them. Replace removes them, except those that work depends on.')),
         list(extra.map((r) => h('li', null, h('span', { class: 'import-names', title: r.name }, r.label),
-          h('span', { class: 'import-faint' }, r.inUse ? ` · kept: ${r.inUse}` : r.clone ? ` · ${r.clone === 'failed' ? 'failed to clone' : 'cloning'}, stopped with Replace` : ' · removed with Replace'))))) : null,
-      plan.ignored.length ? h('p', { class: 'import-faint' }, `Ignored, as this yesman does not know them: ${plan.ignored.join(', ')}`) : null),
+          h('span', { class: 'import-faint' }, ` · ${r.inUse ? t('kept: {reason}', { reason: r.inUse })
+            : r.clone ? (r.clone === 'failed' ? t('failed to clone, stopped with Replace') : t('cloning, stopped with Replace'))
+            : t('removed with Replace')}`))))) : null,
+      plan.ignored.length ? h('p', { class: 'import-faint' }, t('Ignored, as this yesman does not know them: {keys}', { keys: plan.ignored.join(', ') })) : null),
     h('div', { class: 'mds-dialog-actions' },
-      h('button', { class: 'mds-button', value: 'cancel' }, 'Cancel'),
-      replaceDiffers ? h('button', { class: 'mds-button', value: 'replace', title: 'Also reset the settings the file leaves out and remove the repositories it does not list' }, 'Replace') : null,
-      h('button', { class: 'mds-button mds-button--primary', value: 'merge' }, 'Merge'))));
+      h('button', { class: 'mds-button', value: 'cancel' }, t('Cancel')),
+      replaceDiffers ? h('button', { class: 'mds-button', value: 'replace', title: t('Also reset the settings the file leaves out and remove the repositories it does not list') }, t('Replace')) : null,
+      h('button', { class: 'mds-button mds-button--primary', value: 'merge' }, t('Merge')))));
   const answer = openDialog(dialog);
   dialog.querySelector('.mds-button--primary').focus();
   return answer;
@@ -1180,26 +1223,33 @@ function askImport(plan) {
 
 // What an import did, in lines for the Import row.
 function importLines(plan, result) {
-  const verb = result.mode === 'replace' ? 'Replaced with' : 'Merged';
   const parts = [];
-  if (settingChanges(plan).some((s) => result.mode === 'replace' || !s.replaceOnly)) parts.push('settings changed');
-  if (result.cloning.length) parts.push(`${plural(result.cloning.length, 'repository', 'repositories')} cloning`);
-  if (result.removed.length) parts.push(`${result.removed.length} removed`);
-  if (result.stopped.length) parts.push(`${plural(result.stopped.length, 'clone')} stopped`);
-  const lines = [{ text: `${verb} ${fileName(plan.path)}: ${parts.length ? parts.join(' · ') : 'nothing to change'}.` }];
-  for (const r of result.kept) lines.push({ text: `Kept ${r.label}: ${r.inUse}.`, danger: r.inUse.startsWith('removing it failed') });
+  if (settingChanges(plan).some((s) => result.mode === 'replace' || !s.replaceOnly)) parts.push(t('settings changed'));
+  if (result.cloning.length) parts.push(tn(result.cloning.length, '1 repository cloning', '{n} repositories cloning'));
+  if (result.removed.length) parts.push(t('{n} removed', { n: result.removed.length }));
+  if (result.stopped.length) parts.push(tn(result.stopped.length, '1 clone stopped', '{n} clones stopped'));
+  const changes = { file: fileName(plan.path), changes: parts.length ? parts.join(' · ') : t('nothing to change') };
+  const lines = [{ text: result.mode === 'replace' ? t('Replaced with {file}: {changes}.', changes) : t('Merged {file}: {changes}.', changes) }];
+  for (const r of result.kept) lines.push({ text: t('Kept {name}: {reason}.', { name: r.label, reason: r.inUse }), danger: Boolean(r.failed) });
   return lines;
 }
 
 // ---------- Repositories ----------
 
-function ago(iso, verb = 'fetched') {
-  if (!iso) return `never ${verb}`;
+// What ago says of a time, by what happened then.
+const AGO = {
+  fetched: ['never fetched', 'fetched just now', 'fetched {n} min ago', 'fetched {n} h ago', 'fetched {n} d ago'],
+  checked: ['never checked', 'checked just now', 'checked {n} min ago', 'checked {n} h ago', 'checked {n} d ago'],
+};
+
+function ago(iso, what = 'fetched') {
+  const [never, now, minutes, hours, days] = AGO[what];
+  if (!iso) return t(never);
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-  if (s < 60) return `${verb} just now`;
-  if (s < 3600) return `${verb} ${Math.round(s / 60)} min ago`;
-  if (s < 86400) return `${verb} ${Math.round(s / 3600)} h ago`;
-  return `${verb} ${Math.round(s / 86400)} d ago`;
+  if (s < 60) return t(now);
+  if (s < 3600) return t(minutes, { n: Math.round(s / 60) });
+  if (s < 86400) return t(hours, { n: Math.round(s / 3600) });
+  return t(days, { n: Math.round(s / 86400) });
 }
 
 // owner/repo for a GitHub URL, which is all a pool repository can be;
@@ -1212,17 +1262,17 @@ const repoKey = (fullName) => fullName.toLowerCase();
 function renderRepositories(inner) {
   const search = state.repos.length + state.clones.length > 1
     ? h('label', { class: 'search' }, icon('search'),
-        h('input', { class: 'mds-input', id: 'repo-search', type: 'search', placeholder: 'Find a repository', 'aria-label': 'Find a repository', spellcheck: 'false', value: state.repoQuery,
+        h('input', { class: 'mds-input', id: 'repo-search', type: 'search', placeholder: t('Find a repository'), 'aria-label': t('Find a repository'), spellcheck: 'false', value: state.repoQuery,
           oninput: (e) => { state.repoQuery = e.currentTarget.value; renderRepoList(); } }))
     : null;
   inner.append(
     h('div', { class: 'mds-toolbar' },
-      h('p', { class: 'toolbar-lead' }, 'GitHub repositories the yesmen check worktrees out of. Only yesman writes here. It fetches a repository whenever one is checked out, and all of them when you ask or on a schedule.'),
+      h('p', { class: 'toolbar-lead' }, t('GitHub repositories the yesmen check worktrees out of. Only yesman writes here. It fetches a repository whenever one is checked out, and all of them when you ask or on a schedule.')),
       h('div', { class: 'mds-toolbar-actions' }, search,
         h('button', { class: 'mds-button mds-button--small fetch-all', id: 'fetch-all', type: 'button', onclick: () => call('FetchAll').catch(fail) }),
-        h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Reveal the repo pool', 'aria-label': 'Reveal the repo pool', onclick: () => call('Reveal', state.snap.pool).catch(fail) }, icon('folder')))),
-    h('div', { class: 'card-list', id: 'repo-list', role: 'list', 'aria-label': 'Repositories' }),
-    h('div', null, h('button', { class: 'mds-link-button add-link', type: 'button', onclick: openAddRepos }, icon('plus'), 'Add repositories')),
+        h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Reveal the repo pool'), 'aria-label': t('Reveal the repo pool'), onclick: () => call('Reveal', state.snap.pool).catch(fail) }, icon('folder')))),
+    h('div', { class: 'card-list', id: 'repo-list', role: 'list', 'aria-label': t('Repositories') }),
+    h('div', null, h('button', { class: 'mds-link-button add-link', type: 'button', onclick: openAddRepos }, icon('plus'), t('Add repositories'))),
     autoFetchSection());
   renderRepoList();
 }
@@ -1232,7 +1282,7 @@ const AUTO_FETCH = [[0, 'Never'], [1, 'Every minute'], [5, 'Every 5 minutes'], [
 function autoFetchSection() {
   const v = state.settings;
   if (!v) return null;
-  const select = h('select', { class: 'mds-select', 'aria-label': 'Fetch automatically', onchange: async (e) => {
+  const select = h('select', { class: 'mds-select', 'aria-label': t('Fetch automatically'), onchange: async (e) => {
     const el = e.currentTarget;
     try {
       await call('SetAutoFetch', Number(el.value));
@@ -1241,9 +1291,9 @@ function autoFetchSection() {
       fail(err);
       el.value = String(v.autoFetch);
     }
-  } }, AUTO_FETCH.map(([value, label]) => h('option', { value, selected: value === v.autoFetch }, label)));
-  return settingsSection('Fetching', null,
-    preferenceRow('Fetch automatically', h('p', null, 'Fetches every repository in the pool while yesman runs, in the tray too.'), select));
+  } }, AUTO_FETCH.map(([value, label]) => h('option', { value, selected: value === v.autoFetch }, t(label))));
+  return settingsSection(t('Fetching'), null,
+    preferenceRow(t('Fetch automatically'), h('p', null, t('Fetches every repository in the pool while yesman runs, in the tray too.')), select));
 }
 
 // Fetch all spins while any repository fetches, and waits while all do.
@@ -1252,10 +1302,10 @@ function renderFetchAll() {
   if (!button) return;
   const busy = state.fetches.fetching.length > 0;
   button.disabled = !state.repos.length || state.repos.every((r) => state.fetches.fetching.includes(r.name));
-  button.replaceChildren(busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload'), 'Fetch all');
+  button.replaceChildren(busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload'), t('Fetch all'));
 }
 
-const cloneStatus = (c) => (c.state === 'queued' ? 'waiting to clone' : 'cloning…');
+const cloneStatus = (c) => (c.state === 'queued' ? t('waiting to clone') : t('cloning…'));
 
 // A pool repository; clone is set while it is being added again, as an
 // agent may.
@@ -1268,17 +1318,17 @@ function repoRow(r, clone) {
   // The last fetch's error stays, in place of when it was fetched, until
   // a fetch succeeds.
   const error = !busy && state.fetches.errors[r.name];
-  const status = clone ? cloneStatus(clone) : fetching ? 'fetching…' : error ? null : ago(r.fetchedAt);
-  const meta = [name ? null : r.url, r.upstream ? `fork of ${githubName(r.upstream) || r.upstream}` : null, r.defaultBranch ? `default ${r.defaultBranch}` : null, status].filter(Boolean).join(' · ');
+  const status = clone ? cloneStatus(clone) : fetching ? t('fetching…') : error ? null : ago(r.fetchedAt);
+  const meta = [name ? null : r.url, r.upstream ? t('fork of {name}', { name: githubName(r.upstream) || r.upstream }) : null, r.defaultBranch ? t('default {branch}', { branch: r.defaultBranch }) : null, status].filter(Boolean).join(' · ');
   return h('div', { class: 'card-row', role: 'listitem' },
     h('span', { class: 'card-row-icon' }, icon('branch')),
     h('div', { class: 'card-row-text' }, h('strong', { title: r.name }, name || r.name),
-      h('span', { title: error || null }, meta, error ? [meta ? ' · ' : null, h('span', { class: 'danger' }, `last fetch failed: ${error}`)] : null)),
+      h('span', { title: error || null }, meta, error ? [meta ? ' · ' : null, h('span', { class: 'danger' }, t('last fetch failed: {error}', { error }))] : null)),
     users.length
       ? h('span', { class: 'card-row-aside', title: worktrees.map((w) => `${w.yesman}: ${w.dir}`).join('\n') },
-          `${worktrees.length} worktree${worktrees.length === 1 ? '' : 's'} · ${users.join(', ')}`)
+          `${tn(worktrees.length, '1 worktree', '{n} worktrees')} · ${users.join(', ')}`)
       : null,
-    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: `Fetch ${r.name}`, 'aria-label': `Fetch ${r.name}`, disabled: busy, onclick: () => fetchRepo(r.name) },
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Fetch {name}', { name: r.name }), 'aria-label': t('Fetch {name}', { name: r.name }), disabled: busy, onclick: () => fetchRepo(r.name) },
       busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload')));
 }
 
@@ -1292,14 +1342,16 @@ function cloneRow(c) {
     h('span', { class: 'card-row-icon' }, icon('branch')),
     h('div', { class: 'card-row-text' },
       h('strong', { title: `github.com/${c.repo}` }, c.repo),
-      failed ? h('span', { class: 'danger', title: c.error }, `Could not clone: ${c.error}`) : h('span', null, cloneStatus(c))),
+      failed ? h('span', { class: 'danger', title: c.error }, t('Could not clone: {error}', { error: c.error })) : h('span', null, cloneStatus(c))),
     failed
       ? h('span', { class: 'card-row-actions' },
-          button(`Try ${c.repo} again`, 'reload', () => call('RetryClone', c.repo).catch(fail)),
-          button(`Dismiss ${c.repo}`, 'x', () => call('DismissClone', c.repo).catch(fail)))
-      : h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', disabled: true, title: `${c.repo} is ${cloneStatus(c).replace('…', '')}`, 'aria-label': `${c.repo} is ${cloneStatus(c).replace('…', '')}` },
+          button(t('Try {name} again', { name: c.repo }), 'reload', () => call('RetryClone', c.repo).catch(fail)),
+          button(t('Dismiss {name}', { name: c.repo }), 'x', () => call('DismissClone', c.repo).catch(fail)))
+      : h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', disabled: true, title: cloningLabel(c), 'aria-label': cloningLabel(c) },
           h('span', { class: 'mds-spinner', 'aria-hidden': 'true' })));
 }
+
+const cloningLabel = (c) => (c.state === 'queued' ? t('{name} is waiting to clone', { name: c.repo }) : t('{name} is cloning', { name: c.repo }));
 
 function renderRepoList() {
   const list = $('#repo-list');
@@ -1320,9 +1372,9 @@ function renderRepoList() {
   const q = state.repoQuery.trim().toLowerCase();
   const shown = q ? rows.filter((r) => r.text.toLowerCase().includes(q)) : rows;
   if (!rows.length) {
-    list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, 'No repositories yet'), h('span', null, 'Add some from GitHub, or let a yesman add the ones it needs.')));
+    list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, t('No repositories yet')), h('span', null, t('Add some from GitHub, or let a yesman add the ones it needs.'))));
   } else if (!shown.length) {
-    list.replaceChildren(h('div', { class: 'card-empty' }, h('span', null, `No repository matches “${state.repoQuery.trim()}”.`)));
+    list.replaceChildren(h('div', { class: 'card-empty' }, h('span', null, t('No repository matches “{query}”.', { query: state.repoQuery.trim() }))));
   } else {
     list.replaceChildren(...shown.map((r) => r.row()));
   }
@@ -1396,16 +1448,16 @@ function pickerTaken() {
   const taken = new Map();
   for (const r of state.repos) {
     const name = githubName(r.url);
-    if (name) taken.set(repoKey(name), 'In the pool');
+    if (name) taken.set(repoKey(name), t('In the pool'));
   }
   for (const c of state.clones) {
-    if (c.state !== 'failed' && !taken.has(repoKey(c.repo))) taken.set(repoKey(c.repo), 'Cloning');
+    if (c.state !== 'failed' && !taken.has(repoKey(c.repo))) taken.set(repoKey(c.repo), t('Cloning'));
   }
   return taken;
 }
 
 function buildRepoDialog() {
-  const input = h('input', { class: 'mds-input', id: 'picker-input', placeholder: 'owner, or owner/repo', 'aria-label': 'GitHub user, organization or repository',
+  const input = h('input', { class: 'mds-input', id: 'picker-input', placeholder: t('owner, or owner/repo'), 'aria-label': t('GitHub user, organization or repository'),
     spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off', 'aria-describedby': 'picker-error',
     oninput: onPickerInput,
     onkeydown: (e) => {
@@ -1420,14 +1472,14 @@ function buildRepoDialog() {
       }
     } });
   $('#repo-dialog').replaceChildren(h('form', { id: 'repo-form', onsubmit: submitPicker },
-    h('h2', { class: 'mds-heading', id: 'repo-dialog-title' }, 'Add repositories'),
-    h('p', { class: 'dialog-hint' }, 'Name a GitHub user or organization to pick from its repositories, or owner/repo to add one. They clone in the background; for a fork, yesman also fetches the repository it was forked from.'),
+    h('h2', { class: 'mds-heading', id: 'repo-dialog-title' }, t('Add repositories')),
+    h('p', { class: 'dialog-hint' }, t('Name a GitHub user or organization to pick from its repositories, or owner/repo to add one. They clone in the background; for a fork, yesman also fetches the repository it was forked from.')),
     h('label', { class: 'search picker-search' }, icon('search'), input, h('span', { class: 'mds-spinner', 'aria-hidden': 'true' })),
     h('div', { class: 'picker-results', id: 'picker-results' }),
     h('div', { class: 'mds-dialog-actions picker-actions' },
       h('p', { class: 'picker-status', id: 'picker-error', 'aria-live': 'polite' }),
-      h('button', { class: 'mds-button', type: 'button', onclick: () => $('#repo-dialog').close('cancel') }, 'Cancel'),
-      h('button', { class: 'mds-button mds-button--primary', type: 'submit', id: 'picker-add' }, 'Add'))));
+      h('button', { class: 'mds-button', type: 'button', onclick: () => $('#repo-dialog').close('cancel') }, t('Cancel')),
+      h('button', { class: 'mds-button mds-button--primary', type: 'submit', id: 'picker-add' }, t('Add')))));
 }
 
 function openAddRepos() {
@@ -1510,15 +1562,15 @@ function renderPicker() {
     }
   } else if (!typed.owner) {
     note(typed.raw
-      ? `“${typed.raw}” is not a GitHub user, organization or repository.`
-      : 'Type a GitHub user or organization to list its repositories.');
+      ? t('“{input}” is not a GitHub user, organization or repository.', { input: typed.raw })
+      : t('Type a GitHub user or organization to list its repositories.'));
   } else if (entry.state === 'failed') {
-    note(h('span', { class: 'danger' }, entry.error), h('span', null, 'Press Enter to try again.'));
+    note(h('span', { class: 'danger' }, entry.error), h('span', null, t('Press Enter to try again.')));
   } else {
     const q = typed.name.toLowerCase();
     const shown = q ? entry.repos.filter((r) => r.fullName.slice(r.fullName.indexOf('/') + 1).toLowerCase().includes(q)) : entry.repos;
-    if (!entry.repos.length) note(`${entry.owner} has no repositories you can see.`);
-    else if (!shown.length) note(`No repository of ${entry.owner} matches “${typed.name}”.`);
+    if (!entry.repos.length) note(t('{owner} has no repositories you can see.', { owner: entry.owner }));
+    else if (!shown.length) note(t('No repository of {owner} matches “{query}”.', { owner: entry.owner, query: typed.name }));
     else {
       // A new owner's list fades in; filtering it redraws it in place.
       const shows = `${entry.owner.toLowerCase()}/${q}`;
@@ -1555,8 +1607,8 @@ function pickerRows(entry, shown) {
   const on = free.filter((r) => picker.selected.has(repoKey(r.fullName))).length;
   all.checked = on > 0 && on === free.length;
   all.indeterminate = on > 0 && on < free.length;
-  const count = shown.length === entry.repos.length ? `${shown.length} ${shown.length === 1 ? 'repository' : 'repositories'}` : `${shown.length} of ${entry.repos.length}`;
-  const head = h('label', { class: 'picker-row picker-all' }, all, h('span', null, `Select all · ${count}`));
+  const count = shown.length === entry.repos.length ? repositories(shown.length) : t('{shown} of {total}', { shown: shown.length, total: entry.repos.length });
+  const head = h('label', { class: 'picker-row picker-all' }, all, h('span', null, t('Select all · {count}', { count })));
   const rows = shown.map((r) => {
     const key = repoKey(r.fullName);
     const status = taken.get(key);
@@ -1566,7 +1618,7 @@ function pickerRows(entry, shown) {
       syncPicker();
     } });
     box.checked = !!status || picker.selected.has(key);
-    const tags = status ?? [r.private && 'Private', r.fork && 'Fork', r.archived && 'Archived'].filter(Boolean).join(' · ');
+    const tags = status ?? [r.private && t('Private'), r.fork && t('Fork'), r.archived && t('Archived')].filter(Boolean).join(' · ');
     return h('label', { class: 'picker-row', 'data-taken': status ? 'true' : null }, box,
       h('span', { class: 'picker-row-text' },
         h('strong', { title: r.fullName }, r.fullName.slice(r.fullName.indexOf('/') + 1)),
@@ -1595,17 +1647,17 @@ function renderPickerFoot(typed = readPickerInput()) {
   const n = picker.selected.size;
   const add = $('#picker-add');
   add.disabled = !choice.length;
-  add.textContent = n > 1 ? `Add ${n} repositories` : n === 1 ? 'Add 1 repository' : choice.length ? `Add ${typed.full}` : 'Add';
+  add.textContent = n ? tn(n, 'Add 1 repository', 'Add {n} repositories') : choice.length ? t('Add {name}', { name: typed.full }) : t('Add');
   const status = $('#picker-error');
   status.dataset.tone = picker.error ? 'error' : '';
   status.title = picker.error;
   const entry = typed.owner && picker.lists.get(typed.owner.toLowerCase());
   const loading = typed.owner && (!entry || entry.state === 'loading');
   status.textContent = picker.error
-    || (n ? `${n} selected`
-      : typed.full && pickerTaken().has(repoKey(typed.full)) ? `${typed.full} is already in the pool.`
-      : pickerListed(typed) === null ? `Not in ${typed.owner}’s list; Add tries it anyway.`
-      : loading ? `Listing ${typed.owner}’s repositories…` : '');
+    || (n ? t('{n} selected', { n })
+      : typed.full && pickerTaken().has(repoKey(typed.full)) ? t('{name} is already in the pool.', { name: typed.full })
+      : pickerListed(typed) === null ? t('Not in {owner}’s list; Add tries it anyway.', { owner: typed.owner })
+      : loading ? t('Listing {owner}’s repositories…', { owner: typed.owner }) : '');
 }
 
 async function submitPicker(e) {
@@ -1663,7 +1715,7 @@ async function openCheckout(y) {
     return;
   }
   if (!state.repos.length) {
-    toast('Add a repository to the pool first.');
+    toast(t('Add a repository to the pool first.'));
     showSettings('repositories');
     return;
   }
@@ -1674,7 +1726,7 @@ async function openCheckout(y) {
   if ((await openDialog($('#checkout-dialog'))) !== 'checkout') return;
   try {
     const wt = await call('Checkout', y.name, { repo: form.elements.repo.value, branch: form.elements.branch.value.trim() });
-    toast(`Checked out ${wt.dir || wt.path}`);
+    toast(t('Checked out {path}', { path: wt.dir || wt.path }));
   } catch (err) {
     fail(err);
   }
@@ -1699,7 +1751,7 @@ function selectAgent(id) {
 
 async function hire(name) {
   if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) {
-    toast('Use 1-32 lowercase letters, digits and dashes.');
+    toast(t('Use 1-32 lowercase letters, digits and dashes.'));
     return;
   }
   try {
@@ -1720,10 +1772,10 @@ async function confirmAction(title, body, ok) {
 }
 
 async function dismiss(name) {
-  if (!(await confirmAction(`Dismiss ${name}?`, `Its agents stop and its workspace moves to the archive. Branches stay in the repo pool.`, 'Dismiss'))) return;
+  if (!(await confirmAction(t('Dismiss {name}?', { name }), t('Its agents stop and its workspace moves to the archive. Branches stay in the repo pool.'), t('Dismiss')))) return;
   try {
     const dest = await call('Dismiss', name);
-    toast(`Archived to ${dest}`);
+    toast(t('Archived to {path}', { path: dest }));
     // A view of its agents falls back to the first yesman once they are gone.
     await refreshState();
   } catch (err) {
@@ -1732,7 +1784,7 @@ async function dismiss(name) {
 }
 
 async function removeWorker(a) {
-  if (!(await confirmAction(`Remove ${a.name}?`, 'It stops and leaves this yesman. Its worktrees and session log stay in the workspace.', 'Remove'))) return;
+  if (!(await confirmAction(t('Remove {name}?', { name: a.name }), t('It stops and leaves this yesman. Its worktrees and session log stay in the workspace.'), t('Remove')))) return;
   try {
     await call('RemoveWorker', a.id);
     // selectAgent loads the lead's conversation if this window has not yet.
@@ -1796,13 +1848,25 @@ function render() {
   renderInfo();
 }
 
+// onLocale draws the page again in the language the app shows now.
+function onLocale(tag) {
+  setLocale(tag);
+  translatePage();
+  buildSideFoot();
+  if (!$('#repo-dialog').open) buildRepoDialog();
+  render();
+}
+
 async function start() {
+  setLocale(mygo?.locale ?? navigator.language);
+  translatePage();
   if (!mygo) {
-    document.body.replaceChildren(h('div', { class: 'welcome' }, h('h1', { class: 'mds-title' }, 'yesman'), h('p', null, 'Open this page in the yesman app.')));
+    document.body.replaceChildren(h('div', { class: 'welcome' }, h('h1', { class: 'mds-title' }, 'yesman'), h('p', null, t('Open this page in the yesman app.'))));
     return;
   }
   buildSideFoot();
   buildRepoDialog();
+  mygo.on('mygo:locale', (e) => onLocale(e.locale));
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href]');
     if (!link) return;
