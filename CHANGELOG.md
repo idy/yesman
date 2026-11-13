@@ -2,6 +2,11 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.15
+
+- Worktrees whose pull request is merged fold into one row at the end of the info panel's Worktrees list, so the work in progress stays on top. The row opens to show them, and a merged worktree the files pane shows stays in the list.
+- Quitting yesman stops every agent for good: a worker's report to its lead can no longer start the lead again while the app quits.
+
 ## 0.1.14
 
 - Settings › Secrets keeps API keys, tokens and other secrets, and Settings › Variables keeps settings such as an account or a region. Every command of every agent gets each as an environment variable; agents read what each is for with the new `yesman_env` tool.

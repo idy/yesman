@@ -54,12 +54,14 @@ func fakePi() {
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		var cmd struct {
-			ID       string `json:"id"`
-			Type     string `json:"type"`
-			Message  string `json:"message"`
-			Provider string `json:"provider"`
-			ModelID  string `json:"modelId"`
-			Level    string `json:"level"`
+			ID                string  `json:"id"`
+			Type              string  `json:"type"`
+			Message           string  `json:"message"`
+			Images            []Image `json:"images"`
+			StreamingBehavior string  `json:"streamingBehavior"`
+			Provider          string  `json:"provider"`
+			ModelID           string  `json:"modelId"`
+			Level             string  `json:"level"`
 			// extension_ui_response
 			Value     *string `json:"value"`
 			Confirmed *bool   `json:"confirmed"`
@@ -92,7 +94,7 @@ func fakePi() {
 		var data any = map[string]any{"messages": []any{}, "text": "done"}
 		switch cmd.Type {
 		case "prompt":
-			write(map[string]any{"type": "test_prompt_received", "provider": model.Provider, "message": cmd.Message})
+			write(map[string]any{"type": "test_prompt_received", "provider": model.Provider, "message": cmd.Message, "images": cmd.Images, "streamingBehavior": cmd.StreamingBehavior})
 			if os.Getenv("FAKE_PI_HOLD_PROMPTS") != "" ||
 				os.Getenv("FAKE_PI_HOLD_REPORTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Worker") {
 				// Simulate async extension work before isStreaming becomes true.

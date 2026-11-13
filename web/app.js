@@ -14,6 +14,7 @@ import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
 import { createEnvPage } from './env.js';
 import { formatSize } from './diff.js';
+import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, formatNumber, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
@@ -43,6 +44,7 @@ const state = {
   view: { kind: 'none' },
   convos: new Map(),
   drafts: new Map(),
+  attachments: new Map(),
   modelOptions: new Map(),
   pane: null, // the pane beside the conversation: 'files', 'board' or null
   hideDone: new Set(JSON.parse(localStorage.getItem('yesman.hideDone') ?? '[]')), // yesmen whose done workers are hidden
@@ -96,7 +98,7 @@ function convo(a) {
 // Forget conversations and drafts of agents that are gone.
 function pruneCaches() {
   const keys = new Set(state.snap.agents.map(keyOf));
-  for (const map of [state.convos, state.drafts, state.modelOptions]) {
+  for (const map of [state.convos, state.drafts, state.attachments, state.modelOptions]) {
     for (const key of map.keys()) if (!keys.has(key)) map.delete(key);
   }
   contextViewer.prune(keys);
@@ -238,7 +240,10 @@ function messageEl(c, m) {
       // when it did not finish, or the tasks still open.
       const notice = text.match(/^\[yesman\] ([\s\S]*)$/);
       if (notice) return h('div', { class: 'note note--quiet' }, h('div', { class: 'md', html: renderMarkdown(notice[1]) }));
-      return h('div', { class: 'msg-user' }, text);
+      const images = Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image' && imageURL(b)) : [];
+      return h('div', { class: 'msg-user' }, text,
+        images.length ? h('div', { class: 'message-images' }, images.map((image) =>
+          h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
     }
     case 'assistant': {
       const el = h('div', { class: 'msg-assistant' });
@@ -808,7 +813,7 @@ function renderBody() {
   renderThread();
 }
 
-function renderDock() {
+function renderDock({ focusComposer = false } = {}) {
   const dock = $('#dock');
   const a = selectedAgent();
   const keep = dock?.querySelector('textarea');
@@ -829,15 +834,51 @@ function renderDock() {
   if (a.status === 'waiting' && a.dialog) dock.append(askEl(a));
 
   const working = a.status === 'working' || a.status === 'waiting';
+  const key = keyOf(a);
+  let attachments = state.attachments.get(key);
+  if (!attachments) state.attachments.set(key, (attachments = { items: [], reading: false, sending: false }));
+  const busy = attachments.reading || attachments.sending;
+  const previews = h('div', { class: 'composer-images', hidden: !attachments.items.length }, attachments.items.map((image) =>
+    h('div', { class: 'composer-image' },
+      h('img', { src: imageURL(image), alt: image.name, title: image.name }),
+      h('button', { class: 'round', type: 'button', disabled: busy, title: t('Remove image'), 'aria-label': t('Remove image'), onclick: () => {
+        attachments.items = attachments.items.filter((item) => item !== image);
+        renderDock();
+      } }, icon('trash')))));
+  const refresh = () => { if (keyOf(selectedAgent() ?? {}) === key) renderDock(); };
+  const addImages = async (files) => {
+    if (attachments.reading || attachments.sending || !files.length) return;
+    const error = imageFileError(files, attachments.items);
+    if (error) return fail(t(error));
+    attachments.reading = true;
+    refresh();
+    try {
+      const images = await Promise.all(files.map(readImageFile));
+      attachments.items.push(...images);
+    } catch (err) {
+      fail(t(errorText(err)));
+    } finally {
+      attachments.reading = false;
+      refresh();
+    }
+  };
+  const fileInput = h('input', { type: 'file', accept: IMAGE_ACCEPT, multiple: true, hidden: true, onchange: () => {
+    addImages([...fileInput.files]);
+    fileInput.value = '';
+  } });
+  const attach = h('button', { class: 'round', type: 'button', disabled: busy, 'aria-label': t('Attach images'),
+    title: t('Attach images (PNG, JPEG, GIF, WebP; 4 images, 5 MB each, 10 MB total)'), onclick: () => fileInput.click() }, icon('plus'));
   const textarea = h('textarea', {
-    rows: 1, 'aria-label': t('Message'),
+    // Read-only keeps the caret/focus while RPC acceptance is pending. A
+    // disabled textarea would drop focus to BODY before the next render.
+    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending,
     placeholder: a.role === 'lead' ? t('Message {name}…', { name: a.yesman }) : t('Message worker {name}…', { name: a.name }),
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
   const send = h('button', { class: 'round', type: 'submit', 'aria-label': t('Send'), title: working ? t('Send: delivered after its current step') : t('Send') }, icon('enter'));
   const stop = working ? h('button', { class: 'round round--stop', type: 'button', 'aria-label': t('Stop'), title: t('Stop the current run'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop')) : null;
   const sync = () => {
-    send.disabled = !textarea.value.trim() || !!state.modelOptions.get(keyOf(a))?.busy;
+    send.disabled = (!textarea.value.trim() && !attachments.items.length) || busy || !!state.modelOptions.get(keyOf(a))?.busy;
     textarea.style.height = 'auto';
     textarea.style.height = `${textarea.scrollHeight}px`;
   };
@@ -848,10 +889,21 @@ function renderDock() {
       form.requestSubmit();
     }
   });
+  textarea.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.items ?? [])].filter((item) => item.kind === 'file' && item.type.startsWith('image/')).map((item) => item.getAsFile()).filter(Boolean);
+    if (files.length) { e.preventDefault(); addImages(files); }
+  });
   const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea); } },
-    h('div', { class: 'composer-input' }, textarea, h('div', { class: 'ask-actions' }, stop, send)),
+    fileInput, previews,
+    h('div', { class: 'composer-input' }, textarea, h('div', { class: 'ask-actions' }, attach, stop, send)),
     h('div', { class: 'composer-controls' }, modelOptionsEl(a, working), contextViewer.mount(a)),
   );
+  form.addEventListener('dragover', (e) => {
+    if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = busy ? 'none' : 'copy'; }
+  });
+  form.addEventListener('drop', (e) => {
+    if (e.dataTransfer?.files.length) { e.preventDefault(); addImages([...e.dataTransfer.files]); }
+  });
   dock.append(form);
   composerSelects.push(...[...form.querySelectorAll('select')].map((el) => {
     const select = initSelect(el);
@@ -861,25 +913,36 @@ function renderDock() {
   sync();
   const nextControl = composerSelects.find((select) => select.trigger.getAttribute('aria-label') === control);
   if (nextControl && !nextControl.trigger.disabled) nextControl.trigger.focus({ preventScroll: true });
-  else if (focused || !keep) {
+  else if (focusComposer || focused || !keep) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
   }
 }
 
 async function sendMessage(a, textarea) {
+  const key = keyOf(a);
+  const attachments = state.attachments.get(key);
   const text = textarea.value.trim();
-  if (!text || state.modelOptions.get(keyOf(a))?.busy) return;
-  textarea.value = '';
-  state.drafts.delete(keyOf(a));
-  textarea.dispatchEvent(new Event('input'));
+  if ((!text && !attachments?.items.length) || attachments?.reading || attachments?.sending || state.modelOptions.get(key)?.busy) return;
+  const images = imagePayload(attachments?.items ?? []);
+  // A keyboard submit or a click on Send intends to continue composing.
+  // Keep that focus through pending renders; subsequent renders follow the
+  // actual focus, so moving to another control or agent cancels restoration.
+  const focusComposer = document.activeElement === textarea ||
+    document.activeElement === textarea.form?.querySelector('button[type="submit"]');
+  attachments.sending = true;
+  renderDock({ focusComposer });
   try {
-    await call('Send', a.id, text);
+    if (images.length) await call('SendImages', a.id, text, images);
+    else await call('Send', a.id, text);
+    state.drafts.delete(key);
+    attachments.items = [];
   } catch (err) {
-    textarea.value = text;
-    state.drafts.set(keyOf(a), text);
-    textarea.dispatchEvent(new Event('input'));
+    // Keep both text and images for retry if pi rejects the prompt.
     fail(err);
+  } finally {
+    attachments.sending = false;
+    if (keyOf(selectedAgent() ?? {}) === key) renderDock();
   }
 }
 
