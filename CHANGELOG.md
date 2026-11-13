@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.7
+
+- Choose where yesman keeps its data from General → Storage. Browse to or enter a new or empty folder, then move everything and restart.
+- Repositories, active and archived workspaces, conversations, knowledge and settings move together. Git worktree links and session paths are repaired; pending file edits are saved before restarting.
+- The old folder stays as a backup. If copying fails, yesman keeps using the old folder and explains the problem in Storage. Launching with `YESMAN_HOME` still overrides the saved location.
+
 ## 0.1.5
 
 - Choose an agent's model and reasoning effort in a separate row below the input box. Models come from pi's configured catalog, with grouping only when there is more than one provider; effort lists only the levels the selected model supports, including Extra high and Max when available.
