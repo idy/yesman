@@ -104,12 +104,3 @@ func ParseSource(input string) (Source, error) {
 // Pinned reports whether an npm source names an exact version, which pi
 // keeps on update.
 func (s Source) Pinned() bool { return s.Kind == "npm" && exactRE.MatchString(s.Version) }
-
-// NPM is the source that installs an npm package at its latest version,
-// which updates move forward.
-func NPM(name string) (Source, error) {
-	if !npmNameRE.MatchString(name) || len(name) > 214 {
-		return Source{}, refuse("%q is not an npm package name", name)
-	}
-	return Source{Raw: "npm:" + name, Kind: "npm", Name: name}, nil
-}

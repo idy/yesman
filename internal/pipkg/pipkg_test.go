@@ -46,12 +46,6 @@ func TestParseSource(t *testing.T) {
 			t.Errorf("ParseSource(%q) = %+v, want an error", in, s)
 		}
 	}
-	if s, err := NPM("@scope/tools"); err != nil || s.Raw != "npm:@scope/tools" {
-		t.Errorf("NPM = %+v, %v", s, err)
-	}
-	if _, err := NPM("--x"); err == nil {
-		t.Error("NPM took an option")
-	}
 }
 
 func TestParseList(t *testing.T) {

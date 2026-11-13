@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -160,7 +161,8 @@ func TestInstallTakesBareNames(t *testing.T) {
 	pi := newFakePi()
 	a := &app{piJobs: newPiJobs(pi.run, nil)}
 	s := &service{app: a}
-	for in, want := range map[string]string{"pi-web-access": "npm:pi-web-access", "@scope/tools": "npm:@scope/tools", "npm:x@1.0.0": "npm:x@1.0.0", "./here": "./here"} {
+	for in, want := range map[string]string{"pi-web-access": "npm:pi-web-access", "pi-web-access@0.47.0": "npm:pi-web-access@0.47.0", "@scope/tools": "npm:@scope/tools",
+		"@scope/tools@1.0.0": "npm:@scope/tools@1.0.0", "npm:x@1.0.0": "npm:x@1.0.0", "./here": "./here"} {
 		l, err := s.InstallPiPackage(in)
 		if err != nil {
 			t.Fatalf("InstallPiPackage(%q): %v", in, err)
@@ -169,8 +171,10 @@ func TestInstallTakesBareNames(t *testing.T) {
 			t.Errorf("InstallPiPackage(%q) queued %+v, want %s", in, l.Jobs, want)
 		}
 	}
-	if _, err := s.InstallPiPackage("Not A Name"); err == nil {
-		t.Error("took a bad name")
+	for _, bad := range []string{"Not A Name", "--x", "", "@scope/tools@"} {
+		if _, err := s.InstallPiPackage(bad); err == nil {
+			t.Errorf("took %q", bad)
+		}
 	}
 	go func() {
 		for range pi.calls {
@@ -243,15 +247,15 @@ func TestRefusedSourcesAreTranslated(t *testing.T) {
 	}
 }
 
-func TestPiJobsVersionGrows(t *testing.T) {
+func TestPiJobsRevisionGrows(t *testing.T) {
 	var got []int
 	var mu sync.Mutex
 	j := newPiJobs(func(context.Context, ...string) (string, error) { return "", errors.New("no") },
-		func(l PiJobs) { mu.Lock(); got = append(got, l.Version); mu.Unlock() })
-	before := j.List().Version
+		func(l PiJobs) { mu.Lock(); got = append(got, l.Revision); mu.Unlock() })
+	before := j.List().Revision
 	l, _ := j.Queue(PiInstall, "npm:a", "")
-	if l.Version <= before {
-		t.Errorf("queueing kept version %d", l.Version)
+	if l.Revision <= before {
+		t.Errorf("queueing kept revision %d", l.Revision)
 	}
 	waitJobs(t, j, func(l PiJobs) bool { return len(l.Jobs) == 1 && l.Jobs[0].State == JobFailed })
 	j.Dismiss(j.List().Jobs[0].ID)
@@ -259,10 +263,24 @@ func TestPiJobsVersionGrows(t *testing.T) {
 	defer mu.Unlock()
 	for i := 1; i < len(got); i++ {
 		if got[i] <= got[i-1] {
-			t.Fatalf("versions went %v", got)
+			t.Fatalf("revisions went %v", got)
 		}
 	}
-	if got[len(got)-1] != j.List().Version {
-		t.Errorf("the last event says %d, the list %d", got[len(got)-1], j.List().Version)
+	if got[len(got)-1] != j.List().Revision {
+		t.Errorf("the last event says %d, the list %d", got[len(got)-1], j.List().Revision)
+	}
+}
+
+func TestPiViewKeepsBothVersions(t *testing.T) {
+	data, err := json.Marshal(PiView{Version: "1.5.2", PiJobs: PiJobs{Jobs: []PiJob{}, Revision: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Version  string `json:"version"`
+		Revision int    `json:"revision"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil || v.Version != "1.5.2" || v.Revision != 7 {
+		t.Errorf("PiView = %s", data)
 	}
 }

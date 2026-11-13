@@ -57,9 +57,10 @@ const (
 type PiJobs struct {
 	Jobs      []PiJob   `json:"jobs"`
 	ChangedAt time.Time `json:"changedAt,omitzero"`
-	// Version counts the changes to the jobs. Lists reach the page by
+	// Revision counts the changes to the jobs. Lists reach the page by
 	// events, answers and reloads, in any order: the highest is the newest.
-	Version int `json:"version"`
+	// It is not "version", which PiView, embedding it, says of pi.
+	Revision int `json:"revision"`
 }
 
 // piJobTimeout bounds one pi command; installing runs npm.
@@ -80,7 +81,7 @@ type piJobs struct {
 	seq       int
 	busy      bool
 	changedAt time.Time
-	version   int
+	revision  int
 }
 
 func newPiJobs(run func(context.Context, ...string) (string, error), changed func(PiJobs)) *piJobs {
@@ -156,7 +157,7 @@ func (j *piJobs) List() PiJobs {
 }
 
 func (j *piJobs) listLocked() PiJobs {
-	list := PiJobs{Jobs: make([]PiJob, 0, len(j.jobs)), ChangedAt: j.changedAt, Version: j.version}
+	list := PiJobs{Jobs: make([]PiJob, 0, len(j.jobs)), ChangedAt: j.changedAt, Revision: j.revision}
 	for _, job := range j.jobs {
 		list.Jobs = append(list.Jobs, *job)
 	}
@@ -165,7 +166,7 @@ func (j *piJobs) listLocked() PiJobs {
 
 // emitLocked follows every change to the jobs.
 func (j *piJobs) emitLocked() {
-	j.version++
+	j.revision++
 	if j.changed != nil {
 		j.changed(j.listLocked())
 	}
@@ -419,13 +420,9 @@ func (s *service) PiPackage(ctx context.Context, name string) (pipkg.Details, er
 // npm package by name, at its latest version, or any source pi takes.
 func (s *service) InstallPiPackage(source string) (PiJobs, error) {
 	source = strings.TrimSpace(source)
-	if !strings.Contains(source, ":") && !strings.ContainsAny(source, `/\~`) || strings.HasPrefix(source, "@") {
-		// A bare name is an npm package's.
-		src, err := pipkg.NPM(source)
-		if err != nil {
-			return PiJobs{}, sourceError(err)
-		}
-		source = src.Raw
+	if source != "" && (!strings.Contains(source, ":") && !strings.ContainsAny(source, `/\~`) || strings.HasPrefix(source, "@")) {
+		// A bare name, with or without a version, is an npm package's.
+		source = "npm:" + source
 	}
 	return s.app.piJobs.Queue(PiInstall, source, "")
 }

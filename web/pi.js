@@ -57,7 +57,7 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     view: null, // Yesman.PiPackages
     tab: 'info', // info, installed or browse
     updates: {}, // npm name -> its latest version
-    jobs: { jobs: [], changedAt: null, version: -1 }, // Yesman.PiJobs, the newest seen
+    jobs: { jobs: [], changedAt: null, revision: -1 }, // Yesman.PiJobs, the newest seen
     query: '',
     results: null, // { query, total, packages } searched for the query
     searching: false,
@@ -79,8 +79,9 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
   // Job lists arrive by events, answers and loads, in any order: one older
   // than the list shown is dropped.
   function setJobs(next) {
-    if ((next?.version ?? 0) < s.jobs.version) return false;
-    s.jobs = { jobs: next.jobs ?? [], changedAt: next.changedAt, version: next.version ?? 0 };
+    const revision = Number(next?.revision ?? 0);
+    if (revision < s.jobs.revision) return false;
+    s.jobs = { jobs: next.jobs ?? [], changedAt: next.changedAt, revision };
     return true;
   }
 
