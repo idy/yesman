@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.3
+
+- A new sky-blue app icon: a yak turning back to answer you.
+- A matching monochrome yak in the titlebar, menu bar and system tray, tinted for the light or dark appearance.
+- A simpler titlebar without the sidebar-collapse button. The sidebar stays visible, and the brand clears the window controls only while they are shown.
+
 ## 0.1.1
 
 The first version installed copies of 0.1.0 update to by themselves, to check that updating works. Nothing else changes.

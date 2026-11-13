@@ -91,7 +91,7 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | `main.go`, `app.go`, `service.go` | App startup, tray, window and notifications; the methods the page calls |
 | `settings.go` | The settings file and the Settings and About pages' methods |
 | `update.go` | Checking for and installing new versions |
-| `mygo.json`, `resources/icon.png` | The app as `mygo build` packages it, and its icon |
+| `mygo.json`, `resources/`, `icons.go` | Packaging, the yak app icon and the monochrome tray template; see [icon sources](resources/README.md) |
 | `internal/pool` | The repo pool and its worktrees |
 | `internal/github` | What the pool takes: GitHub repositories, their clone URLs and a fork's parent |
 | `internal/yesmen` | Workspaces, workers and their files |
