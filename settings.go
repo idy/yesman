@@ -23,6 +23,22 @@ import (
 type Settings struct {
 	// Appearance is light or dark, or system to follow the desktop.
 	Appearance mygo.ThemeSource `json:"appearance,omitempty"`
+	// AutoFetch is how many minutes apart the pool's repositories are all
+	// fetched; 0 fetches them only when asked or checked out.
+	AutoFetch int `json:"autoFetch,omitempty"`
+}
+
+// autoFetchChoices are the intervals the Repositories page offers, in
+// minutes.
+var autoFetchChoices = []int{0, 1, 5, 15, 60}
+
+func validAutoFetch(minutes int) bool {
+	for _, m := range autoFetchChoices {
+		if m == minutes {
+			return true
+		}
+	}
+	return false
 }
 
 func validAppearance(t mygo.ThemeSource) bool {
@@ -51,6 +67,9 @@ func loadSettings(path string) Settings {
 	if s.Appearance != "" && !validAppearance(s.Appearance) {
 		s.Appearance = ""
 	}
+	if !validAutoFetch(s.AutoFetch) {
+		s.AutoFetch = 0
+	}
 	return s
 }
 
@@ -75,9 +94,10 @@ func (s Settings) save(path string) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// SettingsView is what the General settings page shows.
+// SettingsView is what the General and Repositories settings pages show.
 type SettingsView struct {
 	Appearance mygo.ThemeSource `json:"appearance"`
+	AutoFetch  int              `json:"autoFetch"` // minutes; 0 is off
 	Home       string           `json:"home"`
 	Pool       string           `json:"pool"`
 	Yesmen     string           `json:"yesmen"`
@@ -90,13 +110,14 @@ type SettingsView struct {
 func (s *service) Settings() SettingsView {
 	a := s.app
 	a.setmu.Lock()
-	appearance := a.settings.Appearance
+	appearance, autoFetch := a.settings.Appearance, a.settings.AutoFetch
 	a.setmu.Unlock()
 	if appearance == "" {
 		appearance = mygo.ThemeSystem
 	}
 	v := SettingsView{
 		Appearance: appearance,
+		AutoFetch:  autoFetch,
 		Home:       a.home.Root,
 		Pool:       a.home.Repos(),
 		Yesmen:     a.home.Yesmen(),
@@ -126,6 +147,25 @@ func (s *service) SetAppearance(source string) error {
 	}
 	a.settings = next
 	mygo.Theme.SetSource(t)
+	return nil
+}
+
+// SetAutoFetch sets how many minutes apart the pool's repositories are
+// all fetched, 0 for never, and remembers it for the next start.
+func (s *service) SetAutoFetch(minutes int) error {
+	if !validAutoFetch(minutes) {
+		return fmt.Errorf("fetching every %d minutes is not offered", minutes)
+	}
+	a := s.app
+	a.setmu.Lock()
+	defer a.setmu.Unlock()
+	next := a.settings
+	next.AutoFetch = minutes
+	if err := next.save(a.home.Settings()); err != nil {
+		return fmt.Errorf("save settings: %w", err)
+	}
+	a.settings = next
+	a.fetcher.SetInterval(time.Duration(minutes) * time.Minute)
 	return nil
 }
 

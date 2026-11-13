@@ -114,31 +114,53 @@ func (s *service) Repos() ([]pool.Repo, error) {
 	return repos, err
 }
 
-// AddRepo clones a GitHub repository into the pool: owner/repo or its
-// URL. A fork's parent is fetched too, as its upstream remote.
-func (s *service) AddRepo(repo string) (pool.Repo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-	defer cancel()
-	gh, err := github.Resolve(ctx, repo)
-	if err != nil {
-		return pool.Repo{}, err
-	}
-	r, err := s.app.pool.Add(ctx, gh.URL, gh.Upstream)
-	if err == nil {
-		s.app.notifyChanged()
-	}
-	return r, err
+// AddRepos starts cloning GitHub repositories into the pool, owner/repo or
+// their URLs, and returns at once; the clones event follows them. A fork's
+// parent is fetched too, as its upstream remote.
+func (s *service) AddRepos(repos []string) ([]Clone, error) {
+	return s.app.clones.Queue(repos)
 }
 
-// FetchRepo fetches a pool repository from its remotes now.
-func (s *service) FetchRepo(name string) (pool.Repo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+// Clones lists the repositories on their way into the pool.
+func (s *service) Clones() []Clone {
+	return s.app.clones.List()
+}
+
+// RetryClone tries a clone that failed again.
+func (s *service) RetryClone(repo string) {
+	s.app.clones.Retry(repo)
+}
+
+// DismissClone forgets a clone that failed.
+func (s *service) DismissClone(repo string) {
+	s.app.clones.Dismiss(repo)
+}
+
+// OwnerRepos lists a GitHub user's or organization's repositories, to
+// choose some to add.
+func (s *service) OwnerRepos(owner string) ([]github.Listed, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if err := s.app.pool.Fetch(ctx, name, true); err != nil {
-		return pool.Repo{}, err
-	}
-	s.app.notifyChanged()
-	return s.app.pool.Get(name)
+	return github.List(ctx, owner)
+}
+
+// FetchRepo fetches a pool repository from its remotes now. The fetches
+// event shows it fetching, and its error if it fails.
+func (s *service) FetchRepo(name string) (pool.Repo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	return s.app.fetcher.Fetch(ctx, name)
+}
+
+// FetchAll starts fetching every pool repository and returns at once; the
+// fetches event follows them.
+func (s *service) FetchAll() error {
+	return s.app.fetcher.FetchAll(true)
+}
+
+// Fetches reports the repositories being fetched and their last errors.
+func (s *service) Fetches() FetchState {
+	return s.app.fetcher.State()
 }
 
 // Checkout checks a worktree out into a yesman's workspace.
