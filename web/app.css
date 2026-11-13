@@ -3,7 +3,8 @@
 
 :root {
   --side-width: 264px;
-  --info-width: 320px;
+  --files-width: 300px; /* the files pane with the tree alone */
+  --tree-width: 248px;
   --titlebar: 40px; /* the window's TitleBarHeight, in app.go */
   --thread-width: 760px;
   /* Derived from Magpie's ink so they weigh the same in both themes; its
@@ -224,23 +225,93 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .welcome form { display: flex; gap: 8px; justify-content: center; }
 .welcome .mds-input { max-width: 240px; }
 
-/* Workspace panel */
-.info { grid-column: 3; grid-row: 2; width: var(--info-width); min-height: 0; overflow-y: auto; border-left: 1px solid var(--mds-line); background: var(--mds-sidebar); }
-.info-top { height: 44px; border-bottom: 1px solid var(--mds-line); display: flex; align-items: center; padding: 0 16px; }
-.info-top strong { font-family: var(--mds-font-heading); font-weight: 400; }
-.info-section { padding: 14px 16px; display: grid; gap: 8px; }
-.info-section + .info-section { border-top: 1px solid var(--mds-line); }
-.info-section h3 { margin: 0; font-family: var(--mds-font-heading); font-weight: 400; font-size: var(--mds-text-note); color: var(--mds-muted); }
+/* Files pane: a workspace's tree, and previews of its files in tabs. */
+.files { grid-column: 3; grid-row: 2; display: flex; flex-direction: column; width: var(--files-width); min-width: 0; min-height: 0; border-left: 1px solid var(--mds-line); background: var(--app-pane); }
+.files[data-has-file] { width: clamp(520px, 50vw, 980px); }
+.files { position: relative; max-width: calc(100vw - 320px); }
+.files-tree { position: relative; }
+/* Drag handles over the pane's left border and the tree's. */
+.files-resize { position: absolute; z-index: 2; top: 0; bottom: 0; left: -4px; width: 8px; cursor: col-resize; touch-action: none; }
+.files-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background var(--mds-duration-fast) var(--mds-ease); }
+.files-resize:hover::after, .files-resize:focus-visible::after, :root.resizing .files-resize::after { background: var(--mds-accent-ink); }
+.files-resize:focus-visible { outline: none; }
+:root.resizing, :root.resizing * { cursor: col-resize !important; user-select: none !important; -webkit-user-select: none !important; }
+:root[data-files="wide"] .main { display: none; }
+:root[data-files="wide"] .files { grid-column: 2 / -1; width: auto; max-width: none; border-left: 0; }
 .path { font-family: var(--mds-mono); font-size: var(--mds-text-caption); color: var(--mds-ink-secondary); overflow-wrap: anywhere; }
-.wt { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; padding: 6px 0; }
-.wt + .wt { border-top: 1px solid var(--mds-line); }
-.wt-dir { font-family: var(--mds-mono); font-size: var(--mds-text-caption); color: var(--mds-ink); overflow-wrap: anywhere; }
-.wt-meta { grid-column: 1; color: var(--mds-muted); font-size: var(--mds-text-caption); overflow-wrap: anywhere; }
-.wt button { grid-column: 2; grid-row: 1 / span 2; }
-.info .mds-input, .info .mds-select { width: 100%; }
-.stack { display: grid; gap: 8px; }
+
+.files-head { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 8px 0 6px; border-bottom: 1px solid var(--mds-line); }
+.files-title { padding-left: 8px; color: var(--mds-ink); font-family: var(--mds-font-heading); font-size: var(--mds-text-note); font-weight: 400; }
+.files-tabs { display: flex; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.files-tab { display: flex; align-items: center; flex: 0 0 auto; max-width: 220px; padding-right: 2px; border-radius: var(--mds-radius-sm); color: var(--mds-ink-subtle); }
+.files-tab:hover { background: var(--mds-hover); }
+.files-tab[aria-selected="true"] { background: var(--mds-selected); color: var(--mds-ink-strong); }
+.files-tab-name { min-width: 0; padding: 4px 4px 4px 10px; border: 0; background: none; color: inherit; font: inherit; font-size: var(--mds-text-note); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
+.files-tab:not([data-pinned]) .files-tab-name { font-style: italic; }
+.files-tab .mds-icon-button { visibility: hidden; }
+.files-tab:is(:hover, [aria-selected="true"], :focus-within) .mds-icon-button { visibility: visible; }
+.files-tab .mds-icon { width: 12px; height: 12px; }
+.files-head-actions, .files-bar-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; flex: 0 0 auto; }
+
+.files-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; min-height: 36px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--mds-line); }
+.files-crumb { min-width: 0; overflow: hidden; color: var(--mds-ink-secondary); font-size: var(--mds-text-note); text-overflow: ellipsis; white-space: nowrap; }
+.files-bar .mds-button--small { min-height: 26px; padding: 2px 8px; font-size: var(--mds-text-caption); }
+
+.files-body { flex: 1 1 auto; display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; }
+.files[data-has-file] .files-body[data-tree="true"] { grid-template-columns: minmax(0, 1fr) var(--tree-width); }
+.files-view { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.files-tree { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.files[data-has-file] .files-tree { border-left: 1px solid var(--mds-line); background: var(--mds-sidebar); }
+.files-search { width: auto; margin: 8px 8px 4px; }
+.files-tree-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 2px 6px 16px; }
+
+.tree-row {
+  display: grid; grid-template-columns: 14px minmax(0, 1fr); align-items: center; gap: 6px;
+  width: 100%; min-height: 26px; padding: 2px 8px 2px calc(8px + var(--depth, 0) * 14px);
+  border: 0; border-radius: var(--mds-radius-sm); background: transparent; color: var(--mds-ink-soft);
+  font: inherit; font-size: var(--mds-text-note); text-align: left; cursor: default;
+}
+.tree-row:hover { background: var(--mds-hover); }
+.tree-row[aria-selected="true"] { background: var(--mds-selected); color: var(--mds-ink-strong); }
+.tree-row:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: -2px; }
+.tree-chevron { width: 12px; height: 12px; justify-self: center; color: var(--mds-muted); transition: transform var(--mds-duration) var(--mds-ease); }
+.tree-row[aria-expanded="true"] .tree-chevron { transform: rotate(90deg); }
+.tree-icon { width: 14px; height: 14px; color: var(--mds-muted); }
+.tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-dir { margin-left: 8px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.tree-note { margin: 0; padding: 10px calc(10px + var(--depth, 0) * 14px); color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.5; }
+@media (prefers-reduced-motion: reduce) { .tree-chevron { transition: none; } }
+
+.files-note { display: grid; gap: 6px; justify-items: start; padding: 32px 24px; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.55; }
+.files-note strong { color: var(--mds-ink); font-size: var(--mds-text-body); font-weight: 400; }
+.files-notice { position: sticky; left: 0; margin: 0; padding: 6px 14px; border-bottom: 1px solid var(--mds-warn-line); background: var(--mds-warn-bg); color: var(--mds-warn-detail); font-size: var(--mds-text-caption); }
+.files-md { max-width: 78ch; padding: 20px 28px 40px; }
+.files-image { display: grid; justify-items: center; gap: 10px; margin: 0; padding: 28px 24px; }
+.files-image img { max-width: 100%; height: auto; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-sm); background: var(--mds-code); }
+.files-image figcaption { color: var(--mds-muted); font-size: var(--mds-text-caption); font-variant-numeric: tabular-nums; }
+
+/* The editor fills the preview and scrolls itself. */
+.files-view--editor { display: flex; flex-direction: column; overflow: hidden; }
+.files-editor { flex: 1 1 auto; min-height: 0; }
+.files-editor > .cm-editor { height: 100%; }
+.files-tab[data-dirty] .files-tab-name::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--mds-ink-subtle); vertical-align: 1px; }
+.files-conflict { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--mds-warn-line); background: var(--mds-warn-bg); color: var(--mds-warn-detail); font-size: var(--mds-text-caption); line-height: 1.5; }
+.files-conflict-actions { display: flex; gap: 6px; }
+.files-conflict .mds-button--small { min-height: 26px; padding: 2px 10px; font-size: var(--mds-text-caption); }
+
+/* The editor's syntax colours, from Magpie's code tokens where it has them. */
+:root {
+  --syn-keyword: #8a3fb8; --syn-string: var(--mds-code-value); --syn-number: #9a5b00; --syn-type: #a14a12;
+  --syn-func: var(--mds-code-key); --syn-tag: #a8305a; --syn-comment: var(--mds-muted); --syn-meta: var(--mds-ink-subtle);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --syn-keyword: #d2a8ff; --syn-number: #f0b672; --syn-type: #f3a46b; --syn-tag: #ff9bc0; }
+}
+:root[data-theme="dark"] { --syn-keyword: #d2a8ff; --syn-number: #f0b672; --syn-type: #f3a46b; --syn-tag: #ff9bc0; }
+
 
 .dialog-hint { margin: 6px 0 12px; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.6; }
 .mds-dialog h2 { margin: 0; }
 .mds-dialog .field { margin-top: 4px; }
+.mds-dialog .field + .field { margin-top: 12px; }
 .danger { color: var(--mds-error); }

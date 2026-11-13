@@ -54,6 +54,8 @@ type app struct {
 	settings Settings
 
 	updates *updates
+
+	files fileWatch // the workspace whose files the page shows
 }
 
 // titlebarHeight is the height of the titlebar the page draws.
