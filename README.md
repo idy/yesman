@@ -24,7 +24,9 @@ Every agent runs your installed `pi` with your usual pi configuration (models, p
 - `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`
 - for leads: `yesman_worker_start`, `yesman_worker_send`, `yesman_worker_remove`
 
-The composer lets you choose the current agent's model and reasoning effort. Models come from pi's configured, authenticated catalog, grouped only when there is more than one provider; effort shows only the levels the selected model supports. Change them between runs without starting a new conversation. pi saves the selection in that agent's session once it has messages, and restores it when the agent resumes.
+The composer lets you choose the current agent's model and reasoning effort from the right side below the input box. Models come from pi's configured, authenticated catalog, grouped only when there is more than one provider; effort shows only the levels the selected model supports. Change them between runs without starting a new conversation. pi saves the selection in that agent's session once it has messages, and restores it when the agent resumes.
+
+The context meter beside these choices opens pi's estimated current context usage and model limit, with free space, cumulative input/output and cache usage, and message/tool counts. It refreshes after messages, tool results and compaction. Current context and cumulative session totals are kept separate; when pi cannot report the current context size, such as just after compaction, the viewer shows it as unknown.
 
 The app keeps running in the tray with its window closed. Agents are child processes of the app, so quitting it stops them; they resume from their sessions next time.
 

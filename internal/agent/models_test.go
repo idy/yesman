@@ -17,7 +17,7 @@ func TestModelAndEffortSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(opts.Models) != 2 || opts.Agent.Model != "shared" || opts.Agent.Provider != "alpha" || opts.Agent.Since.IsZero() {
+	if len(opts.Models) != 2 || opts.Models[0].ContextWindow != 200000 || opts.Agent.Model != "shared" || opts.Agent.Provider != "alpha" || opts.Agent.Since.IsZero() {
 		t.Fatalf("initial choices: %+v", opts)
 	}
 	info, err := m.SetEffort(ctx, id, "max")

@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.8
+
+- A compact message field without the shortcut hint underneath. Text and the smaller, unboxed Send and Stop icons share a row, with the last line and icons aligned when the message grows.
+- A wider, taller model menu shows each model's context limit and supports arrow keys and type-ahead.
+- Model and effort choices sit on the right below the input box, alongside a context meter. Open it to see the estimated context used, model limit and free space, plus separate session token totals, cache usage and message/tool counts from pi.
+- The context viewer refreshes as the conversation changes, supports the keyboard and both appearances, and keeps unavailable context usage distinct from an empty window.
+
 ## 0.1.7
 
 - Choose where yesman keeps its data from General → Storage. Browse to or enter a folder, then restart to use it, including folders that already contain your data.
