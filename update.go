@@ -87,6 +87,7 @@ func (u *updates) start() {
 	if !enabled {
 		return
 	}
+	log.Printf("updates: checking for versions newer than %s every %s", mygo.App.Version(), updateInterval)
 	go func() {
 		time.Sleep(10 * time.Second) // after the window has opened
 		for {

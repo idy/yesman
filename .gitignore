@@ -10,3 +10,6 @@ Thumbs.db
 # Local logs and agent settings
 *.log
 .claude/settings.local.json
+
+# mygo build output
+/build/
