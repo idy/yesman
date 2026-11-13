@@ -6,8 +6,12 @@ Each release's section is what installed copies show as its release notes.
 
 - Each yesman has a board: a task list its agents keep with the new `yesman_board` tool. Open it from the titlebar beside the conversation, where the files show. Open tasks keep their order, a blocked one says why, finished ones fold into Done, and a task's owner opens that worker's conversation.
 - The lead delegates instead of working, so it stays free to talk: it has no shell and writes only knowledge notes, and hands changes, commands and investigations to workers. Workers keep their own board tasks up to date.
-- The sidebar shows what each working agent is doing now, such as the command it runs or the file it reads, and how long its run has gone on. Idle workers show their task.
-- The lead hears when a worker's run is stopped by you or its process fails, not only when it finishes.
+- The sidebar shows each worker's subject in words, and how long a working agent's run has gone on. What an agent is doing now, such as the file it reads, shows at the foot of its conversation.
+- A worker that finished and reported closes and shows greyed in its place. Right-click a yesman to hide or show its done workers. Messaging a done worker starts it again with its session.
+- The lead hears when a worker's run is stopped by you or its process fails, not only when it finishes, and restarts failed workers itself.
+- Workers no longer turn to you. A question a worker's tools ask goes to its lead, which answers it, and a worker shows as asking its yesman instead of needing you. Only a lead asks you things or notifies you.
+- The lead sees the work through: it decides what it can, finishes everything that does not wait on you, and then brings the open decisions together. If it ends a run with tasks open and nothing running, yesman reminds it once.
+- The finished notification waits until the whole yesman has settled.
 
 ## 0.1.8
 

@@ -41,6 +41,9 @@ func TestContextBoardAndRoles(t *testing.T) {
 		"- t1 [blocked] Fix the login timeout (owner e2e): waiting for credentials\n",
 		"1 done or dropped",
 		"set its owner when you hand it to a worker",
+		"what you take on, you see through to the end",
+		"yesman_worker_answer",
+		"put the open decisions to the user together",
 	} {
 		if !strings.Contains(lead, want) {
 			t.Errorf("the lead's context lacks %q:\n%s", want, lead)
@@ -51,7 +54,7 @@ func TestContextBoardAndRoles(t *testing.T) {
 	}
 
 	worker := BuildContext(ctx, p, m, y, agent.Info{ID: "alice/e2e", Name: "e2e", Role: agent.RoleWorker, Task: "Fix it"}, board)
-	if !strings.Contains(worker, `Keep the tasks you own (owner "e2e") current`) || strings.Contains(worker, "You have no shell") {
+	if !strings.Contains(worker, `Keep the tasks you own (owner "e2e") current`) || !strings.Contains(worker, "Do not stop to ask") || strings.Contains(worker, "You have no shell") {
 		t.Errorf("worker context:\n%s", worker)
 	}
 

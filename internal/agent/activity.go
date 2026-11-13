@@ -170,6 +170,8 @@ func describeTool(name string, raw json.RawMessage, dir string) string {
 		return with("Starting worker", str("name"))
 	case "yesman_worker_send":
 		return with("Messaging", str("name"))
+	case "yesman_worker_answer":
+		return with("Answering", str("name"))
 	case "yesman_worker_remove":
 		return with("Removing worker", str("name"))
 	case "yesman_checkout":

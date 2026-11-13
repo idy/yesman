@@ -66,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/workers", s.handle(s.startWorker))
 	mux.HandleFunc("POST /v1/workers/send", s.handle(s.sendWorker))
 	mux.HandleFunc("POST /v1/workers/remove", s.handle(s.removeWorker))
+	mux.HandleFunc("POST /v1/workers/answer", s.handle(s.answerWorker))
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
 	return mux
@@ -280,15 +281,16 @@ func (s *Server) startWorker(_ context.Context, c caller, r *http.Request) (any,
 		return nil, errLeadOnly
 	}
 	var req struct {
-		Name string `json:"name"`
-		Task string `json:"task"`
+		Name  string `json:"name"`
+		Title string `json:"title"`
+		Task  string `json:"task"`
 	}
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	return s.Agents.StartWorker(ctx, c.yesman.Name, req.Name, req.Task)
+	return s.Agents.StartWorker(ctx, c.yesman.Name, req.Name, req.Title, req.Task)
 }
 
 func (s *Server) sendWorker(_ context.Context, c caller, r *http.Request) (any, error) {
@@ -315,6 +317,32 @@ func (s *Server) sendWorker(_ context.Context, c caller, r *http.Request) (any, 
 		return nil, err
 	}
 	return map[string]bool{"sent": true}, nil
+}
+
+// answerWorker answers the question a worker waits on, for the lead, which
+// answers for its workers before the user does.
+func (s *Server) answerWorker(_ context.Context, c caller, r *http.Request) (any, error) {
+	if c.agent.Role != agent.RoleLead {
+		return nil, errLeadOnly
+	}
+	var req struct {
+		Name string `json:"name"`
+		agent.DialogReply
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	if req.Name == yesmen.LeadName {
+		return nil, errors.New("that is you")
+	}
+	id := agent.ID(c.yesman.Name, req.Name)
+	if _, err := s.Agents.Get(id); err != nil {
+		return nil, err
+	}
+	if err := s.Agents.AnswerDialog(id, req.DialogReply); err != nil {
+		return nil, err
+	}
+	return map[string]bool{"answered": true}, nil
 }
 
 func (s *Server) removeWorker(_ context.Context, c caller, r *http.Request) (any, error) {
@@ -377,11 +405,21 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	if me.Role == agent.RoleLead {
 		w("You are the lead of the yesman named %q. You talk with the user, plan, keep the board and this yesman's knowledge, and get the work delivered by workers.\n\n", y.Name)
 		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are knowledge notes. Read files only to answer a quick question, not to investigate. ")
-		w("Hand everything else to workers with yesman_worker_start (changes, commands, tests, research across many files, reviews, releases), then end your run. Each worker is its own pi agent in this workspace; several can run at once. ")
+		w("Hand everything else to workers with yesman_worker_start (changes, commands, tests, research across many files, reviews, releases), each with a title naming its subject, then end your run. Each worker is its own pi agent in this workspace; several can run at once. ")
 		w("Keep every run short: answer, delegate, end.\n")
 		w("Never sleep, poll or read session logs to wait for a worker: end your run, and its report arrives as a new message that starts your next one. You also hear when a worker's run was stopped by the user or failed.\n")
+		w("\n## Seeing it through\n\n")
+		w("You answer for this yesman: what you take on, you see through to the end. The user should not have to look after the workers. ")
+		w("When a report arrives, check it against the board, mark the task, and start the next step yourself (follow-ups, fixes, reviews) until everything the user asked for is done.\n")
+		w("- A worker's question arrives as a [yesman] message: answer it with yesman_worker_answer, or with yesman_worker_send when the worker asked in its report.\n")
+		w("- A worker whose process failed: message it with yesman_worker_send to start it again, or start a fresh worker. Tell the user only if it keeps failing.\n")
+		w("- A worker's run the user stopped: that was their call. Leave it stopped and mark its task blocked, unless they say otherwise.\n")
+		w("- When you end a run with tasks still todo or doing and no worker running, yesman reminds you once.\n")
+		w("Decide everything you can. Bring the user only what you cannot decide: what to build, trade-offs only they can weigh, taste, credentials, or anything irreversible they did not ask for. ")
+		w("Never hold the rest of the work for these: mark each task that waits on one blocked, with the question in its note, finish everything else, and then put the open decisions to the user together, each with the options and your recommendation.\n")
 	} else {
 		w("You are %q, a worker of the yesman named %q. Your lead started you for one task and receives your final message when you finish a run, so end each run with a short report: what you did, where (worktree, branch, PR) and what is left.\n", me.Name, y.Name)
+		w("Do not stop to ask. When something is unclear, make the reasonable choice, say so in your report, and go on. If you cannot go on without a decision, finish everything that does not depend on it, then end your run with the question in your report: your lead answers it, not the user. Questions your tools ask go to your lead too.\n")
 		if me.Task != "" {
 			w("\nYour task, as given:\n%s\n", indent(me.Task))
 		}
@@ -452,19 +490,41 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 		}
 	}
 	w("\n## Agents\n\n")
-	w("Agent session logs are under .yesman/sessions/<name>/ as JSONL; read a worker's to see what it did.\n")
+	w("Agent session logs are under .yesman/sessions/<name>/ as JSONL; read a worker's to see what it did. The user sees workers by number, a1, a2 and so on, beside their subject, and may name them that way; you address them by name.\n")
 	if len(team) == 0 {
 		w("No other agents.\n")
 	}
+	finished := 0
 	for _, i := range team {
-		w("- %s (%s): %s", i.Name, i.Role, i.Status)
+		if !i.FinishedAt.IsZero() {
+			finished++
+			continue
+		}
+		if i.Number > 0 {
+			w("- a%d %s (%s): %s", i.Number, i.Name, i.Role, i.Status)
+		} else {
+			w("- %s (%s): %s", i.Name, i.Role, i.Status)
+		}
 		if i.Activity != "" {
 			w(", now: %s", i.Activity)
 		}
-		if i.Task != "" {
-			w(", task: %s", oneLine(i.Task, 120))
+		if i.Title != "" {
+			w(", on: %s", i.Title)
 		}
 		w("\n")
+	}
+	if finished > 0 {
+		w("Done, reported and closed (a message starts one again, with its session): ")
+		n := 0
+		for _, i := range team {
+			if !i.FinishedAt.IsZero() {
+				if n++; n > 1 {
+					w(", ")
+				}
+				w("a%d %s (%s)", i.Number, i.Name, oneLine(i.Title, 80))
+			}
+		}
+		w(".\n")
 	}
 	return b.String()
 }

@@ -221,9 +221,10 @@ export default function yesman(pi: ExtensionAPI) {
 		name: "yesman_worker_start",
 		label: "yesman: start worker",
 		description:
-			"Start a worker: a new pi agent of this yesman, in this workspace, that works on one task and reports its final message back to you when it finishes a run. Give it a complete task: the goal, which worktree to use (or to check one out), what done means and how to deliver (commit, push, PR), and the ID of its board task, whose owner you set to the worker's name. Workers run in parallel; give each its own worktree.",
+			"Start a worker: a new pi agent of this yesman, in this workspace, that works on one task and reports its final message back to you when it finishes a run; then yesman closes it and shows it as done until you message it again. Give it a title the user sees beside its name, and a complete task: the goal, which worktree to use (or to check one out), what done means and how to deliver (commit, push, PR), and the ID of its board task, whose owner you set to the worker's name. Workers run in parallel; give each its own worktree.",
 		parameters: Type.Object({
 			name: Type.String({ description: "Short name: 1-32 lowercase letters, digits and dashes, such as fix-login" }),
+			title: Type.String({ description: "The subject of its work in a few words, up to 80 characters, as the user should see it: usually its board task's title, such as \"Fix the login timeout\". Not an instruction like \"Do task t5\"." }),
 			task: Type.String({ description: "The task, complete enough to work on without asking" }),
 		}),
 		async execute(_id, params, signal) {
@@ -235,7 +236,7 @@ export default function yesman(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "yesman_worker_send",
 		label: "yesman: message worker",
-		description: "Send a message to one of your workers. A working worker reads it after its current tool calls; an idle one starts a new run.",
+		description: "Send a message to one of your workers. A working worker reads it after its current tool calls; an idle one starts a new run, and a done one is started again with its session and has work again.",
 		parameters: Type.Object({
 			name: Type.String({ description: "The worker's name" }),
 			message: Type.String(),
@@ -247,9 +248,26 @@ export default function yesman(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "yesman_worker_answer",
+		label: "yesman: answer worker",
+		description:
+			"Answer the question one of your workers is waiting on, which yesman sent you as a [yesman] message: value for a choice (one of its options) or for text, confirmed for a yes or no, or cancelled to dismiss it. Workers' questions come to you, not the user: decide yourself whenever you can.",
+		parameters: Type.Object({
+			name: Type.String({ description: "The worker's name" }),
+			value: Type.Optional(Type.String({ description: "The option chosen, as offered, or the text asked for" })),
+			confirmed: Type.Optional(Type.Boolean({ description: "The answer to a yes or no question" })),
+			cancelled: Type.Optional(Type.Boolean({ description: "Dismiss the question without an answer" })),
+		}),
+		async execute(_id, params, signal) {
+			await call("POST", "/v1/workers/answer", params, signal);
+			return result(`Answered ${params.name}.`);
+		},
+	});
+
+	pi.registerTool({
 		name: "yesman_worker_remove",
 		label: "yesman: remove worker",
-		description: "Stop a worker and remove it from this yesman once its task is done. Its session log stays in .yesman/sessions/.",
+		description: "Remove a worker from this yesman for good. Not needed when its task is done: a worker that reported is closed and kept as done, for follow-ups. Its session log stays in .yesman/sessions/.",
 		parameters: Type.Object({
 			name: Type.String({ description: "The worker's name" }),
 		}),

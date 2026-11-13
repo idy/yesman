@@ -117,7 +117,7 @@ func waitPrompt(t *testing.T, prompts func(string) []string, id, prefix string) 
 func TestLeadHearsOfAStoppedRun(t *testing.T) {
 	m, _ := newTestManager(t, 0, "FAKE_PI_ABORT_WORKERS=1")
 	prompts := promptsTo(m)
-	if _, err := m.StartWorker(context.Background(), "alice", "w1", "a task"); err != nil {
+	if _, err := m.StartWorker(context.Background(), "alice", "w1", "", "a task"); err != nil {
 		t.Fatal(err)
 	}
 	waitPrompt(t, prompts, ID("alice", yesmen.LeadName), `[yesman] Worker "w1" was stopped by the user`)
@@ -131,7 +131,7 @@ func TestLeadHearsOfAStoppedRun(t *testing.T) {
 func TestLeadHearsOfAFailedWorker(t *testing.T) {
 	m, _ := newTestManager(t, 0, "FAKE_PI_CRASH_WORKERS=1")
 	prompts := promptsTo(m)
-	if _, err := m.StartWorker(context.Background(), "alice", "w1", "a task"); err != nil {
+	if _, err := m.StartWorker(context.Background(), "alice", "w1", "", "a task"); err != nil {
 		t.Fatal(err)
 	}
 	waitPrompt(t, prompts, ID("alice", yesmen.LeadName), `[yesman] Worker "w1" stopped unexpectedly`)
@@ -141,7 +141,7 @@ func TestLeadHearsOfAFailedWorker(t *testing.T) {
 func TestPuttingAWorkerToSleepTellsNobody(t *testing.T) {
 	m, _ := newTestManager(t, 0)
 	prompts := promptsTo(m)
-	if _, err := m.StartWorker(context.Background(), "alice", "w1", "a task"); err != nil {
+	if _, err := m.StartWorker(context.Background(), "alice", "w1", "", "a task"); err != nil {
 		t.Fatal(err)
 	}
 	lead := ID("alice", yesmen.LeadName)

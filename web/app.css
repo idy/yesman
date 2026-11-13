@@ -69,11 +69,16 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .agent-row > .dot-wrap { grid-area: dot; }
 .agent-row > .name { grid-area: name; }
 .agent-row > .meta { grid-area: meta; font-variant-numeric: tabular-nums; }
-.agent-row > .line { grid-area: line; min-width: 0; overflow: hidden; color: var(--mds-faint); font-size: var(--mds-text-caption); text-overflow: ellipsis; white-space: nowrap; }
-.agent-row > .line[data-live] { color: var(--mds-muted); }
-.agent-row--yesman { color: var(--mds-ink); margin-top: 6px; grid-template-columns: 14px auto minmax(0, 1fr) auto; grid-template-areas: "dot name line meta"; }
-.agent-row--worker { padding-left: 26px; grid-template-columns: 14px minmax(0, 1fr) auto; grid-template-areas: "dot name meta" ". line line"; row-gap: 1px; font-size: var(--mds-text-note); min-height: 30px; }
-.agent-row--worker .name { font-family: var(--mds-mono); font-size: var(--mds-text-caption); }
+.agent-row--yesman { color: var(--mds-ink); margin-top: 4px; min-height: 30px; padding-block: 4px; }
+/* Workers sit close: their name over their subject, both tight. */
+/* A worker is one line: mark, number, subject, run time. */
+.agent-row--worker { grid-template-columns: 14px auto minmax(0, 1fr) auto; grid-template-areas: "dot num subject meta"; gap: 6px; min-height: 0; padding: 3px 10px 3px 24px; font-size: var(--mds-text-note); line-height: 18px; }
+.agent-row > .num { grid-area: num; min-width: 2ch; color: var(--mds-muted); font-family: var(--mds-mono); font-size: var(--mds-text-caption); font-variant-numeric: tabular-nums; }
+.agent-row > .subject { grid-area: subject; min-width: 0; overflow: hidden; color: var(--mds-ink); text-overflow: ellipsis; white-space: nowrap; }
+.agent-row[aria-current] > .subject { color: var(--mds-ink-strong); }
+/* A done worker is greyed where it is. */
+.agent-row[data-done] > .subject, .agent-row[data-done] > .num { color: var(--mds-faint); }
+.agent-row .done-mark { width: 12px; height: 12px; color: var(--mds-faint); }
 
 .dot-wrap { display: grid; place-items: center; width: 14px; height: 14px; }
 [data-status="working"] { --mds-tone: var(--mds-accent); --mds-tone-ink: var(--mds-accent-ink); }
@@ -81,6 +86,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 [data-status="failed"] { --mds-tone: var(--mds-error); --mds-tone-ink: var(--mds-error); }
 [data-status="idle"] { --mds-tone: var(--mds-good); }
 [data-status="starting"] { --mds-tone: var(--mds-muted); }
+[data-status="asking"] { --mds-tone: var(--mds-accent); --mds-tone-ink: var(--mds-accent-ink); }
 [data-status="working"] .mds-dot { animation: pulse 1.2s var(--mds-ease) infinite; }
 @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
 @media (prefers-reduced-motion: reduce) { [data-status="working"] .mds-dot { animation: none; } }
@@ -218,6 +224,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 
 .ask { display: grid; gap: 10px; padding: 12px 14px; border: 1px solid var(--mds-warn-line); border-radius: var(--mds-radius-md); background: var(--mds-warn-bg); }
 .ask strong { font-family: var(--mds-font-heading); font-weight: 400; color: var(--mds-warn); }
+.ask .ask-hint { margin: 0; color: var(--mds-muted); font-size: var(--mds-text-caption); }
 .ask p { margin: 0; color: var(--mds-warn-detail); font-size: var(--mds-text-note); white-space: pre-wrap; }
 .ask-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 

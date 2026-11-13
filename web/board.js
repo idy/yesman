@@ -117,7 +117,7 @@ export function createBoard(host) {
     const owner = t.owner ? host.agent(`${y.name}/${t.owner}`) : null;
     const ownerEl = !t.owner ? null
       : owner
-        ? h('button', { class: 'board-owner', type: 'button', title: `Open ${t.owner}'s conversation`, onclick: () => host.openAgent(owner.id) }, t.owner)
+        ? h('button', { class: 'board-owner', type: 'button', title: `${t.owner}: open its conversation`, onclick: () => host.openAgent(owner.id) }, owner.number ? `a${owner.number}` : t.owner)
         : h('span', { class: 'board-owner', 'data-gone': 'true', title: `${t.owner} is not one of ${y.name}'s agents now` }, t.owner);
     const inline = t.status === 'blocked' && t.note && !isExpanded ? h('p', { class: 'board-inline' }, t.note.split('\n')[0]) : null;
     const details = isExpanded
