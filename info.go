@@ -51,7 +51,7 @@ type infoCache struct {
 	mu      sync.Mutex
 	changes map[string]*changesEntry // by worktree path
 	pulls   map[string]pullEntry     // by repository and branch
-	usage   map[string]*usageEntry   // by workspace path
+	usage   map[string]*usageEntry   // by the folder measured: a workspace, or the yesman folder
 	found   map[string]foundEntry    // by yesman and worktree directory
 }
 
@@ -466,14 +466,27 @@ func (s *service) Usage(ctx context.Context, name string, refresh bool) (Workspa
 	if err != nil {
 		return WorkspaceUsage{}, err
 	}
-	cache := s.app.infoCache()
-	cache.mu.Lock()
-	e := cache.usage[y.Path]
+	return s.app.infoCache().measured(ctx, y.Path, refresh, func(ctx context.Context) (WorkspaceUsage, error) {
+		var wts []pool.Worktree
+		if snapshot, err := s.app.pool.Snapshot(ctx); err == nil || len(snapshot.Repos) > 0 {
+			wts = snapshot.Under(y.Path)
+		}
+		return measureWorkspace(ctx, y.Path, wts)
+	})
+}
+
+// measured returns the last measure of a folder, unless it is older than
+// usageFresh or refresh asks again; then measure walks it once, in the
+// background, for every caller that asks meanwhile. A caller that gives up
+// leaves the walk to finish for the next.
+func (c *infoCache) measured(ctx context.Context, dir string, refresh bool, measure func(context.Context) (WorkspaceUsage, error)) (WorkspaceUsage, error) {
+	c.mu.Lock()
+	e := c.usage[dir]
 	if e != nil {
 		select {
 		case <-e.done:
 			if !refresh && time.Since(e.at) < usageFresh && e.err == nil {
-				cache.mu.Unlock()
+				c.mu.Unlock()
 				return e.u, nil
 			}
 			e = nil
@@ -482,22 +495,18 @@ func (s *service) Usage(ctx context.Context, name string, refresh bool) (Workspa
 	}
 	if e == nil {
 		e = &usageEntry{done: make(chan struct{})}
-		cache.usage[y.Path] = e
+		c.usage[dir] = e
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			var wts []pool.Worktree
-			if snapshot, err := s.app.pool.Snapshot(ctx); err == nil || len(snapshot.Repos) > 0 {
-				wts = snapshot.Under(y.Path)
-			}
-			u, err := measureWorkspace(ctx, y.Path, wts)
-			cache.mu.Lock()
+			u, err := measure(ctx)
+			c.mu.Lock()
 			e.u, e.err, e.at = u, err, time.Now()
-			cache.mu.Unlock()
+			c.mu.Unlock()
 			close(e.done)
 		}()
 	}
-	cache.mu.Unlock()
+	c.mu.Unlock()
 	select {
 	case <-e.done:
 		return e.u, e.err
@@ -506,26 +515,51 @@ func (s *service) Usage(ctx context.Context, name string, refresh bool) (Workspa
 	}
 }
 
-// measureWorkspace adds up the sizes of a workspace's files by part. It
-// does not follow symbolic links.
+// measureWorkspace adds up the sizes of a workspace's files by part.
 func measureWorkspace(ctx context.Context, root string, wts []pool.Worktree) (WorkspaceUsage, error) {
-	type part struct {
-		prefix string // slashed, relative, with a trailing slash
-		UsagePart
-	}
-	var parts []*part
+	var parts []UsagePart
 	for _, wt := range wts {
 		rel := filepath.ToSlash(wt.Dir)
-		parts = append(parts, &part{prefix: rel + "/", UsagePart: UsagePart{Kind: "worktree", Name: rel, Path: rel}})
+		parts = append(parts, UsagePart{Kind: "worktree", Name: rel, Path: rel})
 	}
 	parts = append(parts,
-		&part{prefix: ".yesman/knowledge/", UsagePart: UsagePart{Kind: "knowledge", Path: ".yesman/knowledge"}},
-		&part{prefix: ".yesman/sessions/", UsagePart: UsagePart{Kind: "sessions", Path: ".yesman/sessions"}},
-		&part{prefix: ".yesman/", UsagePart: UsagePart{Kind: "yesman", Path: ".yesman"}},
+		UsagePart{Kind: "knowledge", Path: ".yesman/knowledge"},
+		UsagePart{Kind: "sessions", Path: ".yesman/sessions"},
+		UsagePart{Kind: "yesman", Path: ".yesman"},
 	)
-	// The longest prefix wins: a worktree inside another counts as itself.
+	u, err := measureTree(ctx, root, parts)
+	if err != nil {
+		return u, err
+	}
+	all := u.Parts
+	u.Parts = []UsagePart{}
+	for _, pt := range all {
+		if pt.Files > 0 || pt.Kind == "worktree" {
+			u.Parts = append(u.Parts, pt)
+		}
+	}
+	sort.SliceStable(u.Parts, func(i, j int) bool { return u.Parts[i].Bytes > u.Parts[j].Bytes })
+	return u, nil
+}
+
+// measureTree adds up the sizes of the files under root by part: each
+// part holds the files under its Path, relative to root and slashed, and
+// a file under several counts in the one with the longest, so a worktree
+// inside another counts as itself. Files under none count in a last part,
+// other. Parts come back in the order given, other last. It does not
+// follow symbolic links.
+func measureTree(ctx context.Context, root string, given []UsagePart) (WorkspaceUsage, error) {
+	type part struct {
+		prefix string // slashed, relative, with a trailing slash
+		*UsagePart
+	}
+	all := append(append([]UsagePart{}, given...), UsagePart{Kind: "other", Path: "."})
+	other := &all[len(all)-1]
+	parts := make([]part, 0, len(given))
+	for i := range given {
+		parts = append(parts, part{prefix: all[i].Path + "/", UsagePart: &all[i]})
+	}
 	sort.SliceStable(parts, func(i, j int) bool { return len(parts[i].prefix) > len(parts[j].prefix) })
-	other := &part{UsagePart: UsagePart{Kind: "other", Path: "."}}
 	u := WorkspaceUsage{}
 	visits := 0
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -552,7 +586,7 @@ func measureWorkspace(ctx context.Context, root string, wts []pool.Worktree) (Wo
 		into := other
 		for _, pt := range parts {
 			if strings.HasPrefix(rel, pt.prefix) {
-				into = pt
+				into = pt.UsagePart
 				break
 			}
 		}
@@ -572,13 +606,7 @@ func measureWorkspace(ctx context.Context, root string, wts []pool.Worktree) (Wo
 	if _, statErr := os.Stat(root); statErr != nil {
 		return u, statErr
 	}
-	u.Parts = []UsagePart{}
-	for _, pt := range append(parts, other) {
-		if pt.Files > 0 || pt.Kind == "worktree" {
-			u.Parts = append(u.Parts, pt.UsagePart)
-		}
-	}
-	sort.SliceStable(u.Parts, func(i, j int) bool { return u.Parts[i].Bytes > u.Parts[j].Bytes })
+	u.Parts = all
 	u.MeasuredAt = time.Now()
 	return u, nil
 }

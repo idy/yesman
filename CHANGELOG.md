@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.16
+
+- Settings › Storage shows how much space yesman's data takes. Usage, between Data folder and Locations, measures the yesman folder in the background: its total size and file count, a bar of the repositories, workspaces, archive, runtime files and the rest, each with its share, and the space left on its disk. Measure again refreshes it.
+- Attach PNG, JPEG, GIF or WebP images to messages with the image picker, by pasting, or by dragging them into the composer. Send images with text or on their own, preview them and remove any before sending. Each message supports up to four images, 5 MiB each and 10 MiB in total.
+- Text and image drafts stay with each agent while switching conversations, and a failed send keeps the draft ready to retry. Sent images also appear in the conversation history.
+- Sending a message keeps the composer ready for the next one, while respecting focus moved to another control or conversation.
+
 ## 0.1.15
 
 - Worktrees whose pull request is merged fold into one row at the end of the info panel's Worktrees list, so the work in progress stays on top. The row opens to show them, and a merged worktree the files pane shows stays in the list.
