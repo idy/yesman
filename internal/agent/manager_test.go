@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/idy/yesman/internal/yesmen"
@@ -291,17 +292,17 @@ func TestStopAllDuringStart(t *testing.T) {
 	go func() { done <- m.Prompt(context.Background(), id, "hi") }()
 	waitStatus(t, m, id, Starting)
 	m.StopAll()
+	// Inspect before waiting for the caller: its eventual cleanup must not
+	// hide StopAll returning before the in-flight process actually exits.
+	m.mu.Lock()
+	a := m.agents[id]
+	starting, running, tokens := a.starting != nil, a.proc != nil, len(m.tokens)
+	m.mu.Unlock()
+	if starting || running || tokens != 0 {
+		t.Errorf("StopAll returned with starting=%t, running=%t, credentials=%d", starting, running, tokens)
+	}
 	if err := <-done; !errors.Is(err, errStopped) {
 		t.Errorf("interrupted start = %v, want errStopped", err)
-	}
-	if p := m.running(id); p != nil {
-		t.Fatal("a process outlived StopAll")
-	}
-	m.mu.Lock()
-	tokens := len(m.tokens)
-	m.mu.Unlock()
-	if tokens != 0 {
-		t.Errorf("%d credentials outlived StopAll", tokens)
 	}
 }
 
@@ -347,6 +348,28 @@ func TestStopAllCancelsReportRetry(t *testing.T) {
 	if p := m.running(ID("alice", yesmen.LeadName)); p != nil {
 		t.Fatal("report retry restarted the lead after quitting")
 	}
+}
+
+// Use virtual time to stop exactly during backoff, without a process or
+// a wall-clock sleep: shutdown must wake the timer wait immediately.
+func TestStopAllWakesReportBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := &Manager{cfg: Config{Yesmen: yesmen.New("", "")}, shutdown: make(chan struct{})}
+		w := &agent{info: Info{Yesman: "invalid name"}}
+		done := make(chan error, 1)
+		go func() { done <- m.tellLeadWithin(context.Background(), w, "report") }()
+		synctest.Wait() // invalid name fails synchronously; the retry is asleep
+		m.StopAll()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			if !errors.Is(err, errStopped) {
+				t.Errorf("retry after quitting = %v, want errStopped", err)
+			}
+		default:
+			t.Fatal("report is still waiting for its backoff timer after shutdown")
+		}
+	})
 }
 
 func TestRestartAfterStop(t *testing.T) {
