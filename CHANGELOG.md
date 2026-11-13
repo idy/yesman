@@ -6,7 +6,8 @@ Each release's section is what installed copies show as its release notes.
 
 - Choose where yesman keeps its data from General → Storage. Browse to or enter a folder, then restart to use it, including folders that already contain your data.
 - Copy existing data yourself before switching folders. Launching with `YESMAN_HOME` still overrides the saved location.
-- Storage lists the fixed paths for repositories, the workspace parent, archive, runtime files and configuration, each with a Reveal button.
+- Storage has a compact list of fixed locations for repositories, the workspace parent, archive, runtime files and configuration, with Reveal buttons and full paths on hover.
+- Worker records are cleaned up reliably after a rejected start on Windows, including while the sidebar refreshes.
 
 ## 0.1.6
 

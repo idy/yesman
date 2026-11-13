@@ -912,8 +912,8 @@ function preferenceRow(label, hint, control) {
     h('div', { class: 'mds-row-control row-end' }, control));
 }
 
-function revealButton(path) {
-  return h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => call('Reveal', path).catch(fail) }, icon('folder'), 'Reveal');
+function revealButton(path, label) {
+  return h('button', { class: 'mds-button mds-button--small', type: 'button', title: path, 'aria-label': label ? `Reveal ${label}` : null, onclick: () => call('Reveal', path).catch(fail) }, icon('folder'), 'Reveal');
 }
 
 function renderGeneral(inner) {
@@ -951,8 +951,9 @@ function renderGeneral(inner) {
 }
 
 function storagePathRow(label, hint, path) {
-  const row = preferenceRow(label, [h('p', null, hint), h('p', { class: 'path' }, path)], revealButton(path));
+  const row = preferenceRow(label, h('p', null, hint), revealButton(path, label));
   row.classList.add('storage-path-row');
+  row.title = path;
   return row;
 }
 
@@ -963,10 +964,12 @@ function storageRows(v) {
     renderBody();
     $('#storage-path')?.focus();
   } }, 'Change…');
-  const rows = [preferenceRow('yesman folder',
-    h('div', null, h('p', { class: 'path' }, v.home),
+  const current = preferenceRow('yesman folder',
+    h('div', null, h('p', { class: 'path', title: v.home }, v.home),
       v.homeOverride ? h('p', null, 'Set by YESMAN_HOME. Unset it and restart to change the folder here.') : null),
-    h('div', { class: 'storage-actions' }, revealButton(v.home), change))];
+    h('div', { class: 'storage-actions' }, revealButton(v.home), change));
+  current.classList.add('storage-home-row');
+  const rows = [current];
   if (d) {
     const input = h('input', { class: 'mds-input', id: 'storage-path', required: true, value: d.path,
       placeholder: 'Full path to a folder', autocomplete: 'off', spellcheck: 'false',
