@@ -1,12 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"image"
-	"image/color"
-	"image/png"
 	"log"
-	"math"
 	"runtime"
 	"strconv"
 	"sync"
@@ -89,6 +84,11 @@ func (a *app) showWindow() {
 		TrafficLightPosition: &mygo.Point{X: 16, Y: (titlebarHeight - 14) / 2},
 		StateKey:             "main",
 	})
+	if runtime.GOOS != "darwin" {
+		if err := w.SetIcon(appIcon); err != nil {
+			log.Print("window icon: ", err)
+		}
+	}
 	a.win = w
 	w.Page().OnContextMenu(func(e *mygo.ContextMenuEvent) {
 		// App rows provide their own menus. Elsewhere retain native text
@@ -114,7 +114,7 @@ func (a *app) windowFocused() bool {
 }
 
 func (a *app) setupTray() {
-	t, err := mygo.NewTray(mygo.TrayOptions{Icon: trayIcon(), IconIsTemplate: true, ToolTip: "yesman"})
+	t, err := mygo.NewTray(mygo.TrayOptions{Icon: trayIcon, IconIsTemplate: true, ToolTip: "yesman"})
 	if err != nil {
 		log.Print("tray: ", err)
 		return
@@ -204,44 +204,4 @@ func (a *app) agentsChanged(list []agent.Info) {
 		})
 		_ = notification.Show()
 	}
-}
-
-// trayIcon draws a "Y", black on transparent for macOS to tint, and
-// slate blue elsewhere so it shows on light and dark taskbars.
-func trayIcon() []byte {
-	const size = 36
-	img := image.NewNRGBA(image.Rect(0, 0, size, size))
-	ink := color.NRGBA{R: 74, G: 99, B: 160, A: 255}
-	if runtime.GOOS == "darwin" {
-		ink = color.NRGBA{A: 255}
-	}
-	type seg struct{ x1, y1, x2, y2 float64 }
-	segs := []seg{{9, 7, 18, 19}, {27, 7, 18, 19}, {18, 19, 18, 30}}
-	const half = 1.9
-	for y := range size {
-		for x := range size {
-			px, py := float64(x)+0.5, float64(y)+0.5
-			d := math.Inf(1)
-			for _, s := range segs {
-				d = math.Min(d, distance(px, py, s.x1, s.y1, s.x2, s.y2))
-			}
-			cover := math.Max(0, math.Min(1, half+0.5-d))
-			if cover > 0 {
-				c := ink
-				c.A = uint8(float64(ink.A) * cover)
-				img.SetNRGBA(x, y, c)
-			}
-		}
-	}
-	var b bytes.Buffer
-	_ = png.Encode(&b, img)
-	return b.Bytes()
-}
-
-// distance from a point to a segment.
-func distance(px, py, x1, y1, x2, y2 float64) float64 {
-	dx, dy := x2-x1, y2-y1
-	t := ((px-x1)*dx + (py-y1)*dy) / (dx*dx + dy*dy)
-	t = math.Max(0, math.Min(1, t))
-	return math.Hypot(px-(x1+t*dx), py-(y1+t*dy))
 }

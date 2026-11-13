@@ -37,7 +37,6 @@ const state = {
   fetching: new Set(), // repositories being fetched
   addRepo: null, // the add form's draft while it is open
   update: null, // Yesman.Update: where updating yesman stands
-  sidebar: document.documentElement.dataset.sidebar !== 'hidden', // set by boot.js
 };
 
 const agentById = (id) => state.snap.agents.find((a) => a.id === id);
@@ -584,21 +583,6 @@ function onUpdate(u) {
 }
 
 // ---------- Sidebar ----------
-
-function applySidebar() {
-  document.documentElement.dataset.sidebar = state.sidebar ? 'shown' : 'hidden'; // boot.js set it first
-  const toggle = $('#sidebar-button');
-  const label = state.sidebar ? 'Hide the sidebar' : 'Show the sidebar';
-  toggle.setAttribute('aria-expanded', String(state.sidebar));
-  toggle.setAttribute('aria-label', label);
-  toggle.title = label;
-}
-
-function toggleSidebar() {
-  state.sidebar = !state.sidebar;
-  localStorage.setItem('yesman.sidebar', state.sidebar ? 'shown' : 'hidden');
-  applySidebar();
-}
 
 async function openHire() {
   const form = $('#hire-form');
@@ -1187,8 +1171,6 @@ async function start() {
     document.body.replaceChildren(h('div', { class: 'welcome' }, h('h1', { class: 'mds-title' }, 'yesman'), h('p', null, 'Open this page in the yesman app.')));
     return;
   }
-  $('#sidebar-button').addEventListener('click', toggleSidebar);
-  applySidebar();
   buildSideFoot();
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href]');

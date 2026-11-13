@@ -90,6 +90,9 @@ func main() {
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { a.agents.StopAll() })
 	mygo.App.WhenReady(func() {
+		if err := mygo.App.Dock.SetIcon(appIcon); err != nil {
+			log.Print("dock icon: ", err)
+		}
 		a.setupTray()
 		a.updates.start()
 		if os.Getenv("YESMAN_HIDDEN") == "" {
