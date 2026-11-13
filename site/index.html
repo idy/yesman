@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#0b5cad" data-idy-theme-color-light="#0b5cad" data-idy-theme-color-dark="#0b3d73">
+  <meta name="description" content="yesman is a desktop tray app for project workspaces, lead and worker agents, a shared repository pool, and shared knowledge.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="yesman — the agent that says yes and gets things done">
+  <meta property="og:description" content="A workspace, a lead, and the workers your project needs. An open-source desktop tray app powered by pi.">
+  <meta property="og:url" content="https://yesman.idy.dev/">
+  <title>yesman — the agent that says yes and gets things done</title>
+  <link rel="canonical" href="https://yesman.idy.dev/">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <script src="shared/sdk/idy-site.min.js"></script>
+  <link rel="stylesheet" href="shared/sdk/idy-site.css">
+  <link rel="stylesheet" href="styles.css">
+  <script src="page.js" defer></script>
+</head>
+<body class="idy-site yesman-site">
+  <a class="idy-skip-link" href="#main" data-i18n="skipContent">Skip to content</a>
+  <header class="idy-header compact-header">
+    <div class="idy-header-inner">
+      <a class="idy-home" href="https://idy.dev/">idy.dev</a>
+      <nav class="idy-nav" aria-label="Main navigation" data-i18n-aria-label="navigation">
+        <a href="#workspace" data-i18n="workspaceNav">Workspace</a>
+        <a href="#install" data-i18n="installNav">Install</a>
+        <a href="https://github.com/idy/yesman" data-i18n="source">Source</a>
+      </nav>
+      <details class="idy-mobile">
+        <summary aria-label="Main navigation" data-i18n-aria-label="navigation"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></summary>
+        <nav class="idy-mobile-panel" aria-label="Main navigation" data-i18n-aria-label="navigation">
+          <a href="#workspace" data-i18n="workspaceNav">Workspace</a><a href="#install" data-i18n="installNav">Install</a><a href="https://github.com/idy/yesman" data-i18n="source">Source</a>
+        </nav>
+      </details>
+      <div class="header-actions">
+        <div class="idy-preferences">
+          <label><span data-i18n="language">Language</span><select data-idy-language><option value="auto" data-i18n="automatic">Auto</option><option value="en">English</option><option value="zh">中文</option></select></label>
+          <label><span data-i18n="theme">Theme</span><select data-idy-theme><option value="system" data-i18n="system">System</option><option value="light" data-i18n="light">Light</option><option value="dark" data-i18n="dark">Dark</option></select></label>
+        </div>
+        <a class="idy-action" href="https://github.com/idy/yesman"><span class="idy-action-pill">GitHub</span></a>
+      </div>
+    </div>
+  </header>
+  <main id="main" class="idy-container">
+    <section class="product-intro" aria-labelledby="title">
+      <div class="product-name"><img src="icon.svg" width="72" height="72" alt=""><div><h1 id="title">yesman</h1><p class="tagline" data-i18n="tagline">the agent that says yes and gets things done.</p></div></div>
+      <p class="idy-lead" data-i18n="intro">Give a project its own workspace, a lead to talk to, and workers to move it forward. yesman keeps the repositories, conversations, and shared notes together in a desktop tray app.</p>
+      <div class="idy-cluster intro-actions"><a class="idy-button" href="#install" data-i18n="getYesman">Get yesman</a><a href="https://github.com/idy/yesman#how-it-works" data-i18n="readGuide">Read the guide</a></div>
+      <dl class="product-facts"><div><dt data-i18n="statusLabel">Status</dt><dd data-i18n="prototype">Early prototype</dd></div><div><dt data-i18n="runtimeLabel">Agent runtime</dt><dd><a href="https://pi.dev">pi</a></dd></div><div><dt data-i18n="licenseLabel">License</dt><dd><a href="https://github.com/idy/yesman/blob/main/LICENSE">MIT</a></dd></div><div><dt data-i18n="platformLabel">Platforms</dt><dd>macOS · Linux · Windows</dd></div></dl>
+    </section>
+    <section id="workspace" class="workspace-section" aria-labelledby="workspace-title">
+      <h2 id="workspace-title" data-i18n="workspaceTitle">One project. Its own workspace.</h2>
+      <p class="section-intro" data-i18n="workspaceIntro">Hire a yesman for a project, then talk to its lead. When the work splits up, the lead starts workers in the same workspace.</p>
+      <div class="workspace-layout">
+        <div class="workspace-tree"><h3 data-i18n="treeTitle">Example workspace</h3><pre aria-label="Example workspace directory layout" data-i18n-aria-label="treeLabel"><code>yesmen/my-project/
+├── .yesman/
+│   ├── knowledge/
+│   │   └── INDEX.md
+│   └── sessions/
+├── api/              <span data-i18n="worktreeComment"># worktree</span>
+└── website/          <span data-i18n="worktreeComment"># worktree</span></code></pre><p class="idy-caption" data-i18n="treeNote">Repositories live in a shared pool. Each checkout gets a worktree and a branch inside the project workspace.</p></div>
+        <dl class="mechanism"><div><dt data-i18n="leadTitle">A lead you can talk to</dt><dd data-i18n="leadBody">Discuss the goal in a dedicated conversation. The lead plans the work, keeps notes, and delegates tasks.</dd></div><div><dt data-i18n="workersTitle">Workers for focused tasks</dt><dd data-i18n="workersBody">The lead starts and messages workers. A worker’s final message returns to the lead when its run finishes.</dd></div><div><dt data-i18n="knowledgeTitle">Knowledge that stays together</dt><dd data-i18n="knowledgeBody">Agents read and write the same project notes. Their session logs let them resume when the app restarts.</dd></div><div><dt data-i18n="filesTitle">Files beside the conversation</dt><dd data-i18n="filesBody">Browse the workspace, edit code, read Markdown, and view images from the files pane.</dd></div></dl>
+      </div>
+    </section>
+    <section id="install" class="install-section" aria-labelledby="install-title">
+      <h2 id="install-title" data-i18n="installTitle">Install yesman</h2>
+      <div class="install-layout"><div><p data-i18n="requirements">Install git and pi 1.5 or later, with a model configured. yesman uses your usual pi configuration.</p><div class="idy-code"><div class="idy-code-row"><code>npm install -g @earendil-works/pi-coding-agent</code><button class="idy-button idy-button--secondary" data-idy-copy hidden>Copy</button></div><p data-idy-copy-status role="status" aria-live="polite"></p></div><p class="idy-caption" data-i18n="platformNote">macOS has been run. Linux and Windows builds are available but have not been runtime-tested. macOS downloads are signed ad hoc; Windows builds are unsigned.</p><p class="idy-caption" data-i18n="scopeNote">Pull-request watching and service-key management are not built yet.</p></div><div class="release-panel"><h3 data-i18n="downloadsTitle">Downloads</h3><p id="release-status" class="idy-caption" role="status" aria-live="polite" data-i18n="releaseFallback">Choose a package from the latest GitHub release.</p><ul id="download-list" class="download-list" hidden></ul><a class="release-link" href="https://github.com/idy/yesman/releases/latest" data-i18n="allReleases">Latest release and all packages</a><p class="idy-caption"><a href="https://github.com/idy/yesman#run" data-i18n="buildSource">Build from source</a></p></div></div>
+    </section>
+  </main>
+  <footer class="idy-footer"><div class="idy-footer-inner"><a href="https://idy.dev/" data-i18n="allProjects">All projects</a><span>yesman · MIT</span><a href="https://github.com/idy/yesman/issues" data-i18n="reportIssue">Report an issue</a></div></footer>
+</body>
+</html>
