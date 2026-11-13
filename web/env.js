@@ -75,6 +75,8 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
     s.rows = (view.entries ?? []).map((e) => ({ id: nextId++, ...e }));
     s.saved = JSON.stringify(strip(s.rows));
     s.text = s.savedText = view.text ?? '';
+    // A variables file that does not read opens as its text, to mend.
+    if (!secret && view.error && view.text) s.mode = 'yaml';
     s.shown.clear();
     editor?.forget(key);
   }
@@ -258,7 +260,10 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
     if (s.busy) return false; // a save is on its way
     try {
       if (mode === 'yaml') {
-        s.text = await call('FormatEntries', kind, strip(s.rows));
+        // A variables file that does not read keeps its text, unless the
+        // form changed it.
+        const broken = !secret && s.view?.error && JSON.stringify(strip(s.rows)) === s.saved;
+        s.text = broken ? s.savedText : await call('FormatEntries', kind, strip(s.rows));
         editor?.forget(key);
       } else {
         const text = currentText();

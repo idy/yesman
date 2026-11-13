@@ -114,6 +114,9 @@ func TestExportAndImportSecrets(t *testing.T) {
 
 	// The key exported opens the file, as sops would use it.
 	keyFile := filepath.Join(t.TempDir(), "key.txt")
+	if err := os.WriteFile(keyFile, []byte("older, readable by others\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	configSaveDialog = func(mygo.SaveDialogOptions) (string, error) { return keyFile, nil }
 	if _, err := s.ExportSecretsKey(); err != nil {
 		t.Fatal(err)
