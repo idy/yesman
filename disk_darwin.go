@@ -1,11 +1,10 @@
-//go:build darwin || linux
-
 package main
 
 import "golang.org/x/sys/unix"
 
 // diskSpace is the size of the disk that holds path and the space free to
-// use there, as an unprivileged user may.
+// use there, as an unprivileged user may. On macOS statfs counts blocks
+// in Bsize, the fundamental block size.
 func diskSpace(path string) (DiskSpace, error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {
