@@ -94,7 +94,8 @@ func (s Settings) save(path string) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// SettingsView is what the General and Repositories settings pages show.
+// SettingsView is what the General and Repositories settings pages show;
+// the pi page has its own, PiView.
 type SettingsView struct {
 	Appearance    mygo.ThemeSource `json:"appearance"`
 	AutoFetch     int              `json:"autoFetch"` // minutes; 0 is off
@@ -105,8 +106,6 @@ type SettingsView struct {
 	Runtime       string           `json:"runtime"`
 	SettingsFile  string           `json:"settingsFile"`
 	StorageConfig string           `json:"storageConfig,omitempty"`
-	Pi            string           `json:"pi"`
-	PiError       string           `json:"piError,omitempty"`
 	HomeOverride  bool             `json:"homeOverride,omitempty"`
 }
 
@@ -128,10 +127,6 @@ func (s *service) Settings() SettingsView {
 		Archive:      a.home.Archive(),
 		Runtime:      a.home.Runtime(),
 		SettingsFile: a.home.Settings(),
-		Pi:           a.pi,
-	}
-	if a.piErr != nil {
-		v.PiError = a.piErr.Error()
 	}
 	if a.storage != nil {
 		v.HomeOverride = a.storage.override

@@ -2,13 +2,14 @@
 // the live event stream of the agents' pi processes.
 //
 //   mygo.call("Yesman.<Method>", ...)  services in service.go
-//   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "focus-agent" | "update" | "files", fn)
+//   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
+import { createPiPage } from './pi.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 
 const mygo = window.mygo;
@@ -826,6 +827,7 @@ function renderWelcome(body) {
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
+  { page: 'pi', label: 'pi', icon: 'package' },
   { page: 'config', label: 'Import and export', icon: 'transfer' },
   { page: 'about', label: 'About', icon: 'about' },
 ];
@@ -866,6 +868,7 @@ async function loadSettingsPage(page) {
     if (page === 'general') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
+    else if (page === 'pi') { await piPage.load(); return; }
   } catch (err) {
     fail(err);
     return;
@@ -877,6 +880,7 @@ function renderSettings(body) {
   const inner = h('div', { class: 'page-inner' });
   body.append(h('div', { class: 'page' }, inner));
   if (state.view.page === 'repositories') renderRepositories(inner);
+  else if (state.view.page === 'pi') piPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
   else if (state.view.page === 'about') renderAbout(inner);
   else renderGeneral(inner);
@@ -897,6 +901,19 @@ function preferenceRow(label, hint, control) {
 function revealButton(path, label) {
   return h('button', { class: 'mds-button mds-button--small', type: 'button', title: path, 'aria-label': label ? `Reveal ${label}` : null, onclick: () => call('Reveal', path).catch(fail) }, icon('folder'), 'Reveal');
 }
+
+// Settings › pi, in pi.js.
+const piPage = createPiPage({
+  call,
+  fail,
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  agents: () => state.snap.agents,
+  shown: () => state.view.kind === 'settings' && state.view.page === 'pi',
+  rerender: () => renderBody(),
+  ago: (iso, verb) => ago(iso, verb),
+  preferenceRow,
+  revealButton,
+});
 
 function renderGeneral(inner) {
   const v = state.settings;
@@ -925,10 +942,6 @@ function renderGeneral(inner) {
         ['Settings file', 'Appearance and repository fetch preferences.', v.settingsFile],
         ['Storage configuration', 'Remembers the data folder across launches.', v.storageConfig],
       ].filter(([, , path]) => path).map(([label, hint, path]) => storagePathRow(label, hint, path))),
-    settingsSection('Agents', null,
-      preferenceRow('pi',
-        v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null, 'Every lead and worker runs this pi. Set YESMAN_PI to use another. ', h('span', { class: 'path' }, v.pi)),
-        h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : 'idle' }, h('i', { class: 'mds-dot' }), h('span', null, v.piError ? 'Not found' : 'Found')))),
   );
 }
 
@@ -1760,6 +1773,7 @@ function onAgents(agents) {
   state.snap.agents = agents;
   pruneCaches();
   renderSidebar();
+  piPage.onAgents();
   const after = selectedAgent();
   if (after?.status === 'idle' && before?.status === 'starting') loadModelOptions(after);
   if (state.view.kind === 'agent' && !after) {
@@ -1805,6 +1819,7 @@ async function start() {
   mygo.on('changed', refreshSoon);
   mygo.on('clones', onClones);
   mygo.on('fetches', onFetches);
+  mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => files.onChange(change));
   document.addEventListener('keydown', (e) => files.onKey(e));

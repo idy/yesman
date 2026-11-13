@@ -55,6 +55,8 @@ func main() {
 
 	a := &app{home: h, storage: storage, pool: pool.New(h.Repos()), yesmen: yesmen.New(h.Yesmen(), h.Archive())}
 	a.pi, a.piErr = findPi()
+	a.runPi = runPi(a.pi, h.Runtime())
+	a.piJobs = newPiJobs(a.runPi, func(j PiJobs) { _ = piJobsEvent.Broadcast(j) })
 	a.settings = loadSettings(h.Settings())
 	a.setTheme = mygo.Theme.SetSource
 	a.updates = newUpdates()

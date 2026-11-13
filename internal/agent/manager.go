@@ -61,6 +61,9 @@ type Info struct {
 	// Since is when the yesman was hired, for a lead, or the worker
 	// started. With ID it identifies an agent across reuses of a name.
 	Since time.Time `json:"since,omitzero"`
+	// StartedAt is when its running pi process started, which loaded pi's
+	// packages as they were then.
+	StartedAt time.Time `json:"startedAt,omitzero"`
 	// Detail explains a failure.
 	Detail string `json:"detail,omitempty"`
 	// Dialog is the extension_ui_request a Waiting agent waits on.
@@ -320,6 +323,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		m.mu.Unlock()
 		m.changed()
 
+		started := time.Now()
 		p, state, err := m.spawn(a, y, name, role)
 
 		m.mu.Lock()
@@ -347,6 +351,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			return nil, nil, err
 		}
 		a.proc = p
+		a.info.StartedAt = started
 		a.info.Status, a.info.Model, a.info.UpdatedAt = Idle, state.Model.ID, time.Now()
 		a.info.Provider, a.info.Effort, a.info.EffortLevels = state.Model.Provider, state.ThinkingLevel, nil
 		m.mu.Unlock()

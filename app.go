@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"runtime"
 	"strconv"
@@ -30,6 +31,9 @@ var (
 	// fetchesEvent carries where fetching the pool stands whenever a fetch
 	// starts or ends.
 	fetchesEvent = mygo.NewEvent[FetchState]("fetches")
+	// piJobsEvent carries the changes to pi's packages under way, whenever
+	// one starts, finishes or fails.
+	piJobsEvent = mygo.NewEvent[PiJobs]("pi-packages")
 )
 
 type app struct {
@@ -41,6 +45,9 @@ type app struct {
 	agents  *agent.Manager
 	pi      string
 	piErr   error
+	// runPi runs a pi command for the user, outside any workspace.
+	runPi  func(ctx context.Context, args ...string) (string, error)
+	piJobs *piJobs
 
 	wmu  sync.Mutex
 	win  *mygo.Window
