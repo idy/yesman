@@ -3,6 +3,7 @@
   "slug": "yesman",
   "identifier": "dev.idy.yesman",
   "version": "0.1.4",
+  "icon": "resources/icon.png",
   "copyright": "© 2026 Yan",
   "license": "MIT",
   "out": "build",

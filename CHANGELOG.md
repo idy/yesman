@@ -7,7 +7,11 @@ Each release's section is what installed copies show as its release notes.
 - Click a folder in the path above a file to list that folder, and go into its folders or open its files from there. The file's own name lists the folder it is in. The arrow keys move through the list.
 - With the files pane open, its tabs sit in the window's titlebar, so the pane runs the full height of the window.
 
-There is no 0.1.3.
+## 0.1.3
+
+- A new sky-blue app icon: a yak turning back to answer you.
+- A matching monochrome yak in the titlebar, menu bar and system tray, tinted for the light or dark appearance.
+- A simpler titlebar without the sidebar-collapse button. The sidebar stays visible, and the brand clears the window controls only while they are shown.
 
 ## 0.1.2
 

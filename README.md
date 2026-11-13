@@ -96,7 +96,7 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | `files.go`, `files_menu.go` | Listing, reading, finding and watching a workspace's files, and the files pane's menus |
 | `web/files.js`, `web/editor.js`, `web/code.js` | The files pane, its editor, and the language of each file |
 | `tools/codemirror/` | Rebuilds the vendored CodeMirror bundle |
-| `mygo.json`, `resources/icon.png` | The app as `mygo build` packages it, and its icon |
+| `mygo.json`, `resources/`, `icons.go` | Packaging, the yak app icon and the monochrome tray template; see [icon sources](resources/README.md) |
 | `internal/pool` | The repo pool and its worktrees |
 | `internal/github` | What the pool takes: GitHub repositories, their clone URLs and a fork's parent |
 | `internal/yesmen` | Workspaces, workers and their files |
