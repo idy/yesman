@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -255,6 +256,20 @@ func (s *service) OpenURL(url string) error {
 func (s *service) Reveal(path string) error {
 	if path == "" {
 		return errors.New("no path")
+	}
+	// Settings files may not have been written yet. Reveal their nearest
+	// existing parent so the location can still be found.
+	for {
+		if _, err := os.Stat(path); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return errors.New("the path is unavailable")
+		}
+		path = parent
 	}
 	mygo.Shell.ShowItemInFolder(path)
 	return nil

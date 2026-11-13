@@ -188,6 +188,14 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .settings-section .mds-section-heading { margin-bottom: 10px; }
 .settings-section .mds-section-heading h2 { font-size: var(--mds-text-body); }
 .row-end { display: flex; justify-content: flex-end; }
+.storage-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.storage-edit { display: grid; gap: 8px; padding: 16px; border-top: 1px solid var(--mds-line); }
+.storage-edit p { margin: 0; font-size: var(--mds-text-note); }
+.storage-input { display: flex; gap: 8px; }
+.storage-input .mds-input { flex: 1; min-width: 0; }
+.storage-path-row, .storage-home-row { grid-template-columns: minmax(0, 1fr) auto; gap: 12px; min-height: 56px; padding-block: 8px; }
+.storage-path-row .mds-row-label :is(h3, p), .storage-home-row .path { max-width: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.storage-home-row .storage-actions { flex-wrap: nowrap; }
 .mds-row-label .path { display: block; margin-top: 2px; }
 .about-row { align-items: center; }
 .about-row .mds-row-label { padding-top: 0; }

@@ -713,8 +713,7 @@ func (m *Manager) StartWorker(ctx context.Context, yesman, name, task string) (I
 	if err := m.prompt(ctx, id, task, "followUp"); err != nil {
 		// Leave no worker that never got its task, so the name can be
 		// used again.
-		_ = m.RemoveWorker(yesman, name)
-		return Info{}, err
+		return Info{}, errors.Join(err, m.RemoveWorker(yesman, name))
 	}
 	return m.Get(id)
 }

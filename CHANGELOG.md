@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.7
+
+- Choose where yesman keeps its data from General → Storage. Browse to or enter a folder, then restart to use it, including folders that already contain your data.
+- Copy existing data yourself before switching folders. Launching with `YESMAN_HOME` still overrides the saved location.
+- Storage has a compact list of fixed locations for repositories, the workspace parent, archive, runtime files and configuration, with Reveal buttons and full paths on hover.
+- Worker records are cleaned up reliably after a rejected start on Windows, including while the sidebar refreshes.
+
 ## 0.1.6
 
 - Add several repositories at once: in Settings › Repositories, name a GitHub user or organization and tick the repositories you want. Text after a slash filters them, and private repositories your GitHub CLI login sees are listed too.

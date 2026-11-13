@@ -55,6 +55,7 @@ type app struct {
 
 	setmu    sync.Mutex
 	settings Settings
+	storage  *storageLocation
 
 	updates *updates
 
