@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/egoist/mygo"
 
@@ -66,6 +68,10 @@ func main() {
 			a.notifyChanged()
 		}
 	})
+
+	a.fetcher = newFetcher(a.pool, func(s FetchState) { _ = fetchesEvent.Broadcast(s) })
+	a.fetcher.SetInterval(time.Duration(a.settings.AutoFetch) * time.Minute)
+	go a.fetcher.Schedule(context.Background())
 
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add}
 	if err := srv.Start(); err != nil {

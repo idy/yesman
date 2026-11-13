@@ -27,16 +27,20 @@ var (
 	// clonesEvent carries the repositories on their way into the pool
 	// whenever one starts, finishes or fails.
 	clonesEvent = mygo.NewEvent[[]Clone]("clones")
+	// fetchesEvent carries where fetching the pool stands whenever a fetch
+	// starts or ends.
+	fetchesEvent = mygo.NewEvent[FetchState]("fetches")
 )
 
 type app struct {
-	home   home.Home
-	pool   *pool.Pool
-	clones *clones
-	yesmen *yesmen.Store
-	agents *agent.Manager
-	pi     string
-	piErr  error
+	home    home.Home
+	pool    *pool.Pool
+	clones  *clones
+	fetcher *fetcher
+	yesmen  *yesmen.Store
+	agents  *agent.Manager
+	pi      string
+	piErr   error
 
 	wmu  sync.Mutex
 	win  *mygo.Window

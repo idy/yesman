@@ -206,6 +206,8 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .card-empty { display: grid; gap: 4px; padding: 20px 16px; color: var(--mds-muted); font-size: var(--mds-text-note); }
 .card-empty strong { color: var(--mds-ink); font-size: var(--mds-text-body); font-weight: 400; }
 .card-row-actions { display: flex; gap: 2px; }
+.card-row-text .danger { color: var(--mds-error); }
+.fetch-all .mds-icon, .fetch-all .mds-spinner { width: 13px; height: 13px; }
 .card-row[data-clone] strong { color: var(--mds-ink-secondary); }
 .add-link { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; }
 .add-link .mds-icon { width: 14px; height: 14px; }

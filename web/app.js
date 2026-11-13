@@ -2,7 +2,7 @@
 // the live event stream of the agents' pi processes.
 //
 //   mygo.call("Yesman.<Method>", ...)  services in service.go
-//   mygo.on("agents" | "agent-event" | "changed" | "clones" | "focus-agent" | "update" | "files", fn)
+//   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "focus-agent" | "update" | "files", fn)
 
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
@@ -34,7 +34,7 @@ const state = {
   settings: null, // Yesman.Settings, for the General page
   about: null, // Yesman.About
   repoQuery: '',
-  fetching: new Set(), // repositories being fetched
+  fetches: { fetching: [], errors: {} }, // Yesman.Fetches: repositories being fetched, and their last errors
   clones: [], // Yesman.Clones: repositories on their way into the pool
   update: null, // Yesman.Update: where updating yesman stands
 };
@@ -766,7 +766,7 @@ async function loadSettingsPage(page) {
   try {
     if (page === 'general') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
-    else if (page === 'repositories') state.repos = await call('Repos');
+    else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
   } catch (err) {
     fail(err);
     return;
@@ -897,12 +897,42 @@ function renderRepositories(inner) {
     : null;
   inner.append(
     h('div', { class: 'mds-toolbar' },
-      h('p', { class: 'toolbar-lead' }, 'GitHub repositories the yesmen check worktrees out of. Only yesman writes here, and it fetches a repository whenever one is checked out.'),
+      h('p', { class: 'toolbar-lead' }, 'GitHub repositories the yesmen check worktrees out of. Only yesman writes here. It fetches a repository whenever one is checked out, and all of them when you ask or on a schedule.'),
       h('div', { class: 'mds-toolbar-actions' }, search,
+        h('button', { class: 'mds-button mds-button--small fetch-all', id: 'fetch-all', type: 'button', onclick: () => call('FetchAll').catch(fail) }),
         h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Reveal the repo pool', 'aria-label': 'Reveal the repo pool', onclick: () => call('Reveal', state.snap.pool).catch(fail) }, icon('folder')))),
     h('div', { class: 'card-list', id: 'repo-list', role: 'list', 'aria-label': 'Repositories' }),
-    h('div', null, h('button', { class: 'mds-link-button add-link', type: 'button', onclick: openAddRepos }, icon('plus'), 'Add repositories')));
+    h('div', null, h('button', { class: 'mds-link-button add-link', type: 'button', onclick: openAddRepos }, icon('plus'), 'Add repositories')),
+    autoFetchSection());
   renderRepoList();
+}
+
+const AUTO_FETCH = [[0, 'Never'], [1, 'Every minute'], [5, 'Every 5 minutes'], [15, 'Every 15 minutes'], [60, 'Every hour']];
+
+function autoFetchSection() {
+  const v = state.settings;
+  if (!v) return null;
+  const select = h('select', { class: 'mds-select', 'aria-label': 'Fetch automatically', onchange: async (e) => {
+    const el = e.currentTarget;
+    try {
+      await call('SetAutoFetch', Number(el.value));
+      v.autoFetch = Number(el.value);
+    } catch (err) {
+      fail(err);
+      el.value = String(v.autoFetch);
+    }
+  } }, AUTO_FETCH.map(([value, label]) => h('option', { value, selected: value === v.autoFetch }, label)));
+  return settingsSection('Fetching', null,
+    preferenceRow('Fetch automatically', h('p', null, 'Fetches every repository in the pool while yesman runs, in the tray too.'), select));
+}
+
+// Fetch all spins while any repository fetches, and waits while all do.
+function renderFetchAll() {
+  const button = $('#fetch-all');
+  if (!button) return;
+  const busy = state.fetches.fetching.length > 0;
+  button.disabled = !state.repos.length || state.repos.every((r) => state.fetches.fetching.includes(r.name));
+  button.replaceChildren(busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload'), 'Fetch all');
 }
 
 const cloneStatus = (c) => (c.state === 'queued' ? 'waiting to clone' : 'cloning…');
@@ -912,14 +942,18 @@ const cloneStatus = (c) => (c.state === 'queued' ? 'waiting to clone' : 'cloning
 function repoRow(r, clone) {
   const worktrees = state.snap.yesmen.flatMap((y) => y.worktrees.filter((w) => w.repo === r.name).map((w) => ({ yesman: y.name, dir: w.dir || w.path })));
   const users = [...new Set(worktrees.map((w) => w.yesman))];
-  const fetching = state.fetching.has(r.name);
+  const fetching = state.fetches.fetching.includes(r.name);
   const busy = fetching || !!clone;
   const name = githubName(r.url);
-  const status = clone ? cloneStatus(clone) : fetching ? 'fetching…' : ago(r.fetchedAt);
+  // The last fetch's error stays, in place of when it was fetched, until
+  // a fetch succeeds.
+  const error = !busy && state.fetches.errors[r.name];
+  const status = clone ? cloneStatus(clone) : fetching ? 'fetching…' : error ? null : ago(r.fetchedAt);
   const meta = [name ? null : r.url, r.upstream ? `fork of ${githubName(r.upstream) || r.upstream}` : null, r.defaultBranch ? `default ${r.defaultBranch}` : null, status].filter(Boolean).join(' · ');
   return h('div', { class: 'card-row', role: 'listitem' },
     h('span', { class: 'card-row-icon' }, icon('branch')),
-    h('div', { class: 'card-row-text' }, h('strong', { title: r.name }, name || r.name), h('span', null, meta)),
+    h('div', { class: 'card-row-text' }, h('strong', { title: r.name }, name || r.name),
+      h('span', { title: error || null }, meta, error ? [meta ? ' · ' : null, h('span', { class: 'danger' }, `last fetch failed: ${error}`)] : null)),
     users.length
       ? h('span', { class: 'card-row-aside', title: worktrees.map((w) => `${w.yesman}: ${w.dir}`).join('\n') },
           `${worktrees.length} worktree${worktrees.length === 1 ? '' : 's'} · ${users.join(', ')}`)
@@ -950,6 +984,7 @@ function cloneRow(c) {
 function renderRepoList() {
   const list = $('#repo-list');
   if (!list) return;
+  renderFetchAll();
   const adding = new Map(state.clones.filter((c) => c.state !== 'failed').map((c) => [repoKey(c.repo), c]));
   const inPool = new Set();
   const rows = state.repos.map((r) => {
@@ -973,18 +1008,25 @@ function renderRepoList() {
   }
 }
 
-async function fetchRepo(name) {
-  state.fetching.add(name);
-  renderRepoList();
-  try {
-    await call('FetchRepo', name);
-    state.repos = await call('Repos');
-  } catch (err) {
-    fail(err);
-  } finally {
-    state.fetching.delete(name);
-    renderRepoList();
+// The fetches event shows the repository fetching, and its error in its
+// row if the fetch fails.
+function fetchRepo(name) {
+  call('FetchRepo', name).catch(() => {});
+}
+
+// A repository whose fetch ended is read again for its fetch time, while
+// the repositories page shows. The newest state wins.
+let fetchesSeq = 0;
+async function onFetches(next) {
+  const seq = ++fetchesSeq;
+  const ended = state.fetches.fetching.some((name) => !next.fetching.includes(name));
+  if (ended && $('#repo-list')) {
+    const repos = await call('Repos').catch(() => null);
+    if (repos) state.repos = repos;
   }
+  if (seq !== fetchesSeq) return;
+  state.fetches = next;
+  renderRepoList();
 }
 
 // A clone that finished leaves the list once the pool lists it, so its
@@ -1443,6 +1485,7 @@ async function start() {
   mygo.on('agent-event', onAgentEvent);
   mygo.on('changed', refreshSoon);
   mygo.on('clones', onClones);
+  mygo.on('fetches', onFetches);
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => files.onChange(change));
   document.addEventListener('keydown', (e) => files.onKey(e));

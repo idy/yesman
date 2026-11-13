@@ -148,15 +148,23 @@ func (s *service) OwnerRepos(owner string) ([]github.Listed, error) {
 	return repos, err
 }
 
-// FetchRepo fetches a pool repository from its remotes now.
+// FetchRepo fetches a pool repository from its remotes now. The fetches
+// event shows it fetching, and its error if it fails.
 func (s *service) FetchRepo(name string) (pool.Repo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
-	if err := s.app.pool.Fetch(ctx, name, true); err != nil {
-		return pool.Repo{}, err
-	}
-	s.app.notifyChanged()
-	return s.app.pool.Get(name)
+	return s.app.fetcher.Fetch(ctx, name)
+}
+
+// FetchAll starts fetching every pool repository and returns at once; the
+// fetches event follows them.
+func (s *service) FetchAll() error {
+	return s.app.fetcher.FetchAll(true)
+}
+
+// Fetches reports the repositories being fetched and their last errors.
+func (s *service) Fetches() FetchState {
+	return s.app.fetcher.State()
 }
 
 // Checkout checks a worktree out into a yesman's workspace.
