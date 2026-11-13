@@ -96,14 +96,18 @@ func (s Settings) save(path string) error {
 
 // SettingsView is what the General and Repositories settings pages show.
 type SettingsView struct {
-	Appearance mygo.ThemeSource `json:"appearance"`
-	AutoFetch  int              `json:"autoFetch"` // minutes; 0 is off
-	Home       string           `json:"home"`
-	Pool       string           `json:"pool"`
-	Yesmen     string           `json:"yesmen"`
-	Archive    string           `json:"archive"`
-	Pi         string           `json:"pi"`
-	PiError    string           `json:"piError,omitempty"`
+	Appearance    mygo.ThemeSource `json:"appearance"`
+	AutoFetch     int              `json:"autoFetch"` // minutes; 0 is off
+	Home          string           `json:"home"`
+	Pool          string           `json:"pool"`
+	Yesmen        string           `json:"yesmen"`
+	Archive       string           `json:"archive"`
+	Runtime       string           `json:"runtime"`
+	SettingsFile  string           `json:"settingsFile"`
+	StorageConfig string           `json:"storageConfig,omitempty"`
+	Pi            string           `json:"pi"`
+	PiError       string           `json:"piError,omitempty"`
+	HomeOverride  bool             `json:"homeOverride,omitempty"`
 }
 
 // Settings returns the user's choices and where yesman keeps its data.
@@ -116,16 +120,22 @@ func (s *service) Settings() SettingsView {
 		appearance = mygo.ThemeSystem
 	}
 	v := SettingsView{
-		Appearance: appearance,
-		AutoFetch:  autoFetch,
-		Home:       a.home.Root,
-		Pool:       a.home.Repos(),
-		Yesmen:     a.home.Yesmen(),
-		Archive:    a.home.Archive(),
-		Pi:         a.pi,
+		Appearance:   appearance,
+		AutoFetch:    autoFetch,
+		Home:         a.home.Root,
+		Pool:         a.home.Repos(),
+		Yesmen:       a.home.Yesmen(),
+		Archive:      a.home.Archive(),
+		Runtime:      a.home.Runtime(),
+		SettingsFile: a.home.Settings(),
+		Pi:           a.pi,
 	}
 	if a.piErr != nil {
 		v.PiError = a.piErr.Error()
+	}
+	if a.storage != nil {
+		v.HomeOverride = a.storage.override
+		v.StorageConfig = a.storage.path
 	}
 	return v
 }

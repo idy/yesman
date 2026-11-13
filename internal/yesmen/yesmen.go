@@ -215,6 +215,15 @@ func (s *Store) Archive(name string, before func(Yesman) error) (string, error) 
 
 // Workers returns the workers a yesman's lead started.
 func (s *Store) Workers(name string) ([]Worker, error) {
+	// Windows readers do not share delete access, so a reader must close the
+	// old file before an update can atomically replace it.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.workers(name)
+}
+
+// workers reads worker metadata with s.mu held by the caller.
+func (s *Store) workers(name string) ([]Worker, error) {
 	y, err := s.Get(name)
 	if err != nil {
 		return nil, err
@@ -236,7 +245,7 @@ func (s *Store) AddWorker(name string, w Worker) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ws, err := s.Workers(name)
+	ws, err := s.workers(name)
 	if err != nil {
 		return err
 	}
@@ -251,7 +260,7 @@ func (s *Store) AddWorker(name string, w Worker) error {
 func (s *Store) RemoveWorker(name, worker string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ws, err := s.Workers(name)
+	ws, err := s.workers(name)
 	if err != nil {
 		return err
 	}
