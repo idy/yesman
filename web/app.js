@@ -7,7 +7,7 @@
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
-import { toast, openDialog } from './mds/js/magpie.js';
+import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 
 const mygo = window.mygo;
 const call = (method, ...args) => mygo.call(`Yesman.${method}`, ...args);
@@ -28,6 +28,7 @@ const state = {
   view: { kind: 'none' },
   convos: new Map(),
   drafts: new Map(),
+  modelOptions: new Map(),
   infoOpen: false,
   repos: [],
   settingsPage: 'general',
@@ -71,7 +72,7 @@ function convo(a) {
 // Forget conversations and drafts of agents that are gone.
 function pruneCaches() {
   const keys = new Set(state.snap.agents.map(keyOf));
-  for (const map of [state.convos, state.drafts]) {
+  for (const map of [state.convos, state.drafts, state.modelOptions]) {
     for (const key of map.keys()) if (!keys.has(key)) map.delete(key);
   }
 }
@@ -582,7 +583,104 @@ function onUpdate(u) {
   if (state.view.kind === 'settings' && state.view.page === 'about') renderBody();
 }
 
-// ---------- Sidebar ----------
+// ---------- Model and effort ----------
+
+let composerSelects = [];
+
+function acceptModelInfo(a, info) {
+  const current = agentById(a.id);
+  if (!current || keyOf(current) !== keyOf(a)) return;
+  onAgents(state.snap.agents.map((item) => item === current ? info : item));
+}
+
+async function loadModelOptions(a) {
+  const key = keyOf(a);
+  const cached = state.modelOptions.get(key);
+  if (cached && (!cached.models || cached.busy || a.effortLevels)) return;
+  const entry = { models: null, busy: false, error: null };
+  state.modelOptions.set(key, entry);
+  try {
+    const data = await call('Models', a.id);
+    entry.models = data.models;
+    acceptModelInfo(a, data.agent);
+  } catch (err) {
+    entry.error = errorText(err);
+  }
+  if (selectedAgent() && keyOf(selectedAgent()) === key) renderDock();
+}
+
+async function changeModelOption(a, method, ...args) {
+  const entry = state.modelOptions.get(keyOf(a));
+  if (!entry || entry.busy) return;
+  const focus = document.activeElement?.getAttribute('aria-label');
+  entry.busy = true;
+  renderDock();
+  try {
+    acceptModelInfo(a, await call(method, a.id, ...args));
+  } catch (err) {
+    fail(err);
+  } finally {
+    entry.busy = false;
+    if (selectedAgent() && keyOf(selectedAgent()) === keyOf(a)) {
+      const restoreFocus = document.activeElement === document.body;
+      renderDock();
+      if (restoreFocus) composerSelects.find((select) => select.trigger.getAttribute('aria-label') === focus)?.trigger.focus({ preventScroll: true });
+    }
+  }
+}
+
+function modelOptionsEl(a, working) {
+  const entry = state.modelOptions.get(keyOf(a));
+  if (!entry?.models) {
+    return h('button', {
+      class: 'mds-link-button', type: 'button', disabled: !entry?.error,
+      title: entry?.error,
+      onclick: () => { state.modelOptions.delete(keyOf(a)); loadModelOptions(a); renderDock(); },
+    }, entry?.error ? 'Retry loading models' : 'Loading models…');
+  }
+  const disabled = entry.busy || working || a.status === 'starting';
+  const model = h('select', {
+    class: 'mds-select mds-select--text composer-model', 'aria-label': 'Model', disabled,
+    onchange: () => {
+      const selected = entry.models[Number(model.value)];
+      if (selected) changeModelOption(a, 'SetModel', selected.provider, selected.id);
+    },
+  });
+  const grouped = new Set(entry.models.map((m) => m.provider)).size > 1;
+  model.dataset.grouped = String(grouped);
+  const groups = new Map();
+  let current = -1;
+  entry.models.forEach((m, index) => {
+    let parent = model;
+    if (grouped) {
+      if (!groups.has(m.provider)) {
+        const group = h('optgroup', { label: m.provider });
+        groups.set(m.provider, group);
+        model.append(group);
+      }
+      parent = groups.get(m.provider);
+    }
+    parent.append(h('option', { value: index }, m.name || m.id));
+    if (m.id === a.model && m.provider === a.provider) current = index;
+  });
+  if (current < 0) model.prepend(h('option', { value: -1, disabled: true }, a.model || 'No models available'));
+  model.value = String(current);
+  model.disabled = disabled || !entry.models.length;
+  model.title = disabled ? 'Wait for the current run or change to finish' : `${a.provider}/${a.model}`;
+  const levels = a.effortLevels ?? [];
+  const effort = h('select', {
+    class: 'mds-select mds-select--text', 'aria-label': 'Effort', disabled: disabled || levels.length < 2,
+    title: levels.length < 2 ? 'This model has no adjustable reasoning effort' : 'Reasoning effort',
+    onchange: () => changeModelOption(a, 'SetEffort', effort.value),
+  }, levels.map((level) => h('option', { value: level }, level === 'xhigh' ? 'Extra high' : level[0].toUpperCase() + level.slice(1))));
+  if (!levels.length) effort.append(h('option', { value: '' }, 'Unavailable'));
+  effort.value = a.effort ?? '';
+  return h('div', { class: 'composer-options', 'aria-busy': String(entry.busy) },
+    h('span', { class: 'composer-choice composer-choice--model' }, model),
+    h('label', { class: 'composer-choice' }, h('span', null, 'Effort'), effort));
+}
+
+// ---------- Composer ----------
 
 async function openHire() {
   const form = $('#hire-form');
@@ -594,6 +692,8 @@ function renderBody() {
   const body = $('#body');
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
+  for (const select of composerSelects) select.destroy();
+  composerSelects = [];
   body.replaceChildren();
   if (state.view.kind === 'settings') {
     renderSettings(body);
@@ -617,9 +717,14 @@ function renderBody() {
 function renderDock() {
   const dock = $('#dock');
   const a = selectedAgent();
-  if (!dock || !a) return;
-  const keep = dock.querySelector('textarea');
+  const keep = dock?.querySelector('textarea');
   const focused = keep && document.activeElement === keep;
+  const caret = focused ? [keep.selectionStart, keep.selectionEnd, keep.selectionDirection] : null;
+  const control = dock?.contains(document.activeElement) && document.activeElement.getAttribute('role') === 'combobox'
+    ? document.activeElement.getAttribute('aria-label') : null;
+  for (const select of composerSelects) select.destroy();
+  composerSelects = [];
+  if (!dock || !a) return;
   dock.replaceChildren();
 
   if (a.status === 'failed' && a.detail) {
@@ -638,7 +743,7 @@ function renderDock() {
   const send = h('button', { class: 'round', type: 'submit', 'aria-label': 'Send', title: working ? 'Send: delivered after its current step' : 'Send' }, icon('send'));
   const stop = working ? h('button', { class: 'round round--stop', type: 'button', 'aria-label': 'Stop', title: 'Stop the current run', onclick: () => call('Abort', a.id).catch(fail) }, icon('stop')) : null;
   const sync = () => {
-    send.disabled = !textarea.value.trim();
+    send.disabled = !textarea.value.trim() || !!state.modelOptions.get(keyOf(a))?.busy;
     textarea.style.height = 'auto';
     textarea.style.height = `${textarea.scrollHeight}px`;
   };
@@ -652,18 +757,29 @@ function renderDock() {
   const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea); } },
     textarea,
     h('div', { class: 'composer-row' },
-      h('span', { class: 'composer-hint' }, a.model ? h('span', { class: 'composer-model' }, a.model) : null,
-        working ? 'Working. A new message steers it after its current step.' : 'Enter to send, Shift+Enter for a new line'),
+      h('div', { class: 'composer-controls' }, modelOptionsEl(a, working),
+        h('span', { class: 'composer-hint' }, working ? 'Working. A new message steers it after its current step.' : 'Enter to send, Shift+Enter for a new line')),
       h('div', { class: 'ask-actions' }, stop, send)),
   );
   dock.append(form);
+  composerSelects = [...form.querySelectorAll('select')].map((el) => {
+    const select = initSelect(el);
+    select.trigger.title = el.title;
+    if (el.dataset.grouped === 'false') document.getElementById(select.trigger.getAttribute('aria-controls')).classList.add('composer-model-menu--flat');
+    return select;
+  });
   sync();
-  if (focused || !keep) textarea.focus();
+  const nextControl = composerSelects.find((select) => select.trigger.getAttribute('aria-label') === control);
+  if (nextControl && !nextControl.trigger.disabled) nextControl.trigger.focus({ preventScroll: true });
+  else if (focused || !keep) {
+    textarea.focus();
+    if (caret) textarea.setSelectionRange(...caret);
+  }
 }
 
 async function sendMessage(a, textarea) {
   const text = textarea.value.trim();
-  if (!text) return;
+  if (!text || state.modelOptions.get(keyOf(a))?.busy) return;
   textarea.value = '';
   state.drafts.delete(keyOf(a));
   textarea.dispatchEvent(new Event('input'));
@@ -1062,6 +1178,7 @@ function selectAgent(id) {
     render();
     return;
   }
+  loadModelOptions(a);
   const c = convo(a);
   if (!c.loaded && !c.loading) {
     c.loading = loadConvo(c).finally(() => { c.loading = null; });
@@ -1146,11 +1263,12 @@ function onAgents(agents) {
   pruneCaches();
   renderSidebar();
   const after = selectedAgent();
+  if (after?.status === 'idle' && before?.status === 'starting') loadModelOptions(after);
   if (state.view.kind === 'agent' && !after) {
     refreshSoon();
     return;
   }
-  if (after && (before?.status !== after.status || before?.model !== after.model || before?.detail !== after.detail || JSON.stringify(before?.dialog) !== JSON.stringify(after.dialog))) {
+  if (after && (before?.status !== after.status || before?.model !== after.model || before?.provider !== after.provider || before?.effort !== after.effort || JSON.stringify(before?.effortLevels) !== JSON.stringify(after.effortLevels) || before?.detail !== after.detail || JSON.stringify(before?.dialog) !== JSON.stringify(after.dialog))) {
     renderBar();
     renderDock();
     renderWorking();

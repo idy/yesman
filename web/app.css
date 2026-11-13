@@ -156,8 +156,15 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 }
 .composer textarea::placeholder { color: var(--mds-faint); }
 .composer-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
-.composer-model { margin-right: 10px; color: var(--mds-muted); font-family: var(--mds-mono); }
+.composer-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 16px; min-width: 0; }
+.composer-options { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; min-width: 0; max-width: 100%; }
+.composer-choice { display: inline-flex; align-items: center; gap: 4px; min-width: 0; color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.composer-choice--model { max-width: min(360px, 100%); }
+.composer-choice .mds-select { min-height: 28px; padding-block: 2px; }
+.composer-model-menu--flat .mds-select-option { padding-inline: 10px 28px; }
+.composer-model-menu--flat .mds-select-option::before { left: auto; right: 8px; }
 .composer-hint { color: var(--mds-faint); font-size: var(--mds-text-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-row > .ask-actions { flex-shrink: 0; }
 .round { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; border: 0; background: var(--mds-accent); color: var(--mds-on-accent); }
 .round:disabled { background: var(--app-quiet); color: var(--mds-faint); }
 .round--stop { background: var(--mds-ink); color: var(--mds-canvas); }

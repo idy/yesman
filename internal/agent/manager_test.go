@@ -34,6 +34,14 @@ func fakePi() {
 		return
 	}
 	delay, _ := time.ParseDuration(os.Getenv("FAKE_PI_DELAY"))
+	models := []Model{{ID: "shared", Provider: "alpha", Name: "Reasoner"}, {ID: "shared", Provider: "beta", Name: "Plain"}}
+	model, effort := models[0], "high"
+	levels := func() []string {
+		if model.Provider == "beta" {
+			return []string{"off"}
+		}
+		return []string{"low", "high", "max"}
+	}
 	out := bufio.NewWriter(os.Stdout)
 	write := func(v any) {
 		data, _ := json.Marshal(v)
@@ -43,9 +51,12 @@ func fakePi() {
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		var cmd struct {
-			ID      string `json:"id"`
-			Type    string `json:"type"`
-			Message string `json:"message"`
+			ID       string `json:"id"`
+			Type     string `json:"type"`
+			Message  string `json:"message"`
+			Provider string `json:"provider"`
+			ModelID  string `json:"modelId"`
+			Level    string `json:"level"`
 		}
 		if json.Unmarshal(sc.Bytes(), &cmd) != nil {
 			continue
@@ -59,7 +70,35 @@ func fakePi() {
 			write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": false, "error": "rejected"})
 			continue
 		}
-		write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": true, "data": map[string]any{"messages": []any{}, "text": "done"}})
+		var data any = map[string]any{"messages": []any{}, "text": "done"}
+		switch cmd.Type {
+		case "get_state":
+			data = modelState{Model: model, ThinkingLevel: effort, IsStreaming: os.Getenv("FAKE_PI_BUSY") != ""}
+		case "get_available_models":
+			data = map[string]any{"models": models}
+		case "get_available_thinking_levels":
+			data = map[string]any{"levels": levels()}
+		case "set_model":
+			found := false
+			for _, choice := range models {
+				if choice.Provider == cmd.Provider && choice.ID == cmd.ModelID {
+					model = choice
+					found = true
+					break
+				}
+			}
+			if !found {
+				write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": false, "error": "Model not found"})
+				continue
+			}
+			effort = levels()[0]
+			write(map[string]any{"type": "thinking_level_changed", "level": effort})
+			data = model
+		case "set_thinking_level":
+			effort = cmd.Level
+			write(map[string]any{"type": "thinking_level_changed", "level": effort})
+		}
+		write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": true, "data": data})
 		if cmd.Type == "get_messages" && os.Getenv("FAKE_PI_TRAIL") != "" {
 			write(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant"}})
 		}
