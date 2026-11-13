@@ -166,6 +166,7 @@ export function createContextViewer({ call, keyOf }) {
     load(current);
   }
   button.addEventListener('click', open);
+  panel.addEventListener('toggle', place, true);
 
   return {
     mount(a) {
