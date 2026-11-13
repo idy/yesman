@@ -218,28 +218,8 @@ func newTestManager(t *testing.T, delay time.Duration, env ...string) (*Manager,
 		Env:       append([]string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=" + delay.String()}, env...),
 		Yesmen:    store,
 	})
-	t.Cleanup(func() { stopAllSettled(m) })
+	t.Cleanup(m.StopAll)
 	return m, store
-}
-
-// stopAllSettled stops every agent until none runs, starts or reports: a
-// worker's report can start its lead just as a test ends, and Windows
-// cannot remove the temporary folder while that process holds files in it.
-func stopAllSettled(m *Manager) {
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		m.StopAll()
-		m.mu.Lock()
-		busy := false
-		for _, a := range m.agents {
-			busy = busy || a.proc != nil || a.starting != nil || a.reports > 0
-		}
-		m.mu.Unlock()
-		if !busy || time.Now().After(deadline) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 }
 
 func waitStatus(t *testing.T, m *Manager, id string, want Status) {
