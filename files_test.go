@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -128,8 +129,9 @@ func TestWriteFile(t *testing.T) {
 	if err != nil || saved.Hash == v.Hash || saved.Text != "# Shop\n\nEdited.\n" {
 		t.Fatalf("save = %+v, %v", saved, err)
 	}
+	// Windows keeps only a read-only flag, not Unix permission bits.
 	st, _ := os.Stat(filepath.Join(ws, "shop", "README.md"))
-	if st.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
 		t.Errorf("permissions became %v", st.Mode().Perm())
 	}
 	if entries, _ := os.ReadDir(filepath.Join(ws, "shop")); len(entries) != 8 {
