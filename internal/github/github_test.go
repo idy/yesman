@@ -118,16 +118,16 @@ func TestParseOwner(t *testing.T) {
 }
 
 func TestListSortsByLastPush(t *testing.T) {
-	defer func(l func(context.Context, string) ([]Listed, error)) { list = l }(list)
+	defer func(l func(context.Context, string) (Listing, error)) { list = l }(list)
 	day := func(d int) time.Time { return time.Date(2026, 11, d, 0, 0, 0, 0, time.UTC) }
-	list = func(_ context.Context, owner string) ([]Listed, error) {
+	list = func(_ context.Context, owner string) (Listing, error) {
 		if owner != "GizClaw" {
 			t.Errorf("listed %q", owner)
 		}
-		return []Listed{{FullName: "GizClaw/old", PushedAt: day(1)}, {FullName: "GizClaw/new", PushedAt: day(12)}, {FullName: "GizClaw/mid", PushedAt: day(5)}}, nil
+		return Listing{Repos: []Listed{{FullName: "GizClaw/old", PushedAt: day(1)}, {FullName: "GizClaw/new", PushedAt: day(12)}, {FullName: "GizClaw/mid", PushedAt: day(5)}}, Complete: true}, nil
 	}
 	got, err := List(context.Background(), "https://github.com/GizClaw")
-	if err != nil || len(got) != 3 || got[0].FullName != "GizClaw/new" || got[2].FullName != "GizClaw/old" {
+	if err != nil || len(got.Repos) != 3 || got.Repos[0].FullName != "GizClaw/new" || got.Repos[2].FullName != "GizClaw/old" || !got.Complete {
 		t.Errorf("List = %+v, %v", got, err)
 	}
 	if _, err := List(context.Background(), "idy/yesman"); err == nil {
@@ -158,9 +158,13 @@ func TestListWithoutCLI(t *testing.T) {
 	defer func(b string) { apiBase = b }(apiBase)
 	apiBase = srv.URL
 
-	repos, err := ghList(context.Background(), "GizClaw")
-	if err != nil || len(repos) != 101 || !repos[0].Fork || repos[0].Description != "d" || repos[0].PushedAt.IsZero() {
-		t.Fatalf("list = %d repos, %v", len(repos), err)
+	l, err := ghList(context.Background(), "GizClaw")
+	if err != nil || len(l.Repos) != 101 || !l.Repos[0].Fork || l.Repos[0].Description != "d" || l.Repos[0].PushedAt.IsZero() {
+		t.Fatalf("list = %d repos, %v", len(l.Repos), err)
+	}
+	// Public repositories alone may leave out private ones to clone.
+	if l.Complete {
+		t.Error("the public API's list counts as complete")
 	}
 	if _, err := ghList(context.Background(), "nobody"); err == nil || !strings.Contains(err.Error(), "no user or organization") {
 		t.Errorf("listing a missing owner = %v", err)

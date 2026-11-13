@@ -193,7 +193,7 @@ func (c *clones) Dismiss(repo string) {
 
 // Add clones one repository now, for an agent that waits for it, and lists
 // it as cloning meanwhile. It takes no slot and leaves no failure behind:
-// the agent gets the error.
+// the agent gets the error. A clone of it the page queued is taken over.
 func (c *clones) Add(ctx context.Context, input string) (pool.Repo, error) {
 	r, err := github.Parse(input)
 	if err != nil {
@@ -202,7 +202,7 @@ func (c *clones) Add(ctx context.Context, input string) (pool.Repo, error) {
 	name := r.FullName()
 	c.mu.Lock()
 	_, j := c.find(name)
-	mine := j == nil || j.State == CloneFailed
+	mine := j == nil || j.State != CloneCloning
 	if j == nil {
 		c.jobs = append(c.jobs, &Clone{Repo: name, State: CloneCloning, input: input})
 	} else if mine {
@@ -213,7 +213,7 @@ func (c *clones) Add(ctx context.Context, input string) (pool.Repo, error) {
 	}
 	c.mu.Unlock()
 	// The pool clones a repository once: when the page's clone of it is
-	// already under way, this one waits for it and finds it in the pool.
+	// under way, this one waits for it and then finds it in the pool.
 	repo, err := c.add(ctx, input)
 	if mine {
 		c.remove(name, err == nil)

@@ -1171,7 +1171,7 @@ const OWNER_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 
 const picker = {
-  lists: new Map(), // owner key -> { owner, state: 'loading' | 'ready' | 'failed', repos, error }
+  lists: new Map(), // owner key -> { owner, state: 'loading' | 'ready' | 'failed', repos, complete, error }
   selected: new Map(), // repo key -> owner/repo
   timer: 0,
   error: '',
@@ -1251,11 +1251,13 @@ async function listOwner(owner, again = false) {
   clearTimeout(picker.timer);
   const had = picker.lists.get(key);
   if (had && !(again && had.state === 'failed')) return;
-  const entry = { owner, state: 'loading', repos: [], error: '' };
+  const entry = { owner, state: 'loading', repos: [], complete: false, error: '' };
   picker.lists.set(key, entry);
   renderPicker();
   try {
-    entry.repos = await call('OwnerRepos', owner);
+    const listing = await call('OwnerRepos', owner);
+    entry.repos = listing.repos;
+    entry.complete = listing.complete;
     entry.state = 'ready';
   } catch (err) {
     entry.state = 'failed';
@@ -1265,14 +1267,17 @@ async function listOwner(owner, again = false) {
 }
 
 // What Add would add: the ticked repositories, or else the one typed,
-// unless the owner's list shows it does not exist or is in the pool.
+// unless it is in the pool, or the owner's complete list shows it does
+// not exist. A list may leave out what the user can clone: the public
+// API lists no private repositories, and a long list stops at 1,000.
 function pickerChoice(typed = readPickerInput()) {
   if (picker.selected.size) return [...picker.selected.values()];
   if (!typed.full || pickerTaken().has(repoKey(typed.full))) return [];
   const entry = picker.lists.get(typed.owner.toLowerCase());
   if (entry?.state === 'ready') {
     const listed = entry.repos.find((r) => repoKey(r.fullName) === repoKey(typed.full));
-    return listed ? [typed.input === typed.full ? listed.fullName : typed.input] : [];
+    if (listed) return [typed.input === typed.full ? listed.fullName : typed.input];
+    if (entry.complete) return [];
   }
   return [typed.input];
 }
@@ -1343,6 +1348,10 @@ function pickerRows(entry, shown) {
     syncPicker();
   } });
   all.free = free;
+  // Ticks kept from another filter or owner show here too.
+  const on = free.filter((r) => picker.selected.has(repoKey(r.fullName))).length;
+  all.checked = on > 0 && on === free.length;
+  all.indeterminate = on > 0 && on < free.length;
   const count = shown.length === entry.repos.length ? `${shown.length} ${shown.length === 1 ? 'repository' : 'repositories'}` : `${shown.length} of ${entry.repos.length}`;
   const head = h('label', { class: 'picker-row picker-all' }, all, h('span', null, `Select all · ${count}`));
   const rows = shown.map((r) => {

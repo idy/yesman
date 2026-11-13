@@ -195,6 +195,14 @@ type Listed struct {
 // listLimit caps how many repositories List returns.
 const listLimit = 1000
 
+// Listing is an owner's repositories. Complete says it has all the
+// repositories the user can clone: the GitHub CLI listed them, private
+// ones too, and they did not reach listLimit.
+type Listing struct {
+	Repos    []Listed `json:"repos"`
+	Complete bool     `json:"complete"`
+}
+
 // ParseOwner reads a GitHub user or organization: its login, or its
 // github.com URL.
 func ParseOwner(input string) (string, error) {
@@ -215,22 +223,25 @@ func ParseOwner(input string) (string, error) {
 // List returns the repositories of a GitHub user or organization, most
 // recently pushed first: through the GitHub CLI, the private ones the
 // user's login sees too, and else the public ones.
-func List(ctx context.Context, owner string) ([]Listed, error) {
+func List(ctx context.Context, owner string) (Listing, error) {
 	owner, err := ParseOwner(owner)
 	if err != nil {
-		return nil, err
+		return Listing{}, err
 	}
-	repos, err := list(ctx, owner)
+	l, err := list(ctx, owner)
 	if err != nil {
-		return nil, err
+		return Listing{}, err
 	}
-	sort.SliceStable(repos, func(i, j int) bool { return repos[i].PushedAt.After(repos[j].PushedAt) })
-	return repos, nil
+	if l.Repos == nil {
+		l.Repos = []Listed{}
+	}
+	sort.SliceStable(l.Repos, func(i, j int) bool { return l.Repos[i].PushedAt.After(l.Repos[j].PushedAt) })
+	return l, nil
 }
 
 var list = ghList
 
-func ghList(ctx context.Context, owner string) ([]Listed, error) {
+func ghList(ctx context.Context, owner string) (Listing, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	out, err := gh(ctx, "repo", "list", owner, "--limit", strconv.Itoa(listLimit),
@@ -245,17 +256,17 @@ func ghList(ctx context.Context, owner string) ([]Listed, error) {
 			PushedAt      time.Time `json:"pushedAt"`
 		}
 		if err := json.Unmarshal(out, &rows); err != nil {
-			return nil, err
+			return Listing{}, err
 		}
 		repos := make([]Listed, 0, len(rows))
 		for _, r := range rows {
 			repos = append(repos, Listed{FullName: r.NameWithOwner, Description: r.Description, Private: r.IsPrivate, Fork: r.IsFork, Archived: r.IsArchived, PushedAt: r.PushedAt})
 		}
-		return repos, nil
+		return Listing{Repos: repos, Complete: len(repos) < listLimit}, nil
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && strings.Contains(string(exit.Stderr), "not recognized") {
-		return nil, noOwner(owner)
+		return Listing{}, noOwner(owner)
 	}
 	// Without the CLI, or signed out of it, the public API lists public
 	// repositories.
@@ -264,12 +275,12 @@ func ghList(ctx context.Context, owner string) ([]Listed, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 			fmt.Sprintf("%s/users/%s/repos?per_page=100&type=owner&sort=pushed&page=%d", apiBase, owner, page), nil)
 		if err != nil {
-			return nil, err
+			return Listing{}, err
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			return nil, err
+			return Listing{}, err
 		}
 		var rows []struct {
 			FullName    string    `json:"full_name"`
@@ -289,7 +300,7 @@ func ghList(ctx context.Context, owner string) ([]Listed, error) {
 		}
 		resp.Body.Close()
 		if err != nil {
-			return nil, err
+			return Listing{}, err
 		}
 		for _, r := range rows {
 			repos = append(repos, Listed(r))
@@ -298,7 +309,8 @@ func ghList(ctx context.Context, owner string) ([]Listed, error) {
 			break
 		}
 	}
-	return repos, nil
+	// The public API leaves out private repositories the user may clone.
+	return Listing{Repos: repos}, nil
 }
 
 func noOwner(owner string) error {

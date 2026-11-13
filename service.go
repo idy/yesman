@@ -138,14 +138,10 @@ func (s *service) DismissClone(repo string) {
 
 // OwnerRepos lists a GitHub user's or organization's repositories, to
 // choose some to add.
-func (s *service) OwnerRepos(owner string) ([]github.Listed, error) {
+func (s *service) OwnerRepos(owner string) (github.Listing, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	repos, err := github.List(ctx, owner)
-	if repos == nil {
-		repos = []github.Listed{}
-	}
-	return repos, err
+	return github.List(ctx, owner)
 }
 
 // FetchRepo fetches a pool repository from its remotes now. The fetches

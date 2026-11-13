@@ -169,6 +169,42 @@ func TestClonesQueueChecksEveryInputFirst(t *testing.T) {
 	}
 }
 
+// An agent's addition takes over a clone of the same repository the page
+// queued, so that clone does not wait on after the repository arrived.
+func TestClonesAddTakesOverAQueuedClone(t *testing.T) {
+	f := newFakeAdds()
+	c := newClones(f.add, nil)
+	if _, err := c.Queue([]string{"a/one", "a/two", "a/three", "a/four"}); err != nil {
+		t.Fatal(err)
+	}
+	for range cloneSlots {
+		f.waitStarted(t)
+	}
+	errs := make(chan error)
+	go func() {
+		_, err := c.Add(context.Background(), "a/four")
+		errs <- err
+	}()
+	if repo := f.waitStarted(t); repo != "a/four" {
+		t.Fatalf("the agent's add started %s", repo)
+	}
+	waitForClones(t, c, map[string]CloneState{"a/one": CloneCloning, "a/two": CloneCloning, "a/three": CloneCloning, "a/four": CloneCloning})
+	f.finish(t, "a/four", nil)
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	waitForClones(t, c, map[string]CloneState{"a/one": CloneCloning, "a/two": CloneCloning, "a/three": CloneCloning})
+	for _, repo := range []string{"a/one", "a/two", "a/three"} {
+		f.finish(t, repo, nil)
+	}
+	waitForClones(t, c, map[string]CloneState{})
+	select {
+	case repo := <-f.started:
+		t.Fatalf("%s cloned again", repo)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 // An agent's addition waits for its clone, shows while it runs, and
 // leaves nothing behind when it fails.
 func TestClonesAddForAnAgent(t *testing.T) {
