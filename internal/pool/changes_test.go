@@ -201,3 +201,30 @@ func TestChangesTreeFolders(t *testing.T) {
 		t.Errorf("files of a/b = %+v", files)
 	}
 }
+
+// A new symbolic link shows as the path it holds, never as the file it
+// points to, which may be outside the worktree.
+func TestUntrackedSymlink(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	ctx := context.Background()
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	newOrigin(t, repo)
+	secret := filepath.Join(tmp, "secret.txt")
+	write(t, secret, "do not show\n")
+	if err := os.Symlink(secret, filepath.Join(repo, "link.txt")); err != nil {
+		t.Skip("cannot make symbolic links here:", err)
+	}
+	c, err := WorktreeChanges(ctx, repo, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, ok := c.File("link.txt")
+	if !ok || f.Status != "untracked" || f.Additions != 1 || f.Binary || f.Large {
+		t.Errorf("link change = %+v, %v", f, ok)
+	}
+	d, err := c.Diff(ctx, repo, "link.txt", diffTestLimit)
+	if err != nil || strings.Contains(d.Patch, "do not show") || !strings.Contains(d.Patch, "+"+secret+"\n") {
+		t.Errorf("link diff = %q, %v", d.Patch, err)
+	}
+}

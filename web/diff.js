@@ -143,6 +143,7 @@ export function createChanges(host) {
   async function load(s, refresh) {
     const seq = ++s.seq;
     s.loading = true;
+    s.stale = false;
     if (!s.view) host.render();
     try {
       const folders = prefs.folders;
@@ -164,11 +165,12 @@ export function createChanges(host) {
           if (seq !== s.seq) return;
           if (map.get(path)?.nodes) s.expanded.add(path);
         }
-        // What shows is read again, or let go once it has no changes.
-        s.diffs.clear();
-        if (s.selected) loadDiff(s, s.selected, false);
-        else if (s.folder !== null) loadListing(s, s.folder);
       }
+      // What shows is read again, or let go once it has no changes: also
+      // after a view that was let go, whose diffs belong to the old one.
+      s.diffs.clear();
+      if (s.selected) loadDiff(s, s.selected, false);
+      else if (s.folder !== null) loadListing(s, s.folder);
     } catch (err) {
       if (seq !== s.seq) return;
       s.error = err?.message || String(err);
@@ -245,16 +247,21 @@ export function createChanges(host) {
     });
   }
 
-  // loadMore lists the next page of a long folder.
-  async function loadMore(s, path) {
-    const f = s.folders.get(path);
+  // loadMore lists the next page of a long folder: of the tree as it shows
+  // now (folders alone or with their files), or of a folder's list.
+  async function loadMore(s, path, folders = false) {
+    const f = (folders ? s.dirs : s.folders).get(path);
     if (!f?.nodes || f.busy) return;
+    const seq = s.seq;
     f.busy = true;
     renderView(s);
+    renderTree(s);
     try {
-      const v = await host.call('Changes', s.yesman, s.dir, { folder: path, flat: true, offset: f.nodes.length });
-      f.nodes = f.nodes.concat(v.nodes);
-      f.more = v.more ?? 0;
+      const v = await host.call('Changes', s.yesman, s.dir, { folder: path, folders, flat: true, offset: f.nodes.length });
+      if (seq === s.seq) {
+        f.nodes = f.nodes.concat(v.nodes);
+        f.more = v.more ?? 0;
+      }
     } catch (err) {
       host.fail(err);
     } finally {
@@ -359,7 +366,7 @@ export function createChanges(host) {
       timers.set(s.key, setTimeout(() => {
         timers.delete(s.key);
         if (shown(s.yesman, s.dir)) load(s, true);
-        else s.view = null; // measured again when next shown
+        else s.stale = true; // measured again when next shown
       }, 1200));
     }
   }
@@ -371,8 +378,15 @@ export function createChanges(host) {
   function ensure(p) {
     const s = stateOf(p);
     if (!s.view && !s.loading && !s.error) load(s, true);
+    else if (s.stale && !s.loading) load(s, true);
     else if (s.view && !treeMap(s).has('')) restore(s);
     return s;
+  }
+
+  // invalidate says a yesman's worktrees may have changed while nothing
+  // watched them: each is measured again when it next shows.
+  function invalidate(yesman) {
+    for (const s of states.values()) if (s.yesman === yesman && s.view) s.stale = true;
   }
 
   function tree(p) {
@@ -433,7 +447,12 @@ export function createChanges(host) {
         rows.push(make(s, n, depth));
         if (n.dir && s.expanded.has(n.path)) walk(map, n.path, depth + 1, make);
       }
-      if (f.more) rows.push(h('p', { class: 'tree-note', style: `--depth: ${depth}` }, tn(f.more, '{n} more not shown', '{n} more not shown')));
+      if (f.more) {
+        rows.push(h('p', { class: 'tree-note', style: `--depth: ${depth}` },
+          h('button', { class: 'mds-link-button tree-more', type: 'button', disabled: f.busy, onclick: () => loadMore(s, path, map === s.dirs) },
+            f.busy ? t('Loading…') : t('Show {n} more', { n: formatNumber(Math.min(f.more, 1000)) })),
+          ' ', tn(f.more, '{n} not shown yet', '{n} not shown yet')));
+      }
     };
     if (s.error && !s.view) {
       rows.push(h('p', { class: 'tree-note danger' }, s.error));
@@ -662,7 +681,7 @@ export function createChanges(host) {
   }
 
   return {
-    ensure, tree, view, actions, onFiles, cached, list,
+    ensure, invalidate, tree, view, actions, onFiles, cached, list,
     // What shows: the file whose diff shows, else the folder whose files
     // show, as path; '' or null for the top or the summary.
     shown: (p) => {

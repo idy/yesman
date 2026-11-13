@@ -220,17 +220,50 @@ func splitNUL(out []byte) []string {
 	return strings.Split(s, "\x00")
 }
 
-// countLines counts a new file's lines as additions, unless it is binary
-// or too large to read.
-func countLines(path string, f *FileChange) {
+// openRegular opens a new file of a worktree to read it, if it is a
+// regular file. It never follows a symbolic link, which could show a file
+// outside the worktree: git keeps a link as the path it holds, and so does
+// a diff of one (untrackedDiff).
+func openRegular(path string) (*os.File, os.FileInfo, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
 	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The path may have become a link since it was looked at.
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(before, after) {
+		file.Close()
+		return nil, nil, fmt.Errorf("%s changed while it was read", filepath.Base(path))
+	}
+	return file, after, nil
+}
+
+// isLink reports whether a path is a symbolic link, without following it.
+func isLink(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink != 0
+}
+
+// countLines counts a new file's lines as additions, unless it is binary
+// or too large to read. A symbolic link is one line: the path it holds.
+func countLines(path string, f *FileChange) {
+	if isLink(path) {
+		f.Additions = 1
+		return
+	}
+	file, info, err := openRegular(path)
 	if err != nil {
 		return
 	}
 	defer file.Close()
-	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
-		return
-	} else if info.Size() > untrackedCountLimit {
+	if info.Size() > untrackedCountLimit {
 		f.Large = true
 		return
 	}
@@ -490,17 +523,23 @@ func stripHeader(patch string) string {
 	return ""
 }
 
-// untrackedDiff shows a new file as one hunk of added lines.
+// untrackedDiff shows a new file as one hunk of added lines, and a new
+// symbolic link as the path it holds, as git shows one.
 func untrackedDiff(path string, d FileDiff, limit int) (FileDiff, error) {
-	file, err := os.Open(path)
+	if isLink(path) {
+		target, err := os.Readlink(path)
+		if err != nil {
+			return d, err
+		}
+		d.Size = len(target)
+		d.Patch = "@@ -0,0 +1 @@\n+" + target + "\n\\ No newline at end of file\n"
+		return d, nil
+	}
+	file, info, err := openRegular(path)
 	if err != nil {
 		return d, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return d, err
-	}
 	data, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
 	if err != nil {
 		return d, err

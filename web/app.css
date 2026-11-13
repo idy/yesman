@@ -549,6 +549,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .changes-list-more { display: flex; align-items: center; gap: 10px; padding: 4px 18px 24px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
 .changes-list-more .mds-button--small { min-height: 26px; padding: 2px 10px; font-size: var(--mds-text-caption); }
 .diff-head-icon { flex: 0 0 auto; width: 14px; height: 14px; color: var(--mds-muted); }
+.tree-more { font-size: var(--mds-text-note); }
 .tree-twist { display: grid; place-items: center; width: 14px; height: 18px; margin: -2px 0; border-radius: var(--mds-radius-xs); }
 .tree-twist:hover { background: var(--mds-selected); }
 .changes-summary { max-width: 520px; padding: 20px 24px 32px; font-size: var(--mds-text-note); }

@@ -421,6 +421,7 @@ export function createFiles(host) {
       for (const dir of p.dirs.keys()) loadDir(p, dir);
       for (const t of p.tabs) refresh(p, t.path);
     }
+    changes.invalidate(name);
   }
 
   // onChange takes the "files" event: it reloads what changed and is shown.
