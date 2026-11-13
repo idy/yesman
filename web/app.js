@@ -755,11 +755,7 @@ function renderDock() {
     }
   });
   const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea); } },
-    h('div', { class: 'composer-input' },
-      textarea,
-      h('div', { class: 'composer-row' },
-        h('span', { class: 'composer-hint' }, working ? 'Working. A new message steers it after its current step.' : 'Enter to send, Shift+Enter for a new line'),
-        h('div', { class: 'ask-actions' }, stop, send))),
+    h('div', { class: 'composer-input' }, textarea, h('div', { class: 'ask-actions' }, stop, send)),
     h('div', { class: 'composer-controls' }, modelOptionsEl(a, working)),
   );
   dock.append(form);
