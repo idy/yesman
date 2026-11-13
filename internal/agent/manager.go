@@ -606,12 +606,20 @@ func (m *Manager) watch(a *agent, p *proc) {
 // Prompt sends a user message. While the agent works, it steers the run:
 // pi delivers it after the current tool calls.
 func (m *Manager) Prompt(ctx context.Context, id, text string) error {
-	m.unnudge(id)
-	return m.prompt(ctx, id, text, "steer")
+	return m.PromptImages(ctx, id, text, nil)
 }
 
-func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
-	if strings.TrimSpace(text) == "" {
+// PromptImages sends text and image content together, including when steering.
+func (m *Manager) PromptImages(ctx context.Context, id, text string, images []Image) error {
+	if err := validateImages(images); err != nil {
+		return err
+	}
+	m.unnudge(id)
+	return m.prompt(ctx, id, text, "steer", images...)
+}
+
+func (m *Manager) prompt(ctx context.Context, id, text, behavior string, images ...Image) error {
+	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return errors.New("empty message")
 	}
 	var (
@@ -659,18 +667,22 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 		}
 	}
 	a.modelMu.Unlock()
-	return m.sendPrompt(ctx, a, p, text, behavior)
+	return m.sendPrompt(ctx, a, p, text, behavior, images...)
 }
 
 // sendPrompt dispatches a prompt already registered under modelMu and mu.
 // No manager lock is held while sending or waiting for pi's answer.
-func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behavior string) error {
+func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behavior string, images ...Image) error {
 	done := make(chan error, 1)
 	go func() {
 		// Cancelling the caller does not cancel the RPC already sent to pi.
 		// Keep it registered until pi answers (or exits), even if the caller
 		// stops waiting, so configuration cannot slip into its startup gap.
-		_, err := p.call(context.Background(), map[string]any{"type": "prompt", "message": text, "streamingBehavior": behavior})
+		cmd := map[string]any{"type": "prompt", "message": text, "streamingBehavior": behavior}
+		if len(images) > 0 {
+			cmd["images"] = images
+		}
+		_, err := p.call(context.Background(), cmd)
 		a.modelMu.Lock()
 		m.mu.Lock()
 		a.prompts--

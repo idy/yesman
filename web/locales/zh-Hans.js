@@ -1,6 +1,16 @@
 // Simplified Chinese for the page, by the English of each message (see
 // web/i18n.js). A message left out shows in English.
 export default {
+  "Attach images": "添加图片",
+  "Attach images (PNG, JPEG, GIF, WebP; 4 images, 5 MB each, 10 MB total)": "添加图片（PNG、JPEG、GIF、WebP；最多 4 张，每张 5 MB，合计 10 MB）",
+  "Attached image": "已添加的图片",
+  "Remove image": "移除图片",
+  "Attach at most 4 images.": "最多添加 4 张图片。",
+  "Use PNG, JPEG, GIF or WebP images.": "请使用 PNG、JPEG、GIF 或 WebP 图片。",
+  "This image is empty.": "这张图片是空文件。",
+  "Each image must be 5 MB or smaller.": "每张图片不能超过 5 MB。",
+  "Images must be 10 MB or smaller in total.": "图片合计不能超过 10 MB。",
+  "Could not read the image. Try selecting it again.": "无法读取图片，请重新选择。",
   "1 clone stopped": "已停止 1 个克隆",
   "1 repository cloning": "1 个仓库正在克隆",
   "1 repository of the file is in the pool already.": "文件中有 1 个仓库已在仓库池中。",
