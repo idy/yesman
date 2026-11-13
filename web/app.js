@@ -7,6 +7,7 @@
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
+import { createBoard } from './board.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
@@ -31,7 +32,7 @@ const state = {
   convos: new Map(),
   drafts: new Map(),
   modelOptions: new Map(),
-  infoOpen: false,
+  pane: null, // the pane beside the conversation: 'files', 'board' or null
   repos: [],
   settingsPage: 'general',
   settings: null, // Yesman.Settings, for the General page
@@ -215,6 +216,9 @@ function messageEl(c, m) {
       if (fromLead) {
         return h('div', { class: 'note' }, h('strong', null, 'From the lead'), h('div', { class: 'md', html: renderMarkdown(fromLead[1]) }));
       }
+      // How a worker's run ended when it did not finish it: stopped or failed.
+      const notice = text.match(/^\[yesman\] (Worker "[^"]+" [\s\S]*)$/);
+      if (notice) return h('div', { class: 'note note--quiet' }, notice[1]);
       return h('div', { class: 'msg-user' }, text);
     }
     case 'assistant': {
@@ -301,9 +305,11 @@ function renderWorking() {
   thread.querySelector('.working-live')?.remove();
   const a = selectedAgent();
   if (a?.status === 'working') {
-    thread.append(h('div', { class: 'working working-live', 'data-status': 'working' }, h('i', { class: 'mds-dot' }), 'Working…'));
+    thread.append(h('div', { class: 'working working-live', 'data-status': 'working' }, h('i', { class: 'mds-dot' }), h('span', { class: 'working-label' }, workingLabel(a))));
   }
 }
+
+const workingLabel = (a) => (a.activity ? `${a.activity}…` : 'Working…');
 
 // Live records from an agent's pi process.
 function onAgentEvent(ev) {
@@ -453,20 +459,49 @@ function statusDot(status) {
   return h('span', { class: 'dot-wrap', 'data-status': status }, h('i', { class: 'mds-dot' }));
 }
 
+// How long a run has gone on: 8s, 4m, 1h 5m.
+function elapsed(since) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(since).getTime()) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+
+// The line under an agent's name: what it is doing, from the events of its
+// run, or what it is for. Workers always have it, so rows keep their place;
+// the lead shows it beside its name, only while it works.
+function agentLine(a) {
+  switch (a.status) {
+    case 'working': return { text: a.activity || 'Working', live: true };
+    case 'waiting': return { text: 'Waiting for your answer', live: true };
+    case 'failed': return { text: a.detail?.split('\n')[0] || 'Stopped', live: false };
+    default: return a.role === 'worker' ? { text: a.task?.trim().split('\n')[0] ?? '', live: false } : null;
+  }
+}
+
 function agentRow(a, cls, label) {
   const current = state.view.kind === 'agent' && state.view.id === a.id;
-  const meta = a.status === 'idle' || a.status === 'stopped' ? '' : STATUS[a.status] ?? a.status;
+  const meta = a.status === 'working' && a.runStartedAt
+    ? h('span', { class: 'meta', 'data-since': a.runStartedAt, title: 'How long this run has gone on' }, elapsed(a.runStartedAt))
+    : h('span', { class: 'meta' }, a.status === 'idle' || a.status === 'stopped' || a.status === 'working' ? '' : STATUS[a.status] ?? a.status);
+  const line = cls === 'agent-row--worker' || (cls === 'agent-row--yesman' && a.status === 'working') ? agentLine(a) : null;
   return h('button', {
     class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': a.status, 'aria-current': current ? 'page' : null,
     'aria-haspopup': 'menu',
-    title: `${a.id}: ${STATUS[a.status] ?? a.status}${a.detail ? `\n${a.detail}` : ''}`,
+    title: `${a.id}: ${STATUS[a.status] ?? a.status}${a.activity ? `\n${a.activity}` : ''}${a.detail ? `\n${a.detail}` : ''}`,
     onclick: () => selectAgent(a.id),
     oncontextmenu: (e) => openAgentMenu(e, a),
     onkeydown: (e) => {
       if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) openAgentMenu(e, a);
     },
-  }, statusDot(a.status), h('span', { class: 'name' }, label), h('span', { class: 'meta' }, meta));
+  }, statusDot(a.status), h('span', { class: 'name' }, label), meta,
+  line ? h('span', { class: 'line', 'data-live': line.live ? 'true' : null }, line.text) : null);
 }
+
+// Run times count up while agents work.
+setInterval(() => {
+  for (const el of document.querySelectorAll('.agent-row .meta[data-since]')) el.textContent = elapsed(el.dataset.since);
+}, 1000);
 
 async function openAgentMenu(e, a) {
   e.preventDefault();
@@ -484,7 +519,7 @@ async function openAgentMenu(e, a) {
     switch (action) {
       case 'open': selectAgent(a.id); break;
       case 'workspace':
-        state.infoOpen = true;
+        state.pane = 'files';
         selectAgent(a.id);
         break;
       case 'reveal': await call('Reveal', workspace.path); break;
@@ -553,7 +588,8 @@ function renderBarActions() {
       ? button('power', 'Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.', () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', 'Remove worker', () => removeWorker(a)) : null,
-    a ? button('panel', state.infoOpen ? 'Hide the files' : 'Show the files', toggleInfo, { 'aria-pressed': String(state.infoOpen) }) : null,
+    a ? button('listChecks', state.pane === 'board' ? 'Hide the board' : 'Show the board', () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }) : null,
+    a ? button('panel', state.pane === 'files' ? 'Hide the files' : 'Show the files', () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }) : null,
   ].filter(Boolean));
 }
 
@@ -1493,25 +1529,41 @@ const files = createFiles({
     const a = selectedAgent();
     return a ? yesmanOf(a.id) : null;
   },
-  isOpen: () => state.infoOpen,
-  setOpen: (on) => {
-    state.infoOpen = on;
-    files.render();
-    renderBarActions();
-  },
+  isOpen: () => state.pane === 'files',
+  setOpen: (on) => setPane(on ? 'files' : state.pane === 'files' ? null : state.pane),
   checkout: (y) => openCheckout(y),
   dismiss: (name) => dismiss(name),
   confirm: (title, body, ok) => confirmAction(title, body, ok),
 });
 
-function toggleInfo() {
-  state.infoOpen = !state.infoOpen;
-  files.render();
+// ---------- Board pane ----------
+
+// The board shares the place beside the conversation with the files.
+const board = createBoard({
+  call,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.pane === 'board',
+  setOpen: (on) => setPane(on ? 'board' : state.pane === 'board' ? null : state.pane),
+  agent: (id) => agentById(id),
+  openAgent: (id) => selectAgent(id),
+});
+
+function setPane(pane) {
+  state.pane = pane;
+  renderInfo();
   renderBarActions();
+}
+
+function togglePane(pane) {
+  setPane(state.pane === pane ? null : pane);
 }
 
 function renderInfo() {
   files.render();
+  board.render();
 }
 
 async function openCheckout(y) {
@@ -1629,10 +1681,17 @@ async function refreshState() {
 
 function onAgents(agents) {
   const before = selectedAgent();
+  const ids = state.snap.agents.map((a) => a.id).join();
   state.snap.agents = agents;
   pruneCaches();
   renderSidebar();
+  // The board links a task's owner while it is one of the agents.
+  if (state.pane === 'board' && agents.map((a) => a.id).join() !== ids) board.render();
   const after = selectedAgent();
+  if (after?.status === 'working' && after.activity !== before?.activity) {
+    const label = $('#thread .working-live .working-label');
+    if (label) label.textContent = workingLabel(after);
+  }
   if (after?.status === 'idle' && before?.status === 'starting') loadModelOptions(after);
   if (state.view.kind === 'agent' && !after) {
     refreshSoon();
@@ -1679,6 +1738,7 @@ async function start() {
   mygo.on('fetches', onFetches);
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => files.onChange(change));
+  mygo.on('board', (yesman) => board.onChange(yesman));
   document.addEventListener('keydown', (e) => files.onKey(e));
   call('Update').then(onUpdate, () => {});
   mygo.on('focus-agent', (id) => {

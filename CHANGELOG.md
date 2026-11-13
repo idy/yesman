@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## Unreleased
+
+- Each yesman has a board: a task list its agents keep with the new `yesman_board` tool. Open it from the titlebar beside the conversation, where the files show. Open tasks keep their order, a blocked one says why, finished ones fold into Done, and a task's owner opens that worker's conversation.
+- The lead delegates instead of working, so it stays free to talk: it has no shell and writes only knowledge notes, and hands changes, commands and investigations to workers. Workers keep their own board tasks up to date.
+- The sidebar shows what each working agent is doing now, such as the command it runs or the file it reads, and how long its run has gone on. Idle workers show their task.
+- The lead hears when a worker's run is stopped by you or its process fails, not only when it finishes.
+
 ## 0.1.8
 
 - A compact message field without the shortcut hint underneath. Text and the smaller, unboxed Send and Stop icons share a row, with the last line and icons aligned when the message grows.

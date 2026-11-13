@@ -30,6 +30,8 @@ var (
 	// fetchesEvent carries where fetching the pool stands whenever a fetch
 	// starts or ends.
 	fetchesEvent = mygo.NewEvent[FetchState]("fetches")
+	// boardEvent names a yesman whose board changed.
+	boardEvent = mygo.NewEvent[string]("board")
 )
 
 type app struct {

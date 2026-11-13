@@ -14,15 +14,20 @@ yesman is a tray app for hiring yesmen. A yesman takes on one project: it gets a
 | --- | --- |
 | Repo pool | GitHub repositories, kept as bare repositories under `repos/` and written only by yesman. A repository is fetched whenever someone checks it out of the pool, and all of them with Fetch all, or every few minutes when Settings › Repositories says so. A fork also fetches the repository it was forked from, as its `upstream` remote. |
 | Yesman | A workspace directory under `yesmen/<name>/`. Its worktrees, of any pool repositories, are checked out into it with `git worktree`, each on its own branch. |
-| Lead | A [pi](https://pi.dev) agent in RPC mode, working in the workspace. You talk to it; it plans, keeps knowledge, and delegates. |
-| Workers | More pi agents in the same workspace, started by the lead for one task each. A worker's final message is sent to its lead when it finishes a run. |
+| Lead | A [pi](https://pi.dev) agent in RPC mode, working in the workspace. You talk to it; it plans, keeps the board and knowledge, and delegates. It never does the work itself, so it stays free to talk: it has no shell, and writes only knowledge notes. |
+| Workers | More pi agents in the same workspace, started by the lead for one task each. The lead never waits for them: a worker's final message is sent to its lead when it finishes a run, and the lead is also told when a worker's run is stopped by you or its process fails. |
 | Knowledge | `.yesman/knowledge/`, notes every agent of the yesman reads and writes, listed in `INDEX.md`. |
+| Board | `.yesman/board.json`, the yesman's task list: each task has a status (todo, doing, blocked, done, dropped), an owner, and a note on where it stands. The lead adds tasks and hands them to workers; workers keep their own tasks current. It is the plan, not what the agents are doing now. |
 | Sessions | Each agent's pi session log in `.yesman/sessions/<agent>/`. Agents resume their latest session when they restart. |
 
 Every agent runs your installed `pi` with your usual pi configuration (models, plugins, MCP servers), plus yesman's extension, [`pi/yesman.ts`](pi/yesman.ts). Before each run the extension gives the agent its yesman's context: the workspace, its worktrees, the pool, the knowledge index and the other agents. It also adds these tools, which call the app's loopback API:
 
-- `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`
+- `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`, `yesman_board`
 - for leads: `yesman_worker_start`, `yesman_worker_send`, `yesman_worker_remove`
+
+For a lead, the extension also takes away pi's `bash` and adds the read-only `grep`, `find` and `ls`, and refuses `edit` and `write` outside `.yesman/knowledge/`. Tools from your own pi configuration stay.
+
+The sidebar lists each yesman's lead with its workers under it, in the order they started. A working agent shows what it is doing now, taken from its run's events (the tool it runs, the model thinking or writing), and how long its run has gone on; a worker's row shows its task otherwise.
 
 The composer lets you choose the current agent's model and reasoning effort from the right side below the input box. Models come from pi's configured, authenticated catalog, grouped only when there is more than one provider; effort shows only the levels the selected model supports. Change them between runs without starting a new conversation. pi saves the selection in that agent's session once it has messages, and restores it when the agent resumes.
 
@@ -31,6 +36,8 @@ The context meter beside these choices opens pi's estimated current context usag
 The app keeps running in the tray with its window closed. Agents are child processes of the app, so quitting it stops them; they resume from their sessions next time.
 
 The files pane, opened from the titlebar, shows the workspace of the yesman you are talking to as a tree, and opens its files in tabs: text and code in an editor with syntax highlighting that saves with Cmd/Ctrl+S or by itself as you type, Markdown rendered, images shown. It follows changes as agents make them, and never saves over a file that changed on disk since it was opened without asking. Large files stay quick: the editor draws only the lines in view, and files over 5 MB open read-only at their first 512 KB. Each folder in the path above a file opens a list of that folder. Cmd/Ctrl+P goes to a file by name, and its menu checks out repositories, opens the knowledge notes and dismisses the yesman. Its edges can be dragged.
+
+The board, opened beside it in the titlebar, shows the same yesman's board as a list in the agents' order. Finished and dropped tasks fold into Done at the end, a blocked task shows why, a task's owner opens that agent's conversation, and a task expands to its detail and note. It follows the agents' changes; you change it by asking the lead. The board and the files share the place beside the conversation, one at a time.
 
 Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), and About (the versions yesman runs with, and updates).
 
@@ -103,12 +110,13 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | `update.go` | Checking for and installing new versions |
 | `files.go`, `files_menu.go` | Listing, reading, finding and watching a workspace's files, and the files pane's menus |
 | `web/files.js`, `web/editor.js`, `web/code.js` | The files pane, its editor, and the language of each file |
+| `web/board.js` | The board pane |
 | `tools/codemirror/` | Rebuilds the vendored CodeMirror bundle |
 | `mygo.json`, `resources/`, `icons.go` | Packaging, the yak app icon and the monochrome tray template; see [icon sources](resources/README.md) |
 | `internal/pool` | The repo pool and its worktrees |
 | `internal/github` | What the pool takes: GitHub repositories, their clone URLs and a fork's parent |
-| `internal/yesmen` | Workspaces, workers and their files |
-| `internal/agent` | pi processes in RPC mode and their status |
+| `internal/yesmen` | Workspaces, workers, the board and their files |
+| `internal/agent` | pi processes in RPC mode, their status and current activity |
 | `internal/server` | The loopback API for the extension, and the context each agent gets |
 | `pi/yesman.ts` | yesman's pi extension |
 | `web/` | The page: `index.html`, `app.js`, `markdown.js`, `app.css`, and Magpie in `mds/` |

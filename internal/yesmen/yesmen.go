@@ -7,6 +7,7 @@
 //	  .yesman/
 //	    yesman.json        when it was hired
 //	    workers.json       the workers its lead started
+//	    board.json         the task board its agents keep
 //	    knowledge/         notes every agent reads and writes; INDEX.md lists them
 //	    sessions/<agent>/  each agent's pi session log
 //	  <repo>--<topic>/     worktrees

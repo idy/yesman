@@ -80,7 +80,7 @@ func fakePi() {
 		var data any = map[string]any{"messages": []any{}, "text": "done"}
 		switch cmd.Type {
 		case "prompt":
-			write(map[string]any{"type": "test_prompt_received", "provider": model.Provider})
+			write(map[string]any{"type": "test_prompt_received", "provider": model.Provider, "message": cmd.Message})
 			if os.Getenv("FAKE_PI_HOLD_PROMPTS") != "" {
 				// Simulate async extension work before isStreaming becomes true.
 				heldPrompts = append(heldPrompts, cmd.ID)
@@ -151,8 +151,12 @@ func fakePi() {
 			write(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant"}})
 		}
 		if cmd.Type == "prompt" {
+			worker := os.Getenv("YESMAN_ROLE") == RoleWorker
+			if worker && os.Getenv("FAKE_PI_CRASH_WORKERS") != "" {
+				os.Exit(3)
+			}
 			write(map[string]any{"type": "agent_start"})
-			write(map[string]any{"type": "agent_settled", "aborted": false})
+			write(map[string]any{"type": "agent_settled", "aborted": worker && os.Getenv("FAKE_PI_ABORT_WORKERS") != ""})
 		}
 	}
 }

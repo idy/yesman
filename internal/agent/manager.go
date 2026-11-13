@@ -64,12 +64,17 @@ type Info struct {
 	// Detail explains a failure.
 	Detail string `json:"detail,omitempty"`
 	// Dialog is the extension_ui_request a Waiting agent waits on.
-	Dialog       json.RawMessage `json:"dialog,omitempty"`
-	Model        string          `json:"model,omitempty"`
-	Provider     string          `json:"provider,omitempty"`
-	Effort       string          `json:"effort,omitempty"`
-	EffortLevels []string        `json:"effortLevels,omitempty"`
-	UpdatedAt    time.Time       `json:"updatedAt,omitzero"`
+	Dialog json.RawMessage `json:"dialog,omitempty"`
+	// Activity says what a working agent is doing now, from the events of
+	// its run, such as "Running go test ./...". Empty between steps.
+	Activity string `json:"activity,omitempty"`
+	// RunStartedAt is when the current run started; zero between runs.
+	RunStartedAt time.Time `json:"runStartedAt,omitzero"`
+	Model        string    `json:"model,omitempty"`
+	Provider     string    `json:"provider,omitempty"`
+	Effort       string    `json:"effort,omitempty"`
+	EffortLevels []string  `json:"effortLevels,omitempty"`
+	UpdatedAt    time.Time `json:"updatedAt,omitzero"`
 }
 
 // Event is one record an agent's pi process emitted.
@@ -132,6 +137,9 @@ type agent struct {
 	turn     []Event       // the events of the assistant message in progress
 	starting chan struct{} // closed when a start finishes, nil otherwise
 	stopping bool
+	dir      string   // the workspace, to show paths in it relative to it
+	tools    []string // the tool calls running, oldest first
+	labels   map[string]string
 }
 
 // errStopped is returned to a start that Stop interrupted.
@@ -297,6 +305,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			a = &agent{info: Info{ID: id, Yesman: ys, Name: name, Role: role, Status: Stopped}}
 			m.agents[id] = a
 		}
+		a.dir = y.Path
 		if a.proc != nil {
 			p := a.proc
 			select {
@@ -407,6 +416,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 // record handles one record of an agent's process. It runs on the
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
+	m.follow(a, p, kind, raw)
 	switch kind {
 	case "agent_start":
 		m.setStatus(a, p, Working, "")
@@ -423,8 +433,18 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			defer a.modelMu.Unlock()
 			_, _ = m.syncModel(ctx, a, p)
 		}()
-		if a.info.Role == RoleWorker && !e.Aborted {
+		m.mu.Lock()
+		worker, stopping := a.info.Role == RoleWorker, a.stopping
+		m.mu.Unlock()
+		switch {
+		case !worker:
+		case !e.Aborted:
 			go m.reportToLead(a, p)
+		case !stopping:
+			// The user stopped its run. A worker being put to sleep, removed
+			// or shut down with the app tells nobody: telling the lead would
+			// start it again.
+			go m.tellLead(a, fmt.Sprintf("[yesman] Worker %q was stopped by the user before it finished its run. It keeps its session; message it to continue.", a.info.Name))
 		}
 	case "thinking_level_changed":
 		var e struct {
@@ -495,18 +515,23 @@ func (m *Manager) watch(a *agent, p *proc) {
 		return
 	}
 	m.clearLocked(a, p)
-	if a.stopping {
-		a.info.Status, a.info.Detail = Stopped, ""
-	} else {
+	failed := !a.stopping
+	if failed {
 		detail := "pi exited"
 		if msg := p.stderr.String(); msg != "" {
 			detail += ": " + lastLines(msg, 6)
 		}
 		a.info.Status, a.info.Detail = Failed, detail
+	} else {
+		a.info.Status, a.info.Detail = Stopped, ""
 	}
 	a.info.Dialog, a.info.UpdatedAt = nil, time.Now()
+	worker, detail := a.info.Role == RoleWorker, a.info.Detail
 	m.mu.Unlock()
 	m.changed()
+	if failed && worker {
+		go m.tellLead(a, fmt.Sprintf("[yesman] Worker %q stopped unexpectedly (%s). It keeps its session; message it to start it again.", a.info.Name, clip(strings.Join(strings.Fields(detail), " "))))
+	}
 }
 
 // Prompt sends a user message. While the agent works, it steers the run:
@@ -654,6 +679,7 @@ func (m *Manager) clearLocked(a *agent, p *proc) {
 		a.proc = nil
 	}
 	a.turn = nil
+	a.endRun()
 	if a.token != "" {
 		delete(m.tokens, a.token)
 		a.token = ""
@@ -752,7 +778,22 @@ func (m *Manager) reportToLead(a *agent, p *proc) {
 			report = *data.Text
 		}
 	}
-	msg := fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report)
+	m.tellLeadWithin(ctx, a, fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report))
+}
+
+// tellLead hands the lead a message about one of its workers, which starts
+// a run or is read after the current one. The lead never waits for its
+// workers, so it learns how each run ended this way: finished, stopped by
+// the user, or failed.
+func (m *Manager) tellLead(a *agent, msg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	m.tellLeadWithin(ctx, a, msg)
+}
+
+// tellLeadWithin tries a few times; a message that cannot be delivered is
+// shown on the worker, for the user.
+func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, msg string) {
 	lead := ID(a.info.Yesman, yesmen.LeadName)
 	var err error
 	for attempt := range reportAttempts {

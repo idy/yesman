@@ -72,7 +72,8 @@ func main() {
 	a.fetcher.SetInterval(time.Duration(a.settings.AutoFetch) * time.Minute)
 	go a.fetcher.Schedule(context.Background())
 
-	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add}
+	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
+		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) }}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}

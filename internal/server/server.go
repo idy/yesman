@@ -30,6 +30,8 @@ type Server struct {
 	Agents *agent.Manager
 	// Changed is told when the pool or a workspace's worktrees change.
 	Changed func()
+	// BoardChanged is told when a yesman's board changes.
+	BoardChanged func(yesman string)
 	// AddRepo, when set, clones a GitHub repository into the pool in place
 	// of resolving and cloning it here, so the app can show it cloning.
 	AddRepo func(ctx context.Context, repo string) (pool.Repo, error)
@@ -64,6 +66,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/workers", s.handle(s.startWorker))
 	mux.HandleFunc("POST /v1/workers/send", s.handle(s.sendWorker))
 	mux.HandleFunc("POST /v1/workers/remove", s.handle(s.removeWorker))
+	mux.HandleFunc("GET /v1/board", s.handle(s.board))
+	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
 	return mux
 }
 
@@ -329,22 +333,53 @@ func (s *Server) removeWorker(_ context.Context, c caller, r *http.Request) (any
 	return map[string]bool{"removed": true}, nil
 }
 
+// board returns the caller's yesman's board. Every agent of the yesman reads
+// and keeps it, so that the lead can hand keeping it to a worker.
+func (s *Server) board(_ context.Context, c caller, _ *http.Request) (any, error) {
+	return s.Yesmen.Board(c.yesman.Name)
+}
+
+func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any, error) {
+	var change yesmen.BoardChange
+	if err := decode(r, &change); err != nil {
+		return nil, err
+	}
+	if change.Empty() {
+		return s.Yesmen.Board(c.yesman.Name)
+	}
+	var b yesmen.Board
+	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+		var err error
+		b, err = s.Yesmen.ChangeBoard(y.Name, change)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	if s.BoardChanged != nil {
+		s.BoardChanged(c.yesman.Name)
+	}
+	return b, nil
+}
+
 func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, error) {
-	return BuildContext(ctx, s.Pool, s.Agents, c.yesman, c.agent), nil
+	board, _ := s.Yesmen.Board(c.yesman.Name)
+	return BuildContext(ctx, s.Pool, s.Agents, c.yesman, c.agent, board), nil
 }
 
 const knowledgeLimit = 8000
 
 // BuildContext writes the system prompt section yesman's extension gives
 // an agent before each run.
-func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y yesmen.Yesman, me agent.Info) string {
+func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y yesmen.Yesman, me agent.Info, board yesmen.Board) string {
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
 
 	if me.Role == agent.RoleLead {
-		w("You are the lead of the yesman named %q. You talk with the user, plan, keep this yesman's knowledge, and get the work delivered. ", y.Name)
-		w("Hand substantial, separable work to workers with yesman_worker_start: each is its own pi agent in this workspace and reports back to you when it finishes a run. Do small things yourself. ")
-		w("Never sleep, poll or read session logs to wait for a worker: end your run, and its report arrives as a new message that starts your next one.\n")
+		w("You are the lead of the yesman named %q. You talk with the user, plan, keep the board and this yesman's knowledge, and get the work delivered by workers.\n\n", y.Name)
+		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are knowledge notes. Read files only to answer a quick question, not to investigate. ")
+		w("Hand everything else to workers with yesman_worker_start (changes, commands, tests, research across many files, reviews, releases), then end your run. Each worker is its own pi agent in this workspace; several can run at once. ")
+		w("Keep every run short: answer, delegate, end.\n")
+		w("Never sleep, poll or read session logs to wait for a worker: end your run, and its report arrives as a new message that starts your next one. You also hear when a worker's run was stopped by the user or failed.\n")
 	} else {
 		w("You are %q, a worker of the yesman named %q. Your lead started you for one task and receives your final message when you finish a run, so end each run with a short report: what you did, where (worktree, branch, PR) and what is left.\n", me.Name, y.Name)
 		if me.Task != "" {
@@ -400,6 +435,16 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 		w("\n%s/INDEX.md:\n\n%s\n", rel, text)
 	}
 
+	w("\n## Board\n\n")
+	w("The board is this yesman's task list, which the user watches beside the conversation. Read and change it with yesman_board. ")
+	w("Statuses: todo, doing, blocked (say why in the note), done (put the result and its links, such as the branch or PR, in the note), dropped. ")
+	if me.Role == agent.RoleLead {
+		w("Add a task for each piece of work the user asks for, and set its owner when you hand it to a worker. Workers keep their own tasks current; when the board needs more than a quick change, such as reconciling it with reports, have a worker do it.\n")
+	} else {
+		w("Keep the tasks you own (owner %q) current: doing when you start, blocked when you cannot go on, done when you finish. Change other tasks only when your task is to keep the board.\n", me.Name)
+	}
+	writeBoard(&b, board)
+
 	var team []agent.Info
 	for _, i := range agents.List() {
 		if i.Yesman == y.Name && i.ID != me.ID {
@@ -413,6 +458,9 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	}
 	for _, i := range team {
 		w("- %s (%s): %s", i.Name, i.Role, i.Status)
+		if i.Activity != "" {
+			w(", now: %s", i.Activity)
+		}
 		if i.Task != "" {
 			w(", task: %s", oneLine(i.Task, 120))
 		}
@@ -421,14 +469,49 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	return b.String()
 }
 
+const boardLimit = 60
+
+// writeBoard lists a board's open tasks for an agent's context.
+func writeBoard(b *strings.Builder, board yesmen.Board) {
+	open, closed := 0, 0
+	for _, t := range board.Tasks {
+		if !t.Open() {
+			closed++
+			continue
+		}
+		if open++; open > boardLimit {
+			continue
+		}
+		fmt.Fprintf(b, "- %s [%s] %s", t.ID, t.Status, oneLine(t.Title, 200))
+		if t.Owner != "" {
+			fmt.Fprintf(b, " (owner %s)", t.Owner)
+		}
+		if t.Note != "" {
+			fmt.Fprintf(b, ": %s", oneLine(t.Note, 160))
+		}
+		b.WriteString("\n")
+	}
+	switch {
+	case open == 0 && closed == 0:
+		b.WriteString("The board is empty.\n")
+	case open == 0:
+		b.WriteString("No open tasks.\n")
+	case open > boardLimit:
+		fmt.Fprintf(b, "… and %d more open tasks (yesman_board lists them)\n", open-boardLimit)
+	}
+	if closed > 0 {
+		fmt.Fprintf(b, "%d done or dropped (yesman_board lists them).\n", closed)
+	}
+}
+
 func indent(s string) string {
 	return "  " + strings.ReplaceAll(strings.TrimSpace(s), "\n", "\n  ")
 }
 
 func oneLine(s string, n int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > n {
-		s = s[:n] + "…"
+	if r := []rune(s); len(r) > n {
+		s = string(r[:n]) + "…"
 	}
 	return s
 }
