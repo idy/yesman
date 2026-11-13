@@ -2,16 +2,35 @@
 
 Each release's section is what installed copies show as its release notes.
 
-## Unreleased
+## 0.1.12
 
 - Each yesman has a board: a task list its agents keep with the new `yesman_board` tool. Open it from the titlebar beside the conversation, where the files show. Open tasks keep their order, a blocked one says why, finished ones fold into Done, and a task's owner opens that worker's conversation.
 - The lead delegates instead of working, so it stays free to talk: it has no shell and writes only knowledge notes, and hands changes, commands and investigations to workers. Workers keep their own board tasks up to date.
-- The sidebar shows each worker's subject in words, and how long a working agent's run has gone on. What an agent is doing now, such as the file it reads, shows at the foot of its conversation.
+- Each worker has a compact, single-line sidebar row: status, a number such as a1, its subject in words, and its run time. Completed workers show a grey check; running workers show a pulsing blue dot. The board uses the same worker numbers.
 - A worker that finished and reported closes and shows greyed in its place. Right-click a yesman to hide or show its done workers. Messaging a done worker starts it again with its session.
 - The lead hears when a worker's run is stopped by you or its process fails, not only when it finishes, and restarts failed workers itself.
 - Workers no longer turn to you. A question a worker's tools ask goes to its lead, which answers it, and a worker shows as asking its yesman instead of needing you. Only a lead asks you things or notifies you.
 - The lead sees the work through: it decides what it can, finishes everything that does not wait on you, and then brings the open decisions together. If it ends a run with tasks open and nothing running, yesman reminds it once.
 - The finished notification waits until the whole yesman has settled.
+
+## 0.1.11
+
+- Settings › pi manages pi's packages: the extensions, skills, prompt templates and themes every agent loads. Info shows the pi yesman runs, a summary of its packages and pi's own settings file. Installed lists each package with its version, source and what it provides, says when npm has a newer version, and updates or removes it. Browse searches the packages of pi's gallery, most popular first, and shows a package's README, links and preview before you install it. Install from source takes any npm package, git repository or folder pi takes.
+- yesman installs, updates and removes packages with pi's own commands, one at a time in the background, for you as a whole: they load into every yesman agent and into pi wherever you run it. A change that fails stays listed with pi's or npm's reason until you try it again or dismiss it.
+- pi loads packages when it starts, so the page says which agents still run with the packages as they were, and puts the idle ones to sleep. They load the change and resume their sessions when you next talk to them.
+- The pi row moves from Settings › General to the pi page.
+
+## 0.1.10
+
+- yesman speaks Simplified Chinese as well as English. Choose the language in Settings › General, or Match the system to follow the languages of your system settings. The window, its menus, the tray and notifications switch at once.
+- Storage has a page of its own in Settings: choose the yesman folder there, and reveal where the repositories, workspaces, archive and runtime files are.
+
+## 0.1.9
+
+- Export yesman's configuration from Settings › Import and export: the appearance, the fetch schedule and every GitHub repository in the pool, as a TOML file. Workspaces, knowledge and conversations are not included.
+- Import a configuration file to see what it would change, then Merge or Replace. Merge clones the repositories the pool lacks and keeps everything else. Replace also resets the settings the file leaves out and removes the repositories it does not list.
+- Replace never removes a repository that work depends on: one with a worktree checked out of it, in a workspace or the archive, or a branch with commits no remote has. It says which repositories it kept and why. Clones of repositories the file leaves out stop, unless an agent is waiting for one.
+- The Settings pages sit more compactly under Settings in the sidebar, with smaller icons on a rail aligned with the Settings icon.
 
 ## 0.1.8
 

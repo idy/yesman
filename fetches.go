@@ -91,6 +91,22 @@ func (f *fetcher) finish(name string, err error) {
 	f.emitLocked()
 }
 
+// Forget drops the last fetch errors of repositories that left the pool.
+func (f *fetcher) Forget(names ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	changed := false
+	for _, name := range names {
+		if _, ok := f.errors[name]; ok {
+			delete(f.errors, name)
+			changed = true
+		}
+	}
+	if changed {
+		f.emitLocked()
+	}
+}
+
 // Fetch fetches one repository from its remotes now.
 func (f *fetcher) Fetch(ctx context.Context, name string) (pool.Repo, error) {
 	r, err := f.pool.Get(name)

@@ -29,7 +29,7 @@ For a lead, the extension also takes away pi's `bash` and adds the read-only `gr
 
 Only a lead turns to you. A question a worker's tools ask (an extension dialog) goes to its lead as a message, which answers it with `yesman_worker_answer`; the worker shows as asking its yesman, and you can still answer it from its conversation. A worker's failure goes to the lead too. When the lead ends a run with board tasks still to do or in progress and no worker running, yesman reminds it of them once, until you or a worker write to it again. You are notified when a lead asks you something, fails, or finishes with its whole yesman settled.
 
-The sidebar lists each yesman's lead with its workers under it, in the order they started. Each worker shows the subject of its work in words, its title or else its board task's title, never the commands it runs. A working agent shows how long its run has gone on. A done worker stays in its place, greyed; right-click the yesman to hide or show its done workers. What an agent is doing now, taken from its run's events, shows at the foot of its conversation while it works, and the lead sees it in its context.
+The sidebar lists each yesman's lead with its workers under it, in the order they started. Each worker has one line with its status, a number such as a1, and the subject of its work in words, its title or else its board task's title, never the commands it runs. The board uses the same numbers, and hovering a worker shows its name. A working agent shows how long its run has gone on. A done worker stays in its place, greyed; right-click the yesman to hide or show its done workers. What an agent is doing now, taken from its run's events, shows at the foot of its conversation while it works, and the lead sees it in its context.
 
 The composer lets you choose the current agent's model and reasoning effort from the right side below the input box. Models come from pi's configured, authenticated catalog, grouped only when there is more than one provider; effort shows only the levels the selected model supports. Change them between runs without starting a new conversation. pi saves the selection in that agent's session once it has messages, and restores it when the agent resumes.
 
@@ -41,9 +41,24 @@ The files pane, opened from the titlebar, shows the workspace of the yesman you 
 
 The board, opened beside it in the titlebar, shows the same yesman's board as a list in the agents' order. Finished and dropped tasks fold into Done at the end, a blocked task shows why, a task's owner opens that agent's conversation, and a task expands to its detail and note. It follows the agents' changes; you change it by asking the lead. The board and the files share the place beside the conversation, one at a time.
 
-Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), and About (the versions yesman runs with, and updates).
+Settings, at the foot of the sidebar, has six pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and the language), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), Storage (where yesman keeps its data, below), pi (pi's packages, below), Import and export (below), and About (the versions yesman runs with, and updates).
 
-In General → Storage, **Change…** lets you enter or browse to a data folder, then **Use folder and restart** opens it after restarting. Existing folders with data are accepted; a new folder starts fresh. To keep existing data elsewhere, quit yesman, copy the folder yourself, then reopen yesman and select the copy. Data transfers and any Git worktree path repairs are manual. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice. Storage also has a compact list of the repo pool, workspace parent, archive, runtime files, settings file and storage configuration, with a Reveal action for each and the full path on hover.
+yesman is written in English and translated to Simplified Chinese. General › Language chooses one, or Match the system, the default, which shows the first of them among the languages of the system's settings, else English. The window, its menus, the tray and notifications change at once; MyGo keeps the choice (`App.SetLocale`): on macOS as the app's language in System Settings, which AppKit and WebKit also say their own texts in from the next launch, elsewhere in its `locale` file. The page translates itself in [`web/i18n.js`](web/i18n.js), with each message's English as its key in [`web/locales/zh-Hans.js`](web/locales/zh-Hans.js); Go translates its menus, tray, notifications and dialogs with `tr` in [`i18n.go`](i18n.go). A message without a translation shows in English.
+
+The pi page manages [pi packages](https://pi.dev/packages): the extensions, skills, prompt templates and themes pi loads. It has three tabs. Info shows the pi every agent runs, a summary of the installed packages, pi's own settings file and what pi installs npm packages with (its `npmCommand` setting, npm unless set). Installed lists the packages pi's user settings install, with their version, source and what they provide; each can be updated, unless pinned to a version, or removed, and an npm package whose registry has a newer version says so. Browse searches the npm packages tagged `pi-package`, which is what pi's gallery lists, most popular first; a package's details show its README, links and preview, and install it. Install from source takes anything `pi install` does: `npm:name[@version]`, a git repository or URL, or a local path.
+
+Packages are installed for the user, in pi's agent directory (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`), so they load into every yesman agent and into pi wherever you run it. yesman changes them only by running `pi install`, `pi update` and `pi remove`, one at a time in the background; a change that fails stays listed with pi's or npm's error until you try it again or dismiss it. pi loads packages when it starts, so agents already running keep the packages they started with: the page says which, and puts the idle ones to sleep on request, to load the change when they next start.
+
+Import and export saves yesman's configuration as a TOML file, to back it up or carry it to another computer: the appearance, the fetch schedule and the pool's GitHub repositories as `owner/repo`. Workspaces, their knowledge and conversations stay out, as does where yesman keeps its data. Importing a file first shows what it would change, then either merges it, which clones the repositories it lists that the pool lacks and changes the settings it sets, or replaces with it, which also resets the settings it leaves out and removes the pool repositories it does not list. Replace keeps a repository that work depends on, one with a worktree checked out of it (in a workspace or the archive) or a branch with commits no remote has, and says why. It also stops the clones of repositories the file leaves out, except one an agent is waiting for.
+
+```toml
+version = 1
+appearance = "dark"   # system, light or dark
+auto_fetch = 15       # minutes: 0, 1, 5, 15 or 60
+repos = ["idy/yesman", "idy/magpie"]
+```
+
+In Settings › Storage, **Change…** lets you enter or browse to a data folder, then **Use folder and restart** opens it after restarting. Existing folders with data are accepted; a new folder starts fresh. To keep existing data elsewhere, quit yesman, copy the folder yourself, then reopen yesman and select the copy. Data transfers and any Git worktree path repairs are manual. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice. Storage also has a compact list of the repo pool, workspace parent, archive, runtime files, settings file and storage configuration, with a Reveal action for each and the full path on hover.
 
 Release builds update themselves through MyGo's updater: they check GitHub releases of `idy/yesman` at launch and every 6 hours, and download and install a newer version in the background. The titlebar then offers to restart into it, and the next launch runs it anyway. Only release builds, made with `mygo build` and signed, do that; development builds (`go run`, `go build`) never check.
 
@@ -51,7 +66,7 @@ Release builds update themselves through MyGo's updater: they check GitHub relea
 
 - Go 1.27 or later, and git
 - Optionally the [GitHub CLI](https://cli.github.com) (`gh`), signed in. yesman asks it which repository a fork came from and which repositories an owner has, private ones too, and clones `owner/repo` over the protocol it is set to use. Without it, yesman asks GitHub's public API, which sees public repositories, and clones over HTTPS.
-- [pi](https://pi.dev) 1.5.2 or later on the `PATH` (`npm install -g @earendil-works/pi-coding-agent`), with a model configured
+- [pi](https://pi.dev) 1.5.2 or later on the `PATH` (`npm install -g @earendil-works/pi-coding-agent`), with a model configured. Installing npm packages from Settings › pi also needs the command pi installs them with, npm by default.
 
 The window uses [MyGo](https://github.com/egoist/mygo) v0.9.0 with a vanilla JavaScript page and the [Magpie design system](https://github.com/idy/magpie-design-system) v0.4.4, vendored in `web/mds/`. The editor is [CodeMirror 6](https://codemirror.net), bundled into `web/vendor/codemirror/` by `tools/codemirror/build.sh` from the exact versions in `tools/codemirror/package.json`. There is no frontend build step.
 
@@ -88,6 +103,8 @@ To drive the real window, build with the `e2e` tag and attach [`mygo-automation`
 go build -tags e2e -o /tmp/yesman . && YESMAN_HOME=/tmp/yesman-home MYGO_AUTOMATION=/tmp/yesman.sock /tmp/yesman
 ```
 
+Automation cannot reach native file dialogs, so in such builds `YESMAN_E2E_SAVE` and `YESMAN_E2E_OPEN` name the files that Export and Import use instead of asking.
+
 ## Release
 
 `mygo.json` describes the app for `mygo build`: its name, identifier, version, and where its updates come from. To release a version:
@@ -109,10 +126,13 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | --- | --- |
 | `main.go`, `app.go`, `service.go` | App startup, tray, window and notifications; the methods the page calls |
 | `settings.go`, `storage.go`, `internal/home/` | Settings and About, the remembered data location and directory layout |
+| `pipackages.go`, `internal/pipkg`, `web/pi.js` | Settings › pi: pi's packages, installed, updated and removed through pi, and found in the npm registry |
+| `config.go` | The configuration file: export, and import by merging or replacing |
 | `update.go` | Checking for and installing new versions |
 | `files.go`, `files_menu.go` | Listing, reading, finding and watching a workspace's files, and the files pane's menus |
 | `web/files.js`, `web/editor.js`, `web/code.js` | The files pane, its editor, and the language of each file |
 | `web/board.js` | The board pane |
+| `i18n.go`, `web/i18n.js`, `web/locales/` | The languages yesman is written in, and their translations |
 | `tools/codemirror/` | Rebuilds the vendored CodeMirror bundle |
 | `mygo.json`, `resources/`, `icons.go` | Packaging, the yak app icon and the monochrome tray template; see [icon sources](resources/README.md) |
 | `internal/pool` | The repo pool and its worktrees |

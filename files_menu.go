@@ -41,11 +41,11 @@ func disabled(off bool) func(*mygo.MenuItem) { return func(m *mygo.MenuItem) { m
 func revealLabel() string {
 	switch runtime.GOOS {
 	case "darwin":
-		return "Reveal in Finder"
+		return tr("Reveal in Finder")
 	case "windows":
-		return "Show in Explorer"
+		return tr("Show in Explorer")
 	}
-	return "Show in Files"
+	return tr("Show in Files")
 }
 
 // FilesMenu opens the files pane's menu. tree, wrap, autoSave and folders
@@ -54,19 +54,19 @@ func revealLabel() string {
 func (s *service) FilesMenu(ctx context.Context, x, y int, tree, wrap, autoSave, folders bool) (string, error) {
 	return popup(ctx, x, y, func(item func(string, string, ...func(*mygo.MenuItem)) *mygo.MenuItem) []*mygo.MenuItem {
 		return []*mygo.MenuItem{
-			item("find", "Go to File…", accel("CmdOrCtrl+P")),
+			item("find", tr("Go to File…"), accel("CmdOrCtrl+P")),
 			mygo.Separator(),
-			item("tree", "Show File Tree", checked(tree), accel("CmdOrCtrl+Shift+Y")),
-			item("collapse", "Collapse All Folders", disabled(!folders)),
+			item("tree", tr("Show File Tree"), checked(tree), accel("CmdOrCtrl+Shift+Y")),
+			item("collapse", tr("Collapse All Folders"), disabled(!folders)),
 			mygo.Separator(),
-			item("autosave", "Auto Save", checked(autoSave)),
-			item("wrap", "Word Wrap", checked(wrap)),
+			item("autosave", tr("Auto Save"), checked(autoSave)),
+			item("wrap", tr("Word Wrap"), checked(wrap)),
 			mygo.Separator(),
-			item("knowledge", "Open Knowledge Notes"),
-			item("checkout", "Check Out a Repository…"),
+			item("knowledge", tr("Open Knowledge Notes")),
+			item("checkout", tr("Check Out a Repository…")),
 			item("reveal", revealLabel()),
 			mygo.Separator(),
-			item("dismiss", "Dismiss yesman…"),
+			item("dismiss", tr("Dismiss yesman…")),
 		}
 	})
 }
@@ -83,13 +83,13 @@ func (s *service) FileMenu(ctx context.Context, yesman, rel string, dir bool, x,
 	choice, err := popup(ctx, x, y, func(item func(string, string, ...func(*mygo.MenuItem)) *mygo.MenuItem) []*mygo.MenuItem {
 		var items []*mygo.MenuItem
 		if !dir {
-			items = append(items, item("open", "Open"), mygo.Separator())
+			items = append(items, item("open", tr("Open")), mygo.Separator())
 		}
 		return append(items,
 			item("reveal", revealLabel()),
 			mygo.Separator(),
-			item("copy", "Copy Path"),
-			item("copy-rel", "Copy Relative Path"),
+			item("copy", tr("Copy Path")),
+			item("copy-rel", tr("Copy Relative Path")),
 		)
 	})
 	if err != nil {

@@ -31,10 +31,10 @@ func (s *service) AgentMenu(ctx context.Context, id string, x, y int, doneHidden
 	}
 	working := info.Status == agent.Working || info.Status == agent.Waiting
 	running := working || info.Status == agent.Idle || info.Status == agent.Starting
-	removeID, removeLabel := "remove", "Remove Worker…"
+	removeID, removeLabel := "remove", tr("Remove Worker…")
 	var done []*mygo.MenuItem
 	if info.Role == agent.RoleLead {
-		removeID, removeLabel = "archive", "Archive yesman…"
+		removeID, removeLabel = "archive", tr("Archive yesman…")
 		finished := 0
 		for _, i := range s.app.agents.List() {
 			if i.Yesman == info.Yesman && !i.FinishedAt.IsZero() {
@@ -42,21 +42,21 @@ func (s *service) AgentMenu(ctx context.Context, id string, x, y int, doneHidden
 			}
 		}
 		if doneHidden {
-			done = append(done, item("show-done", "Show Done Workers", false), mygo.Separator())
+			done = append(done, item("show-done", tr("Show Done Workers"), false), mygo.Separator())
 		} else {
-			done = append(done, item("hide-done", "Hide Done Workers", finished == 0), mygo.Separator())
+			done = append(done, item("hide-done", tr("Hide Done Workers"), finished == 0), mygo.Separator())
 		}
 	}
 	menu := mygo.NewMenu(append(done, []*mygo.MenuItem{
-		item("open", "Open Conversation", false),
-		item("workspace", "View Workspace", false),
+		item("open", tr("Open Conversation"), false),
+		item("workspace", tr("View Workspace"), false),
 		mygo.Separator(),
-		item("reveal", "Reveal Workspace", false),
-		item("knowledge", "Reveal Knowledge", false),
-		item("logs", "Reveal Session Logs", false),
+		item("reveal", tr("Reveal Workspace"), false),
+		item("knowledge", tr("Reveal Knowledge"), false),
+		item("logs", tr("Reveal Session Logs"), false),
 		mygo.Separator(),
-		item("abort", "Stop Current Run", !working),
-		item("sleep", "Put to Sleep", !running),
+		item("abort", tr("Stop Current Run"), !working),
+		item("sleep", tr("Put to Sleep"), !running),
 		mygo.Separator(),
 		item(removeID, removeLabel, false),
 	}...))

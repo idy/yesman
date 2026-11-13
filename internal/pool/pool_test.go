@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -220,4 +221,65 @@ func TestPool(t *testing.T) {
 		t.Errorf("upstream = %q", r.Upstream)
 	}
 	run(t, r.Path, "rev-parse", "--verify", "upstream/main")
+}
+
+func TestRemove(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_AUTHOR_NAME", "t")
+	t.Setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "t")
+	t.Setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+	ctx := context.Background()
+	tmp := t.TempDir()
+	origin := filepath.Join(tmp, "src", "origin")
+	newOrigin(t, origin)
+	p := New(filepath.Join(tmp, "repos"))
+	r, err := p.Add(ctx, origin, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inUse := func(want string) {
+		t.Helper()
+		err := p.Remove(ctx, r.Name)
+		var used *InUseError
+		if !errors.As(err, &used) || !strings.Contains(used.Reason, want) {
+			t.Fatalf("Remove = %v, want it kept because %s", err, want)
+		}
+		if _, err := os.Stat(filepath.Join(r.Path, "HEAD")); err != nil {
+			t.Fatalf("a kept repository lost its files: %v", err)
+		}
+	}
+
+	// A worktree keeps the repository.
+	wt, err := p.AddWorktree(ctx, r, WorktreeOptions{Dest: filepath.Join(tmp, "yesmen", "alice", "origin"), Branch: "yesman/alice/origin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inUse("worktree")
+
+	// So does a branch with commits no remote has, once its worktree is gone.
+	if err := os.WriteFile(filepath.Join(wt.Path, "work.txt"), []byte("w\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, wt.Path, "add", ".")
+	run(t, wt.Path, "commit", "--quiet", "-m", "work")
+	if err := p.RemoveWorktree(ctx, wt.Path, true); err != nil {
+		t.Fatal(err)
+	}
+	inUse("no remote has")
+
+	// Without either it goes, with the directories it leaves empty.
+	run(t, r.Path, "branch", "-D", "yesman/alice/origin")
+	if err := p.Remove(ctx, "origin"); err == nil {
+		t.Error("Remove took a short name")
+	}
+	if err := p.Remove(ctx, r.Name); err != nil {
+		t.Fatal(err)
+	}
+	if repos, err := p.List(); err != nil || len(repos) != 0 {
+		t.Errorf("after removing, the pool lists %+v, %v", repos, err)
+	}
+	if entries, err := os.ReadDir(p.Root()); err != nil || len(entries) != 0 {
+		t.Errorf("the pool keeps %v, %v", entries, err)
+	}
 }

@@ -69,6 +69,9 @@ type Info struct {
 	// Since is when the yesman was hired, for a lead, or the worker
 	// started. With ID it identifies an agent across reuses of a name.
 	Since time.Time `json:"since,omitzero"`
+	// StartedAt is when its running pi process started, which loaded pi's
+	// packages as they were then.
+	StartedAt time.Time `json:"startedAt,omitzero"`
 	// Detail explains a failure.
 	Detail string `json:"detail,omitempty"`
 	// Dialog is the extension_ui_request a Waiting agent waits on.
@@ -354,6 +357,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		m.mu.Unlock()
 		m.changed()
 
+		started := time.Now()
 		p, state, err := m.spawn(a, y, name, role)
 
 		m.mu.Lock()
@@ -381,6 +385,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			return nil, nil, err
 		}
 		a.proc = p
+		a.info.StartedAt = started
 		a.info.Status, a.info.Model, a.info.UpdatedAt = Idle, state.Model.ID, time.Now()
 		a.info.Provider, a.info.Effort, a.info.EffortLevels = state.Model.Provider, state.ThinkingLevel, nil
 		m.mu.Unlock()
@@ -590,9 +595,9 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 			return err
 		}
 		// Register before dispatch, under the same lock as configuration's
-		// idle check and writes, and as closing a finished worker. Release it
-		// before waiting so other messages can steer a running turn. pi may
-		// await extensions before reporting isStreaming.
+		// idle check and writes, SleepIfIdle, and closing a finished worker.
+		// Release it before waiting so other messages can steer a running
+		// turn. pi may await extensions before reporting isStreaming.
 		a.modelMu.Lock()
 		if err := ctx.Err(); err != nil {
 			a.modelMu.Unlock()
@@ -601,10 +606,15 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 		m.mu.Lock()
 		current := a.proc == p
 		m.mu.Unlock()
+		select {
+		case <-p.done:
+			current = false
+		default:
+		}
 		if current {
 			break
 		}
-		// A finished worker was closed while this waited: start it again.
+		// Put to sleep or closed as finished while this waited: start again.
 		a.modelMu.Unlock()
 	}
 	a.prompts++
@@ -734,6 +744,39 @@ func (m *Manager) Stop(id string) {
 	}
 	m.mu.Unlock()
 	m.changed()
+}
+
+// SleepIfIdle stops the agent's process, as Stop does, only if it is idle
+// and started before the time given, and reports whether it stopped it.
+// It holds the lock prompts register under from its check to the end of the
+// stop, so no message slips in between: one sent meanwhile waits, then
+// starts the agent again. pi is asked too, as it may be running or
+// compacting before yesman hears of it.
+func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
+	m.mu.Lock()
+	a := m.agents[id]
+	m.mu.Unlock()
+	if a == nil {
+		return false
+	}
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	m.mu.Lock()
+	p := a.proc
+	idle := p != nil && a.starting == nil && a.prompts == 0 && a.info.Status == Idle &&
+		!a.info.StartedAt.IsZero() && a.info.StartedAt.Before(startedBefore)
+	m.mu.Unlock()
+	if !idle {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	state, err := p.modelState(ctx)
+	cancel()
+	if err != nil || state.IsStreaming || state.IsCompacting {
+		return false
+	}
+	m.Stop(id)
+	return true
 }
 
 // clearLocked forgets an agent's process, its credential, and the reply

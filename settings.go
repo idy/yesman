@@ -94,9 +94,11 @@ func (s Settings) save(path string) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// SettingsView is what the General and Repositories settings pages show.
+// SettingsView is what the General, Repositories and Storage settings
+// pages show; the pi page has its own, PiView.
 type SettingsView struct {
 	Appearance    mygo.ThemeSource `json:"appearance"`
+	Language      string           `json:"language"`  // a language of languages, or "system"
 	AutoFetch     int              `json:"autoFetch"` // minutes; 0 is off
 	Home          string           `json:"home"`
 	Pool          string           `json:"pool"`
@@ -105,8 +107,6 @@ type SettingsView struct {
 	Runtime       string           `json:"runtime"`
 	SettingsFile  string           `json:"settingsFile"`
 	StorageConfig string           `json:"storageConfig,omitempty"`
-	Pi            string           `json:"pi"`
-	PiError       string           `json:"piError,omitempty"`
 	HomeOverride  bool             `json:"homeOverride,omitempty"`
 }
 
@@ -119,8 +119,13 @@ func (s *service) Settings() SettingsView {
 	if appearance == "" {
 		appearance = mygo.ThemeSystem
 	}
+	language := languageSystem
+	if a.chosenLocale != nil {
+		language = chosenLanguage(a.chosenLocale())
+	}
 	v := SettingsView{
 		Appearance:   appearance,
+		Language:     language,
 		AutoFetch:    autoFetch,
 		Home:         a.home.Root,
 		Pool:         a.home.Repos(),
@@ -128,10 +133,6 @@ func (s *service) Settings() SettingsView {
 		Archive:      a.home.Archive(),
 		Runtime:      a.home.Runtime(),
 		SettingsFile: a.home.Settings(),
-		Pi:           a.pi,
-	}
-	if a.piErr != nil {
-		v.PiError = a.piErr.Error()
 	}
 	if a.storage != nil {
 		v.HomeOverride = a.storage.override
@@ -152,11 +153,20 @@ func (s *service) SetAppearance(source string) error {
 	defer a.setmu.Unlock()
 	next := a.settings
 	next.Appearance = t
-	if err := next.save(a.home.Settings()); err != nil {
-		return fmt.Errorf("save settings: %w", err)
+	return a.putSettingsLocked(next)
+}
+
+// SetLanguage shows yesman in a language it is written in, or "system" to
+// follow the system's languages. MyGo keeps the choice for the next starts
+// (App.SetLocale), and tells the page, which draws itself again.
+func (s *service) SetLanguage(choice string) error {
+	tag, ok := languageTag(choice)
+	if !ok {
+		return fmt.Errorf("unknown language %q", choice)
 	}
-	a.settings = next
-	mygo.Theme.SetSource(t)
+	if s.app.setLocale != nil {
+		s.app.setLocale(tag)
+	}
 	return nil
 }
 
@@ -171,11 +181,32 @@ func (s *service) SetAutoFetch(minutes int) error {
 	defer a.setmu.Unlock()
 	next := a.settings
 	next.AutoFetch = minutes
+	return a.putSettingsLocked(next)
+}
+
+// themeOf is the appearance settings put into effect: none chosen follows
+// the system.
+func themeOf(s Settings) mygo.ThemeSource {
+	if s.Appearance == "" {
+		return mygo.ThemeSystem
+	}
+	return s.Appearance
+}
+
+// putSettingsLocked saves the settings and puts them into effect. a.setmu
+// is held.
+func (a *app) putSettingsLocked(next Settings) error {
 	if err := next.save(a.home.Settings()); err != nil {
 		return fmt.Errorf("save settings: %w", err)
 	}
+	prev := a.settings
 	a.settings = next
-	a.fetcher.SetInterval(time.Duration(minutes) * time.Minute)
+	if themeOf(next) != themeOf(prev) && a.setTheme != nil {
+		a.setTheme(next.Appearance)
+	}
+	if next.AutoFetch != prev.AutoFetch {
+		a.fetcher.SetInterval(time.Duration(next.AutoFetch) * time.Minute)
+	}
 	return nil
 }
 

@@ -1,12 +1,12 @@
 // pi's current context estimate and cumulative session usage. Keep these
 // separate: the tokens billed across requests are not the context window.
 import { h } from './dom.js';
+import { t, formatNumber } from './i18n.js';
 
-const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
-const exact = new Intl.NumberFormat('en', { maximumFractionDigits: 0 });
-const percentage = new Intl.NumberFormat('en', { maximumFractionDigits: 1 });
+const compact = (value) => formatNumber(value, { notation: 'compact', maximumFractionDigits: 1 });
+const percentage = (value) => formatNumber(value, { maximumFractionDigits: 1 });
 const number = (value) => typeof value === 'number' && Number.isFinite(value);
-const count = (value) => number(value) ? exact.format(value) : '—';
+const count = (value) => number(value) ? formatNumber(value, { maximumFractionDigits: 0 }) : '—';
 const errorText = (err) => err?.message || err?.error || String(err);
 
 function ring() {
@@ -36,12 +36,13 @@ export function createContextViewer({ call, keyOf }) {
   const cache = new Map();
   const svg = ring();
   const fill = svg.querySelector('.context-ring-fill');
-  const button = h('button', { class: 'context-toggle', type: 'button', 'aria-label': 'Context window', 'aria-haspopup': 'dialog', 'aria-expanded': 'false', 'aria-controls': 'context-panel' }, svg);
+  const button = h('button', { class: 'context-toggle', type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false', 'aria-controls': 'context-panel' }, svg);
   const value = h('span', { class: 'context-value', role: 'status' });
   const body = h('div', { class: 'context-body' });
-  const dismiss = h('button', { class: 'mds-link-button', type: 'button', onclick: () => close(true) }, 'Close');
-  const panel = h('section', { class: 'context-panel', id: 'context-panel', role: 'dialog', 'aria-label': 'Context window', tabindex: -1, hidden: true },
-    h('div', { class: 'context-heading' }, h('h2', null, 'Context window'), dismiss), value, body);
+  const dismiss = h('button', { class: 'mds-link-button', type: 'button', onclick: () => close(true) });
+  const heading = h('h2');
+  const panel = h('section', { class: 'context-panel', id: 'context-panel', role: 'dialog', tabindex: -1, hidden: true },
+    h('div', { class: 'context-heading' }, heading, dismiss), value, body);
   const topLayer = typeof panel.showPopover === 'function';
   if (topLayer) panel.setAttribute('popover', 'manual');
   let current = null;
@@ -72,44 +73,49 @@ export function createContextViewer({ call, keyOf }) {
     const known = used !== null;
     fill.setAttribute('stroke-dasharray', `${known ? Math.min(100, percent) : 0} 100`);
     button.setAttribute('aria-busy', String(!!entry?.loading));
+    // Said again each time, in the language the page shows.
+    heading.textContent = t('Context window');
+    dismiss.textContent = t('Close');
+    panel.setAttribute('aria-label', t('Context window'));
+    const usage = { used: count(used), limit: count(limit), percent: known ? percentage(percent) : '' };
     const label = known
-      ? `Context window: ${count(used)} of ${count(limit)} tokens (${percentage.format(percent)}%)${entry?.error ? '; refresh failed, showing last reported usage' : ''}`
-      : entry?.error ? 'Context usage unavailable' : entry?.loading ? 'Loading context usage' : 'Context usage not yet reported';
+      ? (entry?.error ? t('Context window: {used} of {limit} tokens ({percent}%); refresh failed, showing last reported usage', usage) : t('Context window: {used} of {limit} tokens ({percent}%)', usage))
+      : entry?.error ? t('Context usage unavailable') : entry?.loading ? t('Loading context usage') : t('Context usage not yet reported');
     button.title = label;
     button.setAttribute('aria-label', label);
     if (panel.hidden) return;
-    value.textContent = known ? `${compact.format(used)} / ${compact.format(limit)} (${percentage.format(percent)}%)`
-      : limit ? `— / ${compact.format(limit)}` : 'Usage unavailable';
+    value.textContent = known ? `${compact(used)} / ${compact(limit)} (${percentage(percent)}%)`
+      : limit ? `— / ${compact(limit)}` : t('Usage unavailable');
     const expanded = body.querySelector('details')?.open ?? false;
     const focused = body.contains(document.activeElement) ? document.activeElement : null;
     body.setAttribute('aria-busy', String(!!entry?.loading));
     body.replaceChildren();
     if (entry?.error) body.append(h('div', { class: 'context-error', role: 'alert' }, h('p', null, errorText(entry.error)),
-      h('button', { class: 'mds-link-button', type: 'button', disabled: entry.loading, onclick: () => load(current) }, 'Try again')));
+      h('button', { class: 'mds-link-button', type: 'button', disabled: entry.loading, onclick: () => load(current) }, t('Try again'))));
     if (!data) {
-      if (!entry?.error) body.append(h('p', { class: 'context-note' }, 'Loading context usage…'));
+      if (!entry?.error) body.append(h('p', { class: 'context-note' }, t('Loading context usage…')));
       if (focused) dismiss.focus({ preventScroll: true });
       place();
       return;
     }
     const meter = h('div', {
-      class: 'context-meter', role: known ? 'meter' : null, 'aria-label': known ? 'Estimated context used' : null,
+      class: 'context-meter', role: known ? 'meter' : null, 'aria-label': known ? t('Estimated context used') : null,
       'aria-valuemin': known ? 0 : null, 'aria-valuemax': known ? limit : null, 'aria-valuenow': known ? Math.min(used, limit) : null,
-      'aria-valuetext': known ? `${count(used)} of ${count(limit)} tokens, ${percentage.format(percent)}%` : null,
-      title: known ? label : 'pi has not reported the current context size',
+      'aria-valuetext': known ? t('{used} of {limit} tokens, {percent}%', usage) : null,
+      title: known ? label : t('pi has not reported the current context size'),
     }, h('span', { style: `width: ${known ? Math.min(100, percent) : 0}%` }));
     body.append(meter,
-      h('dl', { class: 'context-rows' }, row('Used context', known ? count(used) : 'Not yet reported'), row('Free space', known ? count(Math.max(0, limit - used)) : '—')),
-      h('h3', { class: 'context-section' }, 'Session totals'),
+      h('dl', { class: 'context-rows' }, row(t('Used context'), known ? count(used) : t('Not yet reported')), row(t('Free space'), known ? count(Math.max(0, limit - used)) : '—')),
+      h('h3', { class: 'context-section' }, t('Session totals')),
       h('dl', { class: 'context-rows' },
-        row('Input tokens', count(data.tokens?.input)), row('Output tokens', count(data.tokens?.output)),
-        row('Cache read', count(data.tokens?.cacheRead)), row('Cache write', count(data.tokens?.cacheWrite)), row('Total tokens', count(data.tokens?.total))),
-      h('details', { class: 'context-details', open: expanded }, h('summary', null, 'Messages and tools'),
-        h('dl', { class: 'context-rows' }, row('User messages', count(data.userMessages)), row('Assistant messages', count(data.assistantMessages)),
-          row('Tool calls', count(data.toolCalls)), row('Tool results', count(data.toolResults)))),
+        row(t('Input tokens'), count(data.tokens?.input)), row(t('Output tokens'), count(data.tokens?.output)),
+        row(t('Cache read'), count(data.tokens?.cacheRead)), row(t('Cache write'), count(data.tokens?.cacheWrite)), row(t('Total tokens'), count(data.tokens?.total))),
+      h('details', { class: 'context-details', open: expanded }, h('summary', null, t('Messages and tools')),
+        h('dl', { class: 'context-rows' }, row(t('User messages'), count(data.userMessages)), row(t('Assistant messages'), count(data.assistantMessages)),
+          row(t('Tool calls'), count(data.toolCalls)), row(t('Tool results'), count(data.toolResults)))),
       h('p', { class: 'context-note' }, known
-        ? 'Context usage is estimated by pi. Session totals count usage across requests.'
-        : 'pi has not reported the current context size. Session totals count usage across requests.'));
+        ? t('Context usage is estimated by pi. Session totals count usage across requests.')
+        : t('pi has not reported the current context size. Session totals count usage across requests.')));
     if (focused) (focused.tagName === 'SUMMARY' ? body.querySelector('summary') : dismiss).focus({ preventScroll: true });
     place();
   }

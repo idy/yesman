@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"runtime"
 	"strconv"
@@ -33,6 +34,9 @@ var (
 	fetchesEvent = mygo.NewEvent[FetchState]("fetches")
 	// boardEvent names a yesman whose board changed.
 	boardEvent = mygo.NewEvent[string]("board")
+	// piJobsEvent carries the changes to pi's packages under way, whenever
+	// one starts, finishes or fails.
+	piJobsEvent = mygo.NewEvent[PiJobs]("pi-packages")
 )
 
 type app struct {
@@ -44,6 +48,9 @@ type app struct {
 	agents  *agent.Manager
 	pi      string
 	piErr   error
+	// runPi runs a pi command for the user, outside any workspace.
+	runPi  func(ctx context.Context, args ...string) (string, error)
+	piJobs *piJobs
 
 	wmu  sync.Mutex
 	win  *mygo.Window
@@ -52,6 +59,8 @@ type app struct {
 	smu     sync.Mutex
 	last    map[string]agent.Status
 	release func() // ends KeepRunning while no agent works
+	// working and waiting count the agents, for the tray's tooltip.
+	working, waiting int
 
 	fmu          sync.Mutex
 	pendingFocus string // the agent a notification click asked to show
@@ -59,6 +68,16 @@ type app struct {
 	setmu    sync.Mutex
 	settings Settings
 	storage  *storageLocation
+	// setTheme puts an appearance into effect: mygo.Theme.SetSource, or
+	// nil in tests, which have no window to paint.
+	setTheme func(mygo.ThemeSource)
+	// chosenLocale and setLocale read and change the language chosen:
+	// MyGo's App.ChosenLocale and App.SetLocale, or nil in tests, which
+	// have no app running.
+	chosenLocale func() string
+	setLocale    func(string)
+
+	cfgmu sync.Mutex // one import at a time
 
 	updates *updates
 
@@ -132,22 +151,46 @@ func (a *app) setupTray() {
 		return
 	}
 	a.tray = t
-	menu := mygo.NewMenu([]*mygo.MenuItem{
-		{Label: "Open yesman", Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
-		mygo.Separator(),
-		{Label: "Quit yesman", Click: func(*mygo.MenuItem, *mygo.Window) { mygo.App.Quit() }},
-	})
 	if runtime.GOOS == "linux" {
-		t.SetMenu(menu) // AppIndicator reports no clicks, only menus
+		t.SetMenu(a.trayMenu()) // AppIndicator reports no clicks, only menus
 	} else {
 		t.OnClick(a.showWindow)
 		t.OnRightClick(func() {
-			t.SetMenu(menu)
+			t.SetMenu(a.trayMenu())
 			defer t.SetMenu(nil)
 			t.PopUpMenu()
 		})
 	}
+	mygo.App.OnLocaleChanged(func(string) { a.localeChanged() })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { t.Destroy() })
+}
+
+// trayMenu is the tray's menu, in the language yesman shows.
+func (a *app) trayMenu() *mygo.Menu {
+	return mygo.NewMenu([]*mygo.MenuItem{
+		{Label: tr("Open yesman"), Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
+		mygo.Separator(),
+		{Label: tr("Quit yesman"), Click: func(*mygo.MenuItem, *mygo.Window) { mygo.App.Quit() }},
+	})
+}
+
+// localeChanged says the tray in the language yesman shows now. Native
+// menus are made as they open, and the page hears the change itself.
+func (a *app) localeChanged() {
+	if a.tray == nil {
+		return
+	}
+	if runtime.GOOS == "linux" {
+		a.tray.SetMenu(a.trayMenu())
+	}
+	a.smu.Lock()
+	working, waiting := a.working, a.waiting
+	a.smu.Unlock()
+	a.tray.SetToolTip(trayToolTip(working, waiting))
+}
+
+func trayToolTip(working, waiting int) string {
+	return tr("yesman: %d working, %d waiting for you", working, waiting)
 }
 
 func (a *app) notifyChanged() { _ = changedEvent.Broadcast(true) }
@@ -182,9 +225,9 @@ func (a *app) agentsChanged(list []agent.Info) {
 		}
 		switch {
 		case i.Status == agent.Waiting:
-			notes = append(notes, note{i.ID, i.Yesman + " needs you", "It asked a question and is waiting for your answer."})
+			notes = append(notes, note{i.ID, tr("%s needs you", i.Yesman), tr("It asked a question and is waiting for your answer.")})
 		case i.Status == agent.Failed:
-			notes = append(notes, note{i.ID, i.Yesman + " stopped", i.Detail})
+			notes = append(notes, note{i.ID, tr("%s stopped", i.Yesman), i.Detail})
 		case prev == agent.Working && i.Status == agent.Idle:
 			settled = append(settled, i)
 		}
@@ -195,6 +238,7 @@ func (a *app) agentsChanged(list []agent.Info) {
 		a.release()
 		a.release = nil
 	}
+	a.working, a.waiting = working, waiting
 	a.smu.Unlock()
 
 	if a.tray != nil {
@@ -203,7 +247,7 @@ func (a *app) agentsChanged(list []agent.Info) {
 			title = strconv.Itoa(waiting)
 		}
 		a.tray.SetTitle(title)
-		a.tray.SetToolTip("yesman: " + strconv.Itoa(working) + " working, " + strconv.Itoa(waiting) + " waiting for you")
+		a.tray.SetToolTip(trayToolTip(working, waiting))
 	}
 	// A lead that ends a run often carries on at once, with a worker's
 	// report or a reminder of open tasks: tell the user only once the whole
@@ -211,7 +255,7 @@ func (a *app) agentsChanged(list []agent.Info) {
 	for _, i := range settled {
 		time.AfterFunc(settleGrace, func() {
 			if a.yesmanSettled(i.Yesman) {
-				a.notify(i.ID, i.Yesman, "Finished and waiting for you.")
+				a.notify(i.ID, i.Yesman, tr("Finished and waiting for you."))
 			}
 		})
 	}

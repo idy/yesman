@@ -463,3 +463,97 @@ func TestStopInterruptsBlockedSend(t *testing.T) {
 		t.Fatal("the blocked write never ended")
 	}
 }
+
+func TestSleepIfIdle(t *testing.T) {
+	m, _ := newTestManager(t, 0)
+	id := ID("alice", yesmen.LeadName)
+	ctx := context.Background()
+	if err := m.Prompt(ctx, id, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, m, id, Idle)
+	i, _ := m.Get(id)
+	if i.StartedAt.IsZero() {
+		t.Fatal("a running agent has no start time")
+	}
+	// Started after the change it is asked about: left running.
+	if m.SleepIfIdle(id, i.StartedAt) {
+		t.Error("slept an agent that started after the change")
+	}
+	if m.SleepIfIdle("alice/nobody", time.Now()) {
+		t.Error("slept an agent that does not exist")
+	}
+	if !m.SleepIfIdle(id, time.Now()) {
+		t.Fatal("did not sleep an idle agent")
+	}
+	if i, _ := m.Get(id); i.Status != Stopped || m.running(id) != nil {
+		t.Fatalf("after sleeping: %s", i.Status)
+	}
+	if m.SleepIfIdle(id, time.Now()) {
+		t.Error("slept an agent that was asleep")
+	}
+}
+
+func TestSleepIfIdleLeavesPromptsAlone(t *testing.T) {
+	m, _ := newTestManager(t, 0, "FAKE_PI_HOLD_PROMPTS=1")
+	id := ID("alice", yesmen.LeadName)
+	errc := make(chan error, 1)
+	go func() { errc <- m.Prompt(context.Background(), id, "hi") }()
+	// The prompt is registered and pi has not answered it: the agent may
+	// still read Idle, but a message is on its way.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		m.mu.Lock()
+		a := m.agents[id]
+		m.mu.Unlock()
+		if a != nil {
+			a.modelMu.Lock()
+			n := a.prompts
+			a.modelMu.Unlock()
+			if n > 0 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the prompt never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if m.SleepIfIdle(id, time.Now().Add(time.Hour)) {
+		t.Fatal("slept an agent with a message on its way")
+	}
+	p := m.running(id)
+	if _, err := p.call(context.Background(), map[string]any{"type": "test_release_prompts"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPromptRestartsAnAgentSleptMeanwhile(t *testing.T) {
+	m, _ := newTestManager(t, 0)
+	id := ID("alice", yesmen.LeadName)
+	ctx := context.Background()
+	if err := m.Prompt(ctx, id, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, m, id, Idle)
+	m.mu.Lock()
+	a := m.agents[id]
+	before := a.proc
+	m.mu.Unlock()
+	// Hold the lock SleepIfIdle holds; a message sent now waits for it.
+	a.modelMu.Lock()
+	errc := make(chan error, 1)
+	go func() { errc <- m.Prompt(ctx, id, "again") }()
+	time.Sleep(200 * time.Millisecond)
+	m.Stop(id)
+	a.modelMu.Unlock()
+	if err := <-errc; err != nil {
+		t.Fatalf("the message sent while the agent was put to sleep: %v", err)
+	}
+	if p := m.running(id); p == nil || p == before {
+		t.Error("the agent did not start again for the message")
+	}
+}
