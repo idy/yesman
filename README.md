@@ -22,6 +22,8 @@ Every agent runs your installed `pi` with your usual pi configuration (models, p
 - `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`
 - for leads: `yesman_worker_start`, `yesman_worker_send`, `yesman_worker_remove`
 
+The composer lets you choose the current agent's model and reasoning effort. Models come from pi's configured, authenticated catalog, grouped only when there is more than one provider; effort shows only the levels the selected model supports. Change them between runs without starting a new conversation. pi saves the selection in that agent's session once it has messages, and restores it when the agent resumes.
+
 The app keeps running in the tray with its window closed. Agents are child processes of the app, so quitting it stops them; they resume from their sessions next time.
 
 The files pane, opened from the titlebar, shows the workspace of the yesman you are talking to as a tree, and opens its files in tabs: text and code in an editor with syntax highlighting that saves with Cmd/Ctrl+S or by itself as you type, Markdown rendered, images shown. It follows changes as agents make them, and never saves over a file that changed on disk since it was opened without asking. Large files stay quick: the editor draws only the lines in view, and files over 5 MB open read-only at their first 512 KB. Each folder in the path above a file opens a list of that folder. Cmd/Ctrl+P goes to a file by name, and its menu checks out repositories, opens the knowledge notes and dismisses the yesman. Its edges can be dragged.
@@ -34,7 +36,7 @@ Release builds update themselves through MyGo's updater: they check GitHub relea
 
 - Go 1.27 or later, and git
 - Optionally the [GitHub CLI](https://cli.github.com) (`gh`), signed in. yesman asks it which repository a fork came from and which repositories an owner has, private ones too, and clones `owner/repo` over the protocol it is set to use. Without it, yesman asks GitHub's public API, which sees public repositories, and clones over HTTPS.
-- [pi](https://pi.dev) 1.5 or later on the `PATH` (`npm install -g @earendil-works/pi-coding-agent`), with a model configured
+- [pi](https://pi.dev) 1.5.2 or later on the `PATH` (`npm install -g @earendil-works/pi-coding-agent`), with a model configured
 
 The window uses [MyGo](https://github.com/egoist/mygo) v0.9.0 with a vanilla JavaScript page and the [Magpie design system](https://github.com/idy/magpie-design-system) v0.4.4, vendored in `web/mds/`. The editor is [CodeMirror 6](https://codemirror.net), bundled into `web/vendor/codemirror/` by `tools/codemirror/build.sh` from the exact versions in `tools/codemirror/package.json`. There is no frontend build step.
 

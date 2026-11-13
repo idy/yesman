@@ -9,6 +9,11 @@ Each release's section is what installed copies show as its release notes.
 - Repositories an agent adds show as cloning while it waits for them.
 - Fetch all repositories of the pool at once, or have yesman fetch them by itself every minute, 5, 15 or 60 minutes, set in Settings › Repositories. A repository whose last fetch failed says so in its row until a fetch succeeds.
 
+## 0.1.5
+
+- Choose an agent's model and reasoning effort in a separate row below the input box. Models come from pi's configured catalog, with grouping only when there is more than one provider; effort lists only the levels the selected model supports, including Extra high and Max when available.
+- Change selections between runs without losing the conversation or your draft. Each agent keeps its own selection in its pi session once it has messages, and restores it when it resumes.
+
 ## 0.1.4
 
 - Click a folder in the path above a file to list that folder, and go into its folders or open its files from there. The file's own name lists the folder it is in. The arrow keys move through the list.

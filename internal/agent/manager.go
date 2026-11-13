@@ -64,9 +64,12 @@ type Info struct {
 	// Detail explains a failure.
 	Detail string `json:"detail,omitempty"`
 	// Dialog is the extension_ui_request a Waiting agent waits on.
-	Dialog    json.RawMessage `json:"dialog,omitempty"`
-	Model     string          `json:"model,omitempty"`
-	UpdatedAt time.Time       `json:"updatedAt,omitzero"`
+	Dialog       json.RawMessage `json:"dialog,omitempty"`
+	Model        string          `json:"model,omitempty"`
+	Provider     string          `json:"provider,omitempty"`
+	Effort       string          `json:"effort,omitempty"`
+	EffortLevels []string        `json:"effortLevels,omitempty"`
+	UpdatedAt    time.Time       `json:"updatedAt,omitzero"`
 }
 
 // Event is one record an agent's pi process emitted.
@@ -120,6 +123,8 @@ type Manager struct {
 }
 
 type agent struct {
+	modelMu  sync.Mutex // orders prompt registration and model configuration
+	prompts  int        // outstanding prompt RPCs; guarded by modelMu
 	info     Info
 	proc     *proc
 	token    string
@@ -315,7 +320,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		m.mu.Unlock()
 		m.changed()
 
-		p, model, err := m.spawn(a, y, name, role)
+		p, state, err := m.spawn(a, y, name, role)
 
 		m.mu.Lock()
 		if err == nil && a.stopping {
@@ -342,7 +347,8 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			return nil, nil, err
 		}
 		a.proc = p
-		a.info.Status, a.info.Model, a.info.UpdatedAt = Idle, model, time.Now()
+		a.info.Status, a.info.Model, a.info.UpdatedAt = Idle, state.Model.ID, time.Now()
+		a.info.Provider, a.info.Effort, a.info.EffortLevels = state.Model.Provider, state.ThinkingLevel, nil
 		m.mu.Unlock()
 		m.changed()
 		go m.watch(a, p)
@@ -350,10 +356,10 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 	}
 }
 
-func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, string, error) {
+func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, modelState, error) {
 	sessions := y.SessionDir(name)
 	if err := os.MkdirAll(sessions, 0o755); err != nil {
-		return nil, "", err
+		return nil, modelState{}, err
 	}
 	args := []string{"--mode", "rpc", "--session-dir", sessions, "-e", m.cfg.Extension}
 	if hasSession(sessions) {
@@ -375,7 +381,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, st
 		m.record(a, p, kind, raw)
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, modelState{}, err
 	}
 	m.mu.Lock()
 	a.token = token
@@ -384,27 +390,18 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, st
 	// get_state answers once pi has loaded its session and extensions.
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	r, err := p.call(ctx, map[string]any{"type": "get_state"})
+	state, err := p.modelState(ctx)
 	if err != nil {
 		p.stop(2 * time.Second)
 		m.mu.Lock()
 		m.clearLocked(a, p)
 		m.mu.Unlock()
 		if msg := p.stderr.String(); msg != "" {
-			return nil, "", fmt.Errorf("pi did not start: %v: %s", err, lastLines(msg, 6))
+			return nil, modelState{}, fmt.Errorf("pi did not start: %v: %s", err, lastLines(msg, 6))
 		}
-		return nil, "", fmt.Errorf("pi did not start: %w", err)
+		return nil, modelState{}, fmt.Errorf("pi did not start: %w", err)
 	}
-	var state struct {
-		Model struct {
-			ID       string `json:"id"`
-			Provider string `json:"provider"`
-		} `json:"model"`
-		IsStreaming bool `json:"isStreaming"`
-	}
-	_ = json.Unmarshal(r.Data, &state)
-	model := state.Model.ID
-	return p, model, nil
+	return p, state, nil
 }
 
 // record handles one record of an agent's process. It runs on the
@@ -419,8 +416,27 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 		}
 		_ = json.Unmarshal(raw, &e)
 		m.setStatus(a, p, Idle, "")
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			a.modelMu.Lock()
+			defer a.modelMu.Unlock()
+			_, _ = m.syncModel(ctx, a, p)
+		}()
 		if a.info.Role == RoleWorker && !e.Aborted {
 			go m.reportToLead(a, p)
+		}
+	case "thinking_level_changed":
+		var e struct {
+			Level string `json:"level"`
+		}
+		if json.Unmarshal(raw, &e) == nil {
+			m.mu.Lock()
+			if a.proc == p {
+				a.info.Effort = e.Level
+			}
+			m.mu.Unlock()
+			m.changed()
 		}
 	case "extension_ui_request":
 		var e struct {
@@ -503,12 +519,37 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 	if strings.TrimSpace(text) == "" {
 		return errors.New("empty message")
 	}
-	_, p, err := m.ensure(id)
+	a, p, err := m.ensure(id)
 	if err != nil {
 		return err
 	}
-	_, err = p.call(ctx, map[string]any{"type": "prompt", "message": text, "streamingBehavior": behavior})
-	return err
+	// Register before dispatch, under the same lock as configuration's idle
+	// check and writes. Release it before waiting so other messages can steer
+	// a running turn. pi may await extensions before reporting isStreaming.
+	a.modelMu.Lock()
+	if err := ctx.Err(); err != nil {
+		a.modelMu.Unlock()
+		return err
+	}
+	a.prompts++
+	a.modelMu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		// Cancelling the caller does not cancel the RPC already sent to pi.
+		// Keep it registered until pi answers (or exits), even if the caller
+		// stops waiting, so configuration cannot slip into its startup gap.
+		_, err := p.call(context.Background(), map[string]any{"type": "prompt", "message": text, "streamingBehavior": behavior})
+		a.modelMu.Lock()
+		a.prompts--
+		a.modelMu.Unlock()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Abort stops the agent's current run.
