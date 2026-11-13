@@ -13,10 +13,10 @@ func TestSettingsRoundTrip(t *testing.T) {
 	if s := loadSettings(path); s.Appearance != "" {
 		t.Fatalf("a missing file gave %+v", s)
 	}
-	if err := (Settings{Appearance: mygo.ThemeDark}).save(path); err != nil {
+	if err := (Settings{Appearance: mygo.ThemeDark, AutoFetch: 5}).save(path); err != nil {
 		t.Fatal(err)
 	}
-	if s := loadSettings(path); s.Appearance != mygo.ThemeDark {
+	if s := loadSettings(path); s.Appearance != mygo.ThemeDark || s.AutoFetch != 5 {
 		t.Errorf("read back %+v", s)
 	}
 	if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
@@ -43,11 +43,11 @@ func TestReleaseVersion(t *testing.T) {
 // A damaged file or an unknown value starts the app with the defaults.
 func TestSettingsIgnoresBadFiles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	for _, content := range []string{"{not json", `{"appearance":"sepia"}`} {
+	for _, content := range []string{"{not json", `{"appearance":"sepia"}`, `{"autoFetch":7}`, `{"autoFetch":-1}`} {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if s := loadSettings(path); s.Appearance != "" {
+		if s := loadSettings(path); s.Appearance != "" || s.AutoFetch != 0 {
 			t.Errorf("%s gave %+v", content, s)
 		}
 	}

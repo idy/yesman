@@ -2,7 +2,7 @@
 // the live event stream of the agents' pi processes.
 //
 //   mygo.call("Yesman.<Method>", ...)  services in service.go
-//   mygo.on("agents" | "agent-event" | "changed" | "focus-agent" | "update" | "files", fn)
+//   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "focus-agent" | "update" | "files", fn)
 
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
@@ -35,8 +35,8 @@ const state = {
   settings: null, // Yesman.Settings, for the General page
   about: null, // Yesman.About
   repoQuery: '',
-  fetching: new Set(), // repositories being fetched
-  addRepo: null, // the add form's draft while it is open
+  fetches: { fetching: [], errors: {} }, // Yesman.Fetches: repositories being fetched, and their last errors
+  clones: [], // Yesman.Clones: repositories on their way into the pool
   update: null, // Yesman.Update: where updating yesman stands
 };
 
@@ -883,7 +883,7 @@ async function loadSettingsPage(page) {
   try {
     if (page === 'general') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
-    else if (page === 'repositories') state.repos = await call('Repos');
+    else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
   } catch (err) {
     fail(err);
     return;
@@ -1003,32 +1003,74 @@ function ago(iso, verb = 'fetched') {
 // repositories added before yesman took only GitHub keep their URL.
 const githubName = (url) => /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url ?? '')?.[1] ?? '';
 
+// The key of a GitHub repository, owner/repo, which GitHub matches in any case.
+const repoKey = (fullName) => fullName.toLowerCase();
+
 function renderRepositories(inner) {
-  const search = state.repos.length > 1
+  const search = state.repos.length + state.clones.length > 1
     ? h('label', { class: 'search' }, icon('search'),
         h('input', { class: 'mds-input', id: 'repo-search', type: 'search', placeholder: 'Find a repository', 'aria-label': 'Find a repository', spellcheck: 'false', value: state.repoQuery,
           oninput: (e) => { state.repoQuery = e.currentTarget.value; renderRepoList(); } }))
     : null;
   inner.append(
     h('div', { class: 'mds-toolbar' },
-      h('p', { class: 'toolbar-lead' }, 'GitHub repositories the yesmen check worktrees out of. Only yesman writes here, and it fetches a repository whenever one is checked out.'),
+      h('p', { class: 'toolbar-lead' }, 'GitHub repositories the yesmen check worktrees out of. Only yesman writes here. It fetches a repository whenever one is checked out, and all of them when you ask or on a schedule.'),
       h('div', { class: 'mds-toolbar-actions' }, search,
+        h('button', { class: 'mds-button mds-button--small fetch-all', id: 'fetch-all', type: 'button', onclick: () => call('FetchAll').catch(fail) }),
         h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Reveal the repo pool', 'aria-label': 'Reveal the repo pool', onclick: () => call('Reveal', state.snap.pool).catch(fail) }, icon('folder')))),
     h('div', { class: 'card-list', id: 'repo-list', role: 'list', 'aria-label': 'Repositories' }),
-    h('div', { id: 'repo-add' }));
+    h('div', null, h('button', { class: 'mds-link-button add-link', type: 'button', onclick: openAddRepos }, icon('plus'), 'Add repositories')),
+    autoFetchSection());
   renderRepoList();
-  renderRepoAdd();
 }
 
-function repoRow(r) {
+const AUTO_FETCH = [[0, 'Never'], [1, 'Every minute'], [5, 'Every 5 minutes'], [15, 'Every 15 minutes'], [60, 'Every hour']];
+
+function autoFetchSection() {
+  const v = state.settings;
+  if (!v) return null;
+  const select = h('select', { class: 'mds-select', 'aria-label': 'Fetch automatically', onchange: async (e) => {
+    const el = e.currentTarget;
+    try {
+      await call('SetAutoFetch', Number(el.value));
+      v.autoFetch = Number(el.value);
+    } catch (err) {
+      fail(err);
+      el.value = String(v.autoFetch);
+    }
+  } }, AUTO_FETCH.map(([value, label]) => h('option', { value, selected: value === v.autoFetch }, label)));
+  return settingsSection('Fetching', null,
+    preferenceRow('Fetch automatically', h('p', null, 'Fetches every repository in the pool while yesman runs, in the tray too.'), select));
+}
+
+// Fetch all spins while any repository fetches, and waits while all do.
+function renderFetchAll() {
+  const button = $('#fetch-all');
+  if (!button) return;
+  const busy = state.fetches.fetching.length > 0;
+  button.disabled = !state.repos.length || state.repos.every((r) => state.fetches.fetching.includes(r.name));
+  button.replaceChildren(busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload'), 'Fetch all');
+}
+
+const cloneStatus = (c) => (c.state === 'queued' ? 'waiting to clone' : 'cloning…');
+
+// A pool repository; clone is set while it is being added again, as an
+// agent may.
+function repoRow(r, clone) {
   const worktrees = state.snap.yesmen.flatMap((y) => y.worktrees.filter((w) => w.repo === r.name).map((w) => ({ yesman: y.name, dir: w.dir || w.path })));
   const users = [...new Set(worktrees.map((w) => w.yesman))];
-  const busy = state.fetching.has(r.name);
+  const fetching = state.fetches.fetching.includes(r.name);
+  const busy = fetching || !!clone;
   const name = githubName(r.url);
-  const meta = [name ? null : r.url, r.upstream ? `fork of ${githubName(r.upstream) || r.upstream}` : null, r.defaultBranch ? `default ${r.defaultBranch}` : null, busy ? 'fetching…' : ago(r.fetchedAt)].filter(Boolean).join(' · ');
+  // The last fetch's error stays, in place of when it was fetched, until
+  // a fetch succeeds.
+  const error = !busy && state.fetches.errors[r.name];
+  const status = clone ? cloneStatus(clone) : fetching ? 'fetching…' : error ? null : ago(r.fetchedAt);
+  const meta = [name ? null : r.url, r.upstream ? `fork of ${githubName(r.upstream) || r.upstream}` : null, r.defaultBranch ? `default ${r.defaultBranch}` : null, status].filter(Boolean).join(' · ');
   return h('div', { class: 'card-row', role: 'listitem' },
     h('span', { class: 'card-row-icon' }, icon('branch')),
-    h('div', { class: 'card-row-text' }, h('strong', { title: r.name }, name || r.name), h('span', null, meta)),
+    h('div', { class: 'card-row-text' }, h('strong', { title: r.name }, name || r.name),
+      h('span', { title: error || null }, meta, error ? [meta ? ' · ' : null, h('span', { class: 'danger' }, `last fetch failed: ${error}`)] : null)),
     users.length
       ? h('span', { class: 'card-row-aside', title: worktrees.map((w) => `${w.yesman}: ${w.dir}`).join('\n') },
           `${worktrees.length} worktree${worktrees.length === 1 ? '' : 's'} · ${users.join(', ')}`)
@@ -1037,81 +1079,346 @@ function repoRow(r) {
       busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload')));
 }
 
+// A repository on its way into the pool: queued, cloning, or stopped by
+// an error until it is tried again or dismissed.
+function cloneRow(c) {
+  const failed = c.state === 'failed';
+  const button = (label, glyph, onclick) =>
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: label, 'aria-label': label, onclick }, icon(glyph));
+  return h('div', { class: 'card-row', role: 'listitem', 'data-clone': c.state },
+    h('span', { class: 'card-row-icon' }, icon('branch')),
+    h('div', { class: 'card-row-text' },
+      h('strong', { title: `github.com/${c.repo}` }, c.repo),
+      failed ? h('span', { class: 'danger', title: c.error }, `Could not clone: ${c.error}`) : h('span', null, cloneStatus(c))),
+    failed
+      ? h('span', { class: 'card-row-actions' },
+          button(`Try ${c.repo} again`, 'reload', () => call('RetryClone', c.repo).catch(fail)),
+          button(`Dismiss ${c.repo}`, 'x', () => call('DismissClone', c.repo).catch(fail)))
+      : h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', disabled: true, title: `${c.repo} is ${cloneStatus(c).replace('…', '')}`, 'aria-label': `${c.repo} is ${cloneStatus(c).replace('…', '')}` },
+          h('span', { class: 'mds-spinner', 'aria-hidden': 'true' })));
+}
+
 function renderRepoList() {
   const list = $('#repo-list');
   if (!list) return;
+  renderFetchAll();
+  const adding = new Map(state.clones.filter((c) => c.state !== 'failed').map((c) => [repoKey(c.repo), c]));
+  const inPool = new Set();
+  const rows = state.repos.map((r) => {
+    const name = githubName(r.url);
+    if (name) inPool.add(repoKey(name));
+    return { key: repoKey(name || r.name), text: `${r.name} ${r.url} ${r.upstream ?? ''}`, row: () => repoRow(r, name && adding.get(repoKey(name))) };
+  });
+  for (const c of state.clones) {
+    if (c.state !== 'failed' && inPool.has(repoKey(c.repo))) continue;
+    rows.push({ key: repoKey(c.repo), text: c.repo, row: () => cloneRow(c) });
+  }
+  rows.sort((a, b) => a.key.localeCompare(b.key));
   const q = state.repoQuery.trim().toLowerCase();
-  const repos = q ? state.repos.filter((r) => `${r.name} ${r.url} ${r.upstream ?? ''}`.toLowerCase().includes(q)) : state.repos;
-  if (!state.repos.length) {
-    list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, 'No repositories yet'), h('span', null, 'Add one from GitHub, or let a yesman add the ones it needs.')));
-  } else if (!repos.length) {
+  const shown = q ? rows.filter((r) => r.text.toLowerCase().includes(q)) : rows;
+  if (!rows.length) {
+    list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, 'No repositories yet'), h('span', null, 'Add some from GitHub, or let a yesman add the ones it needs.')));
+  } else if (!shown.length) {
     list.replaceChildren(h('div', { class: 'card-empty' }, h('span', null, `No repository matches “${state.repoQuery.trim()}”.`)));
   } else {
-    list.replaceChildren(...repos.map(repoRow));
+    list.replaceChildren(...shown.map((r) => r.row()));
   }
 }
 
-async function fetchRepo(name) {
-  state.fetching.add(name);
+// The fetches event shows the repository fetching, and its error in its
+// row if the fetch fails.
+function fetchRepo(name) {
+  call('FetchRepo', name).catch(() => {});
+}
+
+// A repository whose fetch ended is read again for its fetch time, while
+// the repositories page shows. The newest state wins.
+let fetchesSeq = 0;
+async function onFetches(next) {
+  const seq = ++fetchesSeq;
+  const ended = state.fetches.fetching.some((name) => !next.fetching.includes(name));
+  if (ended && $('#repo-list')) {
+    const repos = await call('Repos').catch(() => null);
+    if (repos) state.repos = repos;
+  }
+  if (seq !== fetchesSeq) return;
+  state.fetches = next;
   renderRepoList();
-  try {
-    await call('FetchRepo', name);
-    state.repos = await call('Repos');
-  } catch (err) {
-    fail(err);
-  } finally {
-    state.fetching.delete(name);
-    renderRepoList();
-  }
 }
 
-// Adding opens a form under the list, as a row of its own, rather than a
-// dialog: nothing else needs to stop while it clones.
-function renderRepoAdd() {
-  const box = $('#repo-add');
-  if (!box) return;
-  const draft = state.addRepo;
-  if (!draft) {
-    box.replaceChildren(h('button', { class: 'mds-link-button add-link', type: 'button', onclick: () => {
-      state.addRepo = { repo: '', error: '', busy: false };
-      renderRepoAdd();
-      $('#repo-input')?.focus();
-    } }, icon('plus'), 'Add repository'));
-    return;
+// A clone that finished leaves the list once the pool lists it, so its
+// row turns into the repository's without a gap. The newest list wins.
+let clonesSeq = 0;
+async function onClones(list) {
+  const seq = ++clonesSeq;
+  const now = new Set(list.map((c) => repoKey(c.repo)));
+  if (state.clones.some((c) => !now.has(repoKey(c.repo)))) {
+    const repos = await call('Repos').catch(() => null);
+    if (repos) state.repos = repos;
   }
-  const input = h('input', { class: 'mds-input mds-mono', id: 'repo-input', placeholder: 'owner/repo', required: true, spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off',
-    value: draft.repo, disabled: draft.busy, 'aria-invalid': draft.error ? 'true' : null, 'aria-describedby': draft.error ? 'repo-error' : 'repo-hint',
-    oninput: (e) => { draft.repo = e.currentTarget.value; } });
-  const cancel = () => { state.addRepo = null; renderRepoAdd(); $('.add-link')?.focus(); };
-  box.replaceChildren(h('form', { class: 'add-form', 'aria-label': 'Add a repository',
-    onkeydown: (e) => { if (e.key === 'Escape' && !draft.busy) cancel(); },
-    onsubmit: async (e) => {
-      e.preventDefault();
-      draft.busy = true;
-      draft.error = '';
-      renderRepoAdd();
-      try {
-        const repo = await call('AddRepo', draft.repo.trim());
-        state.addRepo = null;
-        state.repos = await call('Repos');
-        toast(`${githubName(repo.url) || repo.name} is in the pool`);
-        renderRepoList();
-      } catch (err) {
-        draft.error = errorText(err);
-        draft.busy = false;
+  if (seq !== clonesSeq) return;
+  state.clones = list;
+  renderRepoList();
+}
+
+// ---------- Adding repositories ----------
+
+// The add dialog takes an owner, a user or an organization, and lists its
+// repositories to tick; what follows a slash filters them. owner/repo or a
+// GitHub URL adds that repository even when nothing is ticked. Adding
+// returns at once: the repositories clone in the background, in the list.
+const OWNER_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
+
+const picker = {
+  lists: new Map(), // owner key -> { owner, state: 'loading' | 'ready' | 'failed', repos, error }
+  selected: new Map(), // repo key -> owner/repo
+  timer: 0,
+  error: '',
+};
+
+function readPickerInput() {
+  const raw = $('#picker-input').value.trim();
+  const path = raw.replace(/^git@github\.com:/i, '').replace(/^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?(?:www\.)?github\.com\//i, '');
+  const [owner = '', rest = ''] = path.split('/');
+  const name = rest.replace(/\.git$/i, '');
+  const valid = OWNER_RE.test(owner);
+  const full = valid && NAME_RE.test(name) && name !== '.' && name !== '..' ? `${owner}/${name}` : '';
+  // A URL goes as typed, since it may name the protocol to clone over.
+  return { raw, owner: valid ? owner : '', name, full, input: full && /[:@]/.test(raw) ? raw : full };
+}
+
+// Where each GitHub repository the page knows of stands.
+function pickerTaken() {
+  const taken = new Map();
+  for (const r of state.repos) {
+    const name = githubName(r.url);
+    if (name) taken.set(repoKey(name), 'In the pool');
+  }
+  for (const c of state.clones) {
+    if (c.state !== 'failed' && !taken.has(repoKey(c.repo))) taken.set(repoKey(c.repo), 'Cloning');
+  }
+  return taken;
+}
+
+function buildRepoDialog() {
+  const input = h('input', { class: 'mds-input', id: 'picker-input', placeholder: 'owner, or owner/repo', 'aria-label': 'GitHub user, organization or repository',
+    spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off', 'aria-describedby': 'picker-error',
+    oninput: onPickerInput,
+    onkeydown: (e) => {
+      // Enter lists an owner not listed yet, or lists it again after an
+      // error, before it adds anything.
+      if (e.key !== 'Enter') return;
+      const { owner } = readPickerInput();
+      const entry = owner && picker.lists.get(owner.toLowerCase());
+      if (owner && (!entry || entry.state === 'failed')) {
+        e.preventDefault();
+        listOwner(owner, true);
       }
-      renderRepoAdd();
-      if (state.addRepo) $('#repo-input')?.focus();
-    } },
-    h('label', { class: 'add-label', for: 'repo-input' }, 'GitHub repository'),
-    input,
-    h('div', { class: 'add-actions' },
-      h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', disabled: draft.busy, onclick: cancel }, 'Cancel'),
-      h('button', { class: 'mds-button mds-button--small mds-button--primary', type: 'submit', disabled: draft.busy },
-        draft.busy ? [h('span', { class: 'mds-spinner on-accent', 'aria-hidden': 'true' }), 'Cloning…'] : 'Add')),
-    draft.error
-      ? h('p', { class: 'mds-hint', id: 'repo-error', 'data-tone': 'error', role: 'alert' }, draft.error)
-      : h('p', { class: 'mds-hint', id: 'repo-hint' }, 'owner/repo, or a link to it. For a fork, yesman also fetches the repository it was forked from.')));
+    } });
+  $('#repo-dialog').replaceChildren(h('form', { id: 'repo-form', onsubmit: submitPicker },
+    h('h2', { class: 'mds-heading', id: 'repo-dialog-title' }, 'Add repositories'),
+    h('p', { class: 'dialog-hint' }, 'Name a GitHub user or organization to pick from its repositories, or owner/repo to add one. They clone in the background; for a fork, yesman also fetches the repository it was forked from.'),
+    h('label', { class: 'search picker-search' }, icon('search'), input, h('span', { class: 'mds-spinner', 'aria-hidden': 'true' })),
+    h('div', { class: 'picker-results', id: 'picker-results' }),
+    h('div', { class: 'mds-dialog-actions picker-actions' },
+      h('p', { class: 'picker-status', id: 'picker-error', 'aria-live': 'polite' }),
+      h('button', { class: 'mds-button', type: 'button', onclick: () => $('#repo-dialog').close('cancel') }, 'Cancel'),
+      h('button', { class: 'mds-button mds-button--primary', type: 'submit', id: 'picker-add' }, 'Add'))));
+}
+
+function openAddRepos() {
+  clearTimeout(picker.timer);
+  picker.lists.clear();
+  picker.selected.clear();
+  picker.error = '';
+  $('#picker-input').value = '';
+  renderPicker();
+  openDialog($('#repo-dialog'));
+  $('#picker-input').focus();
+}
+
+function onPickerInput() {
+  picker.error = '';
+  clearTimeout(picker.timer);
+  const { owner } = readPickerInput();
+  if (owner && !picker.lists.has(owner.toLowerCase())) picker.timer = setTimeout(() => listOwner(owner), 400);
+  renderPicker();
+}
+
+async function listOwner(owner, again = false) {
+  const key = owner.toLowerCase();
+  clearTimeout(picker.timer);
+  const had = picker.lists.get(key);
+  if (had && !(again && had.state === 'failed')) return;
+  const entry = { owner, state: 'loading', repos: [], error: '' };
+  picker.lists.set(key, entry);
+  renderPicker();
+  try {
+    entry.repos = await call('OwnerRepos', owner);
+    entry.state = 'ready';
+  } catch (err) {
+    entry.state = 'failed';
+    entry.error = errorText(err);
+  }
+  if (picker.lists.get(key) === entry && $('#repo-dialog').open) renderPicker();
+}
+
+// The owner's listed repository a typed one names, in GitHub's spelling.
+function pickerListed(typed) {
+  const entry = typed.full && picker.lists.get(typed.owner.toLowerCase());
+  if (entry?.state !== 'ready') return undefined;
+  return entry.repos.find((r) => repoKey(r.fullName) === repoKey(typed.full)) ?? null;
+}
+
+// What Add would add: the ticked repositories, or else the one typed,
+// unless it is in the pool. One the owner's list leaves out is still
+// tried: the list may not show every repository the user can clone (the
+// public API lists no private ones, and a list stops at 1,000).
+function pickerChoice(typed = readPickerInput()) {
+  if (picker.selected.size) return [...picker.selected.values()];
+  if (!typed.full || pickerTaken().has(repoKey(typed.full))) return [];
+  const listed = pickerListed(typed);
+  return [listed && typed.input === typed.full ? listed.fullName : typed.input];
+}
+
+function pickerNote(...children) {
+  return h('div', { class: 'picker-note' }, children);
+}
+
+// Loading keeps the dialog still: the first list loads into placeholder
+// rows of the same size, and a list already shown stays, dimmed, until
+// the next owner's replaces it.
+function renderPicker() {
+  const results = $('#picker-results');
+  const typed = readPickerInput();
+  const entry = typed.owner && picker.lists.get(typed.owner.toLowerCase());
+  const loading = !!typed.owner && (!entry || entry.state === 'loading');
+  $('.picker-search').toggleAttribute('data-busy', loading);
+  results.setAttribute('aria-busy', String(loading));
+  const note = (...children) => {
+    results.dataset.shows = '';
+    results.replaceChildren(pickerNote(...children));
+  };
+  if (loading) {
+    if (!results.querySelector('.picker-list, .picker-skeleton')) {
+      results.dataset.shows = '';
+      results.replaceChildren(pickerSkeleton());
+    }
+  } else if (!typed.owner) {
+    note(typed.raw
+      ? `“${typed.raw}” is not a GitHub user, organization or repository.`
+      : 'Type a GitHub user or organization to list its repositories.');
+  } else if (entry.state === 'failed') {
+    note(h('span', { class: 'danger' }, entry.error), h('span', null, 'Press Enter to try again.'));
+  } else {
+    const q = typed.name.toLowerCase();
+    const shown = q ? entry.repos.filter((r) => r.fullName.slice(r.fullName.indexOf('/') + 1).toLowerCase().includes(q)) : entry.repos;
+    if (!entry.repos.length) note(`${entry.owner} has no repositories you can see.`);
+    else if (!shown.length) note(`No repository of ${entry.owner} matches “${typed.name}”.`);
+    else {
+      // A new owner's list fades in; filtering it redraws it in place.
+      const shows = `${entry.owner.toLowerCase()}/${q}`;
+      const fresh = !results.dataset.shows?.startsWith(`${entry.owner.toLowerCase()}/`);
+      if (shows !== results.dataset.shows) results.scrollTop = 0;
+      results.dataset.shows = shows;
+      results.replaceChildren(h('div', { class: 'picker-list', 'data-fresh': fresh ? 'true' : null }, pickerRows(entry, shown)));
+    }
+  }
+  renderPickerFoot(typed);
+}
+
+function pickerSkeleton() {
+  // Bones sit in the text a row has, so a placeholder row is as tall as a
+  // real one with a description.
+  const bone = () => h('i', { class: 'picker-bone' });
+  const row = (head) => h('div', { class: head ? 'picker-row picker-all' : 'picker-row' }, h('i', { class: 'picker-bone-box' }),
+    head ? h('span', null, bone()) : h('span', { class: 'picker-row-text' }, h('strong', null, bone()), h('span', null, bone())));
+  return h('div', { class: 'picker-skeleton', 'aria-hidden': 'true' }, row(true), Array.from({ length: 7 }, () => row(false)));
+}
+
+function pickerRows(entry, shown) {
+  const taken = pickerTaken();
+  const free = shown.filter((r) => !taken.has(repoKey(r.fullName)));
+  const all = h('input', { type: 'checkbox', id: 'picker-all', disabled: !free.length, onchange: (e) => {
+    for (const r of free) {
+      if (e.currentTarget.checked) picker.selected.set(repoKey(r.fullName), r.fullName);
+      else picker.selected.delete(repoKey(r.fullName));
+    }
+    syncPicker();
+  } });
+  all.free = free;
+  // Ticks kept from another filter or owner show here too.
+  const on = free.filter((r) => picker.selected.has(repoKey(r.fullName))).length;
+  all.checked = on > 0 && on === free.length;
+  all.indeterminate = on > 0 && on < free.length;
+  const count = shown.length === entry.repos.length ? `${shown.length} ${shown.length === 1 ? 'repository' : 'repositories'}` : `${shown.length} of ${entry.repos.length}`;
+  const head = h('label', { class: 'picker-row picker-all' }, all, h('span', null, `Select all · ${count}`));
+  const rows = shown.map((r) => {
+    const key = repoKey(r.fullName);
+    const status = taken.get(key);
+    const box = h('input', { type: 'checkbox', 'data-key': key, disabled: !!status, onchange: (e) => {
+      if (e.currentTarget.checked) picker.selected.set(key, r.fullName);
+      else picker.selected.delete(key);
+      syncPicker();
+    } });
+    box.checked = !!status || picker.selected.has(key);
+    const tags = status ?? [r.private && 'Private', r.fork && 'Fork', r.archived && 'Archived'].filter(Boolean).join(' · ');
+    return h('label', { class: 'picker-row', 'data-taken': status ? 'true' : null }, box,
+      h('span', { class: 'picker-row-text' },
+        h('strong', { title: r.fullName }, r.fullName.slice(r.fullName.indexOf('/') + 1)),
+        r.description ? h('span', { title: r.description }, r.description) : null),
+      tags ? h('span', { class: 'picker-row-aside' }, tags) : null);
+  });
+  return [head, ...rows];
+}
+
+// Ticking updates the boxes in place, so focus and scroll stay put.
+function syncPicker() {
+  for (const box of document.querySelectorAll('#picker-results input[data-key]')) {
+    if (!box.disabled) box.checked = picker.selected.has(box.dataset.key);
+  }
+  const all = $('#picker-all');
+  if (all) {
+    const on = all.free.filter((r) => picker.selected.has(repoKey(r.fullName))).length;
+    all.checked = on > 0 && on === all.free.length;
+    all.indeterminate = on > 0 && on < all.free.length;
+  }
+  renderPickerFoot();
+}
+
+function renderPickerFoot(typed = readPickerInput()) {
+  const choice = pickerChoice(typed);
+  const n = picker.selected.size;
+  const add = $('#picker-add');
+  add.disabled = !choice.length;
+  add.textContent = n > 1 ? `Add ${n} repositories` : n === 1 ? 'Add 1 repository' : choice.length ? `Add ${typed.full}` : 'Add';
+  const status = $('#picker-error');
+  status.dataset.tone = picker.error ? 'error' : '';
+  status.title = picker.error;
+  const entry = typed.owner && picker.lists.get(typed.owner.toLowerCase());
+  const loading = typed.owner && (!entry || entry.state === 'loading');
+  status.textContent = picker.error
+    || (n ? `${n} selected`
+      : typed.full && pickerTaken().has(repoKey(typed.full)) ? `${typed.full} is already in the pool.`
+      : pickerListed(typed) === null ? `Not in ${typed.owner}’s list; Add tries it anyway.`
+      : loading ? `Listing ${typed.owner}’s repositories…` : '');
+}
+
+async function submitPicker(e) {
+  e.preventDefault();
+  const repos = pickerChoice();
+  if (!repos.length) return;
+  const add = $('#picker-add');
+  add.disabled = true;
+  try {
+    state.clones = await call('AddRepos', repos);
+    $('#repo-dialog').close('add');
+    renderRepoList();
+  } catch (err) {
+    picker.error = errorText(err);
+    renderPickerFoot();
+  }
 }
 
 // ---------- Files pane ----------
@@ -1243,7 +1550,7 @@ function refreshSoon() {
 
 async function refreshState() {
   try {
-    [state.snap, state.repos] = await Promise.all([call('State'), call('Repos')]);
+    [state.snap, state.repos, state.clones] = await Promise.all([call('State'), call('Repos'), call('Clones')]);
   } catch (err) {
     fail(err);
     return;
@@ -1291,6 +1598,7 @@ async function start() {
     return;
   }
   buildSideFoot();
+  buildRepoDialog();
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href]');
     if (!link) return;
@@ -1305,6 +1613,8 @@ async function start() {
   mygo.on('agents', onAgents);
   mygo.on('agent-event', onAgentEvent);
   mygo.on('changed', refreshSoon);
+  mygo.on('clones', onClones);
+  mygo.on('fetches', onFetches);
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => files.onChange(change));
   document.addEventListener('keydown', (e) => files.onKey(e));
