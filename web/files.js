@@ -542,7 +542,9 @@ export function createFiles(host) {
       el.style.top = `${Math.round(r.bottom + 4)}px`;
     };
     let at = dir;
+    let showing = 0; // the newest listing: an older one that answers late is dropped
     const show = async (folder, mark) => {
+      const seq = ++showing;
       at = folder;
       el.setAttribute('aria-label', folder === '.' ? p.name : folder);
       let entries = p.dirs.get(folder);
@@ -554,12 +556,12 @@ export function createFiles(host) {
           entries = await host.call('ListFiles', p.name, folder);
           p.dirs.set(folder, entries);
         } catch (err) {
-          if (menu?.el !== el) return;
+          if (menu?.el !== el || seq !== showing) return;
           el.replaceChildren(h('p', { class: 'files-menu-note danger' }, err?.message || String(err)));
           el.focus({ preventScroll: true });
           return;
         }
-        if (menu?.el !== el) return;
+        if (menu?.el !== el || seq !== showing) return;
       }
       const items = [];
       if (folder !== '.' && folder !== dir) {
