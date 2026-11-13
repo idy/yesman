@@ -30,6 +30,9 @@ type Server struct {
 	Agents *agent.Manager
 	// Changed is told when the pool or a workspace's worktrees change.
 	Changed func()
+	// AddRepo, when set, clones a GitHub repository into the pool in place
+	// of resolving and cloning it here, so the app can show it cloning.
+	AddRepo func(ctx context.Context, repo string) (pool.Repo, error)
 
 	url string
 }
@@ -141,11 +144,17 @@ func (s *Server) addRepo(_ context.Context, _ caller, r *http.Request) (any, err
 	// A clone outlives a dropped request, so that a retry finds it done.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
-	gh, err := github.Resolve(ctx, req.Repo)
-	if err != nil {
-		return nil, err
+	add := s.AddRepo
+	if add == nil {
+		add = func(ctx context.Context, repo string) (pool.Repo, error) {
+			gh, err := github.Resolve(ctx, repo)
+			if err != nil {
+				return pool.Repo{}, err
+			}
+			return s.Pool.Add(ctx, gh.URL, gh.Upstream)
+		}
 	}
-	repo, err := s.Pool.Add(ctx, gh.URL, gh.Upstream)
+	repo, err := add(ctx, req.Repo)
 	if err == nil {
 		s.changed()
 	}

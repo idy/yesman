@@ -3,9 +3,12 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParse(t *testing.T) {
@@ -92,6 +95,75 @@ func TestResolve(t *testing.T) {
 	}
 	if _, err := Resolve(context.Background(), "https://gitlab.com/idy/plain"); err == nil {
 		t.Error("a GitLab repository resolved")
+	}
+}
+
+func TestParseOwner(t *testing.T) {
+	for in, want := range map[string]string{
+		"GizClaw":                     "GizClaw",
+		" idy ":                       "idy",
+		"github.com/my-org/":          "my-org",
+		"https://github.com/GizClaw":  "GizClaw",
+		"https://www.github.com/idy/": "idy",
+	} {
+		if got, err := ParseOwner(in); err != nil || got != want {
+			t.Errorf("ParseOwner(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "idy/yesman", "-idy", "github.com/idy/yesman", "some one"} {
+		if got, err := ParseOwner(in); err == nil {
+			t.Errorf("ParseOwner(%q) = %q, want an error", in, got)
+		}
+	}
+}
+
+func TestListSortsByLastPush(t *testing.T) {
+	defer func(l func(context.Context, string) ([]Listed, error)) { list = l }(list)
+	day := func(d int) time.Time { return time.Date(2026, 11, d, 0, 0, 0, 0, time.UTC) }
+	list = func(_ context.Context, owner string) ([]Listed, error) {
+		if owner != "GizClaw" {
+			t.Errorf("listed %q", owner)
+		}
+		return []Listed{{FullName: "GizClaw/old", PushedAt: day(1)}, {FullName: "GizClaw/new", PushedAt: day(12)}, {FullName: "GizClaw/mid", PushedAt: day(5)}}, nil
+	}
+	got, err := List(context.Background(), "https://github.com/GizClaw")
+	if err != nil || len(got) != 3 || got[0].FullName != "GizClaw/new" || got[2].FullName != "GizClaw/old" {
+		t.Errorf("List = %+v, %v", got, err)
+	}
+	if _, err := List(context.Background(), "idy/yesman"); err == nil {
+		t.Error("a repository listed as an owner")
+	}
+}
+
+// Without the GitHub CLI, the public API lists public repositories, page
+// by page.
+func TestListWithoutCLI(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/users/GizClaw/repos" {
+			http.NotFound(w, r)
+			return
+		}
+		var rows []string
+		n := 100
+		if r.URL.Query().Get("page") == "2" {
+			n = 1
+		}
+		for i := range n {
+			rows = append(rows, fmt.Sprintf(`{"full_name":"GizClaw/r%d","description":"d","private":false,"fork":%t,"archived":false,"pushed_at":"2026-11-0%dT00:00:00Z"}`, i, i == 0, 1+i%9))
+		}
+		w.Write([]byte("[" + strings.Join(rows, ",") + "]"))
+	}))
+	defer srv.Close()
+	defer func(b string) { apiBase = b }(apiBase)
+	apiBase = srv.URL
+
+	repos, err := ghList(context.Background(), "GizClaw")
+	if err != nil || len(repos) != 101 || !repos[0].Fork || repos[0].Description != "d" || repos[0].PushedAt.IsZero() {
+		t.Fatalf("list = %d repos, %v", len(repos), err)
+	}
+	if _, err := ghList(context.Background(), "nobody"); err == nil || !strings.Contains(err.Error(), "no user or organization") {
+		t.Errorf("listing a missing owner = %v", err)
 	}
 }
 

@@ -1,6 +1,7 @@
 // Package github names the repositories the repo pool takes: those on
 // github.com. It turns what a user or an agent typed, owner/repo or a URL,
-// into the URL to clone and, for a fork, the URL of its parent.
+// into the URL to clone and, for a fork, the URL of its parent, and lists a
+// user's or an organization's repositories to choose from.
 package github
 
 import (
@@ -14,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -177,6 +180,135 @@ func ghLookup(ctx context.Context, fullName string) (info, error) {
 	}
 	err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&v)
 	return v, err
+}
+
+// Listed is one repository of an owner's list.
+type Listed struct {
+	FullName    string    `json:"fullName"`
+	Description string    `json:"description,omitempty"`
+	Private     bool      `json:"private,omitempty"`
+	Fork        bool      `json:"fork,omitempty"`
+	Archived    bool      `json:"archived,omitempty"`
+	PushedAt    time.Time `json:"pushedAt,omitzero"`
+}
+
+// listLimit caps how many repositories List returns.
+const listLimit = 1000
+
+// ParseOwner reads a GitHub user or organization: its login, or its
+// github.com URL.
+func ParseOwner(input string) (string, error) {
+	in := strings.TrimSpace(input)
+	owner := in
+	for _, prefix := range []string{"https://", "http://", "www.", "github.com/"} {
+		if len(owner) >= len(prefix) && strings.EqualFold(owner[:len(prefix)], prefix) {
+			owner = owner[len(prefix):]
+		}
+	}
+	owner = strings.Trim(owner, "/")
+	if !ownerRE.MatchString(owner) {
+		return "", fmt.Errorf("%q is not a GitHub user or organization", in)
+	}
+	return owner, nil
+}
+
+// List returns the repositories of a GitHub user or organization, most
+// recently pushed first: through the GitHub CLI, the private ones the
+// user's login sees too, and else the public ones.
+//
+// A list may leave out repositories the user can clone: the public API
+// lists no private ones, and a list stops at listLimit.
+func List(ctx context.Context, owner string) ([]Listed, error) {
+	owner, err := ParseOwner(owner)
+	if err != nil {
+		return nil, err
+	}
+	repos, err := list(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	if repos == nil {
+		repos = []Listed{}
+	}
+	sort.SliceStable(repos, func(i, j int) bool { return repos[i].PushedAt.After(repos[j].PushedAt) })
+	return repos, nil
+}
+
+var list = ghList
+
+func ghList(ctx context.Context, owner string) ([]Listed, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	out, err := gh(ctx, "repo", "list", owner, "--limit", strconv.Itoa(listLimit),
+		"--json", "nameWithOwner,description,isPrivate,isFork,isArchived,pushedAt")
+	if err == nil {
+		var rows []struct {
+			NameWithOwner string    `json:"nameWithOwner"`
+			Description   string    `json:"description"`
+			IsPrivate     bool      `json:"isPrivate"`
+			IsFork        bool      `json:"isFork"`
+			IsArchived    bool      `json:"isArchived"`
+			PushedAt      time.Time `json:"pushedAt"`
+		}
+		if err := json.Unmarshal(out, &rows); err != nil {
+			return nil, err
+		}
+		repos := make([]Listed, 0, len(rows))
+		for _, r := range rows {
+			repos = append(repos, Listed{FullName: r.NameWithOwner, Description: r.Description, Private: r.IsPrivate, Fork: r.IsFork, Archived: r.IsArchived, PushedAt: r.PushedAt})
+		}
+		return repos, nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && strings.Contains(string(exit.Stderr), "not recognized") {
+		return nil, noOwner(owner)
+	}
+	// Without the CLI, or signed out of it, the public API lists public
+	// repositories.
+	var repos []Listed
+	for page := 1; len(repos) < listLimit; page++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			fmt.Sprintf("%s/users/%s/repos?per_page=100&type=owner&sort=pushed&page=%d", apiBase, owner, page), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		var rows []struct {
+			FullName    string    `json:"full_name"`
+			Description string    `json:"description"`
+			Private     bool      `json:"private"`
+			Fork        bool      `json:"fork"`
+			Archived    bool      `json:"archived"`
+			PushedAt    time.Time `json:"pushed_at"`
+		}
+		switch {
+		case resp.StatusCode == http.StatusNotFound:
+			err = noOwner(owner)
+		case resp.StatusCode != http.StatusOK:
+			err = fmt.Errorf("GitHub answered %s", resp.Status)
+		default:
+			err = json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&rows)
+		}
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			repos = append(repos, Listed(r))
+		}
+		if len(rows) < 100 {
+			break
+		}
+	}
+	return repos, nil
+}
+
+func noOwner(owner string) error {
+	return fmt.Errorf("GitHub has no user or organization named %q", owner)
 }
 
 func gh(ctx context.Context, args ...string) ([]byte, error) {

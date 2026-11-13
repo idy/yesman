@@ -10,7 +10,7 @@ yesman is a tray app for hiring yesmen. A yesman takes on one project: it gets a
 
 | Piece | What it is |
 | --- | --- |
-| Repo pool | GitHub repositories, kept as bare repositories under `repos/` and written only by yesman. A repository is fetched whenever someone checks it out of the pool. A fork also fetches the repository it was forked from, as its `upstream` remote. |
+| Repo pool | GitHub repositories, kept as bare repositories under `repos/` and written only by yesman. A repository is fetched whenever someone checks it out of the pool, and all of them with Fetch all, or every few minutes when Settings › Repositories says so. A fork also fetches the repository it was forked from, as its `upstream` remote. |
 | Yesman | A workspace directory under `yesmen/<name>/`. Its worktrees, of any pool repositories, are checked out into it with `git worktree`, each on its own branch. |
 | Lead | A [pi](https://pi.dev) agent in RPC mode, working in the workspace. You talk to it; it plans, keeps knowledge, and delegates. |
 | Workers | More pi agents in the same workspace, started by the lead for one task each. A worker's final message is sent to its lead when it finishes a run. |
@@ -28,7 +28,7 @@ The app keeps running in the tray with its window closed. Agents are child proce
 
 The files pane, opened from the titlebar, shows the workspace of the yesman you are talking to as a tree, and opens its files in tabs: text and code in an editor with syntax highlighting that saves with Cmd/Ctrl+S or by itself as you type, Markdown rendered, images shown. It follows changes as agents make them, and never saves over a file that changed on disk since it was opened without asking. Large files stay quick: the editor draws only the lines in view, and files over 5 MB open read-only at their first 512 KB. Each folder in the path above a file opens a list of that folder. Cmd/Ctrl+P goes to a file by name, and its menu checks out repositories, opens the knowledge notes and dismisses the yesman. Its edges can be dragged.
 
-Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool), and About (the versions yesman runs with, and updates).
+Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), and About (the versions yesman runs with, and updates).
 
 In General → Storage, **Change…** lets you enter or browse to a data folder, then **Use folder and restart** opens it after restarting. Existing folders with data are accepted; a new folder starts fresh. To keep existing data elsewhere, quit yesman, copy the folder yourself, then reopen yesman and select the copy. Data transfers and any Git worktree path repairs are manual. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice. Storage also lists the fixed paths for the repo pool, workspace parent, archive, runtime files, settings file and storage configuration, with a Reveal action for each.
 
@@ -37,7 +37,7 @@ Release builds update themselves through MyGo's updater: they check GitHub relea
 ## Requirements
 
 - Go 1.27 or later, and git
-- Optionally the [GitHub CLI](https://cli.github.com) (`gh`), signed in. yesman asks it which repository a fork came from, private ones too, and clones `owner/repo` over the protocol it is set to use. Without it, yesman asks GitHub's public API and clones over HTTPS.
+- Optionally the [GitHub CLI](https://cli.github.com) (`gh`), signed in. yesman asks it which repository a fork came from and which repositories an owner has, private ones too, and clones `owner/repo` over the protocol it is set to use. Without it, yesman asks GitHub's public API, which sees public repositories, and clones over HTTPS.
 - [pi](https://pi.dev) 1.5.2 or later on the `PATH` (`npm install -g @earendil-works/pi-coding-agent`), with a model configured
 
 The window uses [MyGo](https://github.com/egoist/mygo) v0.9.0 with a vanilla JavaScript page and the [Magpie design system](https://github.com/idy/magpie-design-system) v0.4.4, vendored in `web/mds/`. The editor is [CodeMirror 6](https://codemirror.net), bundled into `web/vendor/codemirror/` by `tools/codemirror/build.sh` from the exact versions in `tools/codemirror/package.json`. There is no frontend build step.

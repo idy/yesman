@@ -4,8 +4,8 @@
 // A pool repository mirrors its remote in refs/remotes/origin/* (and
 // refs/remotes/upstream/* for a fork's upstream). Its refs/heads/* hold only
 // the branches of worktrees, so a fetch never conflicts with local work.
-// The pool is fetched when someone checks a worktree out of it, not on a
-// timer.
+// The pool is fetched when someone checks a worktree out of it, and the
+// app fetches all of it when asked and on a schedule the user may set.
 package pool
 
 import (
@@ -335,6 +335,12 @@ func (p *Pool) Fetch(ctx context.Context, name string, force bool) error {
 	if err != nil {
 		return err
 	}
+	return p.fetch(ctx, r, force)
+}
+
+// FetchRepo is Fetch for a repository already resolved with Get or List,
+// which spares scanning the pool again.
+func (p *Pool) FetchRepo(ctx context.Context, r Repo, force bool) error {
 	return p.fetch(ctx, r, force)
 }
 
