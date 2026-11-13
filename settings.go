@@ -85,8 +85,6 @@ type SettingsView struct {
 	Pi           string           `json:"pi"`
 	PiError      string           `json:"piError,omitempty"`
 	HomeOverride bool             `json:"homeOverride,omitempty"`
-	StorageError string           `json:"storageError,omitempty"`
-	PreviousHome string           `json:"previousHome,omitempty"`
 }
 
 // Settings returns the user's choices and where yesman keeps its data.
@@ -110,11 +108,7 @@ func (s *service) Settings() SettingsView {
 		v.PiError = a.piErr.Error()
 	}
 	if a.storage != nil {
-		a.storage.mu.Lock()
 		v.HomeOverride = a.storage.override
-		v.StorageError = a.storage.config.Error
-		v.PreviousHome = a.storage.config.Previous
-		a.storage.mu.Unlock()
 	}
 	return v
 }

@@ -1,25 +1,22 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/egoist/mygo"
 	"github.com/idy/yesman/internal/home"
 )
 
-// The location must live outside the data it locates. YESMAN_HOME remains an
+// The location lives outside the data it locates. YESMAN_HOME remains an
 // explicit override; normal launches remember the user's choice here.
 type storageConfig struct {
-	Home     string `json:"home"`
-	Pending  string `json:"pending,omitempty"`
-	Previous string `json:"previous,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Home string `json:"home"`
 }
 
 type storageLocation struct {
@@ -52,7 +49,7 @@ func (c storageConfig) save(path string) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-func openStorage(ctx context.Context) (home.Home, *storageLocation, error) {
+func openStorage() (home.Home, *storageLocation, error) {
 	h, err := home.Default()
 	if err != nil {
 		return home.Home{}, nil, err
@@ -64,12 +61,10 @@ func openStorage(ctx context.Context) (home.Home, *storageLocation, error) {
 	if err != nil {
 		return home.Home{}, nil, fmt.Errorf("find storage configuration: %w", err)
 	}
-	return loadStorage(ctx, filepath.Join(dir, "yesman", "storage.json"), h.Root)
+	return loadStorage(filepath.Join(dir, "yesman", "storage.json"), h.Root)
 }
 
-// A pending relocation runs before any agents, API handlers or file watchers
-// start. CopyTo leaves the old directory intact until the new one is complete.
-func loadStorage(ctx context.Context, path, fallback string) (home.Home, *storageLocation, error) {
+func loadStorage(path, fallback string) (home.Home, *storageLocation, error) {
 	loc := &storageLocation{path: path, config: storageConfig{Home: fallback}}
 	data, err := os.ReadFile(path)
 	if err == nil {
@@ -86,66 +81,68 @@ func loadStorage(ctx context.Context, path, fallback string) (home.Home, *storag
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return home.Home{}, nil, fmt.Errorf("read storage configuration: %w", err)
 	}
-	h := home.Home{Root: loc.config.Home}
-	if loc.config.Pending == "" {
-		return h, loc, nil
-	}
-	next := loc.config
-	destination := next.Pending
-	next.Pending = ""
-	if err := h.CopyTo(ctx, destination); err != nil {
-		next.Error = fmt.Sprintf("Could not move to %s: %v. Your data is still in %s. Choose another empty folder and try again.", destination, err, h.Root)
-	} else {
-		next.Home, next.Previous, next.Error = destination, h.Root, ""
-	}
-	if err := next.save(path); err != nil {
-		// The old copy is still usable even if saving the new location fails.
-		loc.config.Pending = ""
-		loc.config.Error = fmt.Sprintf("Could not save the new location: %v. Still using %s.", err, h.Root)
-		return h, loc, nil
-	}
-	loc.config = next
-	return home.Home{Root: next.Home}, loc, nil
+	return home.Home{Root: loc.config.Home}, loc, nil
 }
 
-func (l *storageLocation) schedule(h home.Home, destination string) error {
+func checkStorageFolder(destination string) (string, error) {
+	destination = strings.TrimSpace(destination)
+	if !filepath.IsAbs(destination) {
+		return "", errors.New("enter the full path of the yesman folder")
+	}
+	destination = filepath.Clean(destination)
+	if info, err := os.Stat(destination); err == nil {
+		if !info.IsDir() {
+			return "", errors.New("choose a folder, not a file")
+		}
+		return filepath.EvalSymlinks(destination)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return destination, nil
+}
+
+func (l *storageLocation) setHome(destination string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.override {
 		return errors.New("YESMAN_HOME sets the folder for this launch; unset it and restart to change the folder in Settings")
 	}
-	if l.config.Pending != "" {
-		return errors.New("a folder move is already scheduled; restart yesman to finish it")
-	}
-	destination, err := h.CheckDestination(destination)
+	destination, err := checkStorageFolder(destination)
 	if err != nil {
 		return err
 	}
-	// Saving a selector inside the source or destination would make its
-	// availability depend on the move it controls.
-	for _, root := range []string{h.Root, destination} {
-		if rel, err := filepath.Rel(root, l.path); err == nil && filepath.IsLocal(rel) {
-			return errors.New("choose a folder outside yesman's application configuration directory")
-		}
+	// Existing data is used as-is; only missing standard directories are made.
+	h := home.Home{Root: destination}
+	if err := h.Ensure(); err != nil {
+		return fmt.Errorf("prepare the yesman folder: %w", err)
 	}
-	next := l.config
-	next.Home, next.Pending, next.Error = h.Root, destination, ""
+	destination, err = filepath.EvalSymlinks(destination)
+	if err != nil {
+		return err
+	}
+	probe, err := os.CreateTemp(h.Runtime(), ".write-check-*")
+	if err != nil {
+		return fmt.Errorf("the yesman folder is not writable: %w", err)
+	}
+	probe.Close()
+	os.Remove(probe.Name())
+	next := storageConfig{Home: destination}
 	if err := next.save(l.path); err != nil {
-		return fmt.Errorf("save the new location: %w", err)
+		return fmt.Errorf("save the location: %w", err)
 	}
 	l.config = next
 	return nil
 }
 
-// ChooseStorageFolder uses the platform's folder picker; cancellation keeps
-// the input unchanged. The user can also enter a not-yet-created full path.
+// ChooseStorageFolder uses the platform's folder picker; cancellation leaves
+// the input unchanged. Existing folders may already contain the user's data.
 func (s *service) ChooseStorageFolder() (string, error) {
 	a := s.app
 	a.wmu.Lock()
 	win := a.win
 	a.wmu.Unlock()
 	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
-		Parent: win, Title: "Choose a new yesman folder", ButtonLabel: "Choose folder",
+		Parent: win, Title: "Choose a yesman folder", ButtonLabel: "Choose folder",
 		DefaultPath: filepath.Dir(a.home.Root), Directory: true, CreateDirectories: true,
 	})
 	if err != nil || len(paths) == 0 {
@@ -154,15 +151,14 @@ func (s *service) ChooseStorageFolder() (string, error) {
 	return paths[0], nil
 }
 
-// CheckStorageFolder validates an entered path before asking to restart.
 func (s *service) CheckStorageFolder(destination string) (string, error) {
-	return s.app.home.CheckDestination(destination)
+	return checkStorageFolder(destination)
 }
 
-// MoveStorage saves the request and relaunches. Graceful quit stops all agents;
-// the next process copies their settled files before opening the data again.
-func (s *service) MoveStorage(destination string) error {
-	if err := s.app.storage.schedule(s.app.home, destination); err != nil {
+// SetStorageFolder remembers the selected folder and restarts to open it.
+// The app does not copy, move or delete existing data in either folder.
+func (s *service) SetStorageFolder(destination string) error {
+	if err := s.app.storage.setHome(destination); err != nil {
 		return err
 	}
 	mygo.App.Relaunch()

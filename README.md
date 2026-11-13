@@ -30,7 +30,7 @@ The files pane, opened from the titlebar, shows the workspace of the yesman you 
 
 Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool), and About (the versions yesman runs with, and updates).
 
-In General → Storage, **Change…** lets you enter or browse to a new or empty folder, then **Move and restart** relocates your data. Agents stop before the move; repositories, active and archived workspaces, conversations, knowledge and settings are copied together, with Git worktree links repaired. The old folder stays as a backup you can remove after checking the new one. If copying fails, yesman keeps using the old folder and shows the error in Storage. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice and disables moving from Settings.
+In General → Storage, **Change…** lets you enter or browse to a data folder, then **Use folder and restart** opens it after restarting. Existing folders with data are accepted; a new folder starts fresh. To keep existing data elsewhere, quit yesman, copy the folder yourself, then reopen yesman and select the copy. Data transfers and any Git worktree path repairs are manual. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice.
 
 Release builds update themselves through MyGo's updater: they check GitHub releases of `idy/yesman` at launch and every 6 hours, and download and install a newer version in the background. The titlebar then offers to restart into it, and the next launch runs it anyway. Only release builds, made with `mygo build` and signed, do that; development builds (`go run`, `go build`) never check.
 
@@ -95,7 +95,7 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | Path | Contents |
 | --- | --- |
 | `main.go`, `app.go`, `service.go` | App startup, tray, window and notifications; the methods the page calls |
-| `settings.go`, `storage.go`, `internal/home/` | Settings and About, the remembered data location, and data relocation |
+| `settings.go`, `storage.go`, `internal/home/` | Settings and About, the remembered data location and directory layout |
 | `update.go` | Checking for and installing new versions |
 | `files.go`, `files_menu.go` | Listing, reading, finding and watching a workspace's files, and the files pane's menus |
 | `web/files.js`, `web/editor.js`, `web/code.js` | The files pane, its editor, and the language of each file |

@@ -933,7 +933,7 @@ function renderGeneral(inner) {
   inner.append(
     settingsSection('Appearance', null,
       preferenceRow('Theme', h('p', null, 'The window and its menus follow this.'), appearance)),
-    settingsSection('Storage', 'Repositories, workspaces, conversations and settings move together.',
+    settingsSection('Storage', 'Choose where yesman keeps its data.',
       ...storageRows(v),
       preferenceRow('Archive', h('p', null, 'Workspaces of dismissed yesmen, with their worktrees. ', h('span', { class: 'path' }, v.archive)), revealButton(v.archive))),
     settingsSection('Agents', null,
@@ -954,10 +954,9 @@ function storageRows(v) {
     h('div', null, h('p', { class: 'path' }, v.home),
       v.homeOverride ? h('p', null, 'Set by YESMAN_HOME. Unset it and restart to change the folder here.') : null),
     h('div', { class: 'storage-actions' }, revealButton(v.home), change))];
-  if (v.storageError) rows.push(h('div', { class: 'storage-message danger', role: 'alert' }, v.storageError));
   if (d) {
     const input = h('input', { class: 'mds-input', id: 'storage-path', required: true, value: d.path,
-      placeholder: 'Full path to a new or empty folder', autocomplete: 'off', spellcheck: 'false',
+      placeholder: 'Full path to a folder', autocomplete: 'off', spellcheck: 'false',
       disabled: d.busy, 'aria-describedby': 'storage-hint storage-error', 'aria-invalid': d.error ? 'true' : null,
       oninput: (e) => { d.path = e.currentTarget.value; } });
     const browse = h('button', { class: 'mds-button', type: 'button', disabled: d.busy, onclick: async () => {
@@ -973,25 +972,22 @@ function storageRows(v) {
         }
       }
     } }, icon('folder'), 'Browse…');
-    rows.push(h('form', { class: 'storage-edit', 'aria-busy': String(d.busy), onsubmit: (e) => { e.preventDefault(); moveStorage(d); } },
+    rows.push(h('form', { class: 'storage-edit', 'aria-busy': String(d.busy), onsubmit: (e) => { e.preventDefault(); changeStorageFolder(d); } },
       h('label', { class: 'field', for: 'storage-path' }, 'New yesman folder'),
       h('div', { class: 'storage-input' }, input, browse),
-      h('p', { class: 'mds-hint', id: 'storage-hint' }, 'yesman restarts to move your data. The old folder stays as a backup. Large folders may take a while to move.'),
+      h('p', { class: 'mds-hint', id: 'storage-hint' }, 'Files are not moved. To keep your data, copy the current folder yourself before switching.'),
       h('p', { class: 'danger', id: 'storage-error', role: 'alert', hidden: !d.error }, d.error),
       h('div', { class: 'storage-actions' },
         h('button', { class: 'mds-button', type: 'button', disabled: d.busy, onclick: () => {
           state.storageDraft = null; renderBody();
           $('.storage-actions button:last-child')?.focus();
         } }, 'Cancel'),
-        h('button', { class: 'mds-button mds-button--primary', type: 'submit', disabled: d.busy }, d.busy ? 'Restarting…' : 'Move and restart'))));
+        h('button', { class: 'mds-button mds-button--primary', type: 'submit', disabled: d.busy }, d.busy ? 'Please wait…' : 'Use folder and restart'))));
   }
-  if (v.previousHome) rows.push(preferenceRow('Previous folder',
-    h('p', null, 'Your backup from the last move. You can remove it after checking the new folder. ', h('span', { class: 'path' }, v.previousHome)),
-    revealButton(v.previousHome)));
   return rows;
 }
 
-async function moveStorage(d) {
+async function changeStorageFolder(d) {
   if (d.busy) return;
   d.busy = true;
   d.error = '';
@@ -1000,9 +996,8 @@ async function moveStorage(d) {
     const destination = await call('CheckStorageFolder', d.path.trim());
     const active = state.snap.agents.filter((a) => ['working', 'starting', 'waiting'].includes(a.status)).length;
     const agents = active ? ` ${active === 1 ? 'The active agent stops' : `${active} active agents stop`}; their sessions resume when you next talk to them.` : '';
-    if (!(await confirmAction('Move your yesman folder?', `Move all data to ${destination} and restart yesman.${agents} The old folder stays as a backup.`, 'Move and restart'))) return;
-    if (!(await files.saveBeforeRestart())) throw new Error('Some file changes could not be saved. Resolve them in the files pane before moving.');
-    await call('MoveStorage', destination);
+    if (!(await confirmAction('Use this yesman folder?', `Restart yesman using ${destination}.${agents} Files are not copied. Save your edits and copy any data you want to use there first.`, 'Use folder and restart'))) return;
+    await call('SetStorageFolder', destination);
   } catch (err) {
     d.error = errorText(err);
   } finally {

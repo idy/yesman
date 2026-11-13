@@ -4,9 +4,8 @@ Each release's section is what installed copies show as its release notes.
 
 ## 0.1.7
 
-- Choose where yesman keeps its data from General → Storage. Browse to or enter a new or empty folder, then move everything and restart.
-- Repositories, active and archived workspaces, conversations, knowledge and settings move together. Git worktree links and session paths are repaired; pending file edits are saved before restarting.
-- The old folder stays as a backup. If copying fails, yesman keeps using the old folder and explains the problem in Storage. Launching with `YESMAN_HOME` still overrides the saved location.
+- Choose where yesman keeps its data from General → Storage. Browse to or enter a folder, then restart to use it, including folders that already contain your data.
+- Copy existing data yourself before switching folders. Launching with `YESMAN_HOME` still overrides the saved location.
 
 ## 0.1.5
 

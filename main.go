@@ -7,7 +7,6 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -37,7 +36,7 @@ func main() {
 	}
 	importLoginPath()
 
-	h, storage, err := openStorage(context.Background())
+	h, storage, err := openStorage()
 	if err != nil {
 		log.Fatal(err)
 	}

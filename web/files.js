@@ -935,16 +935,5 @@ export function createFiles(host) {
     return false;
   }
 
-  // A relocation must include edits still waiting for Auto Save, including
-  // tabs in workspaces that are no longer selected. Conflicts block restart.
-  async function saveBeforeRestart() {
-    for (const p of panes.values()) {
-      for (const tab of p.tabs) {
-        if (tab.dirty || tab.saving) await save(p, tab.path);
-      }
-    }
-    return [...panes.values()].every((p) => p.tabs.every((tab) => !tab.dirty));
-  }
-
-  return { render, open, openPath, onChange, onKey, saveBeforeRestart };
+  return { render, open, openPath, onChange, onKey };
 }
