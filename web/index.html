@@ -32,37 +32,37 @@
 
   <dialog class="mds-dialog" id="hire-dialog">
     <form method="dialog" id="hire-form">
-      <h2 class="mds-heading">Hire a yesman</h2>
-      <p class="dialog-hint">A yesman gets a workspace of its own and a lead you talk to. Name it after the project or the job.</p>
+      <h2 class="mds-heading" data-i18n>Hire a yesman</h2>
+      <p class="dialog-hint" data-i18n>A yesman gets a workspace of its own and a lead you talk to. Name it after the project or the job.</p>
       <label class="field">
-        <span>Name</span>
+        <span data-i18n>Name</span>
         <input class="mds-input" name="name" required autocomplete="off" spellcheck="false"
                pattern="[a-z0-9][a-z0-9\-]{0,31}" placeholder="checkout-v2">
       </label>
-      <p class="dialog-hint">Lowercase letters, digits and dashes.</p>
+      <p class="dialog-hint" data-i18n>Lowercase letters, digits and dashes.</p>
       <div class="mds-dialog-actions">
-        <button class="mds-button" value="cancel" formnovalidate>Cancel</button>
-        <button class="mds-button mds-button--primary" value="hire">Hire</button>
+        <button class="mds-button" value="cancel" formnovalidate data-i18n>Cancel</button>
+        <button class="mds-button mds-button--primary" value="hire" data-i18n>Hire</button>
       </div>
     </form>
   </dialog>
 
   <dialog class="mds-dialog" id="checkout-dialog">
     <form method="dialog" id="checkout-form">
-      <h2 class="mds-heading">Check out a repository</h2>
-      <p class="dialog-hint">A worktree of a pool repository in this yesman's workspace, on a branch of its own. The agents can also check out what they need.</p>
+      <h2 class="mds-heading" data-i18n>Check out a repository</h2>
+      <p class="dialog-hint" data-i18n>A worktree of a pool repository in this yesman's workspace, on a branch of its own. The agents can also check out what they need.</p>
       <label class="field">
-        <span>Repository</span>
+        <span data-i18n>Repository</span>
         <select class="mds-select" name="repo" required></select>
       </label>
       <label class="field">
-        <span>Branch <span class="mds-optional">optional</span></span>
+        <span><span data-i18n>Branch</span> <span class="mds-optional" data-i18n>optional</span></span>
         <input class="mds-input mds-mono" name="branch" autocomplete="off" spellcheck="false">
       </label>
-      <p class="dialog-hint">An existing branch continues; a new one starts from the default branch. Empty makes a new branch.</p>
+      <p class="dialog-hint" data-i18n>An existing branch continues; a new one starts from the default branch. Empty makes a new branch.</p>
       <div class="mds-dialog-actions">
-        <button class="mds-button" value="cancel" formnovalidate>Cancel</button>
-        <button class="mds-button mds-button--primary" value="checkout">Check out</button>
+        <button class="mds-button" value="cancel" formnovalidate data-i18n>Cancel</button>
+        <button class="mds-button mds-button--primary" value="checkout" data-i18n>Check out</button>
       </div>
     </form>
   </dialog>
@@ -78,7 +78,7 @@
       <h2 class="mds-heading" id="confirm-title"></h2>
       <p class="dialog-hint" id="confirm-body"></p>
       <div class="mds-dialog-actions">
-        <button class="mds-button" value="cancel">Cancel</button>
+        <button class="mds-button" value="cancel" data-i18n>Cancel</button>
         <button class="mds-button mds-button--primary" value="ok" id="confirm-ok"></button>
       </div>
     </form>

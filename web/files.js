@@ -7,6 +7,7 @@ import { $, h, icon } from './dom.js';
 import { renderMarkdown } from './markdown.js';
 import { languageOf } from './code.js';
 import { createEditor } from './editor.js';
+import { t, formatNumber } from './i18n.js';
 
 // A folder shows this many entries; Go to File finds the rest.
 const MAX_TREE_ROWS = 2000;
@@ -300,7 +301,7 @@ export function createFiles(host) {
     if (!tab) return;
     if (tab.dirty) {
       if (prefs.autoSave && !tab.conflict) await save(p, rel);
-      if (tab.dirty && !(await host.confirm(`Close ${baseOf(rel)} without saving?`, 'Your changes to it are not saved and will be lost.', 'Close Without Saving'))) return;
+      if (tab.dirty && !(await host.confirm(t('Close {file} without saving?', { file: baseOf(rel) }), t('Your changes to it are not saved and will be lost.'), t('Close Without Saving')))) return;
     }
     const at = p.tabs.indexOf(tab);
     if (at < 0) return;
@@ -421,7 +422,7 @@ export function createFiles(host) {
   }
 
   function paneHandle(mode) {
-    const el = h('div', { class: 'files-resize', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': 'Width of the files', tabindex: '0', title: 'Drag to resize; double-click for the default width' });
+    const el = h('div', { class: 'files-resize', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': t('Width of the files'), tabindex: '0', title: t('Drag to resize; double-click for the default width') });
     const aside = () => $('#info');
     dragHandle(el, {
       widthAt: (x) => window.innerWidth - x,
@@ -437,7 +438,7 @@ export function createFiles(host) {
   }
 
   function listHandle() {
-    const el = h('div', { class: 'files-resize', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': 'Width of the file tree', tabindex: '0', title: 'Drag to resize; double-click for the default width' });
+    const el = h('div', { class: 'files-resize', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': t('Width of the file tree'), tabindex: '0', title: t('Drag to resize; double-click for the default width') });
     const aside = () => $('#info');
     dragHandle(el, {
       widthAt: (x) => aside().getBoundingClientRect().right - x,
@@ -457,14 +458,14 @@ export function createFiles(host) {
   }
 
   function head(p) {
-    const tabs = p.tabs.map((t) => h('div', { class: 'files-tab', role: 'tab', 'aria-selected': String(t.path === p.active), 'data-pinned': t.pinned ? 'true' : null, 'data-dirty': t.dirty ? 'true' : null, title: t.dirty ? `${t.path} (not saved)` : t.path },
-      h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = t.path; if (!p.views.has(t.path)) loadView(p, t.path); render(); }, ondblclick: () => { t.pinned = true; render(); } }, baseOf(t.path)),
-      iconButton('x', `Close ${baseOf(t.path)}`, () => closeTab(p, t.path))));
+    const tabs = p.tabs.map((tab) => h('div', { class: 'files-tab', role: 'tab', 'aria-selected': String(tab.path === p.active), 'data-pinned': tab.pinned ? 'true' : null, 'data-dirty': tab.dirty ? 'true' : null, title: tab.dirty ? t('{path} (not saved)', { path: tab.path }) : tab.path },
+      h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = tab.path; if (!p.views.has(tab.path)) loadView(p, tab.path); render(); }, ondblclick: () => { tab.pinned = true; render(); } }, baseOf(tab.path)),
+      iconButton('x', t('Close {file}', { file: baseOf(tab.path) }), () => closeTab(p, tab.path))));
     return h('div', { class: 'files-head drag' },
-      tabs.length ? h('div', { class: 'files-tabs', role: 'tablist', 'aria-label': 'Open files' }, tabs) : h('strong', { class: 'files-title' }, 'Files'),
+      tabs.length ? h('div', { class: 'files-tabs', role: 'tablist', 'aria-label': t('Open files') }, tabs) : h('strong', { class: 'files-title' }, t('Files')),
       h('div', { class: 'files-head-actions' },
-        p.active ? iconButton(wide ? 'restore' : 'expand', wide ? 'Show the conversation again' : 'Widen the preview', () => { wide = !wide; render(); }) : null,
-        iconButton('x', 'Close the files', () => host.setOpen(false))));
+        p.active ? iconButton(wide ? 'restore' : 'expand', wide ? t('Show the conversation again') : t('Widen the preview'), () => { wide = !wide; render(); }) : null,
+        iconButton('x', t('Close the files'), () => host.setOpen(false))));
   }
 
   function renderHead() {
@@ -479,10 +480,10 @@ export function createFiles(host) {
     return h('div', { class: 'files-bar' },
       crumbs(p),
       h('div', { class: 'files-bar-actions' },
-        isMarkdown ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: () => { p.mode.set(p.active, mode === 'preview' ? 'source' : 'preview'); render(); } }, mode === 'preview' ? 'Source' : 'Preview') : null,
-        iconButton('collapse', 'Collapse all folders', () => { p.expanded.clear(); renderTree(); }, { disabled: !p.expanded.size }),
-        p.active ? iconButton('tree', prefs.tree ? 'Hide the file tree' : 'Show the file tree', toggleTree, { 'aria-pressed': String(prefs.tree) }) : null,
-        iconButton('more', 'More', (e) => more(e, p))));
+        isMarkdown ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: () => { p.mode.set(p.active, mode === 'preview' ? 'source' : 'preview'); render(); } }, mode === 'preview' ? t('Source') : t('Preview')) : null,
+        iconButton('collapse', t('Collapse all folders'), () => { p.expanded.clear(); renderTree(); }, { disabled: !p.expanded.size, 'data-action': 'collapse' }),
+        p.active ? iconButton('tree', prefs.tree ? t('Hide the file tree') : t('Show the file tree'), toggleTree, { 'aria-pressed': String(prefs.tree) }) : null,
+        iconButton('more', t('More'), (e) => more(e, p))));
   }
 
   // ---------- Path ----------
@@ -491,7 +492,7 @@ export function createFiles(host) {
   // menu of its folder, and the file's own segment one of the folder it is in.
   function crumbs(p) {
     const parts = p.active ? p.active.split('/') : [];
-    const nav = h('nav', { class: 'files-crumbs', 'aria-label': 'Path', title: p.active ? absOf(p, p.active) : p.path });
+    const nav = h('nav', { class: 'files-crumbs', 'aria-label': t('Path'), title: p.active ? absOf(p, p.active) : p.path });
     if (!parts.length) {
       nav.append(h('button', { class: 'files-crumb', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (e) => folderMenu(e.currentTarget, p, '.', null) }, p.name));
       return nav;
@@ -549,7 +550,7 @@ export function createFiles(host) {
       el.setAttribute('aria-label', folder === '.' ? p.name : folder);
       let entries = p.dirs.get(folder);
       if (!Array.isArray(entries)) {
-        el.replaceChildren(h('p', { class: 'files-menu-note' }, 'Loading…'));
+        el.replaceChildren(h('p', { class: 'files-menu-note' }, t('Loading…')));
         place();
         el.focus({ preventScroll: true });
         try {
@@ -579,8 +580,8 @@ export function createFiles(host) {
           },
         }, e.dir ? icon('chevron', 'mds-icon files-menu-chevron') : icon(fileIcon(e.path), 'mds-icon files-menu-icon'), h('span', null, e.name)));
       }
-      if (!entries.length) items.push(h('p', { class: 'files-menu-note' }, 'This folder is empty.'));
-      if (entries.length > 500) items.push(h('p', { class: 'files-menu-note' }, `${(entries.length - 500).toLocaleString()} more. Go to a file to find them.`));
+      if (!entries.length) items.push(h('p', { class: 'files-menu-note' }, t('This folder is empty.')));
+      if (entries.length > 500) items.push(h('p', { class: 'files-menu-note' }, t('{n} more. Go to a file to find them.', { n: formatNumber(entries.length - 500) })));
       el.replaceChildren(...items);
       place();
       const focus = el.querySelector('[aria-current="true"]') ?? el.querySelector('.files-menu-item') ?? el;
@@ -645,14 +646,14 @@ export function createFiles(host) {
   // ---------- Tree ----------
 
   function tree(p) {
-    const input = h('input', { class: 'mds-input', id: 'files-find', type: 'search', placeholder: 'Go to a file', 'aria-label': 'Go to a file', spellcheck: 'false', autocomplete: 'off', value: p.query,
+    const input = h('input', { class: 'mds-input', id: 'files-find', type: 'search', placeholder: t('Go to a file'), 'aria-label': t('Go to a file'), spellcheck: 'false', autocomplete: 'off', value: p.query,
       oninput: (e) => find(p, e.currentTarget.value),
       onkeydown: (e) => {
         if (e.key === 'Enter' && p.results?.length) open(p.results[0], true);
         else if (e.key === 'Escape' && p.query) { e.preventDefault(); find(p, ''); e.currentTarget.value = ''; }
         else if (e.key === 'ArrowDown') { e.preventDefault(); $('#files-tree-list [data-path]')?.focus(); }
       } });
-    return h('nav', { class: 'files-tree', 'aria-label': 'Files' },
+    return h('nav', { class: 'files-tree', 'aria-label': t('Files') },
       h('label', { class: 'search files-search' }, icon('search'), input),
       h('div', { class: 'files-tree-list', id: 'files-tree-list', role: 'tree', 'aria-label': p.name, onkeydown: (e) => treeKey(e, p) }));
   }
@@ -710,7 +711,7 @@ export function createFiles(host) {
     }
     renderTree();
     $(`#files-tree-list [data-path="${CSS.escape(rel)}"]`)?.focus({ preventScroll: true });
-    $('#info .files-bar-actions [aria-label="Collapse all folders"]')?.toggleAttribute('disabled', !p.expanded.size);
+    $('#info .files-bar-actions [data-action="collapse"]')?.toggleAttribute('disabled', !p.expanded.size);
   }
 
   async function fileMenu(e, p, entry) {
@@ -737,25 +738,25 @@ export function createFiles(host) {
           icon(fileIcon(rel), 'mds-icon tree-icon'),
           h('span', { class: 'tree-name' }, baseOf(rel), h('span', { class: 'tree-dir' }, parentOf(rel) === '.' ? '' : parentOf(rel)))));
       }
-      if (!rows.length) rows.push(h('p', { class: 'tree-note' }, `No file matches “${p.query.trim()}”.`));
+      if (!rows.length) rows.push(h('p', { class: 'tree-note' }, t('No file matches “{query}”.', { query: p.query.trim() })));
     } else {
       const walk = (dir, depth) => {
         const entries = p.dirs.get(dir);
         if (entries === 'loading' || entries === undefined) {
-          if (depth === 0) rows.push(h('p', { class: 'tree-note' }, 'Loading…'));
+          if (depth === 0) rows.push(h('p', { class: 'tree-note' }, t('Loading…')));
           return;
         }
         if (entries.error) {
           rows.push(h('p', { class: 'tree-note danger', style: `--depth: ${depth}` }, entries.error));
           return;
         }
-        if (!entries.length && depth === 0) rows.push(h('p', { class: 'tree-note' }, 'The workspace is empty. Agents check repositories out into it.'));
+        if (!entries.length && depth === 0) rows.push(h('p', { class: 'tree-note' }, t('The workspace is empty. Agents check repositories out into it.')));
         for (const e of entries.slice(0, MAX_TREE_ROWS)) {
           rows.push(row(p, e, depth));
           if (e.dir && p.expanded.has(e.path)) walk(e.path, depth + 1);
         }
         if (entries.length > MAX_TREE_ROWS) {
-          rows.push(h('p', { class: 'tree-note', style: `--depth: ${depth}` }, `${(entries.length - MAX_TREE_ROWS).toLocaleString()} more. Go to a file to find them.`));
+          rows.push(h('p', { class: 'tree-note', style: `--depth: ${depth}` }, t('{n} more. Go to a file to find them.', { n: formatNumber(entries.length - MAX_TREE_ROWS) })));
         }
       };
       walk('.', 0);
@@ -803,12 +804,12 @@ export function createFiles(host) {
     section.dataset.path = rel;
     const top = section.dataset.fresh ? 0 : section.scrollTop;
     if (!v || v === 'loading') {
-      section.replaceChildren(h('p', { class: 'files-note' }, 'Loading…'));
+      section.replaceChildren(h('p', { class: 'files-note' }, t('Loading…')));
       return;
     }
     if (v.error) {
       section.replaceChildren(h('div', { class: 'files-note' },
-        h('strong', null, /no such file|not exist/i.test(v.error) ? 'This file is gone' : 'This file can’t be shown'),
+        h('strong', null, /no such file|not exist/i.test(v.error) ? t('This file is gone') : t('This file can’t be shown')),
         h('span', null, v.error)));
       return;
     }
@@ -822,14 +823,14 @@ export function createFiles(host) {
     }
     if (v.kind === 'binary') {
       section.replaceChildren(h('div', { class: 'files-note' },
-        h('strong', null, 'This file isn’t text'),
-        h('span', null, `${size}. Open it with another app to see it.`),
-        h('div', null, h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => host.call('Reveal', absOf(p, rel)).catch(host.fail) }, icon('folder'), 'Reveal'))));
+        h('strong', null, t('This file isn’t text')),
+        h('span', null, t('{size}. Open it with another app to see it.', { size })),
+        h('div', null, h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => host.call('Reveal', absOf(p, rel)).catch(host.fail) }, icon('folder'), t('Reveal')))));
       return;
     }
     const tab = tabOf(p, rel);
     const k = keyOf(p, rel);
-    const notice = v.truncated ? h('p', { class: 'files-notice' }, `Showing the first ${formatSize(new Blob([v.text]).size)} of this ${size} file. Large files open read-only.`) : null;
+    const notice = v.truncated ? h('p', { class: 'files-notice' }, t('Showing the first {shown} of this {size} file. Large files open read-only.', { shown: formatSize(new Blob([v.text]).size), size })) : null;
     const banner = h('div', { id: 'files-banner' });
     const lang = languageOf(rel);
     const rendered = lang === 'markdown' && (p.mode.get(rel) ?? 'preview') === 'preview';
@@ -848,14 +849,14 @@ export function createFiles(host) {
       if (!section.dataset.fresh) section.scrollTop = top;
       return;
     }
-    const slot = h('div', { class: 'files-editor', id: 'files-editor' }, h('p', { class: 'files-note' }, 'Loading…'));
+    const slot = h('div', { class: 'files-editor', id: 'files-editor' }, h('p', { class: 'files-note' }, t('Loading…')));
     section.replaceChildren(...[banner, notice, slot].filter(Boolean));
     renderBanner();
     ensureEditor().then((ed) => {
       if (!slot.isConnected || current() !== p || p.active !== rel) return;
       slot.replaceChildren(ed.dom);
       ed.show(k, { text: v.text, lang, readOnly: Boolean(tab?.readOnly || v.truncated) });
-    }, (err) => slot.replaceChildren(h('p', { class: 'files-note' }, `The editor did not load: ${err?.message || err}`)));
+    }, (err) => slot.replaceChildren(h('p', { class: 'files-note' }, t('The editor did not load: {error}', { error: err?.message || err }))));
   }
 
   // renderBanner says when the file shown changed on disk under unsaved
@@ -875,12 +876,12 @@ export function createFiles(host) {
     slot.className = 'files-conflict';
     slot.setAttribute('role', 'alert');
     slot.replaceChildren(
-      h('span', null, gone ? 'This file was deleted on disk. Your changes are only here.' : 'This file changed on disk since you opened it, and you have unsaved changes.'),
+      h('span', null, gone ? t('This file was deleted on disk. Your changes are only here.') : t('This file changed on disk since you opened it, and you have unsaved changes.')),
       h('div', { class: 'files-conflict-actions' },
         gone
-          ? h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => closeTab(p, p.active) }, 'Close')
-          : h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => reload(p, p.active) }, 'Use the File on Disk'),
-        h('button', { class: 'mds-button mds-button--small mds-button--primary', type: 'button', onclick: () => save(p, p.active, true) }, gone ? 'Save Again' : 'Keep Mine')));
+          ? h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => closeTab(p, p.active) }, t('Close'))
+          : h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => reload(p, p.active) }, t('Use the File on Disk')),
+        h('button', { class: 'mds-button mds-button--small mds-button--primary', type: 'button', onclick: () => save(p, p.active, true) }, gone ? t('Save Again') : t('Keep Mine'))));
   }
 
   // resolve joins a relative link to the directory it is in, or returns
