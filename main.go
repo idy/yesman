@@ -55,6 +55,7 @@ func main() {
 	a := &app{home: h, pool: pool.New(h.Repos()), yesmen: yesmen.New(h.Yesmen(), h.Archive())}
 	a.pi, a.piErr = findPi()
 	a.settings = loadSettings(h.Settings())
+	a.updates = newUpdates()
 	if a.settings.Appearance != "" {
 		mygo.Theme.SetSource(a.settings.Appearance) // before Run, so the window opens in it
 	}
@@ -90,6 +91,7 @@ func main() {
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { a.agents.StopAll() })
 	mygo.App.WhenReady(func() {
 		a.setupTray()
+		a.updates.start()
 		if os.Getenv("YESMAN_HIDDEN") == "" {
 			a.showWindow()
 		}
