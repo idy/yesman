@@ -31,8 +31,11 @@ var webFS embed.FS
 //go:embed pi/yesman.ts
 var extensionSource []byte
 
+// appName names the app, and with it the lock that keeps one instance.
+var appName = "yesman"
+
 func main() {
-	mygo.App.SetName("yesman")
+	mygo.App.SetName(appName)
 	mygo.App.SetLanguages(languages...)
 	if !mygo.App.RequestSingleInstanceLock() {
 		return // the running instance shows its window

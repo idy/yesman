@@ -83,6 +83,9 @@ type app struct {
 	updates *updates
 
 	files fileWatch // the workspace whose files the page shows
+
+	infoOnce sync.Once
+	info     *infoCache // what the info panel measured
 }
 
 // titlebarHeight is the height of the titlebar the page draws.

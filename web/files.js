@@ -2,12 +2,24 @@
 // files in tabs, with code highlighted, Markdown rendered and images shown.
 // The Go side lists and reads files (files.go) and reports changes while
 // the pane watches a workspace.
+//
+// The pane shows the whole workspace, or one part of it: the knowledge,
+// read as rendered pages, or a worktree, its files or its changes against
+// the branch it started from (diff.js). Each part keeps its own tabs.
 
 import { $, h, icon } from './dom.js';
-import { renderMarkdown } from './markdown.js';
+import { renderDocument } from './markdown.js';
 import { languageOf } from './code.js';
 import { createEditor } from './editor.js';
-import { t, formatNumber } from './i18n.js';
+import { createChanges, statusMark, counts } from './diff.js';
+import { t, tn, formatNumber } from './i18n.js';
+
+// A folder's menu shows this many entries.
+const MENU_ROWS = 500;
+
+// The knowledge notes of a workspace, and the note that lists them.
+const KNOWLEDGE = '.yesman/knowledge';
+const KNOWLEDGE_INDEX = `${KNOWLEDGE}/INDEX.md`;
 
 // A folder shows this many entries; Go to File finds the rest.
 const MAX_TREE_ROWS = 2000;
@@ -69,20 +81,45 @@ function dragHandle(el, { widthAt, current, apply, reset }) {
 //   isOpen(), setOpen(on)   whether the pane shows
 //   checkout(y), dismiss(name)
 //   confirm(title, body, ok)  asks before something is lost
+//   shown()                   after the pane draws, or what it shows changes
 export function createFiles(host) {
-  const panes = new Map(); // yesman name -> its pane's state
+  const panes = new Map(); // yesman name and part shown -> that pane's state
+  const scopes = new Map(); // yesman name -> the part of its workspace shown
   let watching = null;
   let wide = false;
 
-  function pane(y) {
-    let p = panes.get(y.name);
+  // A scope is the part of a workspace the pane shows: all of it, the
+  // knowledge, or a worktree by its directory.
+  const WORKSPACE = { kind: 'workspace' };
+  const scopeOf = (y) => scopes.get(y.name) ?? WORKSPACE;
+  const scopeKey = (sc) => (sc.kind === 'worktree' ? `worktree:${sc.dir}` : sc.kind);
+  const rootOf = (sc) => (sc.kind === 'knowledge' ? KNOWLEDGE : sc.kind === 'worktree' ? sc.dir : '.');
+  const within = (rel, root) => root === '.' || rel === root || rel.startsWith(`${root}/`);
+  // Knowledge reads as pages: its files open rendered, and read-only.
+  const locked = (p) => p.scope.kind === 'knowledge';
+  // A worktree's pane shows its files, or its changes.
+  const isChanges = (p) => p?.scope.kind === 'worktree' && p.show === 'changes';
+
+  function pane(y, scope = scopeOf(y)) {
+    const key = `${y.name}\u0001${scopeKey(scope)}`;
+    let p = panes.get(key);
     if (!p) {
-      p = { name: y.name, path: y.path, tabs: [], active: null, expanded: new Set(), dirs: new Map(), views: new Map(), mode: new Map(), query: '', results: null };
-      panes.set(y.name, p);
+      p = { key, name: y.name, path: y.path, scope, root: rootOf(scope), show: 'files', tabs: [], active: null, expanded: new Set(), dirs: new Map(), views: new Map(), mode: new Map(), query: '', results: null };
+      panes.set(key, p);
     }
     p.path = y.path;
     return p;
   }
+
+  const panesOf = (name) => [...panes.values()].filter((p) => p.name === name);
+
+  const changes = createChanges({
+    call: (...args) => host.call(...args),
+    fail: (err) => host.fail(err),
+    render: () => render(),
+    renderBar: () => renderBar(),
+    openFile: (rel) => open(rel, true),
+  });
 
   const parentOf = (rel) => (rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '.');
   const baseOf = (rel) => rel.slice(rel.lastIndexOf('/') + 1);
@@ -112,7 +149,7 @@ export function createFiles(host) {
       const tab = tabOf(p, rel);
       if (tab && v.kind === 'text' && !editor?.has(keyOf(p, rel))) {
         tab.base = v.hash;
-        tab.readOnly = Boolean(v.truncated);
+        tab.readOnly = Boolean(v.truncated) || locked(p);
       }
       p.views.set(rel, v);
     } catch (err) {
@@ -131,7 +168,7 @@ export function createFiles(host) {
   // Every text file shows in one editor, made the first time it is needed.
   let editor = null;
   let editorLoading = null;
-  const keyOf = (p, rel) => `${p.name}\n${rel}`;
+  const keyOf = (p, rel) => `${p.key}\u0000${rel}`;
   const tabOf = (p, rel) => p?.tabs.find((t) => t.path === rel);
 
   function ensureEditor() {
@@ -141,7 +178,7 @@ export function createFiles(host) {
   }
 
   function byKey(k) {
-    const at = k.indexOf('\n');
+    const at = k.indexOf('\u0000');
     return [panes.get(k.slice(0, at)), k.slice(at + 1)];
   }
 
@@ -240,7 +277,7 @@ export function createFiles(host) {
     p.views.set(rel, v);
     // A file that grew past the limit can only be read now, or the other
     // way round.
-    const readOnly = Boolean(v.truncated);
+    const readOnly = Boolean(v.truncated) || locked(p);
     const changed = tab.readOnly !== readOnly;
     if (changed) {
       tab.readOnly = readOnly;
@@ -264,17 +301,23 @@ export function createFiles(host) {
   // ---------- Opening files ----------
 
   // open shows a file in a tab: a preview tab, in italics, that the next
-  // file replaces, unless pin keeps it.
+  // file replaces, unless pin keeps it. A file outside the part of the
+  // workspace shown opens with all of it.
   function open(rel, pin = false) {
     const y = host.yesman();
     if (!y) return;
-    const p = pane(y);
+    let p = pane(y);
+    if (!within(rel, p.root)) {
+      scopes.delete(y.name);
+      p = pane(y);
+    }
+    p.show = 'files';
     const at = p.tabs.findIndex((t) => t.path === rel);
     if (at >= 0) {
       if (pin) p.tabs[at].pinned = true;
     } else {
       const preview = p.tabs.findIndex((t) => !t.pinned && !t.dirty);
-      const tab = { path: rel, pinned: pin, dirty: false, base: null, conflict: null, readOnly: false };
+      const tab = { path: rel, pinned: pin, dirty: false, base: null, conflict: null, readOnly: locked(p) };
       if (preview >= 0) {
         const gone = p.tabs[preview].path;
         p.views.delete(gone);
@@ -286,7 +329,7 @@ export function createFiles(host) {
     }
     p.active = rel;
     // Show where it is in the tree.
-    for (let dir = parentOf(rel); dir !== '.'; dir = parentOf(dir)) p.expanded.add(dir);
+    for (let dir = parentOf(rel); dir !== '.' && dir !== p.root; dir = parentOf(dir)) p.expanded.add(dir);
     if (!host.isOpen()) host.setOpen(true);
     // A file the editor has open may have changed while nothing watched
     // it: refresh reconciles it, keeping unsaved changes as a conflict.
@@ -329,6 +372,42 @@ export function createFiles(host) {
     return true;
   }
 
+  // ---------- Parts of the workspace ----------
+
+  // setScope shows a part of the shown yesman's workspace, null for all.
+  function setScope(scope, show) {
+    const y = host.yesman();
+    if (!y) return null;
+    if (scope && scope.kind !== 'workspace') scopes.set(y.name, scope);
+    else scopes.delete(y.name);
+    const p = pane(y);
+    if (show) p.show = show;
+    if (!host.isOpen()) host.setOpen(true);
+    else render();
+    return p;
+  }
+
+  // openKnowledge shows the knowledge, with its index open.
+  async function openKnowledge() {
+    const p = setScope({ kind: 'knowledge' });
+    if (!p || p.tabs.length) return;
+    if (!Array.isArray(p.dirs.get(p.root))) await loadDir(p, p.root);
+    const entries = p.dirs.get(p.root);
+    if (!p.tabs.length && Array.isArray(entries) && entries.some((e) => e.path === KNOWLEDGE_INDEX)) open(KNOWLEDGE_INDEX, true);
+  }
+
+  // openWorktree shows a worktree: its changes, or its files.
+  function openWorktree(dir, show = 'changes') {
+    setScope({ kind: 'worktree', dir }, show);
+  }
+
+  // shown says what the pane shows: null when closed, else the part of the
+  // workspace and, for a worktree, whether its files or its changes.
+  function shown() {
+    const p = current();
+    return p ? { yesman: p.name, kind: p.scope.kind, dir: p.scope.dir ?? null, show: p.scope.kind === 'worktree' ? p.show : null } : null;
+  }
+
   // ---------- Watching ----------
 
   function watch(name) {
@@ -337,56 +416,72 @@ export function createFiles(host) {
     host.call('WatchFiles', name ?? '').catch(() => {});
     // Nothing was watched while the pane was closed or showed another
     // workspace: read again what it shows, as a change would.
-    const p = name && panes.get(name);
-    if (!p) return;
-    for (const dir of p.dirs.keys()) loadDir(p, dir);
-    for (const t of p.tabs) refresh(p, t.path);
+    if (!name) return;
+    for (const p of panesOf(name)) {
+      for (const dir of p.dirs.keys()) loadDir(p, dir);
+      for (const t of p.tabs) refresh(p, t.path);
+    }
+    changes.invalidate(name);
   }
 
   // onChange takes the "files" event: it reloads what changed and is shown.
   function onChange({ yesman, paths }) {
-    const p = panes.get(yesman);
-    if (!p) return;
-    const dirs = new Set();
-    for (const rel of paths) {
-      if (rel === '.') dirs.add('.');
-      dirs.add(parentOf(rel));
-      if (p.dirs.has(rel)) dirs.add(rel);
-      if (tabOf(p, rel)) refresh(p, rel);
+    for (const p of panesOf(yesman)) {
+      const dirs = new Set();
+      for (const rel of paths) {
+        if (rel === '.') dirs.add('.');
+        dirs.add(parentOf(rel));
+        if (p.dirs.has(rel)) dirs.add(rel);
+        if (tabOf(p, rel)) refresh(p, rel);
+      }
+      for (const dir of dirs) if (p.dirs.has(dir)) loadDir(p, dir);
     }
-    for (const dir of dirs) if (p.dirs.has(dir)) loadDir(p, dir);
+    changes.onFiles(yesman, paths, (name, dir) => {
+      const p = current();
+      return Boolean(p && p.name === name && isChanges(p) && p.scope.dir === dir);
+    });
   }
 
   // ---------- Rendering ----------
 
   function render() {
-    const aside = $('#info');
+    const aside = $('#files');
     const p = current();
     aside.hidden = !p;
-    document.documentElement.dataset.files = p ? (wide && p.active ? 'wide' : 'open') : 'closed';
+    const diff = isChanges(p);
+    const hasView = Boolean(p && (p.active || diff));
+    document.documentElement.dataset.files = p ? (wide && hasView ? 'wide' : 'open') : 'closed';
     if (!p) {
       watch(null);
       closeMenu();
+      host.shown?.();
       return;
     }
     watch(p.name);
     closeMenu();
-    if (!p.dirs.has('.')) loadDir(p, '.');
+    if (diff) changes.ensure(p);
+    else if (!p.dirs.has(p.root)) loadDir(p, p.root);
     const keep = scrolls();
-    aside.toggleAttribute('data-has-file', Boolean(p.active));
-    const mode = p.active ? 'file' : 'tree';
-    const fixed = wide && p.active;
+    aside.toggleAttribute('data-has-file', hasView);
+    const mode = hasView ? 'file' : 'tree';
+    const fixed = wide && hasView;
     aside.style.width = widths[mode] && !fixed ? `${clampPane(widths[mode], mode)}px` : '';
     if (widths.list) aside.style.setProperty('--tree-width', `${clampList(widths.list)}px`);
     else aside.style.removeProperty('--tree-width');
-    aside.replaceChildren(head(p), bar(p), h('div', { class: 'files-body', 'data-tree': String(prefs.tree || !p.active) },
-      p.active ? h('section', { class: 'files-view', id: 'files-view', 'aria-label': baseOf(p.active) }) : null,
-      prefs.tree || !p.active ? tree(p) : null));
+    const showTree = diff || prefs.tree || !p.active;
+    aside.replaceChildren(...[head(p), bar(p), h('div', { class: 'files-body', 'data-tree': String(showTree) },
+      hasView ? h('section', { class: 'files-view', id: 'files-view', 'aria-label': diff ? t('Changes') : baseOf(p.active) }) : null,
+      showTree ? (diff ? changes.tree(p) : tree(p)) : null)].filter(Boolean));
     if (!fixed) aside.append(paneHandle(mode));
-    if (p.active && prefs.tree) $('.files-tree', aside).append(listHandle());
-    renderView();
-    renderTree();
+    if (hasView && showTree) $('.files-tree', aside).append(listHandle());
+    if (diff) {
+      changes.view(p, $('#files-view'));
+    } else {
+      renderView();
+      renderTree();
+    }
     keep();
+    host.shown?.();
   }
 
   // scrolls keeps where the view and tree were scrolled, and the focused
@@ -395,14 +490,14 @@ export function createFiles(host) {
     const viewPath = $('#files-view')?.dataset.path;
     const view = $('#files-view')?.scrollTop ?? 0;
     const list = $('#files-tree-list')?.scrollTop ?? 0;
-    const focused = document.activeElement?.closest?.('#info [data-path], #info input')?.dataset?.path ?? document.activeElement?.id;
+    const focused = document.activeElement?.closest?.('#files [data-path], #files input')?.dataset?.path ?? document.activeElement?.id;
     return () => {
       const v = $('#files-view');
       if (v && v.dataset.path === viewPath) v.scrollTop = view;
       const l = $('#files-tree-list');
       if (l) l.scrollTop = list;
       if (!focused) return;
-      const again = document.getElementById(focused) ?? $(`#info [data-path="${CSS.escape(focused)}"]`);
+      const again = document.getElementById(focused) ?? $(`#files [data-path="${CSS.escape(focused)}"]`);
       again?.focus({ preventScroll: true });
     };
   }
@@ -411,19 +506,19 @@ export function createFiles(host) {
 
   // The pane keeps at least 320px for the conversation beside it.
   function clampPane(px, mode) {
-    const side = $('#side')?.getBoundingClientRect().width ?? 0;
+    const side = ($('#side')?.getBoundingClientRect().width ?? 0) + ($('#yesman-info')?.getBoundingClientRect().width ?? 0);
     const max = Math.max(280, window.innerWidth - side - 320);
     return Math.round(Math.min(Math.max(px, mode === 'file' ? 420 : 220), max));
   }
 
   function clampList(px) {
-    const pane = $('#info')?.getBoundingClientRect().width ?? 600;
+    const pane = $('#files')?.getBoundingClientRect().width ?? 600;
     return Math.round(Math.min(Math.max(px, 160), pane - 240));
   }
 
   function paneHandle(mode) {
     const el = h('div', { class: 'files-resize', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': t('Width of the files'), tabindex: '0', title: t('Drag to resize; double-click for the default width') });
-    const aside = () => $('#info');
+    const aside = () => $('#files');
     dragHandle(el, {
       widthAt: (x) => window.innerWidth - x,
       current: () => aside().getBoundingClientRect().width,
@@ -439,7 +534,7 @@ export function createFiles(host) {
 
   function listHandle() {
     const el = h('div', { class: 'files-resize', role: 'separator', 'aria-orientation': 'vertical', 'aria-label': t('Width of the file tree'), tabindex: '0', title: t('Drag to resize; double-click for the default width') });
-    const aside = () => $('#info');
+    const aside = () => $('#files');
     dragHandle(el, {
       widthAt: (x) => aside().getBoundingClientRect().right - x,
       current: () => $('.files-tree', aside()).getBoundingClientRect().width,
@@ -458,58 +553,157 @@ export function createFiles(host) {
   }
 
   function head(p) {
-    const tabs = p.tabs.map((tab) => h('div', { class: 'files-tab', role: 'tab', 'aria-selected': String(tab.path === p.active), 'data-pinned': tab.pinned ? 'true' : null, 'data-dirty': tab.dirty ? 'true' : null, title: tab.dirty ? t('{path} (not saved)', { path: tab.path }) : tab.path },
+    const diff = isChanges(p);
+    const title = diff ? t('Changes') : p.scope.kind === 'knowledge' ? t('Knowledge') : t('Files');
+    const tabs = (diff ? [] : p.tabs).map((tab) => h('div', { class: 'files-tab', role: 'tab', 'aria-selected': String(tab.path === p.active), 'data-pinned': tab.pinned ? 'true' : null, 'data-dirty': tab.dirty ? 'true' : null, title: tab.dirty ? t('{path} (not saved)', { path: tab.path }) : tab.path },
       h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = tab.path; if (!p.views.has(tab.path)) loadView(p, tab.path); render(); }, ondblclick: () => { tab.pinned = true; render(); } }, baseOf(tab.path)),
       iconButton('x', t('Close {file}', { file: baseOf(tab.path) }), () => closeTab(p, tab.path))));
     return h('div', { class: 'files-head drag' },
-      tabs.length ? h('div', { class: 'files-tabs', role: 'tablist', 'aria-label': t('Open files') }, tabs) : h('strong', { class: 'files-title' }, t('Files')),
+      tabs.length ? h('div', { class: 'files-tabs', role: 'tablist', 'aria-label': t('Open files') }, tabs) : h('strong', { class: 'files-title' }, title),
       h('div', { class: 'files-head-actions' },
-        p.active ? iconButton(wide ? 'restore' : 'expand', wide ? t('Show the conversation again') : t('Widen the preview'), () => { wide = !wide; render(); }) : null,
+        p.active || diff ? iconButton(wide ? 'restore' : 'expand', wide ? t('Show the conversation again') : t('Widen the preview'), () => { wide = !wide; render(); }) : null,
         iconButton('x', t('Close the files'), () => host.setOpen(false))));
   }
 
   function renderHead() {
     const p = current();
-    const old = $('#info .files-head');
+    const old = $('#files .files-head');
     if (p && old) old.replaceWith(head(p));
   }
 
+  // ---------- The bar ----------
+
+  // bar is one row: the part of the workspace shown, which switches to
+  // another, then the path of what is open, a segment per folder, then what
+  // can be done, and for a worktree the choice of its files or its changes.
   function bar(p) {
-    const isMarkdown = p.active && languageOf(p.active) === 'markdown';
+    const tab = (show, label) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(p.show === show),
+      onclick: () => { if (p.show !== show) { p.show = show; render(); } } }, label);
+    const tabs = p.scope.kind === 'worktree'
+      ? h('div', { class: 'mds-tabs files-scope-tabs', role: 'tablist', 'aria-label': p.scope.dir }, tab('files', t('Files')), tab('changes', t('Changes')))
+      : null;
+    if (isChanges(p)) {
+      return h('div', { class: 'files-bar' }, changeCrumbs(p), h('div', { class: 'files-bar-actions' }, tabs, changes.actions(p)));
+    }
+    const isMarkdown = p.active && languageOf(p.active) === 'markdown' && !locked(p);
     const mode = p.mode.get(p.active) ?? 'preview';
     return h('div', { class: 'files-bar' },
       crumbs(p),
       h('div', { class: 'files-bar-actions' },
+        tabs,
         isMarkdown ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: () => { p.mode.set(p.active, mode === 'preview' ? 'source' : 'preview'); render(); } }, mode === 'preview' ? t('Source') : t('Preview')) : null,
         iconButton('collapse', t('Collapse all folders'), () => { p.expanded.clear(); renderTree(); }, { disabled: !p.expanded.size, 'data-action': 'collapse' }),
         p.active ? iconButton('tree', prefs.tree ? t('Hide the file tree') : t('Show the file tree'), toggleTree, { 'aria-pressed': String(prefs.tree) }) : null,
         iconButton('more', t('More'), (e) => more(e, p))));
   }
 
+  function renderBar() {
+    const p = current();
+    const old = $('#files .files-bar');
+    if (!p || !old) return;
+    closeMenu();
+    old.replaceWith(bar(p));
+  }
+
   // ---------- Path ----------
 
-  // crumbs shows where the file is, a segment per folder: each opens a
-  // menu of its folder, and the file's own segment one of the folder it is in.
+  const sep = () => h('span', { class: 'files-crumb-sep', 'aria-hidden': 'true' }, '/');
+  const crumb = (label, last, onopen) => h('button', {
+    class: 'files-crumb', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-current': last ? 'page' : null,
+    onclick: (e) => onopen(e.currentTarget),
+  }, label);
+  const scopeLabel = (p) => (p.scope.kind === 'worktree' ? p.scope.dir : p.scope.kind === 'knowledge' ? t('Knowledge') : p.name);
+
+  // scopeCrumb names the part of the workspace shown, and opens the menu
+  // that shows another: all of it, the knowledge, or another worktree.
+  function scopeCrumb(p) {
+    const kind = p.scope.kind;
+    return h('button', {
+      class: 'files-crumb files-crumb--scope', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
+      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, the knowledge or another worktree'),
+      onclick: (e) => scopeMenu(e.currentTarget, p),
+    }, icon(kind === 'worktree' ? 'branch' : kind === 'knowledge' ? 'book' : 'folder', 'mds-icon files-crumb-icon'), h('span', null, scopeLabel(p)));
+  }
+
+  // crumbs shows where the file open is, a segment per folder below the
+  // part shown: each opens a menu of its folder, and the file's own segment
+  // one of the folder it is in.
   function crumbs(p) {
-    const parts = p.active ? p.active.split('/') : [];
-    const nav = h('nav', { class: 'files-crumbs', 'aria-label': t('Path'), title: p.active ? absOf(p, p.active) : p.path });
-    if (!parts.length) {
-      nav.append(h('button', { class: 'files-crumb', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (e) => folderMenu(e.currentTarget, p, '.', null) }, p.name));
-      return nav;
-    }
+    const base = p.root === '.' ? '' : `${p.root}/`;
+    const parts = p.active ? p.active.slice(base.length).split('/') : [];
+    const nav = h('nav', { class: 'files-crumbs', 'aria-label': t('Path'), title: p.active ? absOf(p, p.active) : absOf(p, p.root) }, scopeCrumb(p));
+    const source = filesSource(p);
     parts.forEach((part, i) => {
-      if (i) nav.append(h('span', { class: 'files-crumb-sep', 'aria-hidden': 'true' }, '/'));
       const last = i === parts.length - 1;
-      const dir = last ? parentOf(p.active) : parts.slice(0, i + 1).join('/');
-      nav.append(h('button', {
-        class: 'files-crumb', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-current': last ? 'page' : null,
-        onclick: (e) => folderMenu(e.currentTarget, p, dir, last ? p.active : null),
-      }, part));
+      const dir = last ? parentOf(p.active) : base + parts.slice(0, i + 1).join('/');
+      nav.append(sep(), crumb(part, last, (anchor) => folderMenu(anchor, source, dir, p.active)));
     });
     return nav;
   }
 
-  let menu = null; // the open folder menu: { el, anchor, close }
+  // changeCrumbs shows the changed file whose diff shows, or the folder
+  // whose files show, its folders opening menus of what changed in them;
+  // or, with neither, how much the worktree changed.
+  function changeCrumbs(p) {
+    const { path: rel, file } = changes.shown(p);
+    const nav = h('nav', { class: 'files-crumbs', 'aria-label': t('Path'), title: rel ? `${p.scope.dir}/${rel}` : p.scope.dir }, scopeCrumb(p));
+    if (!rel) {
+      const total = changes.totals(p);
+      if (total) nav.append(h('span', { class: 'changes-total' }, tn(total.files, '{n} file', '{n} files'), counts(total)));
+      return nav;
+    }
+    const parts = rel.split('/');
+    const source = changesSource(p);
+    parts.forEach((part, i) => {
+      const last = i === parts.length - 1;
+      // A file's segment opens the folder it is in; a folder's, itself.
+      const dir = last && file ? source.parentOf(rel) : parts.slice(0, i + 1).join('/');
+      nav.append(sep(), crumb(part, last, (anchor) => folderMenu(anchor, source, dir, rel)));
+    });
+    return nav;
+  }
+
+  // What a folder's menu lists: the files of a folder, or what changed in
+  // it, which the Go side keeps in memory and lists a folder at a time.
+  const chevron = () => icon('chevron', 'mds-icon files-menu-chevron');
+
+  function filesSource(p) {
+    return {
+      root: p.root,
+      rootName: scopeLabel(p),
+      parentOf,
+      cached: (folder) => { const e = p.dirs.get(folder); return Array.isArray(e) ? { entries: e, more: 0 } : null; },
+      list: async (folder) => {
+        const entries = await host.call('ListFiles', p.name, folder);
+        p.dirs.set(folder, entries);
+        return { entries, more: 0 };
+      },
+      icon: (e) => (e.dir ? chevron() : icon(fileIcon(e.path), 'mds-icon files-menu-icon')),
+      aside: () => null,
+      current: () => p.active,
+      open: (e) => { closeMenu(); open(e.path, true); },
+      empty: () => t('This folder is empty.'),
+      moreNote: (n) => t('{n} more. Go to a file to find them.', { n: formatNumber(n) }),
+    };
+  }
+
+  function changesSource(p) {
+    return {
+      root: '',
+      rootName: p.scope.dir,
+      parentOf: (rel) => (rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''),
+      cached: (folder) => changes.cached(p, folder),
+      list: (folder) => changes.list(p, folder),
+      icon: (e) => (e.dir ? chevron() : statusMark(e.status)),
+      aside: (e) => counts(e),
+      current: () => changes.shown(p).path,
+      open: (e) => { closeMenu(); changes.select(p, e.path); },
+      empty: () => t('No changes here.'),
+      moreNote: (n) => tn(n, '{n} more not shown', '{n} more not shown'),
+    };
+  }
+
+  let menu = null; // the open menu: { el, anchor, off }
 
   function closeMenu(refocus = false) {
     if (!menu) return;
@@ -521,15 +715,15 @@ export function createFiles(host) {
     if (refocus && anchor.isConnected) anchor.focus();
   }
 
-  // folderMenu lists dir under anchor. Folders open in it, a level down;
-  // files open in a tab. current is marked.
-  async function folderMenu(anchor, p, dir, current) {
+  // menuFrame opens a menu under anchor, as Magpie's select menu, or closes
+  // it when it is open already. keys takes the keys it does not use itself.
+  function menuFrame(anchor, label, keys) {
     const again = menu?.anchor === anchor;
     closeMenu();
-    if (again) return; // a second click closes it
+    if (again) return null; // a second click closes it
     // The menu takes focus itself while it has no item to focus: loading,
     // failed or empty, so that its keys still work.
-    const el = h('div', { class: 'files-menu', role: 'menu', tabindex: '-1', 'aria-label': dir === '.' ? p.name : dir });
+    const el = h('div', { class: 'files-menu', role: 'menu', tabindex: '-1', 'aria-label': label });
     const away = (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) closeMenu(); };
     const resize = () => closeMenu();
     document.addEventListener('pointerdown', away, true);
@@ -539,54 +733,8 @@ export function createFiles(host) {
     document.body.append(el);
     const place = () => {
       const r = anchor.getBoundingClientRect();
-      el.style.left = `${Math.round(Math.min(r.left - 4, window.innerWidth - el.offsetWidth - 8))}px`;
+      el.style.left = `${Math.round(Math.max(8, Math.min(r.left - 4, window.innerWidth - el.offsetWidth - 8)))}px`;
       el.style.top = `${Math.round(r.bottom + 4)}px`;
-    };
-    let at = dir;
-    let showing = 0; // the newest listing: an older one that answers late is dropped
-    const show = async (folder, mark) => {
-      const seq = ++showing;
-      at = folder;
-      el.setAttribute('aria-label', folder === '.' ? p.name : folder);
-      let entries = p.dirs.get(folder);
-      if (!Array.isArray(entries)) {
-        el.replaceChildren(h('p', { class: 'files-menu-note' }, t('Loading…')));
-        place();
-        el.focus({ preventScroll: true });
-        try {
-          entries = await host.call('ListFiles', p.name, folder);
-          p.dirs.set(folder, entries);
-        } catch (err) {
-          if (menu?.el !== el || seq !== showing) return;
-          el.replaceChildren(h('p', { class: 'files-menu-note danger' }, err?.message || String(err)));
-          el.focus({ preventScroll: true });
-          return;
-        }
-        if (menu?.el !== el || seq !== showing) return;
-      }
-      const items = [];
-      if (folder !== '.' && folder !== dir) {
-        items.push(h('button', { class: 'files-menu-item files-menu-up', type: 'button', role: 'menuitem', onclick: () => show(parentOf(folder), folder) },
-          icon('chevron', 'mds-icon files-menu-back'), h('span', null, parentOf(folder) === '.' ? p.name : baseOf(parentOf(folder)))));
-      }
-      for (const e of entries.slice(0, 500)) {
-        items.push(h('button', {
-          // The folder it came up from, or the file open, is marked.
-          class: 'files-menu-item', type: 'button', role: 'menuitem', 'data-path': e.path, 'aria-current': e.path === (mark ?? p.active) ? 'true' : null,
-          onclick: () => {
-            if (e.dir) { show(e.path, null); return; }
-            closeMenu();
-            open(e.path, true);
-          },
-        }, e.dir ? icon('chevron', 'mds-icon files-menu-chevron') : icon(fileIcon(e.path), 'mds-icon files-menu-icon'), h('span', null, e.name)));
-      }
-      if (!entries.length) items.push(h('p', { class: 'files-menu-note' }, t('This folder is empty.')));
-      if (entries.length > 500) items.push(h('p', { class: 'files-menu-note' }, t('{n} more. Go to a file to find them.', { n: formatNumber(entries.length - 500) })));
-      el.replaceChildren(...items);
-      place();
-      const focus = el.querySelector('[aria-current="true"]') ?? el.querySelector('.files-menu-item') ?? el;
-      focus.focus({ preventScroll: true });
-      if (focus !== el) focus.scrollIntoView({ block: 'nearest' });
     };
     el.addEventListener('keydown', (e) => {
       const items = [...el.querySelectorAll('.files-menu-item')];
@@ -598,10 +746,118 @@ export function createFiles(host) {
       else if (e.key === 'End') go(items.length - 1);
       else if (e.key === 'Escape') { e.preventDefault(); closeMenu(true); }
       else if (e.key === 'Tab') closeMenu();
-      else if (e.key === 'ArrowRight' && document.activeElement?.querySelector('.files-menu-chevron')) { e.preventDefault(); document.activeElement.click(); }
-      else if (e.key === 'ArrowLeft' && at !== dir && at !== '.') { e.preventDefault(); show(parentOf(at), at); }
+      else keys?.(e);
     });
+    return {
+      el,
+      isOpen: () => menu?.el === el,
+      note(text, danger = false) {
+        el.replaceChildren(h('p', { class: danger ? 'files-menu-note danger' : 'files-menu-note' }, text));
+        place();
+        el.focus({ preventScroll: true });
+      },
+      // fill shows items, focusing the one marked current, else the first.
+      fill(items) {
+        el.replaceChildren(...items);
+        place();
+        const focus = el.querySelector('[aria-current="true"]') ?? el.querySelector('.files-menu-item') ?? el;
+        focus.focus({ preventScroll: true });
+        if (focus !== el) focus.scrollIntoView({ block: 'nearest' });
+      },
+    };
+  }
+
+  // folderMenu lists a folder under anchor, from source. Folders open in
+  // it, a level down; files open. current is marked, or the folder on the
+  // way to it.
+  async function folderMenu(anchor, source, dir, current) {
+    let at = dir;
+    let showing = 0; // the newest listing: an older one that answers late is dropped
+    const nameOf = (folder) => (folder === source.root ? source.rootName : folder);
+    const frame = menuFrame(anchor, nameOf(dir), (e) => {
+      if (e.key === 'ArrowRight' && document.activeElement?.querySelector('.files-menu-chevron')) { e.preventDefault(); document.activeElement.click(); }
+      else if (e.key === 'ArrowLeft' && at !== dir && at !== source.root) { e.preventDefault(); show(source.parentOf(at), at); }
+    });
+    if (!frame) return;
+    const show = async (folder, mark) => {
+      const seq = ++showing;
+      at = folder;
+      frame.el.setAttribute('aria-label', nameOf(folder));
+      let listed = source.cached(folder);
+      if (!listed) {
+        frame.note(t('Loading…'));
+        try {
+          listed = await source.list(folder);
+        } catch (err) {
+          if (frame.isOpen() && seq === showing) frame.note(err?.message || String(err), true);
+          return;
+        }
+        if (!frame.isOpen() || seq !== showing) return;
+      }
+      const { entries, more } = listed;
+      const items = [];
+      if (folder !== source.root && folder !== dir) {
+        const up = source.parentOf(folder);
+        items.push(h('button', { class: 'files-menu-item files-menu-up', type: 'button', role: 'menuitem', onclick: () => show(up, folder) },
+          icon('chevron', 'mds-icon files-menu-back'), h('span', null, up === source.root ? source.rootName : baseOf(up))));
+      }
+      // The folder it came up from, or the file open or the folder it is
+      // in, is marked.
+      const marked = mark ?? source.current();
+      const onPath = (e) => Boolean(marked) && (e.path === marked || (e.dir && marked.startsWith(`${e.path}/`)));
+      for (const e of entries.slice(0, MENU_ROWS)) {
+        const aside = source.aside(e);
+        items.push(h('button', {
+          class: aside ? 'files-menu-item files-menu-item--aside' : 'files-menu-item', type: 'button', role: 'menuitem', 'data-path': e.path,
+          'aria-current': onPath(e) ? 'true' : null, title: e.path,
+          onclick: () => (e.dir ? show(e.path, null) : source.open(e)),
+        }, source.icon(e), h('span', null, e.name), aside));
+      }
+      if (!entries.length) items.push(h('p', { class: 'files-menu-note' }, source.empty()));
+      const hidden = Math.max(0, entries.length - MENU_ROWS) + (more ?? 0);
+      if (hidden) items.push(h('p', { class: 'files-menu-note' }, source.moreNote(hidden)));
+      frame.fill(items);
+    };
     await show(dir, current);
+  }
+
+  // scopeMenu shows the parts of the workspace the pane can show: all of
+  // it, the knowledge, and each worktree, with what it changed or its pull
+  // request as the info panel last read them. Choosing the part shown goes
+  // to its top: a worktree's summary of changes.
+  function scopeMenu(anchor, p) {
+    const y = host.yesman();
+    const frame = y && menuFrame(anchor, t('Show'));
+    if (!frame) return;
+    const here = scopeKey(p.scope);
+    const item = (scope, glyph, label, aside, title) => {
+      const mine = scopeKey(scope) === here;
+      return h('button', {
+        class: 'files-menu-item files-menu-item--aside', type: 'button', role: 'menuitem', 'aria-current': mine ? 'true' : null, title,
+        onclick: () => {
+          closeMenu();
+          if (mine) {
+            if (isChanges(p)) changes.clear(p);
+            return;
+          }
+          // From one worktree to another, the same view: files or changes.
+          setScope(scope, p.scope.kind === 'worktree' && scope.kind === 'worktree' ? p.show : undefined);
+        },
+      }, icon(glyph), h('span', null, label), aside ?? h('span'));
+    };
+    const items = [
+      item(WORKSPACE, 'folder', y.name, h('span', { class: 'files-menu-aside' }, t('All files')), y.path),
+      item({ kind: 'knowledge' }, 'book', t('Knowledge'), null, KNOWLEDGE),
+    ];
+    const wts = host.worktrees?.(y) ?? [];
+    if (wts.length) items.push(h('p', { class: 'files-menu-heading', role: 'presentation' }, t('Worktrees')));
+    for (const w of wts) {
+      const pull = w.pull;
+      const aside = pull ? h('span', { class: 'files-menu-aside' }, `#${pull.number}`) : w.changes?.files ? counts(w.changes) : null;
+      items.push(item({ kind: 'worktree', dir: w.dir }, pull ? (pull.state === 'merged' ? 'merge' : 'pullRequest') : 'branch', w.dir, aside,
+        [w.dir, pull ? pull.title : w.branch].filter(Boolean).join('\n')));
+    }
+    frame.fill(items);
   }
 
   async function more(e, p) {
@@ -623,9 +879,9 @@ export function createFiles(host) {
             timers.clear();
           }
           break;
-        case 'knowledge': open('.yesman/knowledge/INDEX.md', true); break;
+        case 'knowledge': openKnowledge(); break;
         case 'checkout': if (y) host.checkout(y); break;
-        case 'reveal': host.call('Reveal', p.path).catch(host.fail); break;
+        case 'reveal': host.call('Reveal', p.root === '.' ? p.path : absOf(p, p.root)).catch(host.fail); break;
         case 'dismiss': host.dismiss(p.name); break;
       }
     } catch (err) {
@@ -668,7 +924,7 @@ export function createFiles(host) {
       return;
     }
     try {
-      const results = await host.call('FindFiles', p.name, query);
+      const results = await host.call('FindFiles', p.name, query, p.root);
       if (seq !== findSeq) return;
       p.results = results;
     } catch (err) {
@@ -711,7 +967,7 @@ export function createFiles(host) {
     }
     renderTree();
     $(`#files-tree-list [data-path="${CSS.escape(rel)}"]`)?.focus({ preventScroll: true });
-    $('#info .files-bar-actions [data-action="collapse"]')?.toggleAttribute('disabled', !p.expanded.size);
+    $('#files .files-bar-actions [data-action="collapse"]')?.toggleAttribute('disabled', !p.expanded.size);
   }
 
   async function fileMenu(e, p, entry) {
@@ -747,10 +1003,12 @@ export function createFiles(host) {
           return;
         }
         if (entries.error) {
-          rows.push(h('p', { class: 'tree-note danger', style: `--depth: ${depth}` }, entries.error));
+          // Knowledge that has no folder yet is only empty.
+          if (depth === 0 && locked(p) && /no such file|not exist|cannot find/i.test(entries.error)) rows.push(h('p', { class: 'tree-note' }, emptyNote(p)));
+          else rows.push(h('p', { class: 'tree-note danger', style: `--depth: ${depth}` }, entries.error));
           return;
         }
-        if (!entries.length && depth === 0) rows.push(h('p', { class: 'tree-note' }, t('The workspace is empty. Agents check repositories out into it.')));
+        if (!entries.length && depth === 0) rows.push(h('p', { class: 'tree-note' }, emptyNote(p)));
         for (const e of entries.slice(0, MAX_TREE_ROWS)) {
           rows.push(row(p, e, depth));
           if (e.dir && p.expanded.has(e.path)) walk(e.path, depth + 1);
@@ -759,7 +1017,7 @@ export function createFiles(host) {
           rows.push(h('p', { class: 'tree-note', style: `--depth: ${depth}` }, t('{n} more. Go to a file to find them.', { n: formatNumber(entries.length - MAX_TREE_ROWS) })));
         }
       };
-      walk('.', 0);
+      walk(p.root, 0);
     }
     list.replaceChildren(...rows);
     list.scrollTop = top;
@@ -797,7 +1055,7 @@ export function createFiles(host) {
   function renderView() {
     const section = $('#files-view');
     const p = current();
-    if (!section || !p?.active) return;
+    if (!section || !p?.active || isChanges(p)) return;
     const rel = p.active;
     const v = p.views.get(rel);
     section.dataset.fresh = section.dataset.path === rel ? '' : 'true';
@@ -833,10 +1091,10 @@ export function createFiles(host) {
     const notice = v.truncated ? h('p', { class: 'files-notice' }, t('Showing the first {shown} of this {size} file. Large files open read-only.', { shown: formatSize(new Blob([v.text]).size), size })) : null;
     const banner = h('div', { id: 'files-banner' });
     const lang = languageOf(rel);
-    const rendered = lang === 'markdown' && (p.mode.get(rel) ?? 'preview') === 'preview';
+    const rendered = lang === 'markdown' && (locked(p) || (p.mode.get(rel) ?? 'preview') === 'preview');
     section.classList.toggle('files-view--editor', !rendered);
     if (rendered) {
-      const article = h('article', { class: 'md files-md', html: renderMarkdown(editor?.has(k) ? editor.text(k) : v.text) });
+      const article = h('article', { class: 'md files-md', html: renderDocument(editor?.has(k) ? editor.text(k) : v.text) });
       // Links to other files of the workspace open them here.
       article.addEventListener('click', (e) => {
         const href = e.target.closest('a[href]')?.getAttribute('href');
@@ -855,7 +1113,7 @@ export function createFiles(host) {
     ensureEditor().then((ed) => {
       if (!slot.isConnected || current() !== p || p.active !== rel) return;
       slot.replaceChildren(ed.dom);
-      ed.show(k, { text: v.text, lang, readOnly: Boolean(tab?.readOnly || v.truncated) });
+      ed.show(k, { text: v.text, lang, readOnly: Boolean(tab?.readOnly || v.truncated || locked(p)) });
     }, (err) => slot.replaceChildren(h('p', { class: 'files-note' }, t('The editor did not load: {error}', { error: err?.message || err }))));
   }
 
@@ -904,6 +1162,8 @@ export function createFiles(host) {
 
   function focusFind() {
     if (!host.yesman()) return;
+    const p = pane(host.yesman());
+    p.show = 'files';
     if (!host.isOpen()) host.setOpen(true);
     if (!prefs.tree) setPref('tree', true);
     render();
@@ -936,5 +1196,11 @@ export function createFiles(host) {
     return false;
   }
 
-  return { render, open, openPath, onChange, onKey };
+  function emptyNote(p) {
+    if (p.scope.kind === 'knowledge') return t('No notes yet. The agents write down here what they learn.');
+    if (p.scope.kind === 'worktree') return t('This worktree is empty.');
+    return t('The workspace is empty. Agents check repositories out into it.');
+  }
+
+  return { render, open, openPath, openKnowledge, openWorktree, shown, onChange, onKey };
 }
