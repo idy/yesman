@@ -628,6 +628,13 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 [data-checks="passed"] .info-checks-dot { background: var(--mds-good); }
 [data-checks="failed"] .info-checks-dot { background: var(--mds-error); }
 [data-checks="pending"] .info-checks-dot { background: var(--mds-warn); }
+.info-merged { margin: 4px -8px 0; }
+.info-list + .info-merged { margin-top: 6px; padding-top: 4px; border-top: 1px solid var(--mds-line); }
+.info-merged > .info-list { margin: 0; }
+.info-merged-toggle { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 8px; border: 0; border-radius: var(--mds-radius-sm); background: transparent; color: var(--mds-muted); font: inherit; font-size: var(--mds-text-note); text-align: left; cursor: default; }
+.info-merged-toggle:hover { background: var(--mds-hover); color: var(--mds-ink); }
+.info-merged-toggle:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: -2px; }
+.info-merged-toggle[aria-expanded="true"] .info-chevron { transform: rotate(90deg); }
 .info-row-actions { display: flex; gap: 0; padding: 5px 4px 0 0; opacity: 0; transition: opacity var(--mds-duration-fast) var(--mds-ease); }
 .info-row:is(:hover, :focus-within) .info-row-actions { opacity: 1; }
 @media (hover: none) { .info-row-actions { opacity: 1; } }

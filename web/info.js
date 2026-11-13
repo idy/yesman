@@ -160,9 +160,35 @@ export function createInfo(host) {
         h('span', null, t('No worktrees yet. The agents check out the repositories they need.')),
         h('button', { class: 'mds-link-button info-note-action', type: 'button', onclick: () => host.checkout(y) }, t('Check out a repository…')));
     } else {
-      body = h('ul', { class: 'info-list', role: 'list' }, list.map((w) => worktreeRow(y, d, w)));
+      // Worktrees whose pull request is merged fold into one row at the end,
+      // unless the files pane shows one.
+      const shown = host.files();
+      const merged = list.filter((w) => d.pulls?.[w.dir]?.pull?.state === 'merged'
+        && !(shown?.yesman === y.name && shown.kind === 'worktree' && shown.dir === w.dir));
+      const open = list.filter((w) => !merged.includes(w));
+      body = [
+        open.length ? h('ul', { class: 'info-list', role: 'list' }, open.map((w) => worktreeRow(y, d, w))) : null,
+        merged.length ? mergedFold(y, d, merged) : null,
+      ];
     }
     return section(t('Worktrees'), refresh, body);
+  }
+
+  // Whether the merged worktrees show, kept across launches.
+  let mergedOpen = localStorage.getItem('yesman.info.merged') === 'open';
+
+  function mergedFold(y, d, merged) {
+    const toggle = h('button', {
+      class: 'info-merged-toggle', type: 'button', 'aria-expanded': String(mergedOpen),
+      title: mergedOpen ? t('Hide the worktrees whose pull requests are merged') : t('Show the worktrees whose pull requests are merged'),
+      onclick: () => {
+        mergedOpen = !mergedOpen;
+        localStorage.setItem('yesman.info.merged', mergedOpen ? 'open' : 'closed');
+        render();
+      },
+    }, icon('chevron', 'mds-icon info-chevron'), h('span', null, tn(merged.length, '{n} merged', '{n} merged')));
+    return h('div', { class: 'info-merged' }, toggle,
+      mergedOpen ? h('ul', { class: 'info-list', role: 'list' }, merged.map((w) => worktreeRow(y, d, w))) : null);
   }
 
   function worktreeRow(y, d, w) {
