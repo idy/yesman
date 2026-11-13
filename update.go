@@ -16,7 +16,6 @@ var updateEvent = mygo.NewEvent[UpdateView]("update")
 // The states of an update, as UpdateView.State.
 const (
 	updateIdle        = "idle"        // up to date, or not checked yet
-	updateChecking    = "checking"    // asking for a newer version
 	updateAvailable   = "available"   // a newer version can be installed
 	updateDownloading = "downloading" // installing it
 	updateReady       = "ready"       // installed: it runs after a restart
@@ -29,13 +28,18 @@ type UpdateView struct {
 	// development builds, and installs yesman cannot write to.
 	Enabled bool   `json:"enabled"`
 	State   string `json:"state"`
+	// Checking is set while a check runs. The state stays what it was, so
+	// an update found before can still be installed meanwhile.
+	Checking bool `json:"checking,omitempty"`
 	// Version and Notes (Markdown) describe the newer version.
 	Version string `json:"version,omitempty"`
 	Notes   string `json:"notes,omitempty"`
 	// Progress runs from 0 to 1 while the update downloads.
 	Progress float64 `json:"progress,omitempty"`
-	// Error says why the last check or install failed.
+	// Error says why the install failed, in the failed state.
 	Error string `json:"error,omitempty"`
+	// CheckError says why the last check failed.
+	CheckError string `json:"checkError,omitempty"`
 	// CheckedAt is when a check last got an answer.
 	CheckedAt time.Time `json:"checkedAt,omitzero"`
 }
@@ -117,36 +121,47 @@ func (u *updates) set(fn func(v *UpdateView)) UpdateView {
 }
 
 // check asks for a newer version. A check that fails, as offline, keeps
-// what an earlier one found. While an update installs, or waits for a
-// restart, it does nothing.
+// what an earlier one found, and an install that starts meanwhile goes on.
+// While an update installs, or waits for a restart, it does nothing.
 func (u *updates) check(ctx context.Context) (UpdateView, error) {
 	u.mu.Lock()
 	v := u.view
-	busy := v.State == updateChecking || v.State == updateDownloading || v.State == updateReady
-	if !v.Enabled || busy {
+	if !v.Enabled {
 		u.mu.Unlock()
-		if !v.Enabled {
-			return v, mygo.ErrUpdatesDisabled
-		}
+		return v, mygo.ErrUpdatesDisabled
+	}
+	if v.Checking || v.State == updateDownloading || v.State == updateReady {
+		u.mu.Unlock()
 		return v, nil
 	}
-	u.view.State, u.view.Error = updateChecking, ""
+	u.view.Checking = true
+	v = u.view
 	u.mu.Unlock()
-	u.changed(u.snapshot())
+	u.changed(v)
 
 	f, err := u.find(ctx)
 	u.mu.Lock()
+	u.view.Checking = false
+	installing := u.view.State == updateDownloading || u.view.State == updateReady
 	switch {
 	case err != nil:
-		u.view.State, u.view.Error = v.State, err.Error()
+		u.view.CheckError = err.Error()
+	case installing:
+		// The update found before is installing; this answer changes nothing.
+		u.view.CheckError, u.view.CheckedAt = "", time.Now()
 	case f == nil:
 		u.pending = nil
-		u.view.State, u.view.Version, u.view.Notes = updateIdle, "", ""
-		u.view.CheckedAt = time.Now()
+		u.view.State, u.view.Version, u.view.Notes, u.view.Error = updateIdle, "", "", ""
+		u.view.CheckError, u.view.CheckedAt = "", time.Now()
 	default:
+		// A failed install of this same version stays failed, with its
+		// error, until it is tried again.
+		if u.view.State != updateFailed || u.view.Version != f.version {
+			u.view.State, u.view.Error = updateAvailable, ""
+		}
 		u.pending = f
-		u.view.State, u.view.Version, u.view.Notes = updateAvailable, f.version, f.notes
-		u.view.CheckedAt = time.Now()
+		u.view.Version, u.view.Notes = f.version, f.notes
+		u.view.CheckError, u.view.CheckedAt = "", time.Now()
 	}
 	v = u.view
 	u.mu.Unlock()
