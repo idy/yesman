@@ -811,7 +811,7 @@ function renderBody() {
   renderThread();
 }
 
-function renderDock() {
+function renderDock({ focusComposer = false } = {}) {
   const dock = $('#dock');
   const a = selectedAgent();
   const keep = dock?.querySelector('textarea');
@@ -867,7 +867,9 @@ function renderDock() {
   const attach = h('button', { class: 'round', type: 'button', disabled: busy, 'aria-label': t('Attach images'),
     title: t('Attach images (PNG, JPEG, GIF, WebP; 4 images, 5 MB each, 10 MB total)'), onclick: () => fileInput.click() }, icon('plus'));
   const textarea = h('textarea', {
-    rows: 1, 'aria-label': t('Message'), disabled: attachments.sending,
+    // Read-only keeps the caret/focus while RPC acceptance is pending. A
+    // disabled textarea would drop focus to BODY before the next render.
+    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending,
     placeholder: a.role === 'lead' ? t('Message {name}…', { name: a.yesman }) : t('Message worker {name}…', { name: a.name }),
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
@@ -909,7 +911,7 @@ function renderDock() {
   sync();
   const nextControl = composerSelects.find((select) => select.trigger.getAttribute('aria-label') === control);
   if (nextControl && !nextControl.trigger.disabled) nextControl.trigger.focus({ preventScroll: true });
-  else if (focused || !keep) {
+  else if (focusComposer || focused || !keep) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
   }
@@ -921,8 +923,13 @@ async function sendMessage(a, textarea) {
   const text = textarea.value.trim();
   if ((!text && !attachments?.items.length) || attachments?.reading || attachments?.sending || state.modelOptions.get(key)?.busy) return;
   const images = imagePayload(attachments?.items ?? []);
+  // A keyboard submit or a click on Send intends to continue composing.
+  // Keep that focus through pending renders; subsequent renders follow the
+  // actual focus, so moving to another control or agent cancels restoration.
+  const focusComposer = document.activeElement === textarea ||
+    document.activeElement === textarea.form?.querySelector('button[type="submit"]');
   attachments.sending = true;
-  renderDock();
+  renderDock({ focusComposer });
   try {
     if (images.length) await call('SendImages', a.id, text, images);
     else await call('Send', a.id, text);
