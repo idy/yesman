@@ -2,6 +2,8 @@
 
 **the agent that says yes and gets things done.**
 
+[Website](https://yesman.idy.dev/) · [Downloads](https://github.com/idy/yesman/releases/latest) · [Website maintenance](WEBSITE.md)
+
 yesman is a tray app for hiring yesmen. A yesman takes on one project: it gets a workspace directory of its own, checks out whichever repositories the project needs from a shared repo pool, keeps notes its agents share, and starts workers when the job splits up. You talk to its lead in a Claude Code-style window.
 
 > Status: early prototype. Hiring, the repo pool, worktrees, lead and worker agents, shared knowledge, and the window work on macOS. The app also compiles for Linux and Windows, but only macOS has been run. Watching pull requests and managing service keys are not built yet.
