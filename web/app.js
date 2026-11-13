@@ -8,11 +8,12 @@ import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
 import { createInfo } from './info.js';
+import { createBoard } from './board.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
-import { t, tn, tNodes, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
+import { t, tn, tNodes, formatNumber, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
 const mygo = window.mygo;
 const call = (method, ...args) => mygo.call(`Yesman.${method}`, ...args);
@@ -29,13 +30,20 @@ const STATUS = {
 };
 const statusText = (status) => (STATUS[status] ? t(STATUS[status]) : status);
 
+// A worker's question goes to its lead, not to you: it shows as asking,
+// in the working colour, and only a lead can need you.
+const asking = (a) => a.role === 'worker' && a.status === 'waiting';
+const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: a.yesman }) : statusText(a.status));
+const statusTone = (a) => (asking(a) ? 'asking' : a.status);
+
 const state = {
   snap: { yesmen: [], agents: [] },
   view: { kind: 'none' },
   convos: new Map(),
   drafts: new Map(),
   modelOptions: new Map(),
-  infoOpen: false,
+  pane: null, // the pane beside the conversation: 'files', 'board' or null
+  hideDone: new Set(JSON.parse(localStorage.getItem('yesman.hideDone') ?? '[]')), // yesmen whose done workers are hidden
   // The info panel between the conversation and the files, open unless
   // closed, as it was last.
   panelOpen: localStorage.getItem('yesman.info') !== 'hidden',
@@ -223,6 +231,10 @@ function messageEl(c, m) {
       if (fromLead) {
         return h('div', { class: 'note' }, h('strong', null, t('From the lead')), h('div', { class: 'md', html: renderMarkdown(fromLead[1]) }));
       }
+      // What yesman tells the lead: a worker's question, how a run ended
+      // when it did not finish, or the tasks still open.
+      const notice = text.match(/^\[yesman\] ([\s\S]*)$/);
+      if (notice) return h('div', { class: 'note note--quiet' }, h('div', { class: 'md', html: renderMarkdown(notice[1]) }));
       return h('div', { class: 'msg-user' }, text);
     }
     case 'assistant': {
@@ -309,8 +321,42 @@ function renderWorking() {
   thread.querySelector('.working-live')?.remove();
   const a = selectedAgent();
   if (a?.status === 'working') {
-    thread.append(h('div', { class: 'working working-live', 'data-status': 'working' }, h('i', { class: 'mds-dot' }), t('Working…')));
+    thread.append(h('div', { class: 'working working-live', 'data-status': 'working' }, h('i', { class: 'mds-dot' }), h('span', { class: 'working-label' }, workingLabel(a))));
   }
+}
+
+// Activity comes from the run's events in English. Translate its action,
+// keeping the tool's subject (a path, command or name) as it was reported.
+const ACTIVITY_SUBJECTS = {
+  'Reading ': 'Reading {subject}',
+  'Editing ': 'Editing {subject}',
+  'Writing ': 'Writing {subject}',
+  'Running ': 'Running {subject}',
+  'Searching for ': 'Searching for {subject}',
+  'Finding ': 'Finding {subject}',
+  'Listing ': 'Listing {subject}',
+  'Starting worker ': 'Starting worker {subject}',
+  'Messaging ': 'Messaging {subject}',
+  'Answering ': 'Answering {subject}',
+  'Removing worker ': 'Removing worker {subject}',
+  'Checking out ': 'Checking out {subject}',
+  'Removing worktree ': 'Removing worktree {subject}',
+  'Adding to the pool ': 'Adding to the pool {subject}',
+  'Using ': 'Using {subject}',
+};
+
+function workingLabel(a) {
+  if (!a.activity) return t('Working…');
+  const [, message, parallel = ''] = a.activity.match(/^(.*?)( \(\+\d+\))?$/);
+  let label = t(message);
+  if (label === message) {
+    for (const [prefix, key] of Object.entries(ACTIVITY_SUBJECTS)) {
+      if (!message.startsWith(prefix)) continue;
+      label = t(key, { subject: message.slice(prefix.length) });
+      break;
+    }
+  }
+  return `${label}${parallel}…`;
 }
 
 // Live records from an agent's pi process.
@@ -462,20 +508,49 @@ function statusDot(status) {
   return h('span', { class: 'dot-wrap', 'data-status': status }, h('i', { class: 'mds-dot' }));
 }
 
+// How long a run has gone on: 8s, 4m, 1h 5m.
+function elapsed(since) {
+  const s = Math.max(0, Math.floor((Date.now() - new Date(since).getTime()) / 1000));
+  if (s < 60) return t('{n}s', { n: formatNumber(s) });
+  if (s < 3600) return t('{n}m', { n: formatNumber(Math.floor(s / 60)) });
+  return t('{hours}h {minutes}m', { hours: formatNumber(Math.floor(s / 3600)), minutes: formatNumber(Math.floor((s % 3600) / 60)) });
+}
+
 function agentRow(a, cls, label) {
   const current = state.view.kind === 'agent' && state.view.id === a.id;
-  const meta = a.status === 'idle' || a.status === 'stopped' ? '' : statusText(a.status);
+  const meta = a.status === 'working' && a.runStartedAt
+    ? h('span', { class: 'meta', 'data-since': a.runStartedAt, title: t('How long this run has gone on') }, elapsed(a.runStartedAt))
+    : h('span', { class: 'meta' }, a.status === 'idle' || a.status === 'stopped' || a.status === 'working' ? '' : asking(a) ? t('Asking') : statusText(a.status));
+  const worker = cls.includes('agent-row--worker');
+  const done = worker && a.finishedAt;
+  let status = done ? t('Done') : statusLabel(a);
+  if (worker && a.status === 'failed') status = t('{status}; {name} was told', { status, name: a.yesman });
   return h('button', {
-    class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': a.status, 'aria-current': current ? 'page' : null,
-    'aria-haspopup': 'menu',
-    title: `${a.id}: ${statusText(a.status)}${a.detail ? `\n${a.detail}` : ''}`,
+    class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': statusTone(a), 'data-done': done ? 'true' : null,
+    'aria-current': current ? 'page' : null, 'aria-haspopup': 'menu',
+    title: `${a.id}: ${status}${a.title ? `\n${a.title}` : ''}${a.detail ? `\n${a.detail}` : ''}`,
     onclick: () => selectAgent(a.id),
     oncontextmenu: (e) => openAgentMenu(e, a),
     onkeydown: (e) => {
       if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) openAgentMenu(e, a);
     },
-  }, statusDot(a.status), h('span', { class: 'name' }, label), h('span', { class: 'meta' }, meta));
+  }, done ? h('span', { class: 'dot-wrap' }, icon('check', 'mds-icon done-mark')) : statusDot(statusTone(a)),
+  // A worker is one line: its number, then the subject of its work in words,
+  // the same all along its task, never the commands it runs. Its name shows
+  // on hover.
+  worker
+    ? [h('span', { class: 'num' }, workerNumber(a)), h('span', { class: 'subject' }, a.title || a.name)]
+    : h('span', { class: 'name' }, label),
+  meta);
 }
+
+// a1, a2, …: a worker's number within its yesman, in the order they started.
+const workerNumber = (a) => (a.number ? `a${a.number}` : a.name);
+
+// Run times count up while agents work.
+setInterval(() => {
+  for (const el of document.querySelectorAll('.agent-row .meta[data-since]')) el.textContent = elapsed(el.dataset.since);
+}, 1000);
 
 async function openAgentMenu(e, a) {
   e.preventDefault();
@@ -486,14 +561,14 @@ async function openAgentMenu(e, a) {
   const x = Math.round(pointer ? e.clientX : rect.left + 20);
   const y = Math.round(pointer ? e.clientY : rect.bottom);
   try {
-    const action = await call('AgentMenu', a.id, x, y);
+    const action = await call('AgentMenu', a.id, x, y, state.hideDone.has(a.yesman));
     const current = agentById(a.id);
     if (!current || keyOf(current) !== keyOf(a)) return;
     const workspace = yesmanOf(a.id);
     switch (action) {
       case 'open': selectAgent(a.id); break;
       case 'workspace':
-        state.infoOpen = true;
+        state.pane = 'files';
         selectAgent(a.id);
         break;
       case 'reveal': await call('Reveal', workspace.path); break;
@@ -503,6 +578,8 @@ async function openAgentMenu(e, a) {
       case 'sleep': await call('Stop', a.id); break;
       case 'archive': await dismiss(a.yesman); break;
       case 'remove': await removeWorker(a); break;
+      case 'hide-done':
+      case 'show-done': setHideDone(a.yesman, action === 'hide-done'); break;
       default:
         document.querySelector(`.agent-row[data-agent="${CSS.escape(a.id)}"]`)?.focus({ preventScroll: true });
     }
@@ -514,7 +591,7 @@ async function openAgentMenu(e, a) {
 function renderSidebar() {
   const list = $('#yesmen');
   list.replaceChildren();
-  const waiting = state.snap.agents.filter((a) => a.status === 'waiting');
+  const waiting = state.snap.agents.filter((a) => a.status === 'waiting' && a.role === 'lead');
   if (waiting.length) {
     list.append(h('p', { class: 'side-group' }, t('Needs you')));
     for (const a of waiting) list.append(agentRow(a, '', a.role === 'lead' ? a.yesman : a.id));
@@ -525,9 +602,23 @@ function renderSidebar() {
     const agents = state.snap.agents.filter((a) => a.yesman === y.name);
     const lead = agents.find((a) => a.role === 'lead');
     if (lead) list.append(agentRow(lead, 'agent-row--yesman', y.name));
-    for (const w of agents.filter((a) => a.role === 'worker')) list.append(agentRow(w, 'agent-row--worker', w.name));
+    // Done workers keep their place, greyed; the yesman's menu can hide them.
+    // The one you are looking at stays.
+    const hide = state.hideDone.has(y.name);
+    for (const w of agents.filter((a) => a.role === 'worker')) {
+      if (hide && w.finishedAt && !(state.view.kind === 'agent' && state.view.id === w.id)) continue;
+      list.append(agentRow(w, 'agent-row--worker', w.name));
+    }
   }
   renderSideFoot();
+}
+
+// Whether a yesman's done workers are hidden, kept across launches.
+function setHideDone(yesman, hide) {
+  if (hide) state.hideDone.add(yesman);
+  else state.hideDone.delete(yesman);
+  localStorage.setItem('yesman.hideDone', JSON.stringify([...state.hideDone]));
+  renderSidebar();
 }
 
 // ---------- Main column ----------
@@ -556,14 +647,15 @@ function renderBarActions() {
   const button = (iconName, label, onclick, extra = {}) =>
     h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: label, 'aria-label': label, onclick, ...extra }, icon(iconName));
   actions.replaceChildren(...[
-    a ? h('span', { class: 'mds-status', 'data-status': a.status, role: 'status' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, statusText(a.status))) : null,
+    a ? h('span', { class: 'mds-status', 'data-status': statusTone(a), role: 'status' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, statusLabel(a))) : null,
     updatePill(),
     a && a.status !== 'stopped'
       ? button('power', t('Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.'), () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
     a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }) : null,
-    a ? button('panel', state.infoOpen ? t('Hide the files') : t('Show the files'), toggleInfo, { 'aria-pressed': String(state.infoOpen) }) : null,
+    a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }) : null,
+    a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }) : null,
   ].filter(Boolean));
 }
 
@@ -792,7 +884,8 @@ async function sendMessage(a, textarea) {
 function askEl(a) {
   const d = a.dialog;
   const answer = (payload) => call('Answer', a.id, d.id, payload).catch(fail);
-  const box = h('div', { class: 'ask', role: 'alert' }, h('strong', null, d.title || t('Question')), d.message ? h('p', null, d.message) : null);
+  const box = h('div', { class: 'ask', role: 'alert' }, h('strong', null, d.title || t('Question')), d.message ? h('p', null, d.message) : null,
+    a.role === 'worker' ? h('p', { class: 'ask-hint' }, t('{name} has this question and answers it. You can answer here instead.', { name: a.yesman })) : null);
   const actions = h('div', { class: 'ask-actions' });
   if (d.method === 'confirm') {
     actions.append(
@@ -1693,12 +1786,8 @@ const files = createFiles({
     const a = selectedAgent();
     return a ? yesmanOf(a.id) : null;
   },
-  isOpen: () => state.infoOpen,
-  setOpen: (on) => {
-    state.infoOpen = on;
-    files.render();
-    renderBarActions();
-  },
+  isOpen: () => state.pane === 'files',
+  setOpen: (on) => setPane(on ? 'files' : state.pane === 'files' ? null : state.pane),
   checkout: (y) => openCheckout(y),
   dismiss: (name) => dismiss(name),
   confirm: (title, body, ok) => confirmAction(title, body, ok),
@@ -1728,18 +1817,38 @@ const info = createInfo({
 function togglePanel() {
   state.panelOpen = !state.panelOpen;
   localStorage.setItem('yesman.info', state.panelOpen ? 'shown' : 'hidden');
+  info.render();
+  renderBarActions();
+}
+
+// ---------- Board pane ----------
+
+// The board shares the place beside the conversation with the files.
+const board = createBoard({
+  call,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.pane === 'board',
+  setOpen: (on) => setPane(on ? 'board' : state.pane === 'board' ? null : state.pane),
+  agent: (id) => agentById(id),
+  openAgent: (id) => selectAgent(id),
+});
+
+function setPane(pane) {
+  state.pane = pane;
   renderInfo();
   renderBarActions();
 }
 
-function toggleInfo() {
-  state.infoOpen = !state.infoOpen;
-  files.render();
-  renderBarActions();
+function togglePane(pane) {
+  setPane(state.pane === pane ? null : pane);
 }
 
 function renderInfo() {
   files.render();
+  board.render();
 }
 
 async function openCheckout(y) {
@@ -1857,11 +1966,18 @@ async function refreshState() {
 
 function onAgents(agents) {
   const before = selectedAgent();
+  const ids = state.snap.agents.map((a) => a.id).join();
   state.snap.agents = agents;
   pruneCaches();
   renderSidebar();
+  // The board links a task's owner while it is one of the agents.
+  if (state.pane === 'board' && agents.map((a) => a.id).join() !== ids) board.render();
   piPage.onAgents();
   const after = selectedAgent();
+  if (after?.status === 'working' && after.activity !== before?.activity) {
+    const label = $('#thread .working-live .working-label');
+    if (label) label.textContent = workingLabel(after);
+  }
   if (after?.status === 'idle' && before?.status === 'starting') loadModelOptions(after);
   if (state.view.kind === 'agent' && !after) {
     refreshSoon();
@@ -1921,6 +2037,7 @@ async function start() {
   mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
+  mygo.on('board', (yesman) => board.onChange(yesman));
   document.addEventListener('keydown', (e) => files.onKey(e));
   call('Update').then(onUpdate, () => {});
   mygo.on('focus-agent', (id) => {

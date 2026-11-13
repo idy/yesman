@@ -180,6 +180,11 @@ func (s *service) Checkout(yesman string, req server.CheckoutRequest) (pool.Work
 	return wt, err
 }
 
+// Board returns a yesman's task board, which its agents keep.
+func (s *service) Board(yesman string) (yesmen.Board, error) {
+	return s.app.yesmen.Board(yesman)
+}
+
 // Messages returns an agent's conversation, starting it if needed.
 func (s *service) Messages(ctx context.Context, id string) (agent.Conversation, error) {
 	if s.app.piErr != nil {

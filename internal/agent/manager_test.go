@@ -49,7 +49,7 @@ func fakePi() {
 		out.Flush()
 	}
 	stateChecks := 0
-	var heldPrompts []string
+	var heldPrompts, heldReports []string
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		var cmd struct {
@@ -59,8 +59,18 @@ func fakePi() {
 			Provider string `json:"provider"`
 			ModelID  string `json:"modelId"`
 			Level    string `json:"level"`
+			// extension_ui_response
+			Value     *string `json:"value"`
+			Confirmed *bool   `json:"confirmed"`
+			Cancelled bool    `json:"cancelled"`
 		}
 		if json.Unmarshal(sc.Bytes(), &cmd) != nil {
+			continue
+		}
+		if cmd.Type == "extension_ui_response" {
+			// pi does not answer a response: the run it held goes on.
+			write(map[string]any{"type": "test_ui_answer", "id": cmd.ID, "value": cmd.Value, "confirmed": cmd.Confirmed, "cancelled": cmd.Cancelled})
+			write(map[string]any{"type": "agent_settled", "aborted": false})
 			continue
 		}
 		if cmd.Type == "get_state" {
@@ -80,17 +90,35 @@ func fakePi() {
 		var data any = map[string]any{"messages": []any{}, "text": "done"}
 		switch cmd.Type {
 		case "prompt":
-			write(map[string]any{"type": "test_prompt_received", "provider": model.Provider})
-			if os.Getenv("FAKE_PI_HOLD_PROMPTS") != "" {
+			write(map[string]any{"type": "test_prompt_received", "provider": model.Provider, "message": cmd.Message})
+			if os.Getenv("FAKE_PI_HOLD_PROMPTS") != "" ||
+				os.Getenv("FAKE_PI_HOLD_REPORTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Worker") {
 				// Simulate async extension work before isStreaming becomes true.
 				heldPrompts = append(heldPrompts, cmd.ID)
 				continue
 			}
 		case "test_release_prompts":
 			for _, id := range heldPrompts {
+				if os.Getenv("FAKE_PI_HOLD_REPORTS") != "" {
+					// Settle before acknowledging report delivery, so the worker
+					// handoff must retry follow-through after its reservation ends.
+					write(map[string]any{"type": "agent_start"})
+					write(map[string]any{"type": "agent_settled", "aborted": false})
+				}
 				write(map[string]any{"type": "response", "id": id, "command": "prompt", "success": true})
 			}
 			heldPrompts = nil
+		case "get_last_assistant_text":
+			if os.Getenv("FAKE_PI_HOLD_REPORTS") != "" {
+				heldReports = append(heldReports, cmd.ID)
+				write(map[string]any{"type": "test_report_waiting"})
+				continue
+			}
+		case "test_release_reports":
+			for _, id := range heldReports {
+				write(map[string]any{"type": "response", "id": id, "command": "get_last_assistant_text", "success": true, "data": map[string]any{"text": "done"}})
+			}
+			heldReports = nil
 		case "get_state":
 			data = modelState{Model: model, ThinkingLevel: effort, IsStreaming: os.Getenv("FAKE_PI_BUSY") != ""}
 		case "get_session_stats":
@@ -151,8 +179,22 @@ func fakePi() {
 			write(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant"}})
 		}
 		if cmd.Type == "prompt" {
+			worker := os.Getenv("YESMAN_ROLE") == RoleWorker
+			if worker && os.Getenv("FAKE_PI_CRASH_WORKERS") != "" {
+				os.Exit(3)
+			}
 			write(map[string]any{"type": "agent_start"})
-			write(map[string]any{"type": "agent_settled", "aborted": false})
+			if os.Getenv("FAKE_PI_SLOW_RUNS") != "" {
+				// A real run takes a while: its prompt's answer is handled
+				// well before it settles.
+				time.Sleep(50 * time.Millisecond)
+			}
+			if worker && os.Getenv("FAKE_PI_ASK_WORKERS") != "" {
+				// A tool's dialog holds the run until it is answered.
+				write(map[string]any{"type": "extension_ui_request", "id": "q1", "method": "select", "title": "Allow rm -rf build?", "options": []string{"Allow", "Block"}, "timeout": 60000})
+				continue
+			}
+			write(map[string]any{"type": "agent_settled", "aborted": worker && os.Getenv("FAKE_PI_ABORT_WORKERS") != ""})
 		}
 	}
 }
@@ -232,7 +274,9 @@ func TestRestartAfterStop(t *testing.T) {
 }
 
 func TestCredentials(t *testing.T) {
-	m, store := newTestManager(t, 0)
+	// Keep the worker running until its credentials have been checked:
+	// a finished worker reports and closes, revoking its credential.
+	m, store := newTestManager(t, 0, "FAKE_PI_ASK_WORKERS=1")
 	if err := store.AddWorker("alice", yesmen.Worker{Name: "w1", Task: "t", StartedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +313,7 @@ func TestCredentials(t *testing.T) {
 
 func TestFailedWorkerStartLeavesNoRecord(t *testing.T) {
 	m, store := newTestManager(t, 0, "FAKE_PI_FAIL_PROMPTS=1")
-	if _, err := m.StartWorker(context.Background(), "alice", "w1", "a task"); err == nil {
+	if _, err := m.StartWorker(context.Background(), "alice", "w1", "", "a task"); err == nil {
 		t.Fatal("a worker whose task was rejected started")
 	}
 	if ws, _ := store.Workers("alice"); len(ws) != 0 {
@@ -281,7 +325,7 @@ func TestUndeliveredReportIsShown(t *testing.T) {
 	reportAttempts, reportBackoff = 2, time.Millisecond
 	t.Cleanup(func() { reportAttempts, reportBackoff = 3, 2*time.Second })
 	m, _ := newTestManager(t, 0, "FAKE_PI_FAIL_REPORTS=1")
-	if _, err := m.StartWorker(context.Background(), "alice", "w1", "a task"); err != nil {
+	if _, err := m.StartWorker(context.Background(), "alice", "w1", "", "a task"); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
