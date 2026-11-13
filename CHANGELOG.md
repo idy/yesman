@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.14
+
+- Settings › Secrets keeps API keys, tokens and other secrets, and Settings › Variables keeps settings such as an account or a region. Every command of every agent gets each as an environment variable; agents read what each is for with the new `yesman_env` tool.
+- Edit them as a form, or as YAML in the editor. Each has a value and a description that tells agents what it is for.
+- Secrets are encrypted with sops and age, with a random password kept in the system's keychain (Keychain, Credential Manager or Secret Service), which unlocks them when yesman starts. Without one, you choose the password and type it after each launch. A secret's value never reaches an agent's context: output shows it as `[secret NAME]`. The sops command can edit the same file with its age key.
+- The configuration file (Settings › Import and export) now carries the variables and the secrets, still encrypted, with their password: importing it on another computer sets them up and unlocks them. Keep the file private.
+
 ## 0.1.13
 
 - An info panel sits between the conversation and the files. Knowledge opens the agents' notes, rendered and read-only. Worktrees lists each worktree with the lines it changed, uncommitted edits too, or, when its branch is in a pull request, that pull request with its state and checks. Storage folds into one row with the disk the workspace takes, and opens to its largest parts.

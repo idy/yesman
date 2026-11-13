@@ -106,6 +106,8 @@ type SettingsView struct {
 	Archive       string           `json:"archive"`
 	Runtime       string           `json:"runtime"`
 	SettingsFile  string           `json:"settingsFile"`
+	Secrets       string           `json:"secrets,omitempty"`   // the folder of the secrets and their key
+	Variables     string           `json:"variables,omitempty"` // the variables' file
 	StorageConfig string           `json:"storageConfig,omitempty"`
 	HomeOverride  bool             `json:"homeOverride,omitempty"`
 }
@@ -133,6 +135,12 @@ func (s *service) Settings() SettingsView {
 		Archive:      a.home.Archive(),
 		Runtime:      a.home.Runtime(),
 		SettingsFile: a.home.Settings(),
+	}
+	if a.vault != nil {
+		v.Secrets = a.vault.Dir()
+	}
+	if a.variables != nil {
+		v.Variables = a.variables.File()
 	}
 	if a.storage != nil {
 		v.HomeOverride = a.storage.override
