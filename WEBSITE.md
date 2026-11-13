@@ -12,6 +12,6 @@ Serve `site/` with any static HTTP server. No application process, pi session, A
 
 The website inherits the Component Datasheet system from [idy/idy](https://github.com/idy/idy/blob/main/DESIGN.md): Archivo, a blue masthead, light/dark sheets, 2px corners, and ruled sections. The desktop app continues to use Magpie.
 
-`.github/workflows/pages.yml` checks the website on pull requests and deploys `site/` on relevant pushes to `main` or manual dispatch. Configure GitHub Pages to use GitHub Actions and bind `yesman.idy.dev` before adding its DNS CNAME. Name.com DNS is managed in the `idy/letsolo` Terraform integration; the website's `CNAME` file does not create DNS records.
+`.github/workflows/pages.yml` checks the website on pull requests and deploys `site/` on relevant pushes to `main` or manual dispatch from `main`. Deployment runs share one concurrency group and do not cancel a deployment already in progress. Configure GitHub Pages to use GitHub Actions and bind `yesman.idy.dev` before adding its DNS CNAME. Name.com DNS is managed in the `idy/letsolo` Terraform integration; the website's `CNAME` file does not create DNS records.
 
 To update the shared website kit, copy the complete built `packages/site-sdk/dist/` from the intended idy/idy release into `site/shared/sdk/`, retaining `assets/` and licenses, then verify both themes, both languages, narrow screens, command copying, and unavailable release metadata.
