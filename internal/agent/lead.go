@@ -156,32 +156,36 @@ func (m *Manager) unnudge(id string) {
 	m.mu.Lock()
 	if a := m.agents[id]; a != nil {
 		a.nudged = false
+		a.inbox++
 	}
 	m.mu.Unlock()
 }
 
-// idleWith reports whether an agent is idle on p, with no message on its way.
-func (m *Manager) idleWith(a *agent, p *proc) bool {
-	a.modelMu.Lock()
-	pending := a.prompts
-	a.modelMu.Unlock()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return pending == 0 && a.proc == p && a.info.Status == Idle
-}
-
-// busy reports whether a worker has work under way or on its way.
-func (m *Manager) busy(a *agent) bool {
-	a.modelMu.Lock()
-	pending := a.prompts
-	a.modelMu.Unlock()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	switch a.info.Status {
-	case Starting, Working, Waiting:
-		return true
+// canRemindLocked checks the lead and all its workers under mu. A settled
+// worker still has work under way while its report is read or delivered.
+func (m *Manager) canRemindLocked(lead *agent, p *proc, inbox uint64) bool {
+	if p == nil || lead.proc != p || lead.nudged || lead.stopping || lead.info.Status != Idle ||
+		lead.prompts != 0 || lead.inbox != inbox || lead.settledInbox != inbox {
+		return false
 	}
-	return pending > 0 || a.starting != nil
+	select {
+	case <-p.done:
+		return false
+	default:
+	}
+	for _, w := range m.agents {
+		if w.info.Yesman != lead.info.Yesman || w.info.Role != RoleWorker {
+			continue
+		}
+		if w.prompts > 0 || w.reports > 0 || w.starting != nil {
+			return false
+		}
+		switch w.info.Status {
+		case Starting, Working, Waiting:
+			return false
+		}
+	}
+	return true
 }
 
 const followLimit = 30
@@ -194,33 +198,14 @@ const followLimit = 30
 // not pressed.
 func (m *Manager) followThrough(lead *agent, p *proc) {
 	m.mu.Lock()
-	yesman, nudged := lead.info.Yesman, lead.nudged
-	var workers []*agent
-	for _, w := range m.agents {
-		if w.info.Yesman == yesman && w.info.Role == RoleWorker {
-			workers = append(workers, w)
-		}
-	}
+	yesman, inbox := lead.info.Yesman, lead.inbox
+	ready := m.canRemindLocked(lead, p, inbox)
 	m.mu.Unlock()
-	if nudged || !m.idleWith(lead, p) {
+	if !ready {
 		return
-	}
-	for _, w := range workers {
-		if m.busy(w) {
-			return // its report starts the lead's next run
-		}
 	}
 	board, err := m.cfg.Yesmen.Board(yesman)
 	if err != nil {
-		return
-	}
-	var open []yesmen.Task
-	for _, t := range board.Tasks {
-		if t.Status == yesmen.TaskTodo || t.Status == yesmen.TaskDoing {
-			open = append(open, t)
-		}
-	}
-	if len(open) == 0 {
 		return
 	}
 	owners := map[string]Info{}
@@ -229,13 +214,36 @@ func (m *Manager) followThrough(lead *agent, p *proc) {
 			owners[i.Name] = i
 		}
 	}
+	m.remindOfBoard(lead, p, inbox, board, owners)
+}
+
+// remindOfBoard rechecks after the board read and reserves the prompt before
+// releasing the locks. A new message, worker or handoff takes precedence.
+func (m *Manager) remindOfBoard(lead *agent, p *proc, inbox uint64, board yesmen.Board, owners map[string]Info) {
+	lead.modelMu.Lock()
 	m.mu.Lock()
-	if lead.proc != p || lead.nudged {
+	if !m.canRemindLocked(lead, p, inbox) {
 		m.mu.Unlock()
+		lead.modelMu.Unlock()
 		return
 	}
-	lead.nudged = true
-	m.mu.Unlock()
+	yesman := lead.info.Yesman
+	var open []yesmen.Task
+	for _, t := range board.Tasks {
+		if t.Status != yesmen.TaskTodo && t.Status != yesmen.TaskDoing {
+			continue
+		}
+		if w := m.agents[ID(yesman, t.Owner)]; w != nil && w.stopping &&
+			w.info.Status == Stopped && owners[t.Owner].FinishedAt.IsZero() {
+			continue // deliberately put to sleep before finishing
+		}
+		open = append(open, t)
+	}
+	if len(open) == 0 {
+		m.mu.Unlock()
+		lead.modelMu.Unlock()
+		return
+	}
 
 	var b strings.Builder
 	b.WriteString("[yesman] No worker is running, but these tasks are still open:\n")
@@ -250,11 +258,15 @@ func (m *Manager) followThrough(lead *agent, p *proc) {
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString("\nCarry on with every one you can now. Mark a task that waits on the user's decision blocked, with the question in its note. When only such tasks are left, put those decisions to the user together, each with the options and your recommendation.")
+	b.WriteString("\nLeave workers deliberately put to sleep by the user asleep, and leave their unfinished tasks alone until the user asks to resume them. Carry on with every listed task you can now. Mark a task that waits on the user's decision blocked, with the question in its note. When only such tasks are left, put those decisions to the user together, each with the options and your recommendation.")
+	lead.nudged = true
+	lead.prompts++
+	m.mu.Unlock()
+	lead.modelMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := m.prompt(ctx, ID(yesman, yesmen.LeadName), b.String(), "followUp"); err != nil {
+	if err := m.sendPrompt(ctx, lead, p, b.String(), "followUp"); err != nil {
 		log.Printf("yesman: remind the lead of %s: %v", yesman, err)
 	}
 }

@@ -224,3 +224,193 @@ func TestNoReminderWhileAWorkerWorks(t *testing.T) {
 		t.Errorf("reminded while a worker waits: %q", prompts(lead))
 	}
 }
+
+// A worker has settled, but its report is deliberately held by fake pi.
+// Running followThrough synchronously must not race the report goroutine.
+func TestNoReminderWhileAReportIsPending(t *testing.T) {
+	for _, afterReport := range []string{yesmen.TaskTodo, yesmen.TaskDone} {
+		t.Run(afterReport, func(t *testing.T) {
+			m, store := newTestManager(t, 0, "FAKE_PI_HOLD_REPORTS=1")
+			prompts := promptsTo(m)
+			reportWaiting := make(chan struct{}, 1)
+			prev := m.cfg.OnEvent
+			m.cfg.OnEvent = func(e Event) {
+				prev(e)
+				var record struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(e.Data, &record) == nil && record.Type == "test_report_waiting" {
+					reportWaiting <- struct{}{}
+				}
+			}
+			board, err := store.ChangeBoard("alice", yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: str("Collect the result"), Owner: str("w1")}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := ID("alice", yesmen.LeadName)
+			lead, p, err := m.ensure(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.StartWorker(context.Background(), "alice", "w1", "Collect the result", "a task"); err != nil {
+				t.Fatal(err)
+			}
+			worker := ID("alice", "w1")
+			wp := m.running(worker)
+			// Release even if an assertion fails, before StopAll runs.
+			defer func() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_, _ = wp.call(ctx, map[string]any{"type": "test_release_reports"})
+				_, _ = p.call(ctx, map[string]any{"type": "test_release_prompts"})
+			}()
+			select {
+			case <-reportWaiting:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the worker never tried to read its report")
+			}
+			m.mu.Lock()
+			w := m.agents[worker]
+			status, pending := w.info.Status, w.reports
+			m.mu.Unlock()
+			if status != Idle || pending != 1 {
+				t.Fatalf("settled worker: status %s, pending reports %d", status, pending)
+			}
+			m.followThrough(lead, p)
+			if got := prompts(id); len(got) != 0 {
+				t.Fatalf("reminded before the report was read: %q", got)
+			}
+			if m.SleepIfIdle(worker, time.Now().Add(time.Hour)) {
+				t.Fatal("put a worker with a pending report to sleep")
+			}
+			if _, err := wp.call(context.Background(), map[string]any{"type": "test_release_reports"}); err != nil {
+				t.Fatal(err)
+			}
+			waitPrompt(t, prompts, id, `[yesman] Worker "w1" finished a run`)
+			// The text has been fetched, but its delivery is still held by the lead.
+			m.mu.Lock()
+			pending = w.reports
+			m.mu.Unlock()
+			if pending != 1 {
+				t.Fatalf("released the report reservation before delivery: %d", pending)
+			}
+			m.followThrough(lead, p)
+			if n := countPrefix(prompts(id), reminder); n != 0 {
+				t.Fatalf("reminded before report delivery finished: %q", prompts(id))
+			}
+			if _, err := store.ChangeBoard("alice", yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: board.Tasks[0].ID, Status: str(afterReport)}}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := p.call(context.Background(), map[string]any{"type": "test_release_prompts"}); err != nil {
+				t.Fatal(err)
+			}
+			waitFinished(t, m, worker, time.Time{})
+			if afterReport == yesmen.TaskTodo {
+				waitPrompt(t, prompts, id, reminder)
+			} else if n := countPrefix(prompts(id), reminder); n != 0 {
+				t.Fatalf("reminded about finished work: %q", prompts(id))
+			}
+		})
+	}
+}
+
+func TestFollowThroughLeavesStoppedWorkersAsleep(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		finished bool
+		other    bool
+	}{
+		{name: "only paused work"},
+		{name: "other work continues", other: true},
+		{name: "normally completed owner", finished: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m, store := newTestManager(t, 0)
+			prompts := promptsTo(m)
+			if err := store.AddWorker("alice", yesmen.Worker{Name: "w1", Title: "Paused task", Task: "a task", StartedAt: time.Now()}); err != nil {
+				t.Fatal(err)
+			}
+			worker := ID("alice", "w1")
+			if _, _, err := m.ensure(worker); err != nil {
+				t.Fatal(err)
+			}
+			if c.finished {
+				if err := store.FinishWorker("alice", "w1", time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m.Stop(worker)
+			tasks := []yesmen.TaskEdit{{Title: str("Paused task"), Status: str("doing"), Owner: str("w1")}}
+			if c.other {
+				tasks = append(tasks, yesmen.TaskEdit{Title: str("Available task")})
+			}
+			if _, err := store.ChangeBoard("alice", yesmen.BoardChange{Add: tasks}); err != nil {
+				t.Fatal(err)
+			}
+			id := ID("alice", yesmen.LeadName)
+			lead, p, err := m.ensure(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.followThrough(lead, p)
+			got := prompts(id)
+			if !c.other && !c.finished {
+				if len(got) != 0 {
+					t.Fatalf("reminded to restart deliberately stopped work: %q", got)
+				}
+			} else {
+				if len(got) != 1 || !strings.HasPrefix(got[0], reminder) {
+					t.Fatalf("expected one reminder: %q", got)
+				}
+				if c.other && (strings.Contains(got[0], "Paused task") || !strings.Contains(got[0], "Available task")) {
+					t.Fatalf("reminder included paused work or lost available work: %s", got[0])
+				}
+				if c.finished && !strings.Contains(got[0], "finished and closed") {
+					t.Fatalf("normal completion was treated as a deliberate stop: %s", got[0])
+				}
+				if !strings.Contains(got[0], "Leave workers deliberately put to sleep by the user asleep") {
+					t.Fatalf("reminder does not preserve deliberate sleep: %s", got[0])
+				}
+			}
+			if i, _ := m.Get(worker); i.Status != Stopped || m.running(worker) != nil {
+				t.Fatalf("the stopped worker was restarted: %+v", i)
+			}
+		})
+	}
+}
+
+// Simulate a state change after followThrough read its board snapshot.
+// The final reservation must recheck it instead of queuing a stale reminder.
+func TestReminderRechecksAfterBoardRead(t *testing.T) {
+	for _, state := range []string{"queued message", "working lead", "pending report", "stopped lead"} {
+		t.Run(state, func(t *testing.T) {
+			m, _ := newTestManager(t, 0)
+			prompts := promptsTo(m)
+			id := ID("alice", yesmen.LeadName)
+			lead, p, err := m.ensure(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.mu.Lock()
+			inbox := lead.inbox
+			m.mu.Unlock()
+			switch state {
+			case "queued message":
+				m.unnudge(id)
+			case "working lead":
+				m.setStatus(lead, p, Working, "")
+			case "pending report":
+				m.mu.Lock()
+				m.agents[ID("alice", "w1")] = &agent{info: Info{Yesman: "alice", Name: "w1", Role: RoleWorker, Status: Idle}, reports: 1}
+				m.mu.Unlock()
+			case "stopped lead":
+				m.Stop(id)
+			}
+			board := yesmen.Board{Tasks: []yesmen.Task{{ID: "t1", Title: "Stale task", Status: yesmen.TaskTodo}}}
+			m.remindOfBoard(lead, p, inbox, board, nil)
+			if got := prompts(id); len(got) != 0 {
+				t.Fatalf("dispatched stale reminder after %s: %q", state, got)
+			}
+		})
+	}
+}

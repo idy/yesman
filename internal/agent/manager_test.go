@@ -49,7 +49,7 @@ func fakePi() {
 		out.Flush()
 	}
 	stateChecks := 0
-	var heldPrompts []string
+	var heldPrompts, heldReports []string
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		var cmd struct {
@@ -91,16 +91,34 @@ func fakePi() {
 		switch cmd.Type {
 		case "prompt":
 			write(map[string]any{"type": "test_prompt_received", "provider": model.Provider, "message": cmd.Message})
-			if os.Getenv("FAKE_PI_HOLD_PROMPTS") != "" {
+			if os.Getenv("FAKE_PI_HOLD_PROMPTS") != "" ||
+				os.Getenv("FAKE_PI_HOLD_REPORTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Worker") {
 				// Simulate async extension work before isStreaming becomes true.
 				heldPrompts = append(heldPrompts, cmd.ID)
 				continue
 			}
 		case "test_release_prompts":
 			for _, id := range heldPrompts {
+				if os.Getenv("FAKE_PI_HOLD_REPORTS") != "" {
+					// Settle before acknowledging report delivery, so the worker
+					// handoff must retry follow-through after its reservation ends.
+					write(map[string]any{"type": "agent_start"})
+					write(map[string]any{"type": "agent_settled", "aborted": false})
+				}
 				write(map[string]any{"type": "response", "id": id, "command": "prompt", "success": true})
 			}
 			heldPrompts = nil
+		case "get_last_assistant_text":
+			if os.Getenv("FAKE_PI_HOLD_REPORTS") != "" {
+				heldReports = append(heldReports, cmd.ID)
+				write(map[string]any{"type": "test_report_waiting"})
+				continue
+			}
+		case "test_release_reports":
+			for _, id := range heldReports {
+				write(map[string]any{"type": "response", "id": id, "command": "get_last_assistant_text", "success": true, "data": map[string]any{"text": "done"}})
+			}
+			heldReports = nil
 		case "get_state":
 			data = modelState{Model: model, ThinkingLevel: effort, IsStreaming: os.Getenv("FAKE_PI_BUSY") != ""}
 		case "get_session_stats":

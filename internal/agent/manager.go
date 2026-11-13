@@ -139,8 +139,13 @@ type Manager struct {
 }
 
 type agent struct {
-	modelMu  sync.Mutex // orders prompt registration and model configuration
-	prompts  int        // outstanding prompt RPCs; guarded by modelMu
+	modelMu sync.Mutex // orders prompt registration and model configuration
+	// prompts counts outstanding prompt RPCs. Writers hold modelMu and the
+	// manager's mu; readers may hold either.
+	prompts int
+	// reports counts worker handoffs being read or delivered to the lead,
+	// registered before the worker becomes idle; guarded by the manager's mu.
+	reports  int
 	info     Info
 	proc     *proc
 	token    string
@@ -154,6 +159,10 @@ type agent struct {
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
 	nudged bool
+	// inbox changes when a message is queued or registered. settledInbox is
+	// the inbox at the last settle, so accepted prompts awaiting agent_start
+	// still prevent reminders. Both are guarded by the manager's mu.
+	inbox, settledInbox uint64
 }
 
 // errStopped is returned to a start that Stop interrupted.
@@ -455,7 +464,22 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			Aborted bool `json:"aborted"`
 		}
 		_ = json.Unmarshal(raw, &e)
-		m.setStatus(a, p, Idle, "")
+		m.mu.Lock()
+		if a.proc != p {
+			m.mu.Unlock()
+			break
+		}
+		worker, stopping := a.info.Role == RoleWorker, a.stopping
+		handoff := worker && (!e.Aborted || !stopping)
+		if handoff {
+			// The worker is still busy until its report reaches the lead.
+			// Reserve this before publishing Idle, without waiting on RPC.
+			a.reports++
+		}
+		a.info.Status, a.info.Detail, a.info.Dialog, a.info.UpdatedAt = Idle, "", nil, time.Now()
+		a.settledInbox = a.inbox
+		m.mu.Unlock()
+		m.changed()
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -463,21 +487,20 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			defer a.modelMu.Unlock()
 			_, _ = m.syncModel(ctx, a, p)
 		}()
-		m.mu.Lock()
-		worker, stopping := a.info.Role == RoleWorker, a.stopping
-		m.mu.Unlock()
-		switch {
-		case !worker:
-			if !e.Aborted {
-				go m.followThrough(a, p)
-			}
-		case !e.Aborted:
-			go m.reportToLead(a, p)
-		case !stopping:
-			// The user stopped its run. A worker being put to sleep, removed
-			// or shut down with the app tells nobody: telling the lead would
-			// start it again.
-			go m.tellLead(a, fmt.Sprintf("[yesman] Worker %q was stopped by the user before it finished its run. It keeps its session; message it to continue.", a.info.Name))
+		if !worker && !e.Aborted {
+			go m.followThrough(a, p)
+		} else if handoff {
+			go func() {
+				defer m.handoffDone(a)
+				if !e.Aborted {
+					m.reportToLead(a, p)
+					return
+				}
+				// The user stopped its run. A worker being put to sleep, removed
+				// or shut down with the app tells nobody: telling the lead would
+				// start it again.
+				m.tellLead(a, fmt.Sprintf("[yesman] Worker %q was stopped by the user before it finished its run. It keeps its session; message it to continue.", a.info.Name))
+			}()
 		}
 	case "thinking_level_changed":
 		var e struct {
@@ -617,7 +640,10 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 		// Put to sleep or closed as finished while this waited: start again.
 		a.modelMu.Unlock()
 	}
+	m.mu.Lock()
 	a.prompts++
+	a.inbox++
+	m.mu.Unlock()
 	if a.info.Role == RoleWorker {
 		// A message gives a finished worker work again.
 		if reopened, err := m.cfg.Yesmen.ReopenWorker(a.info.Yesman, a.info.Name); err != nil {
@@ -627,6 +653,12 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 		}
 	}
 	a.modelMu.Unlock()
+	return m.sendPrompt(ctx, a, p, text, behavior)
+}
+
+// sendPrompt dispatches a prompt already registered under modelMu and mu.
+// No manager lock is held while sending or waiting for pi's answer.
+func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behavior string) error {
 	done := make(chan error, 1)
 	go func() {
 		// Cancelling the caller does not cancel the RPC already sent to pi.
@@ -634,7 +666,9 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 		// stops waiting, so configuration cannot slip into its startup gap.
 		_, err := p.call(context.Background(), map[string]any{"type": "prompt", "message": text, "streamingBehavior": behavior})
 		a.modelMu.Lock()
+		m.mu.Lock()
 		a.prompts--
+		m.mu.Unlock()
 		a.modelMu.Unlock()
 		done <- err
 	}()
@@ -775,7 +809,7 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
 	p := a.proc
-	idle := p != nil && a.starting == nil && a.prompts == 0 && a.info.Status == Idle &&
+	idle := p != nil && a.starting == nil && a.prompts == 0 && a.reports == 0 && a.info.Status == Idle &&
 		!a.info.StartedAt.IsZero() && a.info.StartedAt.Before(startedBefore)
 	m.mu.Unlock()
 	if !idle {
@@ -882,6 +916,22 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 	err := m.cfg.Yesmen.RemoveWorker(yesman, name)
 	m.changed()
 	return err
+}
+
+// handoffDone releases the report reservation after delivery and closing.
+// The lead may already have settled while the handoff was still pending.
+func (m *Manager) handoffDone(a *agent) {
+	m.mu.Lock()
+	a.reports--
+	lead := m.agents[ID(a.info.Yesman, yesmen.LeadName)]
+	var p *proc
+	if lead != nil {
+		p = lead.proc
+	}
+	m.mu.Unlock()
+	if p != nil {
+		go m.followThrough(lead, p)
+	}
 }
 
 // reportToLead hands a worker's final message to its lead, which starts a
