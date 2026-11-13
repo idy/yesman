@@ -92,6 +92,10 @@ func TestConfigSettings(t *testing.T) {
 	if got := c.settings(current, importReplace); got != (Settings{Appearance: mygo.ThemeDark}) {
 		t.Errorf("replacing = %+v", got)
 	}
+	// Replacing with a file that sets no appearance follows the system.
+	if got := (config{}).settings(current, importReplace); got != (Settings{Appearance: mygo.ThemeSystem}) {
+		t.Errorf("replacing without an appearance = %+v", got)
+	}
 }
 
 func TestPlanImport(t *testing.T) {
@@ -106,7 +110,8 @@ repos = ["acme/kept", "acme/new", "acme/cloning", "acme/failed"]`))
 		{Name: "github.com/acme/idle", URL: "https://github.com/acme/idle"},
 		{Name: "local/old", URL: "/src/old"},
 	}
-	clones := []Clone{{Repo: "acme/cloning", State: CloneCloning}, {Repo: "acme/failed", State: CloneFailed}}
+	clones := []Clone{{Repo: "acme/cloning", State: CloneCloning}, {Repo: "acme/failed", State: CloneFailed},
+		{Repo: "acme/stray", State: CloneQueued}, {Repo: "acme/helper", State: CloneCloning, agent: true}}
 	plan := planImport(c, Settings{AutoFetch: 5}, repos, clones, func(r pool.Repo) string {
 		if r.Name == "github.com/acme/busy" {
 			return "a worktree is checked out of it"
@@ -123,6 +128,8 @@ repos = ["acme/kept", "acme/new", "acme/cloning", "acme/failed"]`))
 		{Name: "github.com/acme/busy", Label: "acme/busy", InUse: "a worktree is checked out of it"},
 		{Name: "github.com/acme/idle", Label: "acme/idle"},
 		{Name: "local/old", Label: "local/old"},
+		{Name: "github.com/acme/stray", Label: "acme/stray", Clone: CloneQueued},
+		{Name: "github.com/acme/helper", Label: "acme/helper", InUse: agentCloning, Clone: CloneCloning},
 	}
 	if !reflect.DeepEqual(plan.Extra, want) {
 		t.Errorf("Extra = %+v", plan.Extra)

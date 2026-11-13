@@ -188,7 +188,7 @@ func readConfig(path string) (config, error) {
 func (c config) settings(current Settings, mode importMode) Settings {
 	next := current
 	if mode == importReplace {
-		next = Settings{}
+		next = Settings{Appearance: mygo.ThemeSystem}
 	}
 	if c.appearance != nil {
 		next.Appearance = *c.appearance
@@ -253,7 +253,13 @@ type ExtraRepo struct {
 	Label string `json:"label"` // owner/repo, or the pool name when it is not from GitHub
 	// InUse says why replacing keeps it: work depends on it.
 	InUse string `json:"inUse,omitempty"`
+	// Clone is the state of a repository still on its way into the pool,
+	// whose clone replacing stops, or "" for one in the pool.
+	Clone CloneState `json:"clone,omitempty"`
 }
+
+// agentCloning is why replacing keeps a repository an agent is adding.
+const agentCloning = "an agent is cloning it"
 
 // planImport compares a configuration with the pool and the clones under
 // way. inUse, when not nil, says why an extra repository must stay.
@@ -265,10 +271,10 @@ func planImport(c config, current Settings, repos []pool.Repo, clones []Clone, i
 		Add:     []string{}, Present: []string{}, Extra: []ExtraRepo{}, Ignored: []string{},
 	}
 	plan.Ignored = append(plan.Ignored, c.ignored...)
-	have := map[string]bool{}
+	have, pooled := map[string]bool{}, map[string]bool{}
 	for _, r := range repos {
 		if name := githubName(r); name != "" {
-			have[repoKey(name)] = true
+			have[repoKey(name)], pooled[repoKey(name)] = true, true
 		}
 	}
 	for _, cl := range clones {
@@ -296,6 +302,18 @@ func planImport(c config, current Settings, repos []pool.Repo, clones []Clone, i
 		}
 		if inUse != nil {
 			e.InUse = inUse(r)
+		}
+		plan.Extra = append(plan.Extra, e)
+	}
+	// Clones the file leaves out, queued, under way or failed, would add
+	// repositories it does not list.
+	for _, cl := range clones {
+		if key := repoKey(cl.Repo); listed[key] || pooled[key] {
+			continue
+		}
+		e := ExtraRepo{Name: "github.com/" + cl.Repo, Label: cl.Repo, Clone: cl.State}
+		if cl.agent {
+			e.InUse = agentCloning
 		}
 		plan.Extra = append(plan.Extra, e)
 	}
@@ -389,6 +407,7 @@ type ImportResult struct {
 	Mode    importMode  `json:"mode"`
 	Cloning []string    `json:"cloning"` // repositories it started cloning
 	Removed []string    `json:"removed"` // pool names of the repositories it removed
+	Stopped []string    `json:"stopped"` // clones it stopped, as owner/repo
 	Kept    []ExtraRepo `json:"kept"`    // repositories replacing left, and why
 }
 
@@ -405,13 +424,33 @@ func (a *app) importConfig(ctx context.Context, path string, mode importMode) (I
 	if err != nil {
 		return ImportResult{}, err
 	}
-	res := ImportResult{Mode: mode, Cloning: []string{}, Removed: []string{}, Kept: []ExtraRepo{}}
+	res := ImportResult{Mode: mode, Cloning: []string{}, Removed: []string{}, Stopped: []string{}, Kept: []ExtraRepo{}}
 
 	a.setmu.Lock()
 	err = a.putSettingsLocked(c.settings(a.settings, mode))
 	a.setmu.Unlock()
 	if err != nil {
 		return res, err
+	}
+
+	if mode == importReplace {
+		// Clones the file leaves out stop first, so that none adds a
+		// repository after the pool is reconciled. One that landed before
+		// it stopped is removed with the pool's other extras below.
+		listed := map[string]bool{}
+		for _, r := range c.repos {
+			listed[repoKey(r.name)] = true
+		}
+		stopped, held, err := a.clones.Withdraw(ctx, func(repo string) bool { return listed[repoKey(repo)] })
+		if stopped != nil {
+			res.Stopped = stopped
+		}
+		if err != nil {
+			return res, fmt.Errorf("stop the clones the file leaves out: %w", err)
+		}
+		for _, r := range held {
+			res.Kept = append(res.Kept, ExtraRepo{Name: "github.com/" + r, Label: r, InUse: agentCloning, Clone: CloneCloning})
+		}
 	}
 
 	repos, err := a.pool.List()
@@ -433,6 +472,9 @@ func (a *app) importConfig(ctx context.Context, path string, mode importMode) (I
 	}
 	if mode == importReplace {
 		for _, e := range plan.Extra {
+			if e.Clone != "" {
+				continue // an agent's clone, kept above
+			}
 			var used *pool.InUseError
 			switch err := a.pool.Remove(ctx, e.Name); {
 			case err == nil:

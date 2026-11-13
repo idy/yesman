@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -27,8 +28,13 @@ func (f *fakeAdds) add(ctx context.Context, repo string) (pool.Repo, error) {
 	f.running[repo] = done
 	f.mu.Unlock()
 	f.started <- repo
-	if err := <-done; err != nil {
-		return pool.Repo{}, err
+	select {
+	case err := <-done:
+		if err != nil {
+			return pool.Repo{}, err
+		}
+	case <-ctx.Done():
+		return pool.Repo{}, ctx.Err()
 	}
 	return pool.Repo{Name: "github.com/" + repo}, nil
 }
@@ -220,6 +226,48 @@ func TestClonesAddForAnAgent(t *testing.T) {
 	f.finish(t, "a/one", errors.New("denied"))
 	if err := <-errs; err == nil || err.Error() != "denied" {
 		t.Fatalf("Add = %v", err)
+	}
+	waitForClones(t, c, map[string]CloneState{})
+}
+
+// Withdraw stops every clone but those kept and an agent's: queued and
+// failed ones go at once, one under way once its cancelled clone ends.
+func TestClonesWithdraw(t *testing.T) {
+	f := newFakeAdds()
+	c := newClones(f.add, nil)
+	if _, err := c.Queue([]string{"a/keep", "a/run", "a/fail", "a/wait1", "a/wait2"}); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		f.waitStarted(t)
+	}
+	f.finish(t, "a/fail", errors.New("boom"))
+	f.waitStarted(t) // a/wait1 takes the slot
+	agent := make(chan error, 1)
+	go func() {
+		_, err := c.Add(context.Background(), "a/agent")
+		agent <- err
+	}()
+	f.waitStarted(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stopped, held, err := c.Withdraw(ctx, func(repo string) bool { return repo == "a/keep" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"a/run", "a/fail", "a/wait1", "a/wait2"}; !slices.Equal(stopped, want) {
+		t.Errorf("stopped %q, want %q", stopped, want)
+	}
+	if !slices.Equal(held, []string{"a/agent"}) {
+		t.Errorf("held %q", held)
+	}
+	// A cancelled clone leaves no failure behind, and wait2 never starts.
+	waitForClones(t, c, map[string]CloneState{"a/keep": CloneCloning, "a/agent": CloneCloning})
+	f.finish(t, "a/keep", nil)
+	f.finish(t, "a/agent", nil)
+	if err := <-agent; err != nil {
+		t.Errorf("the agent's clone = %v", err)
 	}
 	waitForClones(t, c, map[string]CloneState{})
 }

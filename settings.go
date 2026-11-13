@@ -169,6 +169,15 @@ func (s *service) SetAutoFetch(minutes int) error {
 	return a.putSettingsLocked(next)
 }
 
+// themeOf is the appearance settings put into effect: none chosen follows
+// the system.
+func themeOf(s Settings) mygo.ThemeSource {
+	if s.Appearance == "" {
+		return mygo.ThemeSystem
+	}
+	return s.Appearance
+}
+
 // putSettingsLocked saves the settings and puts them into effect. a.setmu
 // is held.
 func (a *app) putSettingsLocked(next Settings) error {
@@ -177,7 +186,7 @@ func (a *app) putSettingsLocked(next Settings) error {
 	}
 	prev := a.settings
 	a.settings = next
-	if next.Appearance != prev.Appearance && a.setTheme != nil {
+	if themeOf(next) != themeOf(prev) && a.setTheme != nil {
 		a.setTheme(next.Appearance)
 	}
 	if next.AutoFetch != prev.AutoFetch {

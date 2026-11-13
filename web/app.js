@@ -1154,7 +1154,7 @@ function askImport(plan) {
       extra.length ? part(`Only in this pool (${extra.length})`,
         h('p', null, 'Merge keeps them. Replace removes them, except those that work depends on.'),
         list(extra.map((r) => h('li', null, h('span', { class: 'import-names', title: r.name }, r.label),
-          h('span', { class: 'import-faint' }, r.inUse ? ` · kept: ${r.inUse}` : ' · removed with Replace'))))) : null,
+          h('span', { class: 'import-faint' }, r.inUse ? ` · kept: ${r.inUse}` : r.clone ? ` · ${r.clone === 'failed' ? 'failed to clone' : 'cloning'}, stopped with Replace` : ' · removed with Replace'))))) : null,
       plan.ignored.length ? h('p', { class: 'import-faint' }, `Ignored, as this yesman does not know them: ${plan.ignored.join(', ')}`) : null),
     h('div', { class: 'mds-dialog-actions' },
       h('button', { class: 'mds-button', value: 'cancel' }, 'Cancel'),
@@ -1172,6 +1172,7 @@ function importLines(plan, result) {
   if (settingChanges(plan).some((s) => result.mode === 'replace' || !s.replaceOnly)) parts.push('settings changed');
   if (result.cloning.length) parts.push(`${plural(result.cloning.length, 'repository', 'repositories')} cloning`);
   if (result.removed.length) parts.push(`${result.removed.length} removed`);
+  if (result.stopped.length) parts.push(`${plural(result.stopped.length, 'clone')} stopped`);
   const lines = [{ text: `${verb} ${fileName(plan.path)}: ${parts.length ? parts.join(' · ') : 'nothing to change'}.` }];
   for (const r of result.kept) lines.push({ text: `Kept ${r.label}: ${r.inUse}.`, danger: r.inUse.startsWith('removing it failed') });
   return lines;

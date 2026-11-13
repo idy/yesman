@@ -6,7 +6,7 @@ Each release's section is what installed copies show as its release notes.
 
 - Export yesman's configuration from Settings › Import and export: the appearance, the fetch schedule and every GitHub repository in the pool, as a TOML file. Workspaces, knowledge and conversations are not included.
 - Import a configuration file to see what it would change, then Merge or Replace. Merge clones the repositories the pool lacks and keeps everything else. Replace also resets the settings the file leaves out and removes the repositories it does not list.
-- Replace never removes a repository that work depends on: one with a worktree checked out of it, in a workspace or the archive, or a branch with commits no remote has. It says which repositories it kept and why.
+- Replace never removes a repository that work depends on: one with a worktree checked out of it, in a workspace or the archive, or a branch with commits no remote has. It says which repositories it kept and why. Clones of repositories the file leaves out stop, unless an agent is waiting for one.
 - The Settings pages sit more compactly under Settings in the sidebar, with smaller icons on a rail aligned with the Settings icon.
 
 ## 0.1.8
