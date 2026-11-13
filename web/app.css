@@ -286,6 +286,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .files-menu-back { transform: rotate(180deg); }
 .files-menu-up { margin-bottom: 3px; border-bottom: 1px solid var(--mds-line); border-radius: var(--mds-radius-xs) var(--mds-radius-xs) 0 0; color: var(--mds-muted); }
 .files-menu-note { margin: 0; padding: 8px 10px; color: var(--mds-muted); }
+.files-menu:focus { outline: none; } /* its items show focus */
 @media (pointer: coarse) { .files-menu-item { min-height: 44px; } }
 .files-bar .mds-button--small { min-height: 26px; padding: 2px 8px; font-size: var(--mds-text-caption); }
 

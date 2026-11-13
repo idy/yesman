@@ -526,7 +526,9 @@ export function createFiles(host) {
     const again = menu?.anchor === anchor;
     closeMenu();
     if (again) return; // a second click closes it
-    const el = h('div', { class: 'files-menu', role: 'menu', 'aria-label': dir === '.' ? p.name : dir });
+    // The menu takes focus itself while it has no item to focus: loading,
+    // failed or empty, so that its keys still work.
+    const el = h('div', { class: 'files-menu', role: 'menu', tabindex: '-1', 'aria-label': dir === '.' ? p.name : dir });
     const away = (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) closeMenu(); };
     const resize = () => closeMenu();
     document.addEventListener('pointerdown', away, true);
@@ -547,11 +549,14 @@ export function createFiles(host) {
       if (!Array.isArray(entries)) {
         el.replaceChildren(h('p', { class: 'files-menu-note' }, 'Loading…'));
         place();
+        el.focus({ preventScroll: true });
         try {
           entries = await host.call('ListFiles', p.name, folder);
           p.dirs.set(folder, entries);
         } catch (err) {
+          if (menu?.el !== el) return;
           el.replaceChildren(h('p', { class: 'files-menu-note danger' }, err?.message || String(err)));
+          el.focus({ preventScroll: true });
           return;
         }
         if (menu?.el !== el) return;
@@ -576,9 +581,9 @@ export function createFiles(host) {
       if (entries.length > 500) items.push(h('p', { class: 'files-menu-note' }, `${(entries.length - 500).toLocaleString()} more. Go to a file to find them.`));
       el.replaceChildren(...items);
       place();
-      const focus = el.querySelector('[aria-current="true"]') ?? el.querySelector('.files-menu-item');
-      focus?.focus({ preventScroll: true });
-      focus?.scrollIntoView({ block: 'nearest' });
+      const focus = el.querySelector('[aria-current="true"]') ?? el.querySelector('.files-menu-item') ?? el;
+      focus.focus({ preventScroll: true });
+      if (focus !== el) focus.scrollIntoView({ block: 'nearest' });
     };
     el.addEventListener('keydown', (e) => {
       const items = [...el.querySelectorAll('.files-menu-item')];
