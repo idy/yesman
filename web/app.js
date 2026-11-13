@@ -7,6 +7,7 @@
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
+import { createInfo } from './info.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
@@ -35,6 +36,9 @@ const state = {
   drafts: new Map(),
   modelOptions: new Map(),
   infoOpen: false,
+  // The info panel between the conversation and the files, open unless
+  // closed, as it was last.
+  panelOpen: localStorage.getItem('yesman.info') !== 'hidden',
   repos: [],
   settingsPage: 'general',
   settings: null, // Yesman.Settings, for the General page
@@ -312,6 +316,7 @@ function renderWorking() {
 // Live records from an agent's pi process.
 function onAgentEvent(ev) {
   const { agent: id, data: e } = ev;
+  info.onAgentEvent(ev);
   if (e.type === 'extension_ui_request' && e.method === 'notify') {
     toast(`${id}: ${e.message}`);
     return;
@@ -557,6 +562,7 @@ function renderBarActions() {
       ? button('power', t('Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.'), () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
+    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }) : null,
     a ? button('panel', state.infoOpen ? t('Hide the files') : t('Show the files'), toggleInfo, { 'aria-pressed': String(state.infoOpen) }) : null,
   ].filter(Boolean));
 }
@@ -1696,7 +1702,35 @@ const files = createFiles({
   checkout: (y) => openCheckout(y),
   dismiss: (name) => dismiss(name),
   confirm: (title, body, ok) => confirmAction(title, body, ok),
+  shown: () => info.render(),
+  worktrees: (y) => info.worktrees(y),
 });
+
+// ---------- Info panel ----------
+
+// The panel shows the yesman whose agent is shown, and opens its parts in
+// the files pane.
+const info = createInfo({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.panelOpen,
+  files: () => files.shown(),
+  openKnowledge: () => files.openKnowledge(),
+  openWorktree: (dir, show) => files.openWorktree(dir, show),
+  checkout: (y) => openCheckout(y),
+  openURL: (url) => call('OpenURL', url).catch(fail),
+});
+
+function togglePanel() {
+  state.panelOpen = !state.panelOpen;
+  localStorage.setItem('yesman.info', state.panelOpen ? 'shown' : 'hidden');
+  renderInfo();
+  renderBarActions();
+}
 
 function toggleInfo() {
   state.infoOpen = !state.infoOpen;
@@ -1881,12 +1915,12 @@ async function start() {
   });
   mygo.on('agents', onAgents);
   mygo.on('agent-event', onAgentEvent);
-  mygo.on('changed', refreshSoon);
+  mygo.on('changed', () => { refreshSoon(); info.onChanged(); });
   mygo.on('clones', onClones);
   mygo.on('fetches', onFetches);
   mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
-  mygo.on('files', (change) => files.onChange(change));
+  mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
   document.addEventListener('keydown', (e) => files.onKey(e));
   call('Update').then(onUpdate, () => {});
   mygo.on('focus-agent', (id) => {
