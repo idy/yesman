@@ -233,6 +233,31 @@ func TestConfigCarriesVariablesAndSecrets(t *testing.T) {
 		t.Errorf("a clash imported: %v, %+v", err, to.settings)
 	}
 
+	// A save after the import was planned is merged into, not overwritten,
+	// and a clash it makes is refused when the import writes.
+	c, err := readConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := to.save(secrets.KindVariables, []secrets.Entry{{Name: "SAVED_MEANWHILE", Value: "kept"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := to.importEnv(c, importMerge); err != nil {
+		t.Fatal(err)
+	}
+	if vars, _ := to.variables.Entries(); len(vars) != 2 || vars[0].Name != "SAVED_MEANWHILE" {
+		t.Errorf("a save meanwhile was overwritten: %#v", vars)
+	}
+	if err := to.variables.Save([]secrets.Entry{{Name: "GH_TOKEN", Value: "clash"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := to.importEnv(c, importMerge); err == nil || !strings.Contains(err.Error(), "GH_TOKEN") {
+		t.Errorf("a clash made meanwhile was written: %v", err)
+	}
+	if err := to.variables.Save(nil); err != nil {
+		t.Fatal(err)
+	}
+
 	// A file of version 1 has neither: those here stay, replacing too.
 	old := filepath.Join(t.TempDir(), "old.toml")
 	if err := os.WriteFile(old, []byte("version = 1\n"), 0o600); err != nil {

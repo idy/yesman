@@ -543,7 +543,8 @@ func (a *app) importConfig(ctx context.Context, path string, mode importMode) (I
 	res := ImportResult{Mode: mode, Cloning: []string{}, Removed: []string{}, Stopped: []string{}, Kept: []ExtraRepo{}}
 
 	// The variables and secrets are checked first: a name both would set
-	// stops the import before anything changes.
+	// stops the import before anything changes. They are planned again
+	// when they are written, last.
 	env, err := a.planEnv(c, mode)
 	if err != nil {
 		return res, err
@@ -618,7 +619,7 @@ func (a *app) importConfig(ctx context.Context, path string, mode importMode) (I
 			a.notifyChanged()
 		}
 	}
-	res.Env, err = a.applyEnv(env)
+	res.Env, err = a.importEnv(c, mode)
 	return res, err
 }
 

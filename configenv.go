@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"slices"
+	"strings"
 
 	"github.com/idy/yesman/internal/secrets"
 )
@@ -167,14 +168,30 @@ type EnvImported struct {
 	Skipped   string `json:"skipped,omitempty"`  // why the file's secrets were left out
 }
 
-// applyEnv imports the variables and secrets as p planned.
-func (a *app) applyEnv(p envPlan) (EnvImported, error) {
+// importEnv imports c's variables and secrets. It plans them again while
+// it holds envmu, as Settings saves do, so that a save since the import
+// was planned is merged into rather than overwritten, and a name it made
+// both set stops the import here too.
+func (a *app) importEnv(c config, mode importMode) (EnvImported, error) {
+	a.envmu.Lock()
+	defer a.envmu.Unlock()
+	p, err := a.planEnv(c, mode)
+	if err != nil {
+		return EnvImported{}, err
+	}
+	if len(p.clash) > 0 {
+		return EnvImported{}, errors.New(tr("the variables and secrets would both set %s: rename one, then import again", strings.Join(p.clash, ", ")))
+	}
+	return a.applyEnvLocked(p)
+}
+
+// applyEnvLocked imports the variables and secrets as p planned. a.envmu
+// is held.
+func (a *app) applyEnvLocked(p envPlan) (EnvImported, error) {
 	var res EnvImported
 	if p.changes.Secrets != nil {
 		res.Skipped = p.changes.Secrets.Skipped
 	}
-	a.envmu.Lock()
-	defer a.envmu.Unlock()
 	if p.setVars {
 		if err := a.variables.Save(p.vars); err != nil {
 			return res, trError(err)
