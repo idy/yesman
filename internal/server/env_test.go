@@ -1,6 +1,7 @@
 package server
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,6 +71,17 @@ func TestEnv(t *testing.T) {
 	}
 	if got := s.envContext(true); !strings.Contains(got, "in your workers' bash commands") {
 		t.Errorf("a lead's context:\n%s", got)
+	}
+
+	// A hand-edited file that names PATH sets nothing, and says why.
+	if err := os.WriteFile(vars.File(), []byte("variables:\n  REGION: eu\n  PATH: /tmp/evil\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if env := s.Env(); env.Env["PATH"] != "" || env.Env["REGION"] != "" || len(env.Errors) == 0 {
+		t.Errorf("env from a refused file: %#v", env)
+	}
+	if err := vars.Save([]secrets.Entry{{Name: "REGION", Value: "eu-west", Description: "Where to deploy"}}); err != nil {
+		t.Fatal(err)
 	}
 
 	vault.Lock()

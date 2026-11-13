@@ -162,7 +162,10 @@ func fromNode(kind Kind, doc *yaml.Node) ([]Entry, error) {
 			return nil, errorf("line %d: %q is not a key of this file; it has version and %s", k.Line, k.Value, string(kind))
 		}
 	}
-	return entries, Check(kind, entries)
+	if err := Check(kind, entries); err != nil {
+		return nil, err // none of a file with a mistake
+	}
+	return entries, nil
 }
 
 func entryOf(k, v *yaml.Node) (Entry, error) {

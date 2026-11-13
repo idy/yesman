@@ -54,11 +54,12 @@ type EnvDescription struct {
 // sources reads the variables and secrets, with what failed.
 func (s *Server) sources() (vars, secretList []secrets.Entry, locked []string, errs []string) {
 	if s.Variables != nil {
-		v, err := s.Variables.Entries()
-		if err != nil {
+		// A file that does not read sets none, rather than names it refuses.
+		if v, err := s.Variables.Entries(); err != nil {
 			errs = append(errs, "variables: "+err.Error())
+		} else {
+			vars = v
 		}
-		vars = v
 	}
 	if s.Secrets != nil {
 		if s.Secrets.Unlocked() {

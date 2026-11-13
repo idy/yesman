@@ -123,6 +123,14 @@ async function commandEnv(signal?: AbortSignal): Promise<{ env: Record<string, s
 	}
 }
 
+// refreshHidden asks the app for the secrets' values to hide, keeping
+// those remembered when it does not answer.
+async function refreshHidden(signal?: AbortSignal) {
+	try {
+		remember((await call("GET", "/v1/env", undefined, signal)).hide);
+	} catch {}
+}
+
 function boardText(board: any): string {
 	const tasks: any[] = board?.tasks ?? [];
 	if (!tasks.length) return "The board is empty.";
@@ -204,7 +212,10 @@ export default function yesman(pi: ExtensionAPI) {
 	if (process.platform === "win32") shell(createPowerShellToolDefinition);
 
 	// Whatever a tool returns, a secret's value does not reach the model.
-	pi.on("tool_result", (event) => {
+	// The values are asked for again first: the secrets may have been
+	// unlocked or changed since the last command, and any tool can read them.
+	pi.on("tool_result", async (event, ctx) => {
+		await refreshHidden(ctx.signal);
 		if (!hidden.length) return;
 		const content = hideContent(event.content);
 		const changed = content.some((c, i) => (c as any).text !== (event.content[i] as any).text);

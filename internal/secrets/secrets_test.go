@@ -209,6 +209,9 @@ func TestParseAndFormat(t *testing.T) {
 	if got, err := Parse(KindVariables, []byte("variables:\n  NOTE_unencrypted: x\n")); err != nil || len(got) != 1 {
 		t.Errorf("a variable may end in the suffix: %#v, %v", got, err)
 	}
+	if got, err := Parse(KindVariables, []byte("variables:\n  REGION: eu\n  PATH: /bin\n")); err == nil || got != nil {
+		t.Errorf("a file refusing a name gave %#v, %v", got, err)
+	}
 	var e *Error
 	if _, err := Parse(KindSecrets, []byte("secrets:\n  A-B: x\n")); !errors.As(err, &e) {
 		t.Errorf("a mistake is %T, not *Error", err)
