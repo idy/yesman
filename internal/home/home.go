@@ -6,6 +6,8 @@
 //	yesmen/    one workspace directory per hired yesman
 //	archive/   workspaces of dismissed yesmen
 //	.runtime/  files yesman writes on each start, such as its pi extension
+//	secrets/   the secrets agents' commands get, in a sops file, and its age key
+//	variables.yaml  the variables agents' commands get
 //	settings.json  the user's choices in Settings
 package home
 
@@ -47,6 +49,12 @@ func (h Home) Archive() string { return filepath.Join(h.Root, "archive") }
 
 // Runtime holds files rewritten on every start.
 func (h Home) Runtime() string { return filepath.Join(h.Root, ".runtime") }
+
+// Secrets holds the secrets file and the key that opens it.
+func (h Home) Secrets() string { return filepath.Join(h.Root, "secrets") }
+
+// Variables is the file of the variables agents' commands get.
+func (h Home) Variables() string { return filepath.Join(h.Root, "variables.yaml") }
 
 // Settings is the file of the user's choices in Settings.
 func (h Home) Settings() string { return filepath.Join(h.Root, "settings.json") }

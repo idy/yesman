@@ -8,4 +8,5 @@ Read [README.md](README.md) when starting work in this repository. Read [docs/re
 - Agents are pi processes in RPC mode, children of the app. herdr is not used.
 - The app is Go with MyGo v0.9.0. The page is vanilla JavaScript without a framework or build step, styled with Magpie v0.4.4 vendored in `web/mds/`, with CodeMirror 6 vendored in `web/vendor/codemirror/` for the editor (rebuilt by `tools/codemirror/build.sh`, never by the app); follow Magpie's tokens and typography rather than adding fonts or weights.
 - Keep the app cross-platform: macOS, Linux and Windows must build (`GOOS=linux go build ./...`, `GOOS=windows go build ./...`).
-- Pull request watching, service keys, and agents acting without the user are not designed yet. Confirm the direction with the user before building them.
+- Secrets and variables reach agents only as environment variables of each command, set by the extension's shell tool; a secret's value never enters the context, pi's own environment or a session log. Keep it that way.
+- Pull request watching and agents acting without the user are not designed yet. Confirm the direction with the user before building them.

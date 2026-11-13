@@ -285,6 +285,36 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .import-names { color: var(--mds-ink-strong); overflow-wrap: anywhere; }
 .import-faint { color: var(--mds-muted); font-size: var(--mds-text-note); }
 
+/* Settings › Secrets and Variables: entries as a form, or their YAML. */
+.env-page { display: grid; gap: 16px; }
+.env-page > [role="tabpanel"] { display: grid; gap: 10px; }
+.env-page > [role="tabpanel"][hidden] { display: none; }
+.env-status { color: var(--mds-muted); font-size: var(--mds-text-note); white-space: nowrap; }
+.env-error { margin: 0; font-size: var(--mds-text-note); white-space: pre-wrap; overflow-wrap: anywhere; }
+.env-row { display: grid; grid-template-columns: minmax(140px, 220px) minmax(0, 1fr) auto; gap: 8px 10px; align-items: start; padding: 12px 14px; }
+.env-row + .env-row { border-top: 1px solid var(--mds-line); }
+.env-row .mds-textarea { min-height: 0; resize: none; }
+.env-row .env-description { grid-column: 2; }
+.env-hidden { -webkit-text-security: disc; }
+.env-row-actions { display: flex; align-items: center; gap: 2px; min-height: 38px; }
+.env-show { min-width: 56px; justify-content: center; }
+.env-add { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; }
+.env-add .mds-icon { width: 14px; height: 14px; }
+/* The editor sits on a surface, as the form's list does. */
+.env-editor { --app-pane: var(--mds-surface); height: min(460px, 56vh); overflow: hidden; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-lg); background: var(--mds-surface); }
+.env-editor .cm-editor { height: 100%; }
+.env-editor .cm-editor .cm-content { padding-bottom: 12px; }
+.env-panel .mds-hint { margin: 0; }
+.env-lock { display: grid; gap: 10px; max-width: 480px; padding: 16px; }
+.env-lock p { margin: 0; font-size: var(--mds-text-note); }
+.env-dialog { width: min(440px, calc(100vw - 32px)); }
+.env-dialog-error { margin: 10px 0 0; font-size: var(--mds-text-note); }
+@media (max-width: 720px) {
+  .env-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .env-row .env-row-actions { grid-column: 2; grid-row: 1; }
+  .env-row :is(.env-value, .env-description) { grid-column: 1 / -1; }
+}
+
 /* The add dialog: an owner's repositories to tick. */
 .repo-dialog { width: min(600px, calc(100vw - 32px)); }
 .picker-search { width: auto; }

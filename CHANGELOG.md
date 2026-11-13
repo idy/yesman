@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.12
+
+- Settings › Secrets keeps API keys, tokens and other secrets, and Settings › Variables keeps settings such as an account or a region. Every command of every agent gets each as an environment variable; agents read what each is for with the new `yesman_env` tool.
+- Edit them as a form, or as YAML in the editor. Each has a value and a description that tells agents what it is for.
+- Secrets are encrypted with sops and age and open with a password that yesman never stores; after each launch they stay locked until you unlock them. A secret's value never reaches an agent's context: output shows it as `[secret NAME]`. The sops command can edit the same file with the exported key.
+- Export secrets sealed with a password of their own, or as plain text, and variables as YAML. Importing shows what changes, then merges or replaces.
+
 ## 0.1.11
 
 - Settings › pi manages pi's packages: the extensions, skills, prompt templates and themes every agent loads. Info shows the pi yesman runs, a summary of its packages and pi's own settings file. Installed lists each package with its version, source and what it provides, says when npm has a newer version, and updates or removes it. Browse searches the packages of pi's gallery, most popular first, and shows a package's README, links and preview before you install it. Install from source takes any npm package, git repository or folder pi takes.

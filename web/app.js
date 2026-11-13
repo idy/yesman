@@ -10,6 +10,7 @@ import { createFiles } from './files.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
+import { createEnvPage } from './env.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
@@ -693,7 +694,7 @@ function renderBody() {
     const again = active?.id && document.getElementById(active.id);
     if (again) {
       again.focus();
-      if (again.tagName === 'INPUT') again.setSelectionRange(active.selectionStart, active.selectionEnd);
+      if (['INPUT', 'TEXTAREA'].includes(again.tagName) && again.type !== 'password') again.setSelectionRange(active.selectionStart, active.selectionEnd);
     }
     return;
   }
@@ -834,6 +835,8 @@ function renderWelcome(body) {
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
+  { page: 'secrets', label: 'Secrets', icon: 'lock' },
+  { page: 'variables', label: 'Variables', icon: 'code' },
   { page: 'storage', label: 'Storage', icon: 'folder' },
   { page: 'pi', label: 'pi', icon: 'package' },
   { page: 'config', label: 'Import and export', icon: 'transfer' },
@@ -878,6 +881,8 @@ async function loadSettingsPage(page) {
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
     else if (page === 'pi') { await piPage.load(); return; }
+    else if (page === 'secrets') { await secretsPage.load(); return; }
+    else if (page === 'variables') { await variablesPage.load(); return; }
   } catch (err) {
     fail(err);
     return;
@@ -891,6 +896,8 @@ function renderSettings(body) {
   if (state.view.page === 'repositories') renderRepositories(inner);
   else if (state.view.page === 'storage') renderStorage(inner);
   else if (state.view.page === 'pi') piPage.render(inner);
+  else if (state.view.page === 'secrets') secretsPage.render(inner);
+  else if (state.view.page === 'variables') variablesPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
   else if (state.view.page === 'about') renderAbout(inner);
   else renderGeneral(inner);
@@ -945,6 +952,20 @@ const piPage = createPiPage({
   revealButton,
 });
 
+// Settings › Secrets and Settings › Variables, in env.js.
+const envPage = (kind) => createEnvPage(kind, {
+  call,
+  fail,
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  shown: () => state.view.kind === 'settings' && state.view.page === kind,
+  rerender: () => renderBody(),
+  preferenceRow,
+  settingsSection,
+  revealButton,
+});
+const secretsPage = envPage('secrets');
+const variablesPage = envPage('variables');
+
 function renderGeneral(inner) {
   const v = state.settings;
   if (!v) return;
@@ -969,6 +990,8 @@ function renderStorage(inner) {
         ['Repositories', 'The shared pool of bare Git repositories.', v.pool],
         ['Workspaces', 'The parent folder for all yesman workspaces.', v.yesmen],
         ['Archive', 'Workspaces of dismissed yesmen, with their worktrees.', v.archive],
+        ['Secrets', 'The secrets, encrypted, and the key that opens them.', v.secrets],
+        ['Variables', 'The variables, in plain text.', v.variables],
         ['Runtime', 'Files yesman generates when it starts.', v.runtime],
         ['Settings file', 'Appearance and repository fetch preferences.', v.settingsFile],
         ['Storage configuration', 'Remembers the data folder across launches.', v.storageConfig],

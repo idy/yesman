@@ -4,8 +4,12 @@
 // It gives the agent its yesman's context before every run (workspace,
 // worktrees, the repo pool, shared knowledge, the other agents) and tools
 // to check repositories out of the pool and, for a lead, to run workers.
+// Its shell tool sets the user's secrets and variables in every command,
+// asking the app for them each time, and what tools return hides the
+// secrets' values from the model.
 // Everything is done by the yesman app; this file only forwards.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, createPowerShellToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const API = process.env.YESMAN_API;
@@ -42,13 +46,56 @@ function json(value: unknown) {
 	return JSON.stringify(value, null, 2);
 }
 
+// The secrets' values, and lines of them, as the app last gave them,
+// longest first, which output shows as [secret NAME].
+let hidden: { value: string; name: string }[] = [];
+
+function hide(text: string): string {
+	for (const h of hidden) {
+		if (text.includes(h.value)) text = text.split(h.value).join(`[secret ${h.name}]`);
+	}
+	return text;
+}
+
+type Content = { type: string; text?: string }[];
+
+function hideContent<T extends Content>(content: T): T {
+	return content.map((c) => (c.type === "text" && typeof c.text === "string" ? { ...c, text: hide(c.text) } : c)) as T;
+}
+
+// hideJSON hides values in a JSON value, as JSON writes them.
+function hideJSON(value: unknown): unknown {
+	let text = JSON.stringify(value);
+	for (const h of hidden) {
+		const quoted = JSON.stringify(h.value).slice(1, -1);
+		if (text.includes(quoted)) text = text.split(quoted).join(`[secret ${h.name}]`);
+	}
+	return JSON.parse(text);
+}
+
+// commandEnv asks the app for the variables to set in a command. Without
+// an answer the command runs with none, and says so.
+async function commandEnv(signal?: AbortSignal): Promise<{ env: Record<string, string>; note?: string }> {
+	try {
+		const r = await call("GET", "/v1/env", undefined, signal);
+		// Locked, the app has no values to give: keep hiding those this
+		// agent may have seen, as in a file a command wrote.
+		hidden = r.locked && !r.hide?.length ? hidden : (r.hide ?? []);
+		const note = r.errors?.length ? `yesman could not read some secrets or variables: ${r.errors.join("; ")}` : undefined;
+		return { env: r.env ?? {}, note };
+	} catch (err) {
+		if (signal?.aborted) throw err;
+		return { env: {}, note: `The yesman app did not answer (${(err as Error).message}), so this command ran without the secrets and variables.` };
+	}
+}
+
 export default function yesman(pi: ExtensionAPI) {
 	if (!API || !TOKEN || !AGENT) return; // not started by yesman
 
 	pi.on("before_agent_start", async (event) => {
 		let text: string;
 		try {
-			text = await call("GET", "/v1/context");
+			[text] = await Promise.all([call("GET", "/v1/context"), commandEnv()]);
 		} catch (err) {
 			text = `The yesman app did not answer (${(err as Error).message}), so yesman's tools may fail.`;
 		}
@@ -57,6 +104,73 @@ export default function yesman(pi: ExtensionAPI) {
 			options.sections ??= {};
 			options.sections.yesman = text;
 		}
+	});
+
+	// The shell tools, pi's own, with the environment set in each command.
+	// They keep pi's choice of which is active (defaultTools): registering
+	// them does not activate them.
+	const shell = (make: typeof createBashToolDefinition) => {
+		const base = make(process.cwd());
+		pi.registerTool({
+			...base,
+			defaultActive: false,
+			async execute(id, params, signal, onUpdate, ctx) {
+				const { env, note } = await commandEnv(signal);
+				const tool = make(ctx.cwd, { spawnHook: (c) => ({ ...c, env: { ...c.env, ...env } }) });
+				const update: typeof onUpdate = onUpdate && ((partial) => onUpdate({ ...partial, content: hideContent(partial.content ?? []) }));
+				let out;
+				try {
+					out = await tool.execute(id, params, signal, update, ctx);
+				} catch (err) {
+					const message = hide((err as Error).message ?? String(err));
+					throw new Error(note ? `${message}\n\n${note}` : message);
+				}
+				return note ? { ...out, content: [...out.content, { type: "text" as const, text: note }] } : out;
+			},
+		});
+	};
+	shell(createBashToolDefinition);
+	if (process.platform === "win32") shell(createPowerShellToolDefinition);
+
+	// Whatever a tool returns, a secret's value does not reach the model.
+	pi.on("tool_result", (event) => {
+		if (!hidden.length) return;
+		const content = hideContent(event.content);
+		const changed = content.some((c, i) => (c as any).text !== (event.content[i] as any).text);
+		const structured = event.structuredContent === undefined ? undefined : hideJSON(event.structuredContent);
+		const structuredChanged = structured !== undefined && JSON.stringify(structured) !== JSON.stringify(event.structuredContent);
+		if (!changed && !structuredChanged) return;
+		return structured === undefined ? { content } : { content, structuredContent: structured as any };
+	});
+
+	pi.registerTool({
+		name: "yesman_env",
+		label: "yesman: environment",
+		description:
+			"Say what the environment variables yesman sets in every command are: the user's secrets (keys and tokens) and variables, with what each is for, and each variable's value. A secret's value is never shown.",
+		parameters: Type.Object({
+			name: Type.Optional(Type.String({ description: "One variable's name; all of them when left out" })),
+		}),
+		async execute(_id, params, signal) {
+			const r = await call("GET", "/v1/env/describe", undefined, signal);
+			let vars: any[] = r.vars ?? [];
+			if (params.name) vars = vars.filter((v) => v.name === params.name);
+			const lines = vars.map((v) => {
+				const what = v.kind === "secret" ? (v.locked ? "secret, locked" : "secret") : "variable";
+				const value = v.kind === "variable" ? ` = ${JSON.stringify(v.value ?? "")}` : "";
+				const description = v.description ? `: ${v.description.trim().replace(/\n/g, "\n    ")}` : "";
+				return `- ${v.name} (${what})${value}${description}`;
+			});
+			const notes: string[] = [];
+			if (r.locked) notes.push("The secrets are locked, so commands get only the variables now. Ask the user to unlock them in yesman's Settings › Secrets.");
+			if (r.errors?.length) notes.push(`yesman could not read some of them: ${r.errors.join("; ")}`);
+			const text = vars.length
+				? lines.join("\n")
+				: params.name
+					? `yesman sets no ${params.name}. The user adds secrets and variables in yesman's Settings.`
+					: "yesman sets no secrets or variables. The user adds them in yesman's Settings › Secrets and Settings › Variables.";
+			return result([text, ...notes].join("\n\n"), r);
+		},
 	});
 
 	pi.registerTool({
