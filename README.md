@@ -39,6 +39,10 @@ The app keeps running in the tray with its window closed. Agents are child proce
 
 The files pane, opened from the titlebar, shows the workspace of the yesman you are talking to as a tree, and opens its files in tabs: text and code in an editor with syntax highlighting that saves with Cmd/Ctrl+S or by itself as you type, Markdown rendered, images shown. It follows changes as agents make them, and never saves over a file that changed on disk since it was opened without asking. Large files stay quick: the editor draws only the lines in view, and files over 5 MB open read-only at their first 512 KB. Each folder in the path above a file opens a list of that folder. Cmd/Ctrl+P goes to a file by name, and its menu checks out repositories, opens the knowledge notes and dismisses the yesman. Its edges can be dragged.
 
+The info panel sits between the conversation and the files, and shows the yesman you are talking to at a glance; the titlebar hides or shows it. Knowledge opens the notes in the files pane, rendered and read-only. Storage folds into one row with the disk the workspace takes; open, it shows a bar of its largest parts (each worktree, the conversations, the knowledge, the rest of `.yesman`) and sums the others. Git's objects stay in the shared pool and are not counted. Worktrees lists the workspace's worktrees, each with the lines it changed against the remote's default branch, counting edits not committed yet and new files, or, when its branch is in a pull request, that pull request: its number, title, state, size and checks. yesman finds pull requests through the GitHub CLI, which also sees private repositories and checks, or else GitHub's public API, in the repository and, for a fork, in its upstream.
+
+A worktree opens in the files pane, as its files or as its changes. The pane's bar is one row: the part of the workspace shown, whose menu switches to all of it, the knowledge or another worktree, then the path of what is open, each segment a menu of its folder; in Changes those menus hold only what changed. The changes tree arrives a folder at a time: the Go side measures the changes once and lists one folder per request, opening as many folders below it as 200 rows allow, so a diff of thousands of files never arrives whole. A file's diff is read when it is chosen, up to 256 KB unless you ask for all of it (16 MB at most), and drawn as it scrolls into view. The tree can also show folders alone: choosing a folder then lists its changed files, to see what changed without reading every diff, a thousand at a time.
+
 The board, opened beside it in the titlebar, shows the same yesman's board as a list in the agents' order. Finished and dropped tasks fold into Done at the end, a blocked task shows why, a task's owner opens that agent's conversation, and a task expands to its detail and note. It follows the agents' changes; you change it by asking the lead. The board and the files share the place beside the conversation, one at a time.
 
 Settings, at the foot of the sidebar, has six pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and the language), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), Storage (where yesman keeps its data, below), pi (pi's packages, below), Import and export (below), and About (the versions yesman runs with, and updates).
@@ -103,7 +107,7 @@ To drive the real window, build with the `e2e` tag and attach [`mygo-automation`
 go build -tags e2e -o /tmp/yesman . && YESMAN_HOME=/tmp/yesman-home MYGO_AUTOMATION=/tmp/yesman.sock /tmp/yesman
 ```
 
-Automation cannot reach native file dialogs, so in such builds `YESMAN_E2E_SAVE` and `YESMAN_E2E_OPEN` name the files that Export and Import use instead of asking.
+Automation cannot reach native file dialogs, so in such builds `YESMAN_E2E_SAVE` and `YESMAN_E2E_OPEN` name the files that Export and Import use instead of asking. `YESMAN_E2E_NAME` names the app otherwise, so that a test build runs beside another yesman instead of handing over to it.
 
 ## Release
 
@@ -132,11 +136,13 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | `files.go`, `files_menu.go` | Listing, reading, finding and watching a workspace's files, and the files pane's menus |
 | `web/files.js`, `web/editor.js`, `web/code.js` | The files pane, its editor, and the language of each file |
 | `web/board.js` | The board pane |
+| `info.go`, `web/info.js` | The info panel: knowledge, worktrees with their changes and pull requests, and storage |
+| `internal/pool/changes.go`, `web/diff.js` | A worktree's changes against its base, listed a folder at a time, and each file's diff |
 | `i18n.go`, `web/i18n.js`, `web/locales/` | The languages yesman is written in, and their translations |
 | `tools/codemirror/` | Rebuilds the vendored CodeMirror bundle |
 | `mygo.json`, `resources/`, `icons.go` | Packaging, the yak app icon and the monochrome tray template; see [icon sources](resources/README.md) |
 | `internal/pool` | The repo pool and its worktrees |
-| `internal/github` | What the pool takes: GitHub repositories, their clone URLs and a fork's parent |
+| `internal/github` | What the pool takes: GitHub repositories, their clone URLs and a fork's parent, and the pull request of a branch |
 | `internal/yesmen` | Workspaces, workers, the board and their files |
 | `internal/agent` | pi processes in RPC mode, their status and current activity |
 | `internal/server` | The loopback API for the extension, and the context each agent gets |
