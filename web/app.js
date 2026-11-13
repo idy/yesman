@@ -935,12 +935,25 @@ function renderGeneral(inner) {
       preferenceRow('Theme', h('p', null, 'The window and its menus follow this.'), appearance)),
     settingsSection('Storage', 'Choose where yesman keeps its data.',
       ...storageRows(v),
-      preferenceRow('Archive', h('p', null, 'Workspaces of dismissed yesmen, with their worktrees. ', h('span', { class: 'path' }, v.archive)), revealButton(v.archive))),
+      ...[
+        ['Repositories', 'The shared pool of bare Git repositories.', v.pool],
+        ['Workspaces', 'The parent folder for all yesman workspaces.', v.yesmen],
+        ['Archive', 'Workspaces of dismissed yesmen, with their worktrees.', v.archive],
+        ['Runtime', 'Files yesman generates when it starts.', v.runtime],
+        ['Settings file', 'The saved appearance setting.', v.settingsFile],
+        ['Storage configuration', 'Remembers the data folder across launches.', v.storageConfig],
+      ].filter(([, , path]) => path).map(([label, hint, path]) => storagePathRow(label, hint, path))),
     settingsSection('Agents', null,
       preferenceRow('pi',
         v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null, 'Every lead and worker runs this pi. Set YESMAN_PI to use another. ', h('span', { class: 'path' }, v.pi)),
         h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : 'idle' }, h('i', { class: 'mds-dot' }), h('span', null, v.piError ? 'Not found' : 'Found')))),
   );
+}
+
+function storagePathRow(label, hint, path) {
+  const row = preferenceRow(label, [h('p', null, hint), h('p', { class: 'path' }, path)], revealButton(path));
+  row.classList.add('storage-path-row');
+  return row;
 }
 
 function storageRows(v) {
