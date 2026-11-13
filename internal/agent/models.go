@@ -98,6 +98,9 @@ func (m *Manager) configure(ctx context.Context, id string, cmd map[string]any) 
 	}
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
+	if a.prompts != 0 {
+		return Info{}, errors.New("wait for the current run to finish before changing its model or effort")
+	}
 	state, err := p.modelState(ctx)
 	if err != nil {
 		return Info{}, err

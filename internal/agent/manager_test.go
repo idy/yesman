@@ -48,6 +48,8 @@ func fakePi() {
 		out.Write(append(data, '\n'))
 		out.Flush()
 	}
+	stateChecks := 0
+	var heldPrompts []string
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		var cmd struct {
@@ -62,6 +64,11 @@ func fakePi() {
 			continue
 		}
 		if cmd.Type == "get_state" {
+			stateChecks++
+			if stateChecks == 2 && os.Getenv("FAKE_PI_MODEL_CHECK_DELAY") != "" {
+				write(map[string]any{"type": "test_model_check"})
+				time.Sleep(300 * time.Millisecond)
+			}
 			time.Sleep(delay)
 		}
 		failPrompt := cmd.Type == "prompt" && (os.Getenv("FAKE_PI_FAIL_PROMPTS") != "" ||
@@ -72,6 +79,18 @@ func fakePi() {
 		}
 		var data any = map[string]any{"messages": []any{}, "text": "done"}
 		switch cmd.Type {
+		case "prompt":
+			write(map[string]any{"type": "test_prompt_received", "provider": model.Provider})
+			if os.Getenv("FAKE_PI_HOLD_PROMPTS") != "" {
+				// Simulate async extension work before isStreaming becomes true.
+				heldPrompts = append(heldPrompts, cmd.ID)
+				continue
+			}
+		case "test_release_prompts":
+			for _, id := range heldPrompts {
+				write(map[string]any{"type": "response", "id": id, "command": "prompt", "success": true})
+			}
+			heldPrompts = nil
 		case "get_state":
 			data = modelState{Model: model, ThinkingLevel: effort, IsStreaming: os.Getenv("FAKE_PI_BUSY") != ""}
 		case "get_available_models":

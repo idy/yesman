@@ -123,7 +123,8 @@ type Manager struct {
 }
 
 type agent struct {
-	modelMu  sync.Mutex // orders model and effort configuration
+	modelMu  sync.Mutex // orders prompt registration and model configuration
+	prompts  int        // outstanding prompt RPCs; guarded by modelMu
 	info     Info
 	proc     *proc
 	token    string
@@ -518,12 +519,37 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 	if strings.TrimSpace(text) == "" {
 		return errors.New("empty message")
 	}
-	_, p, err := m.ensure(id)
+	a, p, err := m.ensure(id)
 	if err != nil {
 		return err
 	}
-	_, err = p.call(ctx, map[string]any{"type": "prompt", "message": text, "streamingBehavior": behavior})
-	return err
+	// Register before dispatch, under the same lock as configuration's idle
+	// check and writes. Release it before waiting so other messages can steer
+	// a running turn. pi may await extensions before reporting isStreaming.
+	a.modelMu.Lock()
+	if err := ctx.Err(); err != nil {
+		a.modelMu.Unlock()
+		return err
+	}
+	a.prompts++
+	a.modelMu.Unlock()
+	done := make(chan error, 1)
+	go func() {
+		// Cancelling the caller does not cancel the RPC already sent to pi.
+		// Keep it registered until pi answers (or exits), even if the caller
+		// stops waiting, so configuration cannot slip into its startup gap.
+		_, err := p.call(context.Background(), map[string]any{"type": "prompt", "message": text, "streamingBehavior": behavior})
+		a.modelMu.Lock()
+		a.prompts--
+		a.modelMu.Unlock()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Abort stops the agent's current run.
