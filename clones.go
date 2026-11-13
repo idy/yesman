@@ -172,8 +172,9 @@ func (c *clones) run(ctx context.Context, j *Clone) {
 // Withdraw stops the page's clones of the repositories keep turns down, as
 // replacing the configuration does: queued and failed ones are forgotten,
 // and one under way is cancelled and waited for. A clone cancelled too
-// late may still land in the pool. It returns the repositories it stopped,
-// and those it left because an agent waits for them.
+// late may still land in the pool, as does one an agent asks for while it
+// stops, which the agent clones anew. It returns the repositories it
+// stopped, and those it left because an agent waits for them.
 func (c *clones) Withdraw(ctx context.Context, keep func(repo string) bool) (stopped, held []string, err error) {
 	c.mu.Lock()
 	var wait []chan struct{}
@@ -185,7 +186,7 @@ func (c *clones) Withdraw(ctx context.Context, keep func(repo string) bool) (sto
 		case j.agents > 0:
 			held = append(held, j.Repo)
 			next = append(next, j)
-		case j.State == CloneCloning:
+		case j.State == CloneCloning && j.cancel != nil:
 			// It stays listed until it ends, which drops it.
 			j.withdrawn = true
 			j.cancel()
@@ -209,15 +210,6 @@ func (c *clones) Withdraw(ctx context.Context, keep func(repo string) bool) (sto
 		}
 	}
 	return stopped, held, nil
-}
-
-func (c *clones) remove(name string, arrived bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if i, _ := c.find(name); i >= 0 {
-		c.jobs = append(c.jobs[:i], c.jobs[i+1:]...)
-	}
-	c.emitLocked(arrived)
 }
 
 // Retry queues a clone that failed again, as it was first asked for.
@@ -269,11 +261,16 @@ func (c *clones) Add(ctx context.Context, input string) (pool.Repo, error) {
 	// The pool clones a repository once: when the page's clone of it is
 	// under way, this one waits for it and then finds it in the pool.
 	repo, err := c.add(ctx, input)
+	// The agent's own job leaves under the same lock, so that Withdraw
+	// never sees it listed with no one waiting and nothing to cancel.
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	j.agents--
-	c.mu.Unlock()
 	if mine {
-		c.remove(name, err == nil)
+		if i := slices.Index(c.jobs, j); i >= 0 {
+			c.jobs = slices.Delete(c.jobs, i, i+1)
+		}
+		c.emitLocked(err == nil)
 	}
 	return repo, err
 }
