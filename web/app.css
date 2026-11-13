@@ -53,7 +53,11 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .settings-drawer { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 220ms var(--mds-ease); }
 .settings-branch[data-open] .settings-drawer { grid-template-rows: 1fr; }
 .settings-clip { min-height: 0; overflow: hidden; }
-.settings-clip > .mds-subnav { margin: 4px 0 8px 14px; }
+/* The pages hang compactly from a rail under the Settings icon. */
+.settings-clip > .mds-subnav { gap: 1px; margin: 2px 0 6px 18px; padding-inline-start: 6px; }
+.settings-clip > .mds-subnav > .mds-nav-item { gap: 8px; min-height: 30px; padding: 5px 10px; }
+.settings-clip > .mds-subnav .mds-icon { width: 14px; height: 14px; }
+@media (pointer: coarse) { .settings-clip > .mds-subnav > .mds-nav-item { min-height: 44px; } }
 @media (prefers-reduced-motion: reduce) { .settings-drawer { transition: none; } }
 
 .agent-row {
