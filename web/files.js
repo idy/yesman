@@ -365,9 +365,11 @@ export function createFiles(host) {
     document.documentElement.dataset.files = p ? (wide && p.active ? 'wide' : 'open') : 'closed';
     if (!p) {
       watch(null);
+      closeMenu();
       return;
     }
     watch(p.name);
+    closeMenu();
     if (!p.dirs.has('.')) loadDir(p, '.');
     const keep = scrolls();
     aside.toggleAttribute('data-has-file', Boolean(p.active));
@@ -458,7 +460,7 @@ export function createFiles(host) {
     const tabs = p.tabs.map((t) => h('div', { class: 'files-tab', role: 'tab', 'aria-selected': String(t.path === p.active), 'data-pinned': t.pinned ? 'true' : null, 'data-dirty': t.dirty ? 'true' : null, title: t.dirty ? `${t.path} (not saved)` : t.path },
       h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = t.path; if (!p.views.has(t.path)) loadView(p, t.path); render(); }, ondblclick: () => { t.pinned = true; render(); } }, baseOf(t.path)),
       iconButton('x', `Close ${baseOf(t.path)}`, () => closeTab(p, t.path))));
-    return h('div', { class: 'files-head' },
+    return h('div', { class: 'files-head drag' },
       tabs.length ? h('div', { class: 'files-tabs', role: 'tablist', 'aria-label': 'Open files' }, tabs) : h('strong', { class: 'files-title' }, 'Files'),
       h('div', { class: 'files-head-actions' },
         p.active ? iconButton(wide ? 'restore' : 'expand', wide ? 'Show the conversation again' : 'Widen the preview', () => { wide = !wide; render(); }) : null,
@@ -475,12 +477,130 @@ export function createFiles(host) {
     const isMarkdown = p.active && languageOf(p.active) === 'markdown';
     const mode = p.mode.get(p.active) ?? 'preview';
     return h('div', { class: 'files-bar' },
-      h('span', { class: 'files-crumb', title: p.active ? absOf(p, p.active) : p.path }, p.active ?? p.name),
+      crumbs(p),
       h('div', { class: 'files-bar-actions' },
         isMarkdown ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: () => { p.mode.set(p.active, mode === 'preview' ? 'source' : 'preview'); render(); } }, mode === 'preview' ? 'Source' : 'Preview') : null,
         iconButton('collapse', 'Collapse all folders', () => { p.expanded.clear(); renderTree(); }, { disabled: !p.expanded.size }),
         p.active ? iconButton('tree', prefs.tree ? 'Hide the file tree' : 'Show the file tree', toggleTree, { 'aria-pressed': String(prefs.tree) }) : null,
         iconButton('more', 'More', (e) => more(e, p))));
+  }
+
+  // ---------- Path ----------
+
+  // crumbs shows where the file is, a segment per folder: each opens a
+  // menu of its folder, and the file's own segment one of the folder it is in.
+  function crumbs(p) {
+    const parts = p.active ? p.active.split('/') : [];
+    const nav = h('nav', { class: 'files-crumbs', 'aria-label': 'Path', title: p.active ? absOf(p, p.active) : p.path });
+    if (!parts.length) {
+      nav.append(h('button', { class: 'files-crumb', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (e) => folderMenu(e.currentTarget, p, '.', null) }, p.name));
+      return nav;
+    }
+    parts.forEach((part, i) => {
+      if (i) nav.append(h('span', { class: 'files-crumb-sep', 'aria-hidden': 'true' }, '/'));
+      const last = i === parts.length - 1;
+      const dir = last ? parentOf(p.active) : parts.slice(0, i + 1).join('/');
+      nav.append(h('button', {
+        class: 'files-crumb', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-current': last ? 'page' : null,
+        onclick: (e) => folderMenu(e.currentTarget, p, dir, last ? p.active : null),
+      }, part));
+    });
+    return nav;
+  }
+
+  let menu = null; // the open folder menu: { el, anchor, close }
+
+  function closeMenu(refocus = false) {
+    if (!menu) return;
+    const { el, anchor, off } = menu;
+    menu = null;
+    off();
+    el.remove();
+    anchor.setAttribute('aria-expanded', 'false');
+    if (refocus && anchor.isConnected) anchor.focus();
+  }
+
+  // folderMenu lists dir under anchor. Folders open in it, a level down;
+  // files open in a tab. current is marked.
+  async function folderMenu(anchor, p, dir, current) {
+    const again = menu?.anchor === anchor;
+    closeMenu();
+    if (again) return; // a second click closes it
+    // The menu takes focus itself while it has no item to focus: loading,
+    // failed or empty, so that its keys still work.
+    const el = h('div', { class: 'files-menu', role: 'menu', tabindex: '-1', 'aria-label': dir === '.' ? p.name : dir });
+    const away = (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) closeMenu(); };
+    const resize = () => closeMenu();
+    document.addEventListener('pointerdown', away, true);
+    window.addEventListener('resize', resize);
+    menu = { el, anchor, off: () => { document.removeEventListener('pointerdown', away, true); window.removeEventListener('resize', resize); } };
+    anchor.setAttribute('aria-expanded', 'true');
+    document.body.append(el);
+    const place = () => {
+      const r = anchor.getBoundingClientRect();
+      el.style.left = `${Math.round(Math.min(r.left - 4, window.innerWidth - el.offsetWidth - 8))}px`;
+      el.style.top = `${Math.round(r.bottom + 4)}px`;
+    };
+    let at = dir;
+    let showing = 0; // the newest listing: an older one that answers late is dropped
+    const show = async (folder, mark) => {
+      const seq = ++showing;
+      at = folder;
+      el.setAttribute('aria-label', folder === '.' ? p.name : folder);
+      let entries = p.dirs.get(folder);
+      if (!Array.isArray(entries)) {
+        el.replaceChildren(h('p', { class: 'files-menu-note' }, 'Loading…'));
+        place();
+        el.focus({ preventScroll: true });
+        try {
+          entries = await host.call('ListFiles', p.name, folder);
+          p.dirs.set(folder, entries);
+        } catch (err) {
+          if (menu?.el !== el || seq !== showing) return;
+          el.replaceChildren(h('p', { class: 'files-menu-note danger' }, err?.message || String(err)));
+          el.focus({ preventScroll: true });
+          return;
+        }
+        if (menu?.el !== el || seq !== showing) return;
+      }
+      const items = [];
+      if (folder !== '.' && folder !== dir) {
+        items.push(h('button', { class: 'files-menu-item files-menu-up', type: 'button', role: 'menuitem', onclick: () => show(parentOf(folder), folder) },
+          icon('chevron', 'mds-icon files-menu-back'), h('span', null, parentOf(folder) === '.' ? p.name : baseOf(parentOf(folder)))));
+      }
+      for (const e of entries.slice(0, 500)) {
+        items.push(h('button', {
+          // The folder it came up from, or the file open, is marked.
+          class: 'files-menu-item', type: 'button', role: 'menuitem', 'data-path': e.path, 'aria-current': e.path === (mark ?? p.active) ? 'true' : null,
+          onclick: () => {
+            if (e.dir) { show(e.path, null); return; }
+            closeMenu();
+            open(e.path, true);
+          },
+        }, e.dir ? icon('chevron', 'mds-icon files-menu-chevron') : icon(fileIcon(e.path), 'mds-icon files-menu-icon'), h('span', null, e.name)));
+      }
+      if (!entries.length) items.push(h('p', { class: 'files-menu-note' }, 'This folder is empty.'));
+      if (entries.length > 500) items.push(h('p', { class: 'files-menu-note' }, `${(entries.length - 500).toLocaleString()} more. Go to a file to find them.`));
+      el.replaceChildren(...items);
+      place();
+      const focus = el.querySelector('[aria-current="true"]') ?? el.querySelector('.files-menu-item') ?? el;
+      focus.focus({ preventScroll: true });
+      if (focus !== el) focus.scrollIntoView({ block: 'nearest' });
+    };
+    el.addEventListener('keydown', (e) => {
+      const items = [...el.querySelectorAll('.files-menu-item')];
+      const i = items.indexOf(document.activeElement);
+      const go = (n) => { e.preventDefault(); items[(n + items.length) % items.length]?.focus(); };
+      if (e.key === 'ArrowDown') go(i + 1);
+      else if (e.key === 'ArrowUp') go(i - 1);
+      else if (e.key === 'Home') go(0);
+      else if (e.key === 'End') go(items.length - 1);
+      else if (e.key === 'Escape') { e.preventDefault(); closeMenu(true); }
+      else if (e.key === 'Tab') closeMenu();
+      else if (e.key === 'ArrowRight' && document.activeElement?.querySelector('.files-menu-chevron')) { e.preventDefault(); document.activeElement.click(); }
+      else if (e.key === 'ArrowLeft' && at !== dir && at !== '.') { e.preventDefault(); show(parentOf(at), at); }
+    });
+    await show(dir, current);
   }
 
   async function more(e, p) {
