@@ -25,6 +25,13 @@ export function icon(name, cls = 'mds-icon') {
   const svg = document.createElementNS(SVG, 'svg');
   svg.setAttribute('class', cls);
   svg.setAttribute('aria-hidden', 'true');
+  if (name === 'enter') {
+    svg.setAttribute('viewBox', '0 0 24 24');
+    const path = document.createElementNS(SVG, 'path');
+    for (const [key, value] of Object.entries({ d: 'M20 5v6a3 3 0 0 1-3 3H4m5-5-5 5 5 5', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.7, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })) path.setAttribute(key, value);
+    svg.append(path);
+    return svg;
+  }
   const paths = {
     send: 'M205.66 117.66a8 8 0 0 1-11.32 0L136 59.31V216a8 8 0 0 1-16 0V59.31l-58.34 58.35a8 8 0 0 1-11.32-11.32l72-72a8 8 0 0 1 11.32 0l72 72a8 8 0 0 1 0 11.32Z',
     stop: 'M200 56v144a16 16 0 0 1-16 16H72a16 16 0 0 1-16-16V56a16 16 0 0 1 16-16h112a16 16 0 0 1 16 16Z',
