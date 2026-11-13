@@ -27,7 +27,7 @@
     <main class="main">
       <div class="body" id="body"></div>
     </main>
-    <aside class="info" id="info" hidden></aside>
+    <aside class="files" id="info" aria-label="Files" hidden></aside>
   </div>
 
   <dialog class="mds-dialog" id="hire-dialog">
@@ -43,6 +43,26 @@
       <div class="mds-dialog-actions">
         <button class="mds-button" value="cancel" formnovalidate>Cancel</button>
         <button class="mds-button mds-button--primary" value="hire">Hire</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="mds-dialog" id="checkout-dialog">
+    <form method="dialog" id="checkout-form">
+      <h2 class="mds-heading">Check out a repository</h2>
+      <p class="dialog-hint">A worktree of a pool repository in this yesman's workspace, on a branch of its own. The agents can also check out what they need.</p>
+      <label class="field">
+        <span>Repository</span>
+        <select class="mds-select" name="repo" required></select>
+      </label>
+      <label class="field">
+        <span>Branch <span class="mds-optional">optional</span></span>
+        <input class="mds-input mds-mono" name="branch" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="dialog-hint">An existing branch continues; a new one starts from the default branch. Empty makes a new branch.</p>
+      <div class="mds-dialog-actions">
+        <button class="mds-button" value="cancel" formnovalidate>Cancel</button>
+        <button class="mds-button mds-button--primary" value="checkout">Check out</button>
       </div>
     </form>
   </dialog>
