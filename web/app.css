@@ -29,13 +29,13 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .drag button, .drag a, .drag input, .drag select { --app-region: no-drag; }
 
 .app { display: grid; grid-template-columns: var(--side-width) minmax(0, 1fr) auto; grid-template-rows: var(--titlebar) minmax(0, 1fr); height: 100vh; }
-.app[data-sidebar="hidden"] { grid-template-columns: 0 minmax(0, 1fr) auto; }
-.app[data-sidebar="hidden"] .side { display: none; }
+:root[data-sidebar="hidden"] .app { grid-template-columns: 0 minmax(0, 1fr) auto; }
+:root[data-sidebar="hidden"] .app .side { display: none; }
 
 /* Titlebar, as Magpie's: the brand over the sidebar, then where you are and
    what you can do. It clears the window controls MyGo reports. */
 .titlebar { grid-column: 1 / -1; grid-row: 1; display: grid; grid-template-columns: var(--side-width) minmax(0, 1fr); min-width: 0; line-height: 1.25; user-select: none; -webkit-user-select: none; cursor: default; }
-.app[data-sidebar="hidden"] .titlebar { grid-template-columns: auto minmax(0, 1fr); }
+:root[data-sidebar="hidden"] .app .titlebar { grid-template-columns: auto minmax(0, 1fr); }
 .titlebar-brand { gap: 6px; padding-left: calc(var(--mygo-titlebar-inset-left, 0px) + 8px); padding-right: 16px; }
 .titlebar-brand .mds-brand-mark { color: var(--mds-ink-strong); margin-left: 2px; }
 .titlebar-brand .mds-brand-mark svg { width: 20px; height: 20px; }

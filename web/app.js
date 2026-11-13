@@ -86,7 +86,7 @@ const state = {
   fetching: new Set(), // repositories being fetched
   addRepo: null, // the add form's draft while it is open
   update: null, // Yesman.Update: where updating yesman stands
-  sidebar: localStorage.getItem('yesman.sidebar') !== 'hidden',
+  sidebar: document.documentElement.dataset.sidebar !== 'hidden', // set by boot.js
 };
 
 const agentById = (id) => state.snap.agents.find((a) => a.id === id);
@@ -635,7 +635,7 @@ function onUpdate(u) {
 // ---------- Sidebar ----------
 
 function applySidebar() {
-  $('#app').dataset.sidebar = state.sidebar ? 'shown' : 'hidden';
+  document.documentElement.dataset.sidebar = state.sidebar ? 'shown' : 'hidden'; // boot.js set it first
   const toggle = $('#sidebar-button');
   const label = state.sidebar ? 'Hide the sidebar' : 'Show the sidebar';
   toggle.setAttribute('aria-expanded', String(state.sidebar));
@@ -899,15 +899,16 @@ function updateStatus() {
   const action = (label, onclick) => h('button', { class: 'mds-button mds-button--small', type: 'button', onclick }, label);
   const check = () => call('CheckForUpdates').catch(fail);
   switch (u.state) {
-    case 'checking': return faint('Checking…');
     case 'available': return h('span', { class: 'about-update' }, h('span', null, `yesman ${u.version} is available`), action('Install', installUpdate));
     case 'downloading': return faint(`Installing ${u.version}, ${Math.round((u.progress ?? 0) * 100)}%`);
     case 'ready': return h('span', { class: 'about-update' }, h('span', null, `${u.version} is installed`), action('Restart', restartToUpdate));
     case 'failed': return h('span', { class: 'about-update' }, h('span', { class: 'danger' }, `Installing ${u.version} failed: ${u.error}`), action('Try again', installUpdate));
     default:
       return h('span', { class: 'about-update' },
-        u.error ? h('span', { class: 'danger' }, `The last check failed: ${u.error}`) : h('span', null, u.checkedAt ? `Up to date, ${ago(u.checkedAt, 'checked')}` : 'Not checked yet'),
-        action('Check now', check));
+        u.checking ? faint('Checking…')
+          : u.checkError ? h('span', { class: 'danger' }, `The last check failed: ${u.checkError}`)
+          : h('span', null, u.checkedAt ? `Up to date, ${ago(u.checkedAt, 'checked')}` : 'Not checked yet'),
+        u.checking ? null : action('Check now', check));
   }
 }
 
