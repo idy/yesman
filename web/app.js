@@ -32,6 +32,7 @@ const state = {
   repos: [],
   settingsPage: 'general',
   settings: null, // Yesman.Settings, for the General page
+  storageDraft: null, // destination and inline feedback while changing folders
   about: null, // Yesman.About
   repoQuery: '',
   fetching: new Set(), // repositories being fetched
@@ -815,14 +816,85 @@ function renderGeneral(inner) {
   inner.append(
     settingsSection('Appearance', null,
       preferenceRow('Theme', h('p', null, 'The window and its menus follow this.'), appearance)),
-    settingsSection('Storage', 'Everything yesman keeps is in one folder. Start yesman with YESMAN_HOME set to keep it somewhere else.',
-      preferenceRow('yesman folder', h('p', { class: 'path' }, v.home), revealButton(v.home)),
+    settingsSection('Storage', 'Repositories, workspaces, conversations and settings move together.',
+      ...storageRows(v),
       preferenceRow('Archive', h('p', null, 'Workspaces of dismissed yesmen, with their worktrees. ', h('span', { class: 'path' }, v.archive)), revealButton(v.archive))),
     settingsSection('Agents', null,
       preferenceRow('pi',
         v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null, 'Every lead and worker runs this pi. Set YESMAN_PI to use another. ', h('span', { class: 'path' }, v.pi)),
         h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : 'idle' }, h('i', { class: 'mds-dot' }), h('span', null, v.piError ? 'Not found' : 'Found')))),
   );
+}
+
+function storageRows(v) {
+  const d = state.storageDraft;
+  const change = h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: v.homeOverride || Boolean(d), onclick: () => {
+    state.storageDraft = { path: '', error: '', busy: false };
+    renderBody();
+    $('#storage-path')?.focus();
+  } }, 'Change…');
+  const rows = [preferenceRow('yesman folder',
+    h('div', null, h('p', { class: 'path' }, v.home),
+      v.homeOverride ? h('p', null, 'Set by YESMAN_HOME. Unset it and restart to change the folder here.') : null),
+    h('div', { class: 'storage-actions' }, revealButton(v.home), change))];
+  if (v.storageError) rows.push(h('div', { class: 'storage-message danger', role: 'alert' }, v.storageError));
+  if (d) {
+    const input = h('input', { class: 'mds-input', id: 'storage-path', required: true, value: d.path,
+      placeholder: 'Full path to a new or empty folder', autocomplete: 'off', spellcheck: 'false',
+      disabled: d.busy, 'aria-describedby': 'storage-hint storage-error', 'aria-invalid': d.error ? 'true' : null,
+      oninput: (e) => { d.path = e.currentTarget.value; } });
+    const browse = h('button', { class: 'mds-button', type: 'button', disabled: d.busy, onclick: async () => {
+      browse.disabled = true;
+      try {
+        const path = await call('ChooseStorageFolder');
+        if (path) { d.path = path; d.error = ''; }
+      } catch (err) { d.error = errorText(err); }
+      finally {
+        if (state.view.kind === 'settings' && state.view.page === 'general' && state.storageDraft === d) {
+          renderBody();
+          $('#storage-path')?.focus();
+        }
+      }
+    } }, icon('folder'), 'Browse…');
+    rows.push(h('form', { class: 'storage-edit', 'aria-busy': String(d.busy), onsubmit: (e) => { e.preventDefault(); moveStorage(d); } },
+      h('label', { class: 'field', for: 'storage-path' }, 'New yesman folder'),
+      h('div', { class: 'storage-input' }, input, browse),
+      h('p', { class: 'mds-hint', id: 'storage-hint' }, 'yesman restarts to move your data. The old folder stays as a backup. Large folders may take a while to move.'),
+      h('p', { class: 'danger', id: 'storage-error', role: 'alert', hidden: !d.error }, d.error),
+      h('div', { class: 'storage-actions' },
+        h('button', { class: 'mds-button', type: 'button', disabled: d.busy, onclick: () => {
+          state.storageDraft = null; renderBody();
+          $('.storage-actions button:last-child')?.focus();
+        } }, 'Cancel'),
+        h('button', { class: 'mds-button mds-button--primary', type: 'submit', disabled: d.busy }, d.busy ? 'Restarting…' : 'Move and restart'))));
+  }
+  if (v.previousHome) rows.push(preferenceRow('Previous folder',
+    h('p', null, 'Your backup from the last move. You can remove it after checking the new folder. ', h('span', { class: 'path' }, v.previousHome)),
+    revealButton(v.previousHome)));
+  return rows;
+}
+
+async function moveStorage(d) {
+  if (d.busy) return;
+  d.busy = true;
+  d.error = '';
+  renderBody();
+  try {
+    const destination = await call('CheckStorageFolder', d.path.trim());
+    const active = state.snap.agents.filter((a) => ['working', 'starting', 'waiting'].includes(a.status)).length;
+    const agents = active ? ` ${active === 1 ? 'The active agent stops' : `${active} active agents stop`}; their sessions resume when you next talk to them.` : '';
+    if (!(await confirmAction('Move your yesman folder?', `Move all data to ${destination} and restart yesman.${agents} The old folder stays as a backup.`, 'Move and restart'))) return;
+    if (!(await files.saveBeforeRestart())) throw new Error('Some file changes could not be saved. Resolve them in the files pane before moving.');
+    await call('MoveStorage', destination);
+  } catch (err) {
+    d.error = errorText(err);
+  } finally {
+    d.busy = false;
+    if (state.view.kind === 'settings' && state.view.page === 'general') {
+      renderBody();
+      if (d.error) $('#storage-path')?.focus();
+    }
+  }
 }
 
 // What About says of updates, with the one action that fits.

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -18,7 +19,6 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
-	"github.com/idy/yesman/internal/home"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/server"
 	"github.com/idy/yesman/internal/yesmen"
@@ -37,7 +37,7 @@ func main() {
 	}
 	importLoginPath()
 
-	h, err := home.Default()
+	h, storage, err := openStorage(context.Background())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	a := &app{home: h, pool: pool.New(h.Repos()), yesmen: yesmen.New(h.Yesmen(), h.Archive())}
+	a := &app{home: h, storage: storage, pool: pool.New(h.Repos()), yesmen: yesmen.New(h.Yesmen(), h.Archive())}
 	a.pi, a.piErr = findPi()
 	a.settings = loadSettings(h.Settings())
 	a.updates = newUpdates()

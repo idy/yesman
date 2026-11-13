@@ -77,13 +77,16 @@ func (s Settings) save(path string) error {
 
 // SettingsView is what the General settings page shows.
 type SettingsView struct {
-	Appearance mygo.ThemeSource `json:"appearance"`
-	Home       string           `json:"home"`
-	Pool       string           `json:"pool"`
-	Yesmen     string           `json:"yesmen"`
-	Archive    string           `json:"archive"`
-	Pi         string           `json:"pi"`
-	PiError    string           `json:"piError,omitempty"`
+	Appearance   mygo.ThemeSource `json:"appearance"`
+	Home         string           `json:"home"`
+	Pool         string           `json:"pool"`
+	Yesmen       string           `json:"yesmen"`
+	Archive      string           `json:"archive"`
+	Pi           string           `json:"pi"`
+	PiError      string           `json:"piError,omitempty"`
+	HomeOverride bool             `json:"homeOverride,omitempty"`
+	StorageError string           `json:"storageError,omitempty"`
+	PreviousHome string           `json:"previousHome,omitempty"`
 }
 
 // Settings returns the user's choices and where yesman keeps its data.
@@ -105,6 +108,13 @@ func (s *service) Settings() SettingsView {
 	}
 	if a.piErr != nil {
 		v.PiError = a.piErr.Error()
+	}
+	if a.storage != nil {
+		a.storage.mu.Lock()
+		v.HomeOverride = a.storage.override
+		v.StorageError = a.storage.config.Error
+		v.PreviousHome = a.storage.config.Previous
+		a.storage.mu.Unlock()
 	}
 	return v
 }

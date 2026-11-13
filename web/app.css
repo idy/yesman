@@ -180,6 +180,12 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .settings-section .mds-section-heading { margin-bottom: 10px; }
 .settings-section .mds-section-heading h2 { font-size: var(--mds-text-body); }
 .row-end { display: flex; justify-content: flex-end; }
+.storage-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.storage-edit { display: grid; gap: 8px; padding: 16px; border-top: 1px solid var(--mds-line); }
+.storage-edit p { margin: 0; font-size: var(--mds-text-note); }
+.storage-input { display: flex; gap: 8px; }
+.storage-input .mds-input { flex: 1; min-width: 0; }
+.storage-message { padding: 12px 16px; border-top: 1px solid var(--mds-line); font-size: var(--mds-text-note); overflow-wrap: anywhere; }
 .mds-row-label .path { display: block; margin-top: 2px; }
 .about-row { align-items: center; }
 .about-row .mds-row-label { padding-top: 0; }

@@ -28,6 +28,8 @@ The files pane, opened from the titlebar, shows the workspace of the yesman you 
 
 Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool), and About (the versions yesman runs with, and updates).
 
+In General → Storage, **Change…** lets you enter or browse to a new or empty folder, then **Move and restart** relocates your data. Agents stop before the move; repositories, active and archived workspaces, conversations, knowledge and settings are copied together, with Git worktree links repaired. The old folder stays as a backup you can remove after checking the new one. If copying fails, yesman keeps using the old folder and shows the error in Storage. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice and disables moving from Settings.
+
 Release builds update themselves through MyGo's updater: they check GitHub releases of `idy/yesman` at launch and every 6 hours, and download and install a newer version in the background. The titlebar then offers to restart into it, and the next launch runs it anyway. Only release builds, made with `mygo build` and signed, do that; development builds (`go run`, `go build`) never check.
 
 ## Requirements
@@ -46,7 +48,7 @@ go run .
 
 | Variable | Effect |
 | --- | --- |
-| `YESMAN_HOME` | Data directory, default `~/yesman` |
+| `YESMAN_HOME` | Override the data directory; otherwise use the folder chosen in Settings, default `~/yesman` |
 | `YESMAN_PI` | The pi executable, default `pi` from the `PATH` (the app adds your login shell's `PATH`) |
 | `YESMAN_WEB_DIR` | Serve the page from this directory instead of the embedded copy, to edit it without rebuilding |
 | `YESMAN_HIDDEN` | Start in the tray without opening the window |
@@ -91,7 +93,7 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | Path | Contents |
 | --- | --- |
 | `main.go`, `app.go`, `service.go` | App startup, tray, window and notifications; the methods the page calls |
-| `settings.go` | The settings file and the Settings and About pages' methods |
+| `settings.go`, `storage.go`, `internal/home/` | Settings and About, the remembered data location, and data relocation |
 | `update.go` | Checking for and installing new versions |
 | `files.go`, `files_menu.go` | Listing, reading, finding and watching a workspace's files, and the files pane's menus |
 | `web/files.js`, `web/editor.js`, `web/code.js` | The files pane, its editor, and the language of each file |
