@@ -1242,14 +1242,16 @@ function renderConfig(inner) {
   const action = (label, onclick) => h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: c.busy, onclick }, label);
   const e = c.exported;
   const exportHint = e
-    ? h('p', null, tNodes('Exported {repos} and the settings to {path}.', { repos: repositories(e.repos), path: h('span', { class: 'path', title: e.path }, e.path) }),
-        e.skipped.length ? [' ', t('Left out, as they are not from GitHub: {names}.', { names: e.skipped.join(', ') })] : null)
-    : h('p', null, t('The theme, the fetch schedule and every GitHub repository in the pool, as a TOML file.'));
+    ? h('div', null,
+        h('p', null, tNodes('Exported {repos} and the settings to {path}.', { repos: repositories(e.repos), path: h('span', { class: 'path', title: e.path }, e.path) }),
+          e.skipped.length ? [' ', t('Left out, as they are not from GitHub: {names}.', { names: e.skipped.join(', ') })] : null),
+        h('p', null, exportedEnv(e)))
+    : h('p', null, t('The theme, the fetch schedule, every GitHub repository in the pool, the variables and the secrets with the password that opens them, as a TOML file. Keep it private.'));
   const i = c.imported;
   const importHint = i ? h('div', { class: 'config-imported' }, i.lines.map((line) => h('p', { class: line.danger ? 'danger' : null }, line.text)))
     : h('p', null, t('A file exported from yesman. You see what it changes, then merge it or replace with it.'));
   inner.append(
-    settingsSection(t('Configuration'), t('Back up yesman’s settings and repo pool, or carry them to another computer. Workspaces, their knowledge and conversations are not included.'),
+    settingsSection(t('Configuration'), t('Back up yesman’s settings, repo pool, variables and secrets, or carry them to another computer. Workspaces, their knowledge and conversations are not included.'),
       preferenceRow(t('Export'), exportHint, h('div', { class: 'storage-actions' }, e ? revealButton(e.path, t('the exported file')) : null, action(t('Export…'), exportConfig))),
       preferenceRow(t('Import'), importHint, action(t('Import…'), importConfig))));
 }
@@ -1267,6 +1269,17 @@ async function exportConfig() {
     c.busy = false;
     if (state.view.kind === 'settings' && state.view.page === 'config') renderBody();
   }
+}
+
+const variablesCount = (n) => tn(n, '{n} variable', '{n} variables');
+const secretsCount = (n) => tn(n, '{n} secret', '{n} secrets');
+
+// What an export says of the variables and secrets it carries.
+function exportedEnv(e) {
+  if (e.secrets == null) return t('It has {variables}, and no secrets, as none are set up.', { variables: variablesCount(e.variables) });
+  return e.password
+    ? t('It has {variables} and {secrets}, with the password that opens them: keep it private.', { variables: variablesCount(e.variables), secrets: secretsCount(e.secrets) })
+    : t('It has {variables} and {secrets}, but not their password, which the keychain does not keep: you need it to open them after importing.', { variables: variablesCount(e.variables), secrets: secretsCount(e.secrets) });
 }
 
 async function importConfig() {
@@ -1314,7 +1327,9 @@ function askImport(plan) {
   const settings = settingChanges(plan);
   const extra = plan.extra;
   const removable = extra.filter((r) => !r.inUse).length;
-  const replaceDiffers = removable > 0 || settings.some((s) => s.replaceOnly);
+  const env = plan.env;
+  const replaceDiffers = removable > 0 || settings.some((s) => s.replaceOnly)
+    || Boolean(env.variables?.extra.length) || Boolean(env.secrets?.plan?.extra.length);
   dialog.replaceChildren(h('form', { method: 'dialog' },
     h('h2', { class: 'mds-heading', id: 'import-title' }, t('Import {file}', { file: fileName(plan.path) })),
     h('p', { class: 'dialog-hint path', title: plan.path }, plan.path),
@@ -1333,14 +1348,45 @@ function askImport(plan) {
           h('span', { class: 'import-faint' }, ` · ${r.inUse ? t('kept: {reason}', { reason: r.inUse })
             : r.clone ? (r.clone === 'failed' ? t('failed to clone, stopped with Replace') : t('cloning, stopped with Replace'))
             : t('removed with Replace')}`))))) : null,
+      ...envParts(plan.env, part),
       plan.ignored.length ? h('p', { class: 'import-faint' }, t('Ignored, as this yesman does not know them: {keys}', { keys: plan.ignored.join(', ') })) : null),
     h('div', { class: 'mds-dialog-actions' },
       h('button', { class: 'mds-button', value: 'cancel' }, t('Cancel')),
-      replaceDiffers ? h('button', { class: 'mds-button', value: 'replace', title: t('Also reset the settings the file leaves out and remove the repositories it does not list') }, t('Replace')) : null,
-      h('button', { class: 'mds-button mds-button--primary', value: 'merge' }, t('Merge')))));
+      replaceDiffers && !env.replaceClash.length ? h('button', { class: 'mds-button', value: 'replace', title: t('Also reset the settings the file leaves out and remove the repositories, variables and secrets it does not list') }, t('Replace')) : null,
+      env.clash.length ? null : h('button', { class: 'mds-button mds-button--primary', value: 'merge' }, t('Merge')))));
   const answer = openDialog(dialog);
-  dialog.querySelector('.mds-button--primary').focus();
+  (dialog.querySelector('.mds-button--primary') ?? dialog.querySelector('.mds-button'))?.focus();
   return answer;
+}
+
+// envParts say what importing does to the variables and secrets, a part
+// for each the file has.
+function envParts(env, part) {
+  const names = (list) => h('span', { class: 'import-names mds-mono' }, list.join(', '));
+  const changes = (p) => [
+    p.add.length ? h('p', null, tNodes('Adds {names}', { names: names(p.add) })) : null,
+    p.change.length ? h('p', null, tNodes('Changes {names}', { names: names(p.change) })) : null,
+    p.extra.length ? h('p', null, tNodes('Only here: {names}. Merge keeps them; Replace removes them.', { names: names(p.extra) })) : null,
+    !p.add.length && !p.change.length && !p.extra.length ? h('p', null, t('Unchanged.')) : null,
+  ];
+  const parts = [];
+  if (env.variables) parts.push(part(t('Variables'), changes(env.variables)));
+  const s = env.secrets;
+  if (s) {
+    parts.push(part(t('Secrets'),
+      s.skipped ? h('p', { class: 'danger' }, t('Left out: {reason}.', { reason: s.skipped }))
+        : s.restore ? h('p', null, s.password
+          ? t('Sets up {secrets} from the file, and keeps their password in the keychain.', { secrets: secretsCount(s.names.length) })
+          : t('Sets up {secrets} from the file, locked: the file has no password, so enter it in Settings › Secrets.', { secrets: secretsCount(s.names.length) }))
+          : changes(s.plan)));
+  }
+  const clash = env.clash.length ? env.clash : env.replaceClash;
+  if (clash.length) {
+    parts.push(h('p', { class: 'danger' }, env.clash.length
+      ? t('Variables and secrets would both set {names}. Rename one, then import again.', { names: clash.join(', ') })
+      : t('Replace would have variables and secrets both set {names}, so only Merge is offered.', { names: clash.join(', ') })));
+  }
+  return parts;
 }
 
 // What an import did, in lines for the Import row.
@@ -1350,9 +1396,14 @@ function importLines(plan, result) {
   if (result.cloning.length) parts.push(tn(result.cloning.length, '1 repository cloning', '{n} repositories cloning'));
   if (result.removed.length) parts.push(t('{n} removed', { n: result.removed.length }));
   if (result.stopped.length) parts.push(tn(result.stopped.length, '1 clone stopped', '{n} clones stopped'));
+  if (result.env.variables != null) parts.push(t('{variables} now', { variables: variablesCount(result.env.variables) }));
+  if (result.env.secrets != null) parts.push(result.env.restored
+    ? (result.env.locked ? t('{secrets} set up, locked', { secrets: secretsCount(result.env.secrets) }) : t('{secrets} set up', { secrets: secretsCount(result.env.secrets) }))
+    : t('{secrets} now', { secrets: secretsCount(result.env.secrets) }));
   const changes = { file: fileName(plan.path), changes: parts.length ? parts.join(' · ') : t('nothing to change') };
   const lines = [{ text: result.mode === 'replace' ? t('Replaced with {file}: {changes}.', changes) : t('Merged {file}: {changes}.', changes) }];
   for (const r of result.kept) lines.push({ text: t('Kept {name}: {reason}.', { name: r.label, reason: r.inUse }), danger: Boolean(r.failed) });
+  if (result.env.skipped) lines.push({ text: t('Secrets left out: {reason}.', { reason: result.env.skipped }), danger: true });
   return lines;
 }
 

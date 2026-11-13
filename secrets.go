@@ -3,8 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -16,11 +16,9 @@ import (
 
 // Settings › Secrets and Settings › Variables edit the environment
 // variables every agent's commands get, as a form or as YAML: secrets in a
-// sops file that a password opens, variables in a plain YAML file. Each
-// can be exported and imported, the secrets sealed with a password.
-
-// envLimit bounds a file to import.
-const envLimit = 1 << 20
+// sops file that a password opens, kept in the credential store
+// (keychain.go), and variables in a plain YAML file. The configuration
+// file of Settings › Import and export backs both up (configenv.go).
 
 // trError says a mistake the secrets package reports in the language
 // yesman shows, keeping what wraps it, such as the file's name.
@@ -42,12 +40,21 @@ type SecretsView struct {
 	Error      string          `json:"error,omitempty"`
 	File       string          `json:"file"`
 	KeyFile    string          `json:"keyFile"`
+	// Keychain says the system has a credential store, which keeps the
+	// password; Stored, that it keeps this vault's.
+	Keychain bool `json:"keychain"`
+	Stored   bool `json:"stored"`
 }
 
 func (a *app) secretsView() SecretsView {
 	v := SecretsView{
 		Configured: a.vault.Configured(), Unlocked: a.vault.Unlocked(),
 		Names: []string{}, Entries: []secrets.Entry{}, File: a.vault.File(), KeyFile: a.vault.KeyFile(),
+		Keychain: a.hasKeychain(),
+	}
+	if v.Configured && v.Keychain {
+		password, _ := a.storedPassword()
+		v.Stored = password != ""
 	}
 	if names, err := a.vault.Names(); err != nil {
 		v.Error = trError(err).Error()
@@ -146,21 +153,43 @@ func (a *app) save(kind secrets.Kind, entries []secrets.Entry) error {
 // Secrets returns what Settings › Secrets shows.
 func (s *service) Secrets() SecretsView { return s.app.secretsView() }
 
-// SetUpSecrets sets the password and an empty secrets file, unlocked.
+// SetUpSecrets sets up an empty secrets file, unlocked: with a random
+// password the keychain keeps, or, given one, with that.
 func (s *service) SetUpSecrets(password string) (SecretsView, error) {
-	if err := s.app.vault.Create(password); err != nil {
-		return SecretsView{}, trError(err)
+	if err := s.app.setUpSecrets(password); err != nil {
+		return SecretsView{}, err
 	}
 	return s.app.secretsView(), nil
 }
 
-// UnlockSecrets opens the secrets with their password, until LockSecrets
-// or the app quits.
+// UnlockSecrets opens the secrets until LockSecrets or the app quits: with
+// the password the keychain keeps, or with one typed, which the keychain
+// then keeps.
 func (s *service) UnlockSecrets(password string) (SecretsView, error) {
-	if err := s.app.vault.Unlock(password); err != nil {
+	a := s.app
+	if password == "" {
+		if !a.unlockFromKeychain() {
+			return SecretsView{}, errors.New(tr("the keychain has no password for these secrets: enter it"))
+		}
+		return a.secretsView(), nil
+	}
+	if err := a.vault.Unlock(password); err != nil {
 		return SecretsView{}, trError(err)
 	}
-	return s.app.secretsView(), nil
+	if err := a.keepPassword(password); err != nil {
+		log.Print("secrets: keeping the password in the keychain: ", err)
+	}
+	return a.secretsView(), nil
+}
+
+// CopySecretsPassword puts the password the keychain keeps on the
+// clipboard.
+func (s *service) CopySecretsPassword() error {
+	password, _ := s.app.storedPassword()
+	if password == "" {
+		return errors.New(tr("the keychain has no password for these secrets"))
+	}
+	return mygo.Clipboard.Write(transfer.TextData(password))
 }
 
 // LockSecrets forgets the key: commands get no secrets until unlocked again.
@@ -169,9 +198,16 @@ func (s *service) LockSecrets() SecretsView {
 	return s.app.secretsView()
 }
 
-// ChangeSecretsPassword keeps the key with a new password.
+// ChangeSecretsPassword keeps the key with a new password, in the
+// keychain too.
 func (s *service) ChangeSecretsPassword(old, password string) error {
-	return trError(s.app.vault.ChangePassword(old, password))
+	if err := s.app.vault.ChangePassword(old, password); err != nil {
+		return trError(err)
+	}
+	if s.app.vault.Unlocked() {
+		return s.app.keepPassword(password)
+	}
+	return nil
 }
 
 // SaveSecrets replaces the secrets with those of the form.
@@ -236,165 +272,4 @@ func (s *service) ParseEntries(kind, text string) ([]secrets.Entry, error) {
 // CopyValue puts a secret's or variable's value on the clipboard.
 func (s *service) CopyValue(value string) error {
 	return mygo.Clipboard.Write(transfer.TextData(value))
-}
-
-// ---------- Export and import ----------
-
-// EnvExport says what an export wrote; no path when the dialog was
-// cancelled.
-type EnvExport struct {
-	Path  string `json:"path"`
-	Count int    `json:"count"`
-}
-
-func (s *service) saveAs(title, name string, filters []mygo.FileFilter, data []byte) (string, error) {
-	dir, _ := os.UserHomeDir()
-	path, err := configSaveDialog(mygo.SaveDialogOptions{
-		Parent: s.app.window(), Title: title, ButtonLabel: tr("Export"),
-		DefaultPath: filepath.Join(dir, name), Filters: filters, CreateDirectories: true,
-	})
-	if err != nil || path == "" {
-		return "", err
-	}
-	return path, writePrivate(path, data)
-}
-
-// ExportSecrets saves the secrets as YAML: sealed with a password, which
-// `age -d` also opens, or, with no password, in plain text.
-func (s *service) ExportSecrets(password string) (EnvExport, error) {
-	entries, err := s.app.vault.Entries()
-	if err != nil {
-		return EnvExport{}, trError(err)
-	}
-	data := secrets.Format(secrets.KindSecrets, entries)
-	name, filters := "yesman-secrets.yaml", []mygo.FileFilter{{Name: tr("YAML"), Extensions: []string{"yaml", "yml"}}}
-	if password != "" {
-		if data, err = secrets.Seal(data, password, 0); err != nil {
-			return EnvExport{}, trError(err)
-		}
-		name, filters = "yesman-secrets.yaml.age", []mygo.FileFilter{{Name: tr("Encrypted with age"), Extensions: []string{"age"}}}
-	}
-	path, err := s.saveAs(tr("Export secrets"), name, filters, data)
-	return EnvExport{Path: path, Count: len(entries)}, err
-}
-
-// ExportSecretsKey saves the age key that opens the secrets file, for
-// sops (SOPS_AGE_KEY_FILE). Anyone with it reads the secrets.
-func (s *service) ExportSecretsKey() (EnvExport, error) {
-	key, err := s.app.vault.Key()
-	if err != nil {
-		return EnvExport{}, trError(err)
-	}
-	path, err := s.saveAs(tr("Export the secrets key"), "yesman-age-key.txt",
-		[]mygo.FileFilter{{Name: tr("Text"), Extensions: []string{"txt"}}}, []byte(key))
-	return EnvExport{Path: path, Count: 1}, err
-}
-
-// ExportVariables saves the variables as YAML.
-func (s *service) ExportVariables() (EnvExport, error) {
-	entries, err := s.app.variables.Entries()
-	if err != nil {
-		return EnvExport{}, trError(err)
-	}
-	path, err := s.saveAs(tr("Export variables"), "yesman-variables.yaml",
-		[]mygo.FileFilter{{Name: tr("YAML"), Extensions: []string{"yaml", "yml"}}}, secrets.Format(secrets.KindVariables, entries))
-	return EnvExport{Path: path, Count: len(entries)}, err
-}
-
-// EnvFile is a file chosen to import; no path when the dialog was
-// cancelled.
-type EnvFile struct {
-	Path      string `json:"path"`
-	Encrypted bool   `json:"encrypted"` // it needs its password
-}
-
-// ChooseEnvFile asks for a file of secrets or variables to import.
-func (s *service) ChooseEnvFile(kind string) (EnvFile, error) {
-	k, err := kindOf(kind)
-	if err != nil {
-		return EnvFile{}, err
-	}
-	title := tr("Import secrets")
-	if k == secrets.KindVariables {
-		title = tr("Import variables")
-	}
-	dir, _ := os.UserHomeDir()
-	paths, err := configOpenDialog(mygo.OpenDialogOptions{
-		Parent: s.app.window(), Title: title, ButtonLabel: tr("Choose"), DefaultPath: dir,
-		Filters: []mygo.FileFilter{{Name: tr("YAML, or encrypted with age"), Extensions: []string{"yaml", "yml", "age"}}},
-	})
-	if err != nil || len(paths) == 0 {
-		return EnvFile{}, err
-	}
-	f, err := os.Open(paths[0])
-	if err != nil {
-		return EnvFile{}, err
-	}
-	defer f.Close()
-	head := make([]byte, 64)
-	n, _ := f.Read(head)
-	return EnvFile{Path: paths[0], Encrypted: secrets.IsEncrypted(head[:n])}, nil
-}
-
-// EnvImportPlan is what importing a file would change.
-type EnvImportPlan struct {
-	Path string `json:"path"`
-	secrets.Plan
-	// Clash lists the file's names the other kind sets, which stop it.
-	Clash []string `json:"clash"`
-}
-
-func (a *app) readImport(k secrets.Kind, path, password string) (current, incoming []secrets.Entry, err error) {
-	incoming, err = secrets.ReadFile(k, path, password, envLimit)
-	if err != nil {
-		return nil, nil, trError(err)
-	}
-	if k == secrets.KindSecrets {
-		current, err = a.vault.Entries()
-	} else {
-		current, err = a.variables.Entries()
-	}
-	return current, incoming, trError(err)
-}
-
-// PreviewEnvImport says what importing a file of secrets or variables
-// would change. An encrypted file needs its password.
-func (s *service) PreviewEnvImport(kind, path, password string) (EnvImportPlan, error) {
-	k, err := kindOf(kind)
-	if err != nil {
-		return EnvImportPlan{}, err
-	}
-	current, incoming, err := s.app.readImport(k, path, password)
-	if err != nil {
-		return EnvImportPlan{}, err
-	}
-	other, err := s.app.otherNames(k)
-	if err != nil {
-		return EnvImportPlan{}, err // not a clash: the other file cannot be read
-	}
-	plan := EnvImportPlan{Path: path, Plan: secrets.PlanImport(current, incoming), Clash: []string{}}
-	for _, e := range incoming {
-		if slices.Contains(other, e.Name) {
-			plan.Clash = append(plan.Clash, e.Name)
-		}
-	}
-	return plan, nil
-}
-
-// ImportEnv imports a file of secrets or variables: merge changes and
-// adds what it lists; replace also removes what it leaves out.
-func (s *service) ImportEnv(kind, path, password, mode string) (int, error) {
-	k, err := kindOf(kind)
-	if err != nil {
-		return 0, err
-	}
-	if mode != string(importMerge) && mode != string(importReplace) {
-		return 0, fmt.Errorf("unknown import mode %q", mode)
-	}
-	current, incoming, err := s.app.readImport(k, path, password)
-	if err != nil {
-		return 0, err
-	}
-	next := secrets.Merge(current, incoming, mode == string(importReplace))
-	return len(next), s.app.save(k, next)
 }

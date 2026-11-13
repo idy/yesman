@@ -301,18 +301,40 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .import-faint { color: var(--mds-muted); font-size: var(--mds-text-note); }
 
 /* Settings › Secrets and Variables: entries as a form, or their YAML. */
-.env-page { display: grid; gap: 16px; }
+.env-page { position: relative; display: grid; gap: 16px; }
 .env-page > [role="tabpanel"] { display: grid; gap: 10px; }
 .env-page > [role="tabpanel"][hidden] { display: none; }
 .env-status { color: var(--mds-muted); font-size: var(--mds-text-note); white-space: nowrap; }
 .env-error { margin: 0; font-size: var(--mds-text-note); white-space: pre-wrap; overflow-wrap: anywhere; }
-.env-row { display: grid; grid-template-columns: minmax(140px, 220px) minmax(0, 1fr) auto; gap: 8px 10px; align-items: start; padding: 12px 14px; }
+/* An entry is a line of underlined text in columns: its name, value and
+   description, then its actions. Clicking one opens an editor of one width
+   floating below it, as tall as its text, so nothing moves. */
+.env-row { display: flex; align-items: center; gap: 8px; padding: 8px 14px; }
 .env-row + .env-row { border-top: 1px solid var(--mds-line); }
-.env-row .mds-textarea { min-height: 0; resize: none; }
-.env-row .env-description { grid-column: 2; }
+.env-cell {
+  flex: 1 1 0; min-width: 0; height: var(--mds-control-height); padding: 0 11px;
+  border: 0; border-radius: var(--mds-radius-sm); background: transparent; color: var(--mds-ink);
+  text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text;
+  text-decoration: underline dashed color-mix(in srgb, var(--mds-ink) 28%, transparent); text-underline-offset: 5px;
+}
+.env-cell, .env-cell-input { font-family: var(--mds-font); font-size: var(--mds-text-body); }
+.env-cell.mds-mono, .env-cell-input.mds-mono { font-family: var(--mds-mono); font-size: var(--mds-text-code); }
+.env-cell:hover { background: var(--mds-hover); text-decoration-color: color-mix(in srgb, var(--mds-ink) 55%, transparent); }
+.env-cell:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: 2px; }
+.env-cell--name { flex: 0 1 220px; }
+.env-cell--value { flex-grow: 1.3; }
+.env-cell--description { flex-grow: 1.7; color: var(--mds-ink-subtle); }
+.env-cell-empty { color: var(--mds-faint); }
+.env-cell--editing { background: var(--mds-hover); text-decoration-color: var(--mds-accent-ink); }
+.env-cell-edit { position: absolute; z-index: 5; border-radius: var(--mds-radius-sm); box-shadow: 0 8px 24px var(--mds-dialog-shadow); }
+.env-cell-edit .env-cell-input { display: block; width: 100%; }
+.env-cell-edit .mds-textarea { min-height: var(--mds-control-height); padding-block: 6px; line-height: 1.5; resize: none; overflow-y: hidden; overflow-wrap: anywhere; }
+/* The eye is a secret's value's alone, while it is edited. */
+.env-cell-edit--secret .env-cell-input { padding-right: 38px; }
+.env-eye { position: absolute; top: 0; right: 2px; width: 34px; height: var(--mds-control-height); color: var(--mds-muted); }
+.env-eye .mds-icon { width: 15px; height: 15px; }
 .env-hidden { -webkit-text-security: disc; }
-.env-row-actions { display: flex; align-items: center; gap: 2px; min-height: 38px; }
-.env-show { min-width: 56px; justify-content: center; }
+.env-row-actions { display: flex; flex: none; align-items: center; gap: 2px; min-height: 38px; }
 .env-add { display: inline-flex; align-items: center; gap: 6px; margin-left: 14px; }
 .env-add .mds-icon { width: 14px; height: 14px; }
 /* The editor sits on a surface, as the form's list does. */
@@ -325,9 +347,8 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .env-dialog { width: min(440px, calc(100vw - 32px)); }
 .env-dialog-error { margin: 10px 0 0; font-size: var(--mds-text-note); }
 @media (max-width: 720px) {
-  .env-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .env-row .env-row-actions { grid-column: 2; grid-row: 1; }
-  .env-row :is(.env-value, .env-description) { grid-column: 1 / -1; }
+  .env-row { flex-wrap: wrap; }
+  .env-cell--description { flex-basis: 100%; order: 1; }
 }
 
 /* The add dialog: an owner's repositories to tick. */

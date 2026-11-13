@@ -8,13 +8,12 @@ import { t, tn } from './i18n.js';
 import { createEditor } from './editor.js';
 
 const errorText = (err) => String(err?.message || err?.error || err);
-const fileName = (path) => path.split(/[\\/]/).pop();
 const dirName = (path) => path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')));
 
 // What each page says, in English: t says it in the page's language.
 const WORDS = {
   secrets: {
-    lead: 'Secrets are environment variables every agent’s commands get, such as API keys and tokens. They are kept encrypted with sops and age, and open with your password. Agents read a secret’s name and description with yesman_env, never its value: output shows it as [secret NAME].',
+    lead: 'Secrets are environment variables every agent’s commands get, such as API keys and tokens. They are kept encrypted with sops and age. Agents read a secret’s name and description with yesman_env, never its value: output shows it as [secret NAME].',
     add: 'Add secret',
     empty: 'No secrets yet',
     emptyHint: 'Add the keys and tokens your agents need, with what each is for.',
@@ -108,12 +107,12 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
     inner.append(page);
     if (secret && !v.configured) {
       page.append(setupSection());
-      focusOnce('setup', id('setup-password'));
+      focusOnce('setup', id(v.keychain ? 'setup-button' : 'setup-password'));
       return;
     }
     if (secret && !v.unlocked) {
       page.append(...unlockSection().filter(Boolean));
-      focusOnce('unlock', id('unlock-password'));
+      focusOnce('unlock', id(v.stored ? 'unlock-button' : 'unlock-password'));
       return;
     }
     s.focused = '';
@@ -132,6 +131,7 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
     );
     initTabs(tabs, { onSelect: (tabEl) => switchTo(tabEl.id === id('tab', 'yaml') ? 'yaml' : 'form') });
     if (s.mode === 'yaml') showEditor();
+    else if (s.editing) reopenEditor();
   }
 
   // focusOnce puts the caret in a password field when its form first
@@ -178,50 +178,191 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
   }
 
   function paintList() {
+    editing = null;
+    s.editing = null;
     $(`#${id('list')}`)?.replaceChildren(...[rowEls()].flat());
   }
 
-  // area is a text box that grows with its lines, up to eight.
-  function area({ elementId, cls, text, label, placeholder, onchange }) {
-    const lines = (v) => Math.min(8, Math.max(1, v.split('\n').length));
-    const el = h('textarea', { class: `mds-textarea ${cls}`, id: elementId, rows: lines(text), placeholder, 'aria-label': label,
-      spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off',
-      oninput: (e) => { e.currentTarget.rows = lines(e.currentTarget.value); onchange(e.currentTarget.value); } });
-    el.value = text;
-    return el;
+  // ---------- Cells ----------
+
+  // An entry is a line of cells: its name, value and description, shown as
+  // underlined text in columns that never move. Clicking one, or reaching
+  // it with the keyboard, opens an editor of one width floating below it,
+  // as tall as its text; leaving the editor closes it, and Escape undoes
+  // the edit. A
+  // secret's value shows as dots, and its editor alone has the eye that
+  // shows or hides it.
+  const FIELDS = {
+    name: { line: true, mono: true, placeholder: () => 'NAME', label: () => t('Name') },
+    value: { mono: true, placeholder: () => t('Value'), label: (n) => t('Value of {name}', { name: n }) },
+    description: { placeholder: () => t(w.describe), label: (n) => t('Description of {name}', { name: n }) },
+  };
+  const editorWidth = 400; // an editor's width, whatever its text: it grows in height
+  const entryLabel = (r) => r.name || t('this entry');
+  const eyeLabel = (hidden, name) => (hidden ? t('Show the value of {name}', { name }) : t('Hide the value of {name}', { name }));
+  let editing = null; // the editor open: { r, field, box, input }
+  let quiet = false; // yesman moves the focus to a cell: open nothing
+
+  function cellContent(r, field) {
+    const v = r[field];
+    if (!v) return h('span', { class: 'env-cell-empty' }, FIELDS[field].placeholder());
+    return secret && field === 'value' ? '••••••••••••' : v;
+  }
+
+  function cellEl(r, field) {
+    const f = FIELDS[field];
+    return h('button', { class: `env-cell env-cell--${field}${f.mono ? ' mds-mono' : ''}`, type: 'button', id: id(field, r.id), 'data-row': r.id, 'data-field': field,
+      'aria-label': secret && field === 'value' ? f.label(entryLabel(r)) : null,
+      onclick: () => openEditor(r, field),
+      onfocus: (e) => { if (!quiet && e.currentTarget.matches(':focus-visible')) openEditor(r, field); } }, cellContent(r, field));
+  }
+
+  function focusCell(el) {
+    quiet = true;
+    try { el?.focus(); } finally { quiet = false; }
   }
 
   function rowEl(r) {
-    const hidden = secret && !s.shown.has(r.id);
-    const label = r.name || t('this entry');
-    const name = h('input', { class: 'mds-input mds-mono env-name', id: id('name', r.id), value: r.name, placeholder: 'NAME', 'aria-label': t('Name'),
-      spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off',
-      oninput: (e) => { r.name = e.currentTarget.value; edited(); } });
-    const value = area({ elementId: id('value', r.id), cls: `mds-mono env-value${hidden ? ' env-hidden' : ''}`, text: r.value,
-      label: t('Value of {name}', { name: label }), placeholder: t('Value'), onchange: (v) => { r.value = v; edited(); } });
-    const description = area({ elementId: id('description', r.id), cls: 'env-description', text: r.description,
-      label: t('Description of {name}', { name: label }), placeholder: t(w.describe), onchange: (v) => { r.description = v; edited(); } });
-    const iconButton = (glyph, title, onclick) => h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title, 'aria-label': title, onclick }, icon(glyph));
+    const label = entryLabel(r);
+    const iconButton = (glyph, cls, title, onclick) => h('button', { class: `mds-icon-button mds-icon-button--compact ${cls}`, type: 'button', title, 'aria-label': title, onclick }, icon(glyph));
     return h('div', { class: 'env-row', role: 'listitem' },
-      name, value,
+      cellEl(r, 'name'), cellEl(r, 'value'), cellEl(r, 'description'),
       h('div', { class: 'env-row-actions' },
-        secret ? h('button', { class: 'mds-button mds-button--small mds-button--subtle env-show', type: 'button', 'aria-pressed': String(!hidden),
-          'aria-controls': id('value', r.id), onclick: () => toggleShown(r) }, hidden ? t('Show') : t('Hide')) : null,
-        iconButton('copy', t('Copy the value of {name}', { name: label }), () => call('CopyValue', r.value).then(() => toast(t('Copied.')), fail)),
-        iconButton('trash', t('Remove {name}', { name: label }), () => removeRow(r))),
-      description);
+        iconButton('copy', 'env-copy', t('Copy the value of {name}', { name: label }), () => call('CopyValue', r.value).then(() => toast(t('Copied.')), fail)),
+        iconButton('trash', 'env-remove', t('Remove {name}', { name: label }), () => removeRow(r))));
   }
 
-  function toggleShown(r) {
-    if (s.shown.has(r.id)) s.shown.delete(r.id);
-    else s.shown.add(r.id);
-    const hidden = !s.shown.has(r.id);
-    $(`#${id('value', r.id)}`)?.classList.toggle('env-hidden', hidden);
-    const button = document.querySelector(`[aria-controls="${id('value', r.id)}"]`);
-    if (button) {
-      button.textContent = hidden ? t('Show') : t('Hide');
-      button.setAttribute('aria-pressed', String(!hidden));
+  // relabel says an entry's new name in the labels of its row.
+  function relabel(row, r) {
+    const label = entryLabel(r);
+    const set = (el, text) => { if (el) { el.title = text; el.setAttribute('aria-label', text); } };
+    set(row.querySelector('.env-copy'), t('Copy the value of {name}', { name: label }));
+    set(row.querySelector('.env-remove'), t('Remove {name}', { name: label }));
+    if (secret) row.querySelector('.env-cell--value')?.setAttribute('aria-label', FIELDS.value.label(label));
+  }
+
+  function openEditor(r, field, caret) {
+    if (editing?.r === r && editing.field === field && editing.box.isConnected) {
+      editing.input.focus();
+      return;
     }
+    const cell = $(`#${id(field, r.id)}`);
+    const row = cell?.closest('.env-row');
+    const page = $(`#${prefix}-page`);
+    const list = $(`#${id('list')}`);
+    if (!row || !page || !list) return;
+    const f = FIELDS[field];
+    const before = r[field];
+    const isSecret = secret && field === 'value';
+    const props = { class: `${f.line ? 'mds-input' : 'mds-textarea'} env-cell-input${f.mono ? ' mds-mono' : ''}`,
+      id: id(`${field}-edit`, r.id), placeholder: f.placeholder(), 'aria-label': f.label(entryLabel(r)),
+      spellcheck: 'false', autocomplete: 'off', autocapitalize: 'off' };
+    const input = f.line ? h('input', props) : h('textarea', { ...props, rows: 1 });
+    input.value = before;
+    // A textarea is as tall as its lines, wrapped or not, up to eight.
+    const fit = () => {
+      if (f.line) return;
+      const style = getComputedStyle(input);
+      const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+      const most = 8 * (parseFloat(style.lineHeight) || 20) + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + border;
+      input.style.height = 'auto';
+      const height = input.scrollHeight + border;
+      input.style.height = `${Math.min(height, most)}px`;
+      input.style.overflowY = height > most ? 'auto' : 'hidden';
+    };
+    const masked = () => isSecret && !s.shown.has(r.id);
+    // Pressing the eye keeps the focus in the value.
+    const eye = isSecret ? h('button', { class: 'mds-icon-button mds-icon-button--compact env-eye', type: 'button', 'aria-controls': input.id,
+      onmousedown: (e) => e.preventDefault(),
+      onclick: () => {
+        if (s.shown.has(r.id)) s.shown.delete(r.id);
+        else s.shown.add(r.id);
+        paintEye();
+      } }) : null;
+    function paintEye() {
+      input.classList.toggle('env-hidden', masked());
+      if (!eye) return;
+      const hidden = masked();
+      const text = eyeLabel(hidden, entryLabel(r));
+      eye.replaceChildren(icon(hidden ? 'eye' : 'eyeSlash'));
+      eye.title = text;
+      eye.setAttribute('aria-label', text);
+      eye.setAttribute('aria-pressed', String(!hidden));
+    }
+    paintEye();
+    // The editor floats below its cell, over what follows, and moves
+    // nothing; the cell's text stays in view and follows the edit.
+    const box = h('div', { class: `env-cell-edit${isSecret ? ' env-cell-edit--secret' : ''}`, role: 'group', 'aria-label': f.label(entryLabel(r)) }, input, eye);
+    let done = false;
+    const onResize = () => close(false);
+    const close = (undo) => {
+      if (done) return;
+      done = true;
+      if (undo) r[field] = before;
+      if (editing?.box === box) { editing = null; s.editing = null; }
+      if (isSecret) s.shown.delete(r.id); // shown again only by the eye
+      window.removeEventListener('resize', onResize);
+      cell.replaceChildren(cellContent(r, field));
+      cell.classList.remove('env-cell--editing');
+      box.remove();
+      if (field === 'name') relabel(row, r);
+      edited();
+    };
+    // Tab goes on to the next cell, or back, as a sheet does; a secret's
+    // value goes to its eye first.
+    const move = (step) => {
+      const cells = [...list.querySelectorAll('.env-cell')];
+      const next = cells[cells.indexOf(cell) + step];
+      close(false);
+      const nr = next && s.rows.find((x) => String(x.id) === next.dataset.row);
+      if (nr) openEditor(nr, next.dataset.field);
+      else focusCell(step > 0 ? $(`#${prefix}-page .env-add`) : cell);
+    };
+    input.addEventListener('input', () => {
+      r[field] = input.value;
+      fit();
+      cell.replaceChildren(cellContent(r, field));
+      s.editing = { rowId: r.id, field, caret: input.selectionStart };
+      edited();
+    });
+    box.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' || (e.key === 'Enter' && f.line && e.target === input)) {
+        e.preventDefault();
+        e.stopPropagation();
+        close(e.key === 'Escape');
+        focusCell(cell);
+      } else if (e.key === 'Tab') {
+        if (eye && (e.shiftKey ? e.target === eye : e.target === input)) return; // between the value and its eye
+        e.preventDefault();
+        move(e.shiftKey ? -1 : 1);
+      }
+    });
+    box.addEventListener('focusout', (e) => {
+      if (box.isConnected && !box.contains(e.relatedTarget)) close(false);
+    });
+    cell.classList.add('env-cell--editing');
+    page.append(box);
+    const pageBox = page.getBoundingClientRect();
+    const listBox = list.getBoundingClientRect();
+    const cellBox = cell.getBoundingClientRect();
+    const pad = 8;
+    const width = Math.min(listBox.width - 2 * pad, editorWidth);
+    const left = Math.max(listBox.left + pad, Math.min(cellBox.left, listBox.right - pad - width));
+    Object.assign(box.style, { left: `${left - pageBox.left}px`, top: `${cellBox.bottom - pageBox.top + 4}px`, width: `${width}px` });
+    fit();
+    window.addEventListener('resize', onResize);
+    editing = { r, field, box, input };
+    s.editing = { rowId: r.id, field, caret: caret ?? before.length };
+    input.focus();
+    const at = Math.min(caret ?? input.value.length, input.value.length);
+    input.setSelectionRange(at, at);
+  }
+
+  // A page drawn again opens the editor that was open.
+  function reopenEditor() {
+    const r = s.rows.find((x) => x.id === s.editing?.rowId);
+    if (r) openEditor(r, s.editing.field, s.editing.caret);
+    else s.editing = null;
   }
 
   function addRow() {
@@ -230,7 +371,7 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
     s.shown.add(r.id); // a value you type in shows
     paintList();
     paintActions();
-    $(`#${id('name', r.id)}`)?.focus();
+    openEditor(r, 'name');
   }
 
   function removeRow(r) {
@@ -239,7 +380,7 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
     paintList();
     paintActions();
     const next = s.rows[Math.min(at, s.rows.length - 1)];
-    (next ? $(`#${id('name', next.id)}`) : $(`#${prefix}-page .env-add`))?.focus();
+    focusCell(next ? $(`#${id('name', next.id)}`) : $(`#${prefix}-page .env-add`));
   }
 
   // ---------- YAML ----------
@@ -346,6 +487,27 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
   }
 
   function setupSection() {
+    if (s.view.keychain) {
+      // A random password, which the keychain keeps.
+      const error = h('p', { class: 'danger', role: 'alert', hidden: true });
+      const submit = h('button', { class: 'mds-button mds-button--primary', type: 'submit', id: id('setup-button') }, t('Set up secrets'));
+      return settingsSection(t('Set up secrets'),
+        t('yesman makes a random password for them and keeps it in the system keychain, which unlocks them each time yesman starts. The exported configuration carries it, with the secrets.'),
+        h('form', { class: 'env-lock', onsubmit: async (e) => {
+          e.preventDefault();
+          submit.disabled = true;
+          error.hidden = true;
+          try {
+            accept(await call('SetUpSecrets', ''));
+            rerender();
+          } catch (err) {
+            error.textContent = errorText(err);
+            error.hidden = false;
+          } finally {
+            submit.disabled = false;
+          }
+        } }, error, h('div', null, submit)));
+    }
     const password = passwordInput(id('setup-password'), 'new-password');
     const again = passwordInput(id('setup-again'), 'new-password');
     const error = h('p', { class: 'danger', role: 'alert', id: id('setup-error'), hidden: true });
@@ -381,27 +543,30 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
 
   function unlockSection() {
     const v = s.view;
-    const password = passwordInput(id('unlock-password'), 'current-password');
+    // The keychain keeps the password: a button unlocks them. Otherwise it
+    // is typed, and the keychain, when there is one, keeps it then.
+    const password = v.stored ? null : passwordInput(id('unlock-password'), 'current-password');
     const error = h('p', { class: 'danger', role: 'alert', id: id('unlock-error'), hidden: true });
-    const submit = h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, t('Unlock'));
+    const submit = h('button', { class: 'mds-button mds-button--primary', type: 'submit', id: id('unlock-button') }, t('Unlock'));
     const form = h('form', { class: 'env-lock', onsubmit: async (e) => {
       e.preventDefault();
       submit.disabled = true;
       error.hidden = true;
       try {
-        accept(await call('UnlockSecrets', password.value));
+        accept(await call('UnlockSecrets', password?.value ?? ''));
         s.error = '';
         rerender();
       } catch (err) {
         error.textContent = errorText(err);
         error.hidden = false;
-        password.select();
+        password?.select();
       } finally {
         submit.disabled = false;
       }
     } },
-    h('label', { class: 'field', for: id('unlock-password') }, t('Password')),
-    h('div', { class: 'storage-input' }, password, submit),
+    v.stored ? null : v.keychain ? h('p', null, t('The keychain has no password for these secrets. Enter it, from the configuration file you exported, and the keychain keeps it.')) : null,
+    v.stored ? null : h('label', { class: 'field', for: id('unlock-password') }, t('Password')),
+    v.stored ? h('div', null, submit) : h('div', { class: 'storage-input' }, password, submit),
     error);
     const names = v.names ?? [];
     const hint = names.length
@@ -410,7 +575,7 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
     return [
       settingsSection(t('Unlock'), hint, form),
       v.error ? h('p', { class: 'danger' }, v.error) : null,
-      settingsSection(t('Forgot the password?'), null,
+      v.stored ? null : settingsSection(t('Forgot the password?'), null,
         preferenceRow(t('Start over'), h('p', null, t('A forgotten password cannot be recovered. To start over, quit yesman and move this folder away; your secrets stay in it, encrypted.')),
           revealButton(dirName(v.file), t('Secrets')))),
     ];
@@ -422,25 +587,16 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
 
   function secretSections(v) {
     return [
-      settingsSection(t('Back up'), t('Keep a copy of your secrets, or carry them to another computer.'),
-        preferenceRow(t('Export encrypted'), h('p', null, t('A YAML file sealed with a password of its own. yesman imports it, and age -d opens it.')), smallButton(t('Export…'), exportSealed)),
-        preferenceRow(t('Export as plain text'), h('p', null, t('A YAML file that anyone who reads it can use. Delete it once you are done with it.')), smallButton(t('Export…'), exportPlain)),
-        preferenceRow(t('Import'), h('p', null, t('A file exported here, encrypted or not. You see what it changes, then merge it or replace with it.')), smallButton(t('Import…'), importFile))),
-      settingsSection(t('Password and key'), null,
-        preferenceRow(t('Password'), h('p', null, t('The secrets stay as they are; the new password opens them from then on.')), smallButton(t('Change…'), changePassword)),
-        preferenceRow(t('Key for sops'), h('p', null, t('The age key that opens {file}, to edit it with sops: SOPS_AGE_KEY_FILE=key.txt sops edit {file}. Anyone with the key and the file reads your secrets.', { file: fileName(v.file) })),
-          h('div', { class: 'storage-actions' }, revealButton(dirName(v.file), t('Secrets')), smallButton(t('Export key…'), exportKey)))),
+      settingsSection(t('Password'), t('Settings › Import and export backs the secrets up, with the rest of yesman’s configuration.'),
+        v.stored
+          ? preferenceRow(t('In the keychain'), h('p', null, t('Random, and kept in the system keychain, which unlocks the secrets when yesman starts. The exported configuration carries it.')),
+            smallButton(t('Copy'), () => call('CopySecretsPassword').then(() => toast(t('Copied.')), fail)))
+          : preferenceRow(t('Password'), h('p', null, t('The secrets stay as they are; the new password opens them from then on.')), smallButton(t('Change…'), changePassword))),
     ];
   }
 
-  function variableSections(v) {
-    return [
-      settingsSection(t('Back up'), t('Keep a copy of your variables, or carry them to another computer.'),
-        preferenceRow(t('Export'), h('p', null, t('The variables as a YAML file.')), smallButton(t('Export…'), exportVariables)),
-        preferenceRow(t('Import'), h('p', null, t('A file exported here. You see what it changes, then merge it or replace with it.')), smallButton(t('Import…'), importFile)),
-        preferenceRow(t('File'), h('p', { class: 'path', title: v.file }, v.file), revealButton(v.file, t('the variables file')))),
-    ];
-  }
+  // Settings › Import and export backs the variables up.
+  const variableSections = () => [];
 
   // passwords asks for passwords in a dialog: run(values) does the work,
   // and its error shows there. It resolves to run's result, or undefined
@@ -501,135 +657,6 @@ export function createEnvPage(kind, { call, fail, confirm, shown, rerender, pref
       },
     });
     if (done) toast(t('The password is changed.'));
-  }
-
-  function exported(result) {
-    if (!result.path) return;
-    toast(t('Exported {what} to {path}.', { what: count(result.count), path: result.path }), { duration: 6000 });
-  }
-
-  async function exportSealed() {
-    if (dirty()) toast(t('Changes not saved are left out.'));
-    const password = await passwords({
-      title: t('Export encrypted'),
-      hint: t('Choose a password for the file. Importing it asks for it, and so does age -d.'),
-      fields: [
-        { name: 'password', label: t('Password for the file'), autocomplete: 'new-password' },
-        { name: 'again', label: t('Password again'), autocomplete: 'new-password' },
-      ],
-      ok: t('Choose where…'),
-      run: async (v) => {
-        same(v.password, v.again);
-        if ([...v.password].length < 8) throw new Error(t('The password should have at least 8 characters.'));
-        return v.password;
-      },
-    });
-    if (!password) return;
-    try {
-      exported(await call('ExportSecrets', password));
-    } catch (err) {
-      fail(err);
-    }
-  }
-
-  async function exportPlain() {
-    if (!(await confirm(t('Export secrets as plain text?'), t('Anyone who reads the file can use your secrets. Keep it somewhere safe, and delete it once you no longer need it.'), t('Export…')))) return;
-    try {
-      exported(await call('ExportSecrets', ''));
-    } catch (err) {
-      fail(err);
-    }
-  }
-
-  async function exportKey() {
-    if (!(await confirm(t('Export the secrets key?'), t('With the key, anyone who has the secrets file reads your secrets, without the password. Keep it as safe as the password.'), t('Export…')))) return;
-    try {
-      const result = await call('ExportSecretsKey');
-      if (result.path) toast(t('Exported the key to {path}.', { path: result.path }), { duration: 6000 });
-    } catch (err) {
-      fail(err);
-    }
-  }
-
-  async function exportVariables() {
-    if (dirty()) toast(t('Changes not saved are left out.'));
-    try {
-      exported(await call('ExportVariables'));
-    } catch (err) {
-      fail(err);
-    }
-  }
-
-  async function importFile() {
-    if (dirty()) {
-      toast(t('Save or revert your changes first.'));
-      return;
-    }
-    let file;
-    let plan;
-    let password = '';
-    try {
-      file = await call('ChooseEnvFile', kind);
-      if (!file.path) return;
-      if (file.encrypted) {
-        plan = await passwords({
-          title: t('Import {file}', { file: fileName(file.path) }),
-          hint: t('This file is encrypted. Enter the password it was exported with.'),
-          fields: [{ name: 'password', label: t('Password for the file'), autocomplete: 'off' }],
-          ok: t('Open'),
-          run: async (v) => {
-            const p = await call('PreviewEnvImport', kind, file.path, v.password);
-            password = v.password;
-            return p;
-          },
-        });
-        if (!plan) return;
-      } else {
-        plan = await call('PreviewEnvImport', kind, file.path, '');
-      }
-      const mode = await askImport(plan);
-      if (mode !== 'merge' && mode !== 'replace') return;
-      if (file.encrypted) toast(t('Importing…'));
-      const n = await call('ImportEnv', kind, file.path, password, mode);
-      toast(mode === 'replace'
-        ? t('Replaced with {file}: {what} now.', { file: fileName(file.path), what: count(n) })
-        : t('Merged {file}: {what} now.', { file: fileName(file.path), what: count(n) }), { duration: 6000 });
-      accept(await call(secret ? 'Secrets' : 'Variables'));
-      rerender();
-    } catch (err) {
-      fail(err);
-    } finally {
-      password = '';
-    }
-  }
-
-  // askImport shows what importing would change, and resolves to merge,
-  // replace or cancel.
-  function askImport(plan) {
-    const dialog = $('#import-dialog');
-    const part = (title, ...children) => h('section', { class: 'import-part' }, h('h3', null, title), children);
-    const names = (list) => h('p', null, h('span', { class: 'import-names mds-mono' }, list.join(', ')));
-    const clash = plan.clash.length > 0;
-    dialog.replaceChildren(h('form', { method: 'dialog' },
-      h('h2', { class: 'mds-heading', id: 'import-title' }, t('Import {file}', { file: fileName(plan.path) })),
-      h('p', { class: 'dialog-hint path', title: plan.path }, plan.path),
-      h('div', { class: 'import-body' },
-        clash ? h('p', { class: 'danger' }, secret
-          ? t('{names} are variables already. Remove them from Variables, then import again.', { names: plan.clash.join(', ') })
-          : t('{names} are secrets already. Remove them from Secrets, then import again.', { names: plan.clash.join(', ') })) : null,
-        plan.add.length ? part(t('Adds ({n})', { n: plan.add.length }), names(plan.add)) : null,
-        plan.change.length ? part(t('Changes ({n})', { n: plan.change.length }), names(plan.change)) : null,
-        plan.same.length ? part(t('Unchanged ({n})', { n: plan.same.length }), names(plan.same)) : null,
-        !plan.add.length && !plan.change.length && !plan.same.length ? h('p', null, secret ? t('The file lists no secrets.') : t('The file lists no variables.')) : null,
-        plan.extra.length ? part(t('Only here ({n})', { n: plan.extra.length }),
-          h('p', null, t('Merge keeps them. Replace removes them.')), names(plan.extra)) : null),
-      h('div', { class: 'mds-dialog-actions' },
-        h('button', { class: 'mds-button', value: 'cancel' }, t('Cancel')),
-        !clash && plan.extra.length ? h('button', { class: 'mds-button', value: 'replace' }, t('Replace')) : null,
-        clash ? null : h('button', { class: 'mds-button mds-button--primary', value: 'merge' }, t('Merge')))));
-    const answer = openDialog(dialog);
-    (dialog.querySelector('.mds-button--primary') ?? dialog.querySelector('.mds-button'))?.focus();
-    return answer;
   }
 
   return { load, render, dirty: () => (s.view ? dirty() : false) };

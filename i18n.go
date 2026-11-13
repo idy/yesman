@@ -145,15 +145,6 @@ var zhHans = map[string]string{
 	"removing it failed: %s":                                "移除失败：%s",
 
 	// Settings › Secrets and Variables: dialogs
-	"Export secrets":              "导出机密",
-	"Export the secrets key":      "导出机密的密钥",
-	"Export variables":            "导出变量",
-	"Import secrets":              "导入机密",
-	"Import variables":            "导入变量",
-	"YAML":                        "YAML",
-	"Text":                        "文本",
-	"Encrypted with age":          "用 age 加密",
-	"YAML, or encrypted with age": "YAML，或用 age 加密的文件",
 
 	// Settings › Secrets and Variables: what cannot be kept
 	"%s is a variable already: remove it from Variables first": "%s 已经是变量：请先从变量中移除",
@@ -185,7 +176,18 @@ var zhHans = map[string]string{
 	"secrets are set up already":                                                         "机密已经设置好了",
 	"%s is there without its key, identity.age: put the key back, or move the file away": "%s 存在，但缺少它的密钥 identity.age：请放回密钥，或把这个文件移走",
 	"the secrets file is also encrypted to %s, which yesman cannot encrypt to":           "机密文件还加密给了 %s，yesman 无法为它加密",
-	"the password of this file is wrong":                                                 "这个文件的密码错误",
-	"this file is too large to import":                                                   "这个文件太大，无法导入",
-	"this file is encrypted: enter its password":                                         "这个文件已加密：请输入它的密码",
+	"the secrets file has secrets, so it stays":                                          "机密文件中还有机密，因此保留它",
+
+	// Settings › Secrets: the password in the keychain
+	"this system keeps no passwords for apps: choose a password for the secrets": "这个系统不能为应用保存密码：请为机密设置一个密码",
+	"the keychain did not keep the password: %s":                                 "钥匙串没有保存密码：%s",
+	"the keychain has no password for these secrets: enter it":                   "钥匙串中没有这些机密的密码：请输入",
+	"the keychain has no password for these secrets":                             "钥匙串中没有这些机密的密码",
+
+	// The configuration file's variables and secrets
+	"secrets: the key is not an age file":                                                        "secrets：key 不是 age 文件",
+	"the file's password does not open its secrets: %s":                                          "文件中的密码打不开它的机密：%s",
+	"the file has no password for its secrets, so they cannot join the secrets here":             "文件中没有机密的密码，因此无法并入这里的机密",
+	"the secrets here are locked: unlock them in Settings › Secrets, then import the file again": "这里的机密已锁定：请在 设置 › 机密 中解锁，再重新导入文件",
+	"the variables and secrets would both set %s: rename one, then import again":                 "变量和机密会同时设置 %s：请重命名其中一个，再重新导入",
 }

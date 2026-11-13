@@ -17,19 +17,24 @@ import (
 
 	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/secrets"
 )
 
-// yesman's configuration file carries its settings and its repo pool, as
-// TOML, to another computer or into a backup. Workspaces, their knowledge
-// and conversations stay out of it, as does where yesman keeps its data.
+// yesman's configuration file carries its settings, its repo pool, the
+// variables and the secrets agents' commands get, as TOML, to another
+// computer or into a backup. The secrets stay encrypted, but the file
+// carries the password that opens them, from the keychain: it is as
+// private as the secrets. Workspaces, their knowledge and conversations
+// stay out of it, as does where yesman keeps its data.
 //
 // Importing it merges, adding what is missing and changing the settings it
 // sets, or replaces, which also resets the settings it leaves out and
 // removes the pool's repositories it does not list, except those that work
 // depends on.
 
-// configVersion is the version of the file's format this yesman writes.
-const configVersion = 1
+// configVersion is the version of the file's format this yesman writes:
+// 2 added variables and secrets.
+const configVersion = 2
 
 // configLimit bounds the file yesman reads.
 const configLimit = 1 << 20
@@ -37,10 +42,27 @@ const configLimit = 1 << 20
 // configFile is the file as TOML has it. Pointers tell a key left out from
 // one set to its zero value.
 type configFile struct {
-	Version    int       `toml:"version"`
-	Appearance *string   `toml:"appearance"`
-	AutoFetch  *int      `toml:"auto_fetch"`
-	Repos      *[]string `toml:"repos"`
+	Version    int               `toml:"version"`
+	Appearance *string           `toml:"appearance"`
+	AutoFetch  *int              `toml:"auto_fetch"`
+	Repos      *[]string         `toml:"repos"`
+	Variables  *[]configVariable `toml:"variables"`
+	Secrets    *configSecrets    `toml:"secrets"`
+}
+
+// configVariable is a variable as the file has it.
+type configVariable struct {
+	Name        string `toml:"name"`
+	Value       string `toml:"value"`
+	Description string `toml:"description"`
+}
+
+// configSecrets are the secrets as the vault keeps them, with the password
+// that opens them, or none where the keychain had none.
+type configSecrets struct {
+	Password string `toml:"password"`
+	Key      string `toml:"key"`  // identity.age
+	File     string `toml:"file"` // secrets.sops.yaml, or "" with none saved
 }
 
 // config is a configuration file read and checked.
@@ -48,7 +70,11 @@ type config struct {
 	appearance *mygo.ThemeSource
 	autoFetch  *int
 	repos      []configRepo // in the file's order, each once
-	ignored    []string     // keys this yesman does not know
+	// variables and secrets are nil when the file leaves them out, which
+	// leaves those here as they are, merging or replacing.
+	variables *[]secrets.Entry
+	secrets   *configSecrets
+	ignored   []string // keys this yesman does not know
 }
 
 // configRepo is a GitHub repository the file lists.
@@ -65,17 +91,26 @@ const (
 	importReplace importMode = "replace" // resets settings, removes repositories
 )
 
-// formatConfig writes the configuration file.
-func formatConfig(s Settings, repos []string) []byte {
+// formatConfig writes the configuration file: vars nil and sec nil leave
+// variables and secrets out.
+func formatConfig(s Settings, repos []string, vars []secrets.Entry, sec *configSecrets) []byte {
 	appearance := s.Appearance
 	if appearance == "" {
 		appearance = mygo.ThemeSystem
 	}
 	var b strings.Builder
-	b.WriteString(`# yesman configuration: its settings and the repositories of its repo pool.
+	b.WriteString(`# yesman configuration: its settings, the repositories of its repo pool, and
+# the variables and secrets every agent's commands get.
 # Import it in Settings > Import and export. Merge adds what is missing; Replace
-# also removes the repositories this file does not list, unless work depends on them.
-
+# also removes the repositories and entries this file does not list, unless work
+# depends on them.
+`)
+	if sec != nil {
+		b.WriteString(`#
+# It carries the secrets and the password that opens them: keep it private.
+`)
+	}
+	b.WriteString(`
 version = ` + strconv.Itoa(configVersion) + `
 
 # system, light or dark
@@ -93,7 +128,33 @@ repos = [`)
 		b.WriteString("\n")
 	}
 	b.WriteString("]\n")
+	if vars != nil {
+		b.WriteString("\n# Environment variables of every agent's command, with what each is for.\n")
+		if len(vars) == 0 {
+			b.WriteString("variables = []\n")
+		}
+	}
+	for _, v := range vars {
+		b.WriteString("\n[[variables]]\nname = " + tomlString(v.Name) + "\nvalue = " + tomlString(v.Value) +
+			"\ndescription = " + tomlString(v.Description) + "\n")
+	}
+	if sec != nil {
+		b.WriteString("\n# Secrets: the vault's key file and secrets file, encrypted, and the password\n# that opens the key.\n[secrets]\npassword = " + tomlString(sec.Password) +
+			"\nkey = " + tomlText(sec.Key) + "\nfile = " + tomlText(sec.File) + "\n")
+	}
 	return []byte(b.String())
+}
+
+// tomlText quotes s, which may be long and over lines, as a literal
+// multi-line TOML string when it can.
+func tomlText(s string) string {
+	if s == "" || strings.Contains(s, "'''") || strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 && r != '\n' && r != '\t' || r == 0x7f }) {
+		return tomlString(s)
+	}
+	if !strings.HasSuffix(s, "\n") {
+		s += "\n"
+	}
+	return "'''\n" + s + "'''"
 }
 
 // tomlString quotes s as a TOML basic string.
@@ -160,6 +221,28 @@ func parseConfig(data []byte) (config, error) {
 				c.repos = append(c.repos, configRepo{name: name, input: strings.TrimSpace(in)})
 			}
 		}
+	}
+	if f.Variables != nil {
+		vars := []secrets.Entry{}
+		for _, v := range *f.Variables {
+			vars = append(vars, secrets.Entry{Name: v.Name, Value: v.Value, Description: v.Description})
+		}
+		if err := secrets.Check(secrets.KindVariables, vars); err != nil {
+			return config{}, fmt.Errorf("variables: %w", trError(err))
+		}
+		c.variables = &vars
+	}
+	if f.Secrets != nil {
+		s := *f.Secrets
+		if !secrets.IsEncrypted([]byte(s.Key)) {
+			return config{}, errors.New(tr("secrets: the key is not an age file"))
+		}
+		if strings.TrimSpace(s.File) != "" {
+			if _, err := secrets.FileNames([]byte(s.File)); err != nil {
+				return config{}, fmt.Errorf("secrets: %w", trError(err))
+			}
+		}
+		c.secrets = &s
 	}
 	for _, k := range md.Undecoded() {
 		c.ignored = append(c.ignored, k.String())
@@ -245,6 +328,8 @@ type ImportPlan struct {
 	// keeps them; replacing removes those not in use.
 	Extra   []ExtraRepo `json:"extra"`
 	Ignored []string    `json:"ignored"` // keys this yesman does not know
+	// Env is what it does to the variables and secrets.
+	Env EnvChanges `json:"env"`
 }
 
 // ExtraRepo is a pool repository a configuration file leaves out.
@@ -356,27 +441,52 @@ func (a *app) exportedRepos() (repos, skipped []string, err error) {
 
 // ExportResult says what an export wrote.
 type ExportResult struct {
-	Path    string   `json:"path"` // empty when the dialog was cancelled
-	Repos   int      `json:"repos"`
-	Skipped []string `json:"skipped"` // pool repositories not from GitHub, left out
+	Path      string   `json:"path"` // empty when the dialog was cancelled
+	Repos     int      `json:"repos"`
+	Skipped   []string `json:"skipped"` // pool repositories not from GitHub, left out
+	Variables int      `json:"variables"`
+	// Secrets counts the secrets, when set up; Password says the file has
+	// the password that opens them.
+	Secrets  *int `json:"secrets,omitempty"`
+	Password bool `json:"password,omitempty"`
 }
 
-// writeConfig writes the configuration file to path.
+// writeConfig writes the configuration file to path, readable only by the
+// user when it carries secrets.
 func (a *app) writeConfig(path string) (ExportResult, error) {
 	repos, skipped, err := a.exportedRepos()
+	if err != nil {
+		return ExportResult{}, err
+	}
+	vars, sec, err := a.exportedEnv()
 	if err != nil {
 		return ExportResult{}, err
 	}
 	a.setmu.Lock()
 	s := a.settings
 	a.setmu.Unlock()
-	if err := os.WriteFile(path, formatConfig(s, repos), 0o644); err != nil {
+	if err := writeExport(path, formatConfig(s, repos, vars, sec), sec != nil); err != nil {
 		return ExportResult{}, err
 	}
 	if skipped == nil {
 		skipped = []string{}
 	}
-	return ExportResult{Path: path, Repos: len(repos), Skipped: skipped}, nil
+	res := ExportResult{Path: path, Repos: len(repos), Skipped: skipped, Variables: len(vars)}
+	if sec != nil {
+		names, _ := secrets.FileNames([]byte(sec.File))
+		n := len(names)
+		res.Secrets, res.Password = &n, sec.Password != ""
+	}
+	return res, nil
+}
+
+// writeExport writes a configuration file the user exports: one that
+// carries secrets readable only by the user, over whatever was there.
+func writeExport(path string, data []byte, private bool) error {
+	if private {
+		return writePrivate(path, data)
+	}
+	return os.WriteFile(path, data, 0o644)
 }
 
 // previewImport reads a configuration file and says what importing it
@@ -401,6 +511,9 @@ func (a *app) previewImport(ctx context.Context, path string) (ImportPlan, error
 		return inUseText(reason)
 	})
 	plan.Path = path
+	if plan.Env, err = a.envChanges(c); err != nil {
+		return ImportPlan{}, err
+	}
 	return plan, nil
 }
 
@@ -411,6 +524,7 @@ type ImportResult struct {
 	Removed []string    `json:"removed"` // pool names of the repositories it removed
 	Stopped []string    `json:"stopped"` // clones it stopped, as owner/repo
 	Kept    []ExtraRepo `json:"kept"`    // repositories replacing left, and why
+	Env     EnvImported `json:"env"`     // what it did to the variables and secrets
 }
 
 // importConfig imports a configuration file. It reads the file again,
@@ -427,6 +541,16 @@ func (a *app) importConfig(ctx context.Context, path string, mode importMode) (I
 		return ImportResult{}, err
 	}
 	res := ImportResult{Mode: mode, Cloning: []string{}, Removed: []string{}, Stopped: []string{}, Kept: []ExtraRepo{}}
+
+	// The variables and secrets are checked first: a name both would set
+	// stops the import before anything changes.
+	env, err := a.planEnv(c, mode)
+	if err != nil {
+		return res, err
+	}
+	if len(env.clash) > 0 {
+		return res, errors.New(tr("the variables and secrets would both set %s: rename one, then import again", strings.Join(env.clash, ", ")))
+	}
 
 	a.setmu.Lock()
 	err = a.putSettingsLocked(c.settings(a.settings, mode))
@@ -494,7 +618,8 @@ func (a *app) importConfig(ctx context.Context, path string, mode importMode) (I
 			a.notifyChanged()
 		}
 	}
-	return res, nil
+	res.Env, err = a.applyEnv(env)
+	return res, err
 }
 
 // configFilters are what the file dialogs offer.

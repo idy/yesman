@@ -56,6 +56,7 @@ type app struct {
 	// variables, in Settings › Secrets and Settings › Variables.
 	vault     *secrets.Vault
 	variables *secrets.Variables
+	keychain  keychain   // keeps the secrets' password; nil for none
 	envmu     sync.Mutex // one change of them at a time
 
 	wmu  sync.Mutex

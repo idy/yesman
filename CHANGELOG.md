@@ -6,8 +6,8 @@ Each release's section is what installed copies show as its release notes.
 
 - Settings › Secrets keeps API keys, tokens and other secrets, and Settings › Variables keeps settings such as an account or a region. Every command of every agent gets each as an environment variable; agents read what each is for with the new `yesman_env` tool.
 - Edit them as a form, or as YAML in the editor. Each has a value and a description that tells agents what it is for.
-- Secrets are encrypted with sops and age and open with a password that yesman never stores; after each launch they stay locked until you unlock them. A secret's value never reaches an agent's context: output shows it as `[secret NAME]`. The sops command can edit the same file with the exported key.
-- Export secrets sealed with a password of their own, or as plain text, and variables as YAML. Importing shows what changes, then merges or replaces.
+- Secrets are encrypted with sops and age, with a random password kept in the system's keychain (Keychain, Credential Manager or Secret Service), which unlocks them when yesman starts. Without one, you choose the password and type it after each launch. A secret's value never reaches an agent's context: output shows it as `[secret NAME]`. The sops command can edit the same file with its age key.
+- The configuration file (Settings › Import and export) now carries the variables and the secrets, still encrypted, with their password: importing it on another computer sets them up and unlocks them. Keep the file private.
 
 ## 0.1.13
 

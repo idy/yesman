@@ -364,30 +364,8 @@ func TestVariables(t *testing.T) {
 	}
 }
 
-func TestSealAndImport(t *testing.T) {
+func TestPlanImportAndMerge(t *testing.T) {
 	entries := []Entry{{Name: "A", Value: "1"}, {Name: "B", Value: "2", Description: "b"}}
-	sealed, err := Seal(Format(KindSecrets, entries), "passphrase", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !IsEncrypted(sealed) || IsEncrypted([]byte("secrets: {}\n")) {
-		t.Error("IsEncrypted")
-	}
-	path := filepath.Join(t.TempDir(), "backup.yaml.age")
-	if err := os.WriteFile(path, sealed, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ReadFile(KindSecrets, path, "", 1<<20); !errors.Is(err, ErrNeedsPassword) {
-		t.Errorf("no passphrase: %v", err)
-	}
-	if _, err := ReadFile(KindSecrets, path, "wrong passphrase", 1<<20); err == nil {
-		t.Error("a wrong passphrase opened it")
-	}
-	got, err := ReadFile(KindSecrets, path, "passphrase", 1<<20)
-	if err != nil || !reflect.DeepEqual(got, entries) {
-		t.Fatalf("ReadFile: %#v, %v", got, err)
-	}
-
 	current := []Entry{{Name: "B", Value: "old"}, {Name: "C", Value: "3"}, {Name: "A", Value: "1"}}
 	plan := PlanImport(current, entries)
 	if want := (Plan{Add: []string{}, Change: []string{"B"}, Same: []string{"A"}, Extra: []string{"C"}}); !reflect.DeepEqual(plan, want) {

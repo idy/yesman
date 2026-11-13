@@ -83,6 +83,8 @@ func main() {
 
 	a.vault = secrets.NewVault(h.Secrets())
 	a.variables = secrets.NewVariables(h.Variables())
+	a.keychain = appKeychain()
+	go a.unlockFromKeychain() // the system may ask the user first
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
 		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) },
 		Secrets:      a.vault, Variables: a.variables}

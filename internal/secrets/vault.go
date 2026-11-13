@@ -207,6 +207,27 @@ func (v *Vault) Unlock(password string) error {
 	return nil
 }
 
+// RemoveEmpty removes a vault without secrets, as one just set up whose
+// password could not be kept. It refuses one that has secrets.
+func (v *Vault) RemoveEmpty() error {
+	names, err := v.Names()
+	if err != nil {
+		return err
+	}
+	if len(names) > 0 {
+		return errorf("the secrets file has secrets, so it stays")
+	}
+	v.Lock()
+	return errors.Join(removeIfThere(v.File()), removeIfThere(v.KeyFile()))
+}
+
+func removeIfThere(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // Lock forgets the key and the secrets.
 func (v *Vault) Lock() {
 	v.mu.Lock()
@@ -239,6 +260,109 @@ func (v *Vault) Key() (string, error) {
 	return keyText(v.id), nil
 }
 
+// Recipients lists the age recipients the secrets file is encrypted to,
+// which it keeps in the clear: none without a file.
+func (v *Vault) Recipients() ([]string, error) {
+	data, err := os.ReadFile(v.File())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return Recipients(data)
+}
+
+// Recipient is the vault's own age recipient, while unlocked.
+func (v *Vault) Recipient() (string, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.id == nil {
+		return "", ErrLocked
+	}
+	return v.id.Recipient().String(), nil
+}
+
+// Files are the key file and the secrets file as they are, encrypted, to
+// carry to another computer with the password.
+func (v *Vault) Files() (key, file []byte, err error) {
+	if key, err = os.ReadFile(v.KeyFile()); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, ErrNotSetUp
+		}
+		return nil, nil, err
+	}
+	if file, err = os.ReadFile(v.File()); errors.Is(err, fs.ErrNotExist) {
+		err = nil // no secrets saved yet
+	}
+	return key, file, err
+}
+
+// OpenFiles reads the secrets of another vault's files with its password.
+func OpenFiles(key, file []byte, password string) ([]Entry, error) {
+	id, err := openKey(key, password)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(file)) == 0 {
+		return nil, nil
+	}
+	tree, err := Decrypt(file, id)
+	if err != nil {
+		return nil, err
+	}
+	return fromNode(KindSecrets, tree)
+}
+
+// Restore sets the vault up with another's files, as they are. With their
+// password it checks them first and is unlocked after; without, it stays
+// locked until unlocked with it.
+func (v *Vault) Restore(key, file []byte, password string) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.Configured() {
+		return errorf("secrets are set up already")
+	}
+	if _, err := os.Stat(v.File()); err == nil {
+		return errorf("%s is there without its key, identity.age: put the key back, or move the file away", v.File())
+	}
+	var id *age.X25519Identity
+	if password != "" {
+		var err error
+		if id, err = openKey(key, password); err != nil {
+			return err
+		}
+		if len(bytes.TrimSpace(file)) > 0 {
+			tree, err := Decrypt(file, id)
+			if err != nil {
+				return err
+			}
+			if _, err := fromNode(KindSecrets, tree); err != nil {
+				return err
+			}
+		}
+	}
+	if err := os.MkdirAll(v.dir, 0o700); err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(file)) > 0 {
+		if err := writeFile(v.File(), file); err != nil {
+			return err
+		}
+	}
+	if err := writeFile(v.KeyFile(), key); err != nil {
+		return err
+	}
+	v.id, v.entries, v.stamp = id, nil, stamp{}
+	if id != nil {
+		if _, err := v.loadLocked(); err != nil {
+			v.id = nil
+			return err
+		}
+	}
+	return nil
+}
+
 // Names lists the secrets' names, which the sops file keeps in the clear,
 // locked or not.
 func (v *Vault) Names() ([]string, error) {
@@ -248,6 +372,15 @@ func (v *Vault) Names() ([]string, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	return FileNames(data)
+}
+
+// FileNames lists the names of the secrets in a secrets file, without its
+// key.
+func FileNames(data []byte) ([]string, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, nil
 	}
 	tree, _, err := readSops(data)
 	if err != nil {

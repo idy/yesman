@@ -1,17 +1,13 @@
 package secrets
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 
-	"filippo.io/age"
 	"filippo.io/age/armor"
 )
 
@@ -77,7 +73,7 @@ func (v *Variables) Save(entries []Entry) error {
 	return nil
 }
 
-// ---------- Moving entries between computers ----------
+// ---------- Importing ----------
 
 // Plan is what importing entries would change.
 type Plan struct {
@@ -149,81 +145,3 @@ func IsEncrypted(data []byte) bool {
 	}
 	return false
 }
-
-// Seal encrypts data with a passphrase as an armored age file, which
-// `age -d` opens.
-func Seal(data []byte, passphrase string, workFactor int) ([]byte, error) {
-	if err := checkPassword(passphrase); err != nil {
-		return nil, err
-	}
-	r, err := age.NewScryptRecipient(passphrase)
-	if err != nil {
-		return nil, err
-	}
-	if workFactor > 0 {
-		r.SetWorkFactor(workFactor)
-	}
-	var buf bytes.Buffer
-	aw := armor.NewWriter(&buf)
-	w, err := age.Encrypt(aw, r)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := w.Write(data); err != nil {
-		return nil, err
-	}
-	if err := errors.Join(w.Close(), aw.Close()); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-// Open decrypts an age file Seal wrote, armored or not.
-func Open(data []byte, passphrase string) ([]byte, error) {
-	sid, err := age.NewScryptIdentity(passphrase)
-	if err != nil {
-		return nil, err
-	}
-	var in io.Reader = bytes.NewReader(data)
-	if strings.HasPrefix(strings.TrimLeft(string(data[:min(len(data), 64)]), " \t\r\n"), armor.Header) {
-		in = armor.NewReader(in)
-	}
-	r, err := age.Decrypt(in, sid)
-	if err != nil {
-		var none *age.NoIdentityMatchError
-		if errors.As(err, &none) || errors.Is(err, age.ErrIncorrectIdentity) {
-			return nil, errorf("the password of this file is wrong")
-		}
-		return nil, err
-	}
-	return io.ReadAll(r)
-}
-
-// ReadFile reads a file of entries to import: one Format wrote, plain or
-// sealed with a passphrase.
-func ReadFile(kind Kind, path, passphrase string, limit int64) ([]Entry, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > limit {
-		return nil, errorf("this file is too large to import")
-	}
-	if IsEncrypted(data) {
-		if passphrase == "" {
-			return nil, ErrNeedsPassword
-		}
-		if data, err = Open(data, passphrase); err != nil {
-			return nil, err
-		}
-	}
-	return Parse(kind, data)
-}
-
-// ErrNeedsPassword says a file to import is encrypted.
-var ErrNeedsPassword = errorf("this file is encrypted: enter its password")

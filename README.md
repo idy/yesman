@@ -67,21 +67,41 @@ secrets:            # variables: in variables.yaml
   OPENAI_API_KEY: sk-…   # a value alone is short for one without a description
 ```
 
-Secrets are kept in `secrets/secrets.sops.yaml` in the data directory, a [sops](https://getsops.io) file: names in the clear, every value and description encrypted with AES-256-GCM, a MAC over all of them, and the data key encrypted to an [age](https://age-encryption.org) key. The key is `secrets/identity.age`, encrypted with your password, which yesman never stores. Unlocking reads the key into memory until you lock again or quit yesman, so after each launch the secrets stay locked, and commands run without them, until you unlock them. yesman reads and writes the sops format itself, so neither sops nor its key services are needed; with the key exported (Key for sops), `SOPS_AGE_KEY_FILE=key.txt sops edit secrets/secrets.sops.yaml` edits the same file, and yesman keeps any other age recipient sops added. A forgotten password cannot be recovered. Variables are kept in plain text in `variables.yaml`, which you may edit by hand.
+Secrets are kept in `secrets/secrets.sops.yaml` in the data directory, a [sops](https://getsops.io) file: names in the clear, every value and description encrypted with AES-256-GCM, a MAC over all of them, and the data key encrypted to an [age](https://age-encryption.org) key. The key is `secrets/identity.age`, encrypted with a password. Setting up makes the password at random and keeps it in the system's credential store (the login Keychain on macOS, the Credential Manager on Windows, the Secret Service on Linux), keyed by the vault's age recipient, so yesman unlocks the secrets when it starts; Settings › Secrets copies it. Where the system has no credential store, you choose the password and type it after each launch. Unlocking reads the key into memory until you lock again or quit yesman; while locked, commands run without the secrets. yesman reads and writes the sops format itself, so neither sops nor its key services are needed; with the age key, which `age -d secrets/identity.age` gives with the password, `SOPS_AGE_KEY_FILE=key.txt sops edit secrets/secrets.sops.yaml` edits the same file, and yesman keeps any other age recipient sops added. A lost password cannot be recovered: the exported configuration keeps a copy. Variables are kept in plain text in `variables.yaml`, which you may edit by hand.
 
 Agents get them through yesman's extension. Its `bash` tool (and `powershell` on Windows) replaces pi's own and asks the app, before each command, for the variables and, while unlocked, the secrets, and sets them in that command alone: a change reaches the next command without restarting anyone, and pi's process, its other extensions and its MCP servers never see the secrets. The context says one sentence about them, and `yesman_env` says what each variable is: its description, a variable's value, never a secret's. Whatever a tool returns, output or a file read, shows a secret's value, or a line of one, as `[secret NAME]`, for values of six characters or more, including values the agent was given before they changed or were removed. This keeps values out of the model's context and the session logs; it does not stop a command from using a secret as it likes, or a determined agent from encoding one.
 
-Secrets export sealed with a password of their own, as an age file (`age -d` opens it), or as plain YAML; variables export as YAML. Importing a file shows what it adds, changes and leaves out, then merges it or replaces with it. Neither is in the configuration file below.
+Neither page has a backup of its own: Settings › Import and export backs both up with the rest of the configuration, below.
 
 ### Import and export
 
-Import and export saves yesman's configuration as a TOML file, to back it up or carry it to another computer: the appearance, the fetch schedule and the pool's GitHub repositories as `owner/repo`. Workspaces, their knowledge and conversations stay out, as does where yesman keeps its data. Importing a file first shows what it would change, then either merges it, which clones the repositories it lists that the pool lacks and changes the settings it sets, or replaces with it, which also resets the settings it leaves out and removes the pool repositories it does not list. Replace keeps a repository that work depends on, one with a worktree checked out of it (in a workspace or the archive) or a branch with commits no remote has, and says why. It also stops the clones of repositories the file leaves out, except one an agent is waiting for.
+Import and export saves yesman's configuration as a TOML file, to back it up or carry it to another computer: the appearance, the fetch schedule, the pool's GitHub repositories as `owner/repo`, the variables, and the secrets: the vault's key file and secrets file as they are, encrypted, with the password from the credential store. With the password in it the file opens the secrets, so it is written readable only by you; keep it private. Importing its secrets where none are set up sets them up as they are and keeps the password in the credential store; where there are secrets, the file's are opened with its password and merged or replaced into them. A name both variables and secrets would set stops the import before anything changes. A file without variables or secrets, such as one of version 1, leaves those here alone, replacing too. Workspaces, their knowledge and conversations stay out, as does where yesman keeps its data. Importing a file first shows what it would change, then either merges it, which clones the repositories it lists that the pool lacks and changes the settings it sets, or replaces with it, which also resets the settings it leaves out and removes the pool repositories it does not list. Replace keeps a repository that work depends on, one with a worktree checked out of it (in a workspace or the archive) or a branch with commits no remote has, and says why. It also stops the clones of repositories the file leaves out, except one an agent is waiting for.
 
 ```toml
-version = 1
+version = 2
 appearance = "dark"   # system, light or dark
 auto_fetch = 15       # minutes: 0, 1, 5, 15 or 60
 repos = ["idy/yesman", "idy/magpie"]
+
+[[variables]]
+name = "DEPLOY_REGION"
+value = "eu-west-1"
+description = "AWS region the deploy scripts use"
+
+[secrets]
+password = "…"        # from the credential store
+key = '''
+-----BEGIN AGE ENCRYPTED FILE-----
+…
+'''
+file = '''
+secrets:
+    GH_TOKEN:
+        description: ENC[AES256_GCM,…]
+        value: ENC[AES256_GCM,…]
+sops:
+    …
+'''
 ```
 
 In Settings › Storage, **Change…** lets you enter or browse to a data folder, then **Use folder and restart** opens it after restarting. Existing folders with data are accepted; a new folder starts fresh. To keep existing data elsewhere, quit yesman, copy the folder yourself, then reopen yesman and select the copy. Data transfers and any Git worktree path repairs are manual. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice. Storage also has a compact list of the repo pool, workspace parent, archive, secrets, variables, runtime files, settings file and storage configuration, with a Reveal action for each and the full path on hover.
