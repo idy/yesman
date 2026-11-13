@@ -162,7 +162,10 @@ export function createFiles(host) {
   function scheduleSave(p, rel) {
     const k = keyOf(p, rel);
     clearTimeout(timers.get(k));
-    timers.set(k, setTimeout(() => { timers.delete(k); save(p, rel); }, 800));
+    timers.set(k, setTimeout(() => {
+      timers.delete(k);
+      if (prefs.autoSave) save(p, rel);
+    }, 800));
   }
 
   // save writes a file's text, unless it changed on disk since it was read:
@@ -284,7 +287,10 @@ export function createFiles(host) {
     // Show where it is in the tree.
     for (let dir = parentOf(rel); dir !== '.'; dir = parentOf(dir)) p.expanded.add(dir);
     if (!host.isOpen()) host.setOpen(true);
-    loadView(p, rel);
+    // A file the editor has open may have changed while nothing watched
+    // it: refresh reconciles it, keeping unsaved changes as a conflict.
+    if (editor?.has(keyOf(p, rel))) refresh(p, rel);
+    else loadView(p, rel);
     for (const dir of p.expanded) if (!p.dirs.has(dir)) loadDir(p, dir);
     render();
   }
@@ -327,7 +333,13 @@ export function createFiles(host) {
   function watch(name) {
     if (watching === name) return;
     watching = name;
-    host.call('WatchFiles', name ?? '').catch(() => {}); // without a watch, reopening refreshes
+    host.call('WatchFiles', name ?? '').catch(() => {});
+    // Nothing was watched while the pane was closed or showed another
+    // workspace: read again what it shows, as a change would.
+    const p = name && panes.get(name);
+    if (!p) return;
+    for (const dir of p.dirs.keys()) loadDir(p, dir);
+    for (const t of p.tabs) refresh(p, t.path);
   }
 
   // onChange takes the "files" event: it reloads what changed and is shown.
@@ -483,7 +495,12 @@ export function createFiles(host) {
         case 'wrap': setPref('wrap', !prefs.wrap); editor?.setWrap(prefs.wrap); break;
         case 'autosave':
           setPref('autoSave', !prefs.autoSave);
-          if (prefs.autoSave) for (const t of p.tabs) if (t.dirty) save(p, t.path);
+          if (prefs.autoSave) {
+            for (const t of p.tabs) if (t.dirty) save(p, t.path);
+          } else {
+            for (const timer of timers.values()) clearTimeout(timer);
+            timers.clear();
+          }
           break;
         case 'knowledge': open('.yesman/knowledge/INDEX.md', true); break;
         case 'checkout': if (y) host.checkout(y); break;
