@@ -24,7 +24,9 @@ Every agent runs your installed `pi` with your usual pi configuration (models, p
 
 The app keeps running in the tray with its window closed. Agents are child processes of the app, so quitting it stops them; they resume from their sessions next time.
 
-Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool), and About (the versions yesman runs with).
+Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool), and About (the versions yesman runs with, and updates).
+
+Release builds update themselves through MyGo's updater: they check GitHub releases of `idy/yesman` at launch and every 6 hours, and an update pill in the titlebar installs a newer version and restarts into it. That needs builds made with `mygo build` from signed releases, which are not set up yet; development builds (`go run`, `go build`) never check.
 
 ## Requirements
 
@@ -71,6 +73,7 @@ go build -tags e2e -o /tmp/yesman . && YESMAN_HOME=/tmp/yesman-home MYGO_AUTOMAT
 | --- | --- |
 | `main.go`, `app.go`, `service.go` | App startup, tray, window and notifications; the methods the page calls |
 | `settings.go` | The settings file and the Settings and About pages' methods |
+| `update.go` | Checking for and installing new versions |
 | `internal/pool` | The repo pool and its worktrees |
 | `internal/github` | What the pool takes: GitHub repositories, their clone URLs and a fork's parent |
 | `internal/yesmen` | Workspaces, workers and their files |

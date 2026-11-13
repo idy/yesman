@@ -85,6 +85,8 @@ const state = {
   repoQuery: '',
   fetching: new Set(), // repositories being fetched
   addRepo: null, // the add form's draft while it is open
+  update: null, // Yesman.Update: where updating yesman stands
+  sidebar: localStorage.getItem('yesman.sidebar') !== 'hidden',
 };
 
 const agentById = (id) => state.snap.agents.find((a) => a.id === id);
@@ -550,7 +552,8 @@ function renderSidebar() {
     list.append(h('p', { class: 'side-group' }, 'Needs you'));
     for (const a of waiting) list.append(agentRow(a, '', a.role === 'lead' ? a.yesman : a.id));
   }
-  if (state.snap.yesmen.length) list.append(h('p', { class: 'side-group' }, 'Yesmen'));
+  list.append(h('div', { class: 'side-group' }, h('span', null, 'Yesmen'),
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Hire a yesman', 'aria-label': 'Hire a yesman', onclick: openHire }, icon('plus'))));
   for (const y of state.snap.yesmen) {
     const agents = state.snap.agents.filter((a) => a.yesman === y.name);
     const lead = agents.find((a) => a.role === 'lead');
@@ -562,36 +565,94 @@ function renderSidebar() {
 
 // ---------- Main column ----------
 
+// The titlebar: where you are on the left, what you can do on the right.
 function renderBar() {
-  const bar = $('#bar');
-  bar.replaceChildren();
+  const crumbs = $('#crumbs');
+  const sep = () => h('span', { class: 'mds-crumb-sep', 'aria-hidden': 'true' }, '/');
   const a = selectedAgent();
   if (state.view.kind === 'settings') {
     const page = SETTINGS.find((s) => s.page === state.view.page);
-    bar.append(h('nav', { class: 'mds-crumbs bar-crumbs', 'aria-label': 'Breadcrumb' },
-      h('span', null, 'Settings'), h('span', { class: 'mds-crumb-sep', 'aria-hidden': 'true' }, '/'), h('strong', { 'aria-current': 'page' }, page.label)));
-    return;
+    crumbs.replaceChildren(h('span', null, 'Settings'), sep(), h('span', { 'aria-current': 'page' }, page.label));
+  } else if (a) {
+    const y = yesmanOf(a.id);
+    const here = h('span', { 'aria-current': 'page', title: y?.path ?? '' }, a.role === 'lead' ? a.yesman : a.name);
+    crumbs.replaceChildren(...(a.role === 'lead' ? [here] : [h('span', null, a.yesman), sep(), here]));
+  } else {
+    crumbs.replaceChildren();
   }
-  if (!a) {
-    bar.append(h('div', { class: 'bar-title' }));
-    return;
+  renderBarActions();
+}
+
+function renderBarActions() {
+  const actions = $('#bar-actions');
+  const a = state.view.kind === 'agent' ? selectedAgent() : null;
+  const button = (iconName, label, onclick, extra = {}) =>
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: label, 'aria-label': label, onclick, ...extra }, icon(iconName));
+  actions.replaceChildren(...[
+    a ? h('span', { class: 'mds-status', 'data-status': a.status, role: 'status' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, STATUS[a.status] ?? a.status)) : null,
+    updatePill(),
+    a && a.status !== 'stopped'
+      ? button('power', 'Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.', () => call('Stop', a.id).catch(fail))
+      : null,
+    a?.role === 'worker' ? button('x', 'Remove worker', () => removeWorker(a)) : null,
+    a ? button('panel', 'Workspace', toggleInfo, { 'aria-pressed': String(state.infoOpen) }) : null,
+  ].filter(Boolean));
+}
+
+// The pill shows only while there is something to do about an update.
+function updatePill() {
+  const u = state.update;
+  if (!u?.enabled) return null;
+  const pill = (iconName, label, title, extra) => h('button', { class: 'mds-pill mds-pill--responsive', type: 'button', title, ...extra },
+    icon(iconName), h('span', { class: 'mds-pill-label' }, label));
+  switch (u.state) {
+    case 'available': return pill('up', `Update ${u.version}`, `Install yesman ${u.version}`, { onclick: installUpdate });
+    case 'downloading': return pill('reload', `Updating ${Math.round((u.progress ?? 0) * 100)}%`, `Installing yesman ${u.version}`, { disabled: true, 'aria-busy': 'true' });
+    case 'ready': return pill('up', 'Restart to update', `Restart into yesman ${u.version}`, { onclick: restartToUpdate });
+    case 'failed': return pill('alert', 'Update failed', `Installing yesman ${u.version} failed: ${u.error}\nClick to try again.`, { 'data-tone': 'error', onclick: installUpdate });
+    default: return null;
   }
-  const y = yesmanOf(a.id);
-  const title = a.role === 'lead' ? a.yesman : `${a.yesman} / ${a.name}`;
-  const sub = [a.role === 'lead' ? 'lead' : 'worker', a.model, y?.path].filter(Boolean).join(' · ');
-  bar.append(
-    h('div', { class: 'bar-title' }, h('strong', null, title), h('span', null, sub)),
-    h('span', { class: 'mds-status', 'data-status': a.status }, h('i', { class: 'mds-dot' }), h('span', null, STATUS[a.status] ?? a.status)),
-    h('div', { class: 'bar-actions' },
-      a.status !== 'stopped'
-        ? h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.', 'aria-label': 'Put agent to sleep', onclick: () => call('Stop', a.id).catch(fail) }, icon('power'))
-        : null,
-      a.role === 'worker'
-        ? h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Remove worker', 'aria-label': 'Remove worker', onclick: () => removeWorker(a) }, icon('x'))
-        : null,
-      h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: 'Workspace', 'aria-label': 'Toggle workspace panel', 'aria-pressed': String(state.infoOpen), onclick: toggleInfo }, icon('panel')),
-    ),
-  );
+}
+
+function installUpdate() {
+  call('InstallUpdate').catch(fail);
+}
+
+async function restartToUpdate() {
+  const busy = state.snap.agents.filter((a) => a.status === 'working' || a.status === 'waiting').length;
+  if (busy && !(await confirmAction('Restart yesman?',
+    `${busy === 1 ? 'An agent is' : `${busy} agents are`} working. Restarting stops ${busy === 1 ? 'it' : 'them'}; ${busy === 1 ? 'it picks up its' : 'they pick up their'} session when you next talk to ${busy === 1 ? 'it' : 'them'}.`,
+    'Restart'))) return;
+  call('RestartToUpdate').catch(fail);
+}
+
+function onUpdate(u) {
+  state.update = u;
+  renderBarActions();
+  if (state.view.kind === 'settings' && state.view.page === 'about') renderBody();
+}
+
+// ---------- Sidebar ----------
+
+function applySidebar() {
+  $('#app').dataset.sidebar = state.sidebar ? 'shown' : 'hidden';
+  const toggle = $('#sidebar-button');
+  const label = state.sidebar ? 'Hide the sidebar' : 'Show the sidebar';
+  toggle.setAttribute('aria-expanded', String(state.sidebar));
+  toggle.setAttribute('aria-label', label);
+  toggle.title = label;
+}
+
+function toggleSidebar() {
+  state.sidebar = !state.sidebar;
+  localStorage.setItem('yesman.sidebar', state.sidebar ? 'shown' : 'hidden');
+  applySidebar();
+}
+
+async function openHire() {
+  const form = $('#hire-form');
+  form.reset();
+  if ((await openDialog($('#hire-dialog'))) === 'hire') hire(form.elements.name.value.trim());
 }
 
 function renderBody() {
@@ -656,7 +717,8 @@ function renderDock() {
   const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea); } },
     textarea,
     h('div', { class: 'composer-row' },
-      h('span', { class: 'composer-hint' }, working ? 'Working. A new message steers it after its current step.' : 'Enter to send, Shift+Enter for a new line'),
+      h('span', { class: 'composer-hint' }, a.model ? h('span', { class: 'composer-model' }, a.model) : null,
+        working ? 'Working. A new message steers it after its current step.' : 'Enter to send, Shift+Enter for a new line'),
       h('div', { class: 'ask-actions' }, stop, send)),
   );
   dock.append(form);
@@ -828,6 +890,27 @@ function renderGeneral(inner) {
   );
 }
 
+// What About says of updates, with the one action that fits.
+function updateStatus() {
+  const u = state.update;
+  const faint = (text) => h('span', { class: 'about-faint' }, text);
+  if (!u) return faint('Checking…');
+  if (!u.enabled) return faint('Release builds update themselves from GitHub. This build does not.');
+  const action = (label, onclick) => h('button', { class: 'mds-button mds-button--small', type: 'button', onclick }, label);
+  const check = () => call('CheckForUpdates').catch(fail);
+  switch (u.state) {
+    case 'checking': return faint('Checking…');
+    case 'available': return h('span', { class: 'about-update' }, h('span', null, `yesman ${u.version} is available`), action('Install', installUpdate));
+    case 'downloading': return faint(`Installing ${u.version}, ${Math.round((u.progress ?? 0) * 100)}%`);
+    case 'ready': return h('span', { class: 'about-update' }, h('span', null, `${u.version} is installed`), action('Restart', restartToUpdate));
+    case 'failed': return h('span', { class: 'about-update' }, h('span', { class: 'danger' }, `Installing ${u.version} failed: ${u.error}`), action('Try again', installUpdate));
+    default:
+      return h('span', { class: 'about-update' },
+        u.error ? h('span', { class: 'danger' }, `The last check failed: ${u.error}`) : h('span', null, u.checkedAt ? `Up to date, ${ago(u.checkedAt, 'checked')}` : 'Not checked yet'),
+        action('Check now', check));
+  }
+}
+
 function renderAbout(inner) {
   const v = state.about;
   const row = (label, ...value) => h('div', { class: 'mds-row about-row' },
@@ -843,6 +926,7 @@ function renderAbout(inner) {
   inner.append(
     settingsSection('yesman', 'Hires yesmen: pi agents that each take on one project in a workspace of their own.',
       row('Build', build),
+      row('Updates', updateStatus()),
       row('pi', v ? (v.pi || h('span', { class: 'danger' }, v.piError)) : faint('Checking…')),
       row('MyGo', v ? v.mygo || faint('unknown') : faint('Checking…')),
       row('Magpie', v ? v.magpie || faint('unknown') : faint('Checking…')),
@@ -853,13 +937,13 @@ function renderAbout(inner) {
 
 // ---------- Repositories ----------
 
-function ago(iso) {
-  if (!iso) return 'never fetched';
+function ago(iso, verb = 'fetched') {
+  if (!iso) return `never ${verb}`;
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-  if (s < 60) return 'fetched just now';
-  if (s < 3600) return `fetched ${Math.round(s / 60)} min ago`;
-  if (s < 86400) return `fetched ${Math.round(s / 3600)} h ago`;
-  return `fetched ${Math.round(s / 86400)} d ago`;
+  if (s < 60) return `${verb} just now`;
+  if (s < 3600) return `${verb} ${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${verb} ${Math.round(s / 3600)} h ago`;
+  return `${verb} ${Math.round(s / 86400)} d ago`;
 }
 
 // owner/repo for a GitHub URL, which is all a pool repository can be;
@@ -999,7 +1083,7 @@ function renderInfo() {
   const checkout = h('button', { class: 'mds-button mds-button--small', type: 'submit', disabled: !state.repos.length }, 'Check out');
 
   info.replaceChildren(
-    h('div', { class: 'info-top drag' }, h('strong', null, y.name)),
+    h('div', { class: 'info-top' }, h('strong', null, 'Workspace')),
     h('section', { class: 'info-section' },
       h('h3', null, 'Workspace'),
       h('span', { class: 'path' }, y.path),
@@ -1146,7 +1230,7 @@ function onAgents(agents) {
 }
 
 function render() {
-  $('.main').dataset.view = state.view.kind;
+  $('#app').dataset.view = state.view.kind;
   renderSidebar();
   renderBar();
   renderBody();
@@ -1158,12 +1242,8 @@ async function start() {
     document.body.replaceChildren(h('div', { class: 'welcome' }, h('h1', { class: 'mds-title' }, 'yesman'), h('p', null, 'Open this page in the yesman app.')));
     return;
   }
-  $('#hire-button').addEventListener('click', async () => {
-    const form = $('#hire-form');
-    form.reset();
-    const result = await openDialog($('#hire-dialog'));
-    if (result === 'hire') hire(form.elements.name.value.trim());
-  });
+  $('#sidebar-button').addEventListener('click', toggleSidebar);
+  applySidebar();
   buildSideFoot();
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href]');
@@ -1178,6 +1258,8 @@ async function start() {
   mygo.on('agents', onAgents);
   mygo.on('agent-event', onAgentEvent);
   mygo.on('changed', refreshSoon);
+  mygo.on('update', onUpdate);
+  call('Update').then(onUpdate, () => {});
   mygo.on('focus-agent', (id) => {
     call('TakeFocus').catch(() => {});
     selectAgent(id);

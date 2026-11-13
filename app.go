@@ -52,7 +52,12 @@ type app struct {
 
 	setmu    sync.Mutex
 	settings Settings
+
+	updates *updates
 }
+
+// titlebarHeight is the height of the titlebar the page draws.
+const titlebarHeight = 40
 
 // showWindow opens the main window, or brings it to the front.
 func (a *app) showWindow() {
@@ -76,7 +81,11 @@ func (a *app) showWindow() {
 		Width:         1180,
 		Height:        780,
 		TitleBarStyle: mygo.TitleBarHidden,
-		StateKey:      "main",
+		// The page's titlebar is 40px tall: Windows' caption buttons fill
+		// it, and the traffic lights sit centered in it.
+		TitleBarHeight:       titlebarHeight,
+		TrafficLightPosition: &mygo.Point{X: 16, Y: (titlebarHeight - 14) / 2},
+		StateKey:             "main",
 	})
 	a.win = w
 	w.Page().OnContextMenu(func(e *mygo.ContextMenuEvent) {
