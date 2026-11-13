@@ -1171,7 +1171,7 @@ const OWNER_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 
 const picker = {
-  lists: new Map(), // owner key -> { owner, state: 'loading' | 'ready' | 'failed', repos, complete, error }
+  lists: new Map(), // owner key -> { owner, state: 'loading' | 'ready' | 'failed', repos, error }
   selected: new Map(), // repo key -> owner/repo
   timer: 0,
   error: '',
@@ -1251,13 +1251,11 @@ async function listOwner(owner, again = false) {
   clearTimeout(picker.timer);
   const had = picker.lists.get(key);
   if (had && !(again && had.state === 'failed')) return;
-  const entry = { owner, state: 'loading', repos: [], complete: false, error: '' };
+  const entry = { owner, state: 'loading', repos: [], error: '' };
   picker.lists.set(key, entry);
   renderPicker();
   try {
-    const listing = await call('OwnerRepos', owner);
-    entry.repos = listing.repos;
-    entry.complete = listing.complete;
+    entry.repos = await call('OwnerRepos', owner);
     entry.state = 'ready';
   } catch (err) {
     entry.state = 'failed';
@@ -1266,20 +1264,22 @@ async function listOwner(owner, again = false) {
   if (picker.lists.get(key) === entry && $('#repo-dialog').open) renderPicker();
 }
 
+// The owner's listed repository a typed one names, in GitHub's spelling.
+function pickerListed(typed) {
+  const entry = typed.full && picker.lists.get(typed.owner.toLowerCase());
+  if (entry?.state !== 'ready') return undefined;
+  return entry.repos.find((r) => repoKey(r.fullName) === repoKey(typed.full)) ?? null;
+}
+
 // What Add would add: the ticked repositories, or else the one typed,
-// unless it is in the pool, or the owner's complete list shows it does
-// not exist. A list may leave out what the user can clone: the public
-// API lists no private repositories, and a long list stops at 1,000.
+// unless it is in the pool. One the owner's list leaves out is still
+// tried: the list may not show every repository the user can clone (the
+// public API lists no private ones, and a list stops at 1,000).
 function pickerChoice(typed = readPickerInput()) {
   if (picker.selected.size) return [...picker.selected.values()];
   if (!typed.full || pickerTaken().has(repoKey(typed.full))) return [];
-  const entry = picker.lists.get(typed.owner.toLowerCase());
-  if (entry?.state === 'ready') {
-    const listed = entry.repos.find((r) => repoKey(r.fullName) === repoKey(typed.full));
-    if (listed) return [typed.input === typed.full ? listed.fullName : typed.input];
-    if (entry.complete) return [];
-  }
-  return [typed.input];
+  const listed = pickerListed(typed);
+  return [listed && typed.input === typed.full ? listed.fullName : typed.input];
 }
 
 function pickerNote(...children) {
@@ -1401,6 +1401,7 @@ function renderPickerFoot(typed = readPickerInput()) {
   status.textContent = picker.error
     || (n ? `${n} selected`
       : typed.full && pickerTaken().has(repoKey(typed.full)) ? `${typed.full} is already in the pool.`
+      : pickerListed(typed) === null ? `Not in ${typed.owner}’s list; Add tries it anyway.`
       : loading ? `Listing ${typed.owner}’s repositories…` : '');
 }
 

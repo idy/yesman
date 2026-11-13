@@ -338,6 +338,12 @@ func (p *Pool) Fetch(ctx context.Context, name string, force bool) error {
 	return p.fetch(ctx, r, force)
 }
 
+// FetchRepo is Fetch for a repository already resolved with Get or List,
+// which spares scanning the pool again.
+func (p *Pool) FetchRepo(ctx context.Context, r Repo, force bool) error {
+	return p.fetch(ctx, r, force)
+}
+
 func (p *Pool) fetch(ctx context.Context, r Repo, force bool) error {
 	l := p.lock(r.Name)
 	l.Lock()

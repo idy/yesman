@@ -98,7 +98,7 @@ func (f *fetcher) Fetch(ctx context.Context, name string) (pool.Repo, error) {
 		return r, err
 	}
 	f.start(r.Name)
-	err = f.pool.Fetch(ctx, r.Name, true)
+	err = f.pool.FetchRepo(ctx, r, true)
 	f.finish(r.Name, err)
 	if err != nil {
 		return r, err
@@ -145,7 +145,7 @@ func (f *fetcher) FetchAll(force bool) error {
 				defer func() { <-slots; wg.Done() }()
 				ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 				defer cancel()
-				f.finish(r.Name, f.pool.Fetch(ctx, r.Name, force))
+				f.finish(r.Name, f.pool.FetchRepo(ctx, r, force))
 			}()
 		}
 		wg.Wait()

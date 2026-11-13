@@ -138,7 +138,7 @@ func (s *service) DismissClone(repo string) {
 
 // OwnerRepos lists a GitHub user's or organization's repositories, to
 // choose some to add.
-func (s *service) OwnerRepos(owner string) (github.Listing, error) {
+func (s *service) OwnerRepos(owner string) ([]github.Listed, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	return github.List(ctx, owner)
