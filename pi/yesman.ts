@@ -76,10 +76,9 @@ export default function yesman(pi: ExtensionAPI) {
 		name: "yesman_repo_add",
 		label: "yesman: add repo",
 		description:
-			"Add a repository to yesman's shared repo pool by its remote URL, so that any yesman can check it out. Pass upstream for a fork, to also fetch the repository it was forked from. Adding a repository already in the pool returns it.",
+			"Add a GitHub repository to yesman's shared repo pool, so that any yesman can check it out. The pool takes only GitHub repositories. For a fork, yesman also fetches the repository it was forked from, as the upstream remote. Adding a repository already in the pool returns it.",
 		parameters: Type.Object({
-			url: Type.String({ description: "Remote URL, such as https://github.com/owner/repo or git@github.com:owner/repo.git" }),
-			upstream: Type.Optional(Type.String({ description: "For a fork: the URL of the repository it was forked from" })),
+			repo: Type.String({ description: "The GitHub repository: owner/repo, or its URL such as https://github.com/owner/repo or git@github.com:owner/repo.git" }),
 		}),
 		async execute(_id, params, signal) {
 			const repo = await call("POST", "/v1/repos", params, signal);

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -132,8 +133,7 @@ func (s *Server) repos(ctx context.Context, c caller, _ *http.Request) (any, err
 
 func (s *Server) addRepo(_ context.Context, _ caller, r *http.Request) (any, error) {
 	var req struct {
-		URL      string `json:"url"`
-		Upstream string `json:"upstream"`
+		Repo string `json:"repo"` // a GitHub repository: owner/repo or its URL
 	}
 	if err := decode(r, &req); err != nil {
 		return nil, err
@@ -141,7 +141,11 @@ func (s *Server) addRepo(_ context.Context, _ caller, r *http.Request) (any, err
 	// A clone outlives a dropped request, so that a retry finds it done.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
-	repo, err := s.Pool.Add(ctx, req.URL, req.Upstream)
+	gh, err := github.Resolve(ctx, req.Repo)
+	if err != nil {
+		return nil, err
+	}
+	repo, err := s.Pool.Add(ctx, gh.URL, gh.Upstream)
 	if err == nil {
 		s.changed()
 	}
@@ -359,7 +363,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	}
 	if repos := snapshot.Repos; repos != nil || scanErr == nil {
 		if len(repos) == 0 {
-			w("\nThe repo pool is empty. Add a repository with yesman_repo_add.\n")
+			w("\nThe repo pool is empty. Add a GitHub repository with yesman_repo_add.\n")
 		} else {
 			w("\nRepositories in the pool: ")
 			for i, r := range repos {
@@ -372,7 +376,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 				}
 				w("%s", r.Name)
 			}
-			w(". Add another with yesman_repo_add.\n")
+			w(". Add another GitHub repository with yesman_repo_add.\n")
 		}
 	}
 

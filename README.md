@@ -10,7 +10,7 @@ yesman is a tray app for hiring yesmen. A yesman takes on one project: it gets a
 
 | Piece | What it is |
 | --- | --- |
-| Repo pool | Bare repositories under `repos/`, written only by yesman. A repository is fetched whenever someone checks it out of the pool. Forks can carry an `upstream` remote. |
+| Repo pool | GitHub repositories, kept as bare repositories under `repos/` and written only by yesman. A repository is fetched whenever someone checks it out of the pool. A fork also fetches the repository it was forked from, as its `upstream` remote. |
 | Yesman | A workspace directory under `yesmen/<name>/`. Its worktrees, of any pool repositories, are checked out into it with `git worktree`, each on its own branch. |
 | Lead | A [pi](https://pi.dev) agent in RPC mode, working in the workspace. You talk to it; it plans, keeps knowledge, and delegates. |
 | Workers | More pi agents in the same workspace, started by the lead for one task each. A worker's final message is sent to its lead when it finishes a run. |
@@ -24,9 +24,12 @@ Every agent runs your installed `pi` with your usual pi configuration (models, p
 
 The app keeps running in the tray with its window closed. Agents are child processes of the app, so quitting it stops them; they resume from their sessions next time.
 
+Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool), and About (the versions yesman runs with).
+
 ## Requirements
 
 - Go 1.27 or later, and git
+- Optionally the [GitHub CLI](https://cli.github.com) (`gh`), signed in. yesman asks it which repository a fork came from, private ones too, and clones `owner/repo` over the protocol it is set to use. Without it, yesman asks GitHub's public API and clones over HTTPS.
 - [pi](https://pi.dev) 1.5 or later on the `PATH` (`npm install -g @earendil-works/pi-coding-agent`), with a model configured
 
 The window uses [MyGo](https://github.com/egoist/mygo) v0.9.0 with a vanilla JavaScript page and the [Magpie design system](https://github.com/idy/magpie-design-system) v0.4.4, vendored in `web/mds/`. There is no frontend build step.
@@ -67,7 +70,9 @@ go build -tags e2e -o /tmp/yesman . && YESMAN_HOME=/tmp/yesman-home MYGO_AUTOMAT
 | Path | Contents |
 | --- | --- |
 | `main.go`, `app.go`, `service.go` | App startup, tray, window and notifications; the methods the page calls |
+| `settings.go` | The settings file and the Settings and About pages' methods |
 | `internal/pool` | The repo pool and its worktrees |
+| `internal/github` | What the pool takes: GitHub repositories, their clone URLs and a fork's parent |
 | `internal/yesmen` | Workspaces, workers and their files |
 | `internal/agent` | pi processes in RPC mode and their status |
 | `internal/server` | The loopback API for the extension, and the context each agent gets |

@@ -54,6 +54,10 @@ func main() {
 
 	a := &app{home: h, pool: pool.New(h.Repos()), yesmen: yesmen.New(h.Yesmen(), h.Archive())}
 	a.pi, a.piErr = findPi()
+	a.settings = loadSettings(h.Settings())
+	if a.settings.Appearance != "" {
+		mygo.Theme.SetSource(a.settings.Appearance) // before Run, so the window opens in it
+	}
 
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged}
 	if err := srv.Start(); err != nil {
