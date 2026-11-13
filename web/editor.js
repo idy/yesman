@@ -5,6 +5,15 @@
 // One view shows one file at a time; each open file keeps its own state,
 // with its undo history and selection, while it has a tab.
 
+import { t } from './i18n.js';
+
+// CodeMirror's own words, in its search and fold panels, which it says in
+// the page's language through EditorState.phrases.
+const PHRASES = ['Find', 'Replace', 'next', 'previous', 'all', 'match case', 'regexp', 'by word', 'replace', 'replace all', 'close',
+  'current match', 'on line', 'replaced match on line $', 'replaced $ matches', 'Go to line', 'go', 'Folded lines', 'Unfolded lines',
+  'to', 'folded code', 'unfold', 'Fold line', 'Unfold line', 'Control character', 'Selection deleted'];
+const phrases = () => Object.fromEntries(PHRASES.map((p) => [p, t(p)]));
+
 let cm = null;
 async function load() {
   cm ??= await import('./vendor/codemirror/codemirror.js');
@@ -98,7 +107,7 @@ export async function createEditor({ onChange, onSave }) {
   function extensions(k, readOnly) {
     return [
       lineNumbers(), foldGutter(), highlightActiveLineGutter(), highlightSpecialChars(), history(), drawSelection(), dropCursor(),
-      EditorState.allowMultipleSelections.of(true), indentOnInput(), bracketMatching(), closeBrackets(),
+      EditorState.allowMultipleSelections.of(true), EditorState.phrases.of(phrases()), indentOnInput(), bracketMatching(), closeBrackets(),
       rectangularSelection(), crosshairCursor(), highlightActiveLine(), highlightSelectionMatches(), search({ top: true }),
       keymap.of([
         { key: 'Mod-s', preventDefault: true, run: () => { onSave(k); return true; } },
@@ -111,7 +120,7 @@ export async function createEditor({ onChange, onSave }) {
       EditorView.updateListener.of((u) => {
         if (u.docChanged && !u.transactions.every((tr) => tr.annotation(fromDisk))) onChange(k);
       }),
-      EditorView.contentAttributes.of({ 'aria-label': `Contents of ${k}` }),
+      EditorView.contentAttributes.of({ 'aria-label': t('Contents of {file}', { file: k.slice(k.indexOf('\n') + 1) }) }),
     ];
   }
 

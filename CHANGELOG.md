@@ -2,6 +2,11 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.10
+
+- yesman speaks Simplified Chinese as well as English. Choose the language in Settings › General, or Match the system to follow the languages of your system settings. The window, its menus, the tray and notifications switch at once.
+- Storage has a page of its own in Settings: choose the yesman folder there, and reveal where the repositories, workspaces, archive and runtime files are.
+
 ## 0.1.9
 
 - Export yesman's configuration from Settings › Import and export: the appearance, the fetch schedule and every GitHub repository in the pool, as a TOML file. Workspaces, knowledge and conversations are not included.

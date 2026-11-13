@@ -94,9 +94,11 @@ func (s Settings) save(path string) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// SettingsView is what the General and Repositories settings pages show.
+// SettingsView is what the General, Repositories and Storage settings
+// pages show.
 type SettingsView struct {
 	Appearance    mygo.ThemeSource `json:"appearance"`
+	Language      string           `json:"language"`  // a language of languages, or "system"
 	AutoFetch     int              `json:"autoFetch"` // minutes; 0 is off
 	Home          string           `json:"home"`
 	Pool          string           `json:"pool"`
@@ -119,8 +121,13 @@ func (s *service) Settings() SettingsView {
 	if appearance == "" {
 		appearance = mygo.ThemeSystem
 	}
+	language := languageSystem
+	if a.chosenLocale != nil {
+		language = chosenLanguage(a.chosenLocale())
+	}
 	v := SettingsView{
 		Appearance:   appearance,
+		Language:     language,
 		AutoFetch:    autoFetch,
 		Home:         a.home.Root,
 		Pool:         a.home.Repos(),
@@ -153,6 +160,20 @@ func (s *service) SetAppearance(source string) error {
 	next := a.settings
 	next.Appearance = t
 	return a.putSettingsLocked(next)
+}
+
+// SetLanguage shows yesman in a language it is written in, or "system" to
+// follow the system's languages. MyGo keeps the choice for the next starts
+// (App.SetLocale), and tells the page, which draws itself again.
+func (s *service) SetLanguage(choice string) error {
+	tag, ok := languageTag(choice)
+	if !ok {
+		return fmt.Errorf("unknown language %q", choice)
+	}
+	if s.app.setLocale != nil {
+		s.app.setLocale(tag)
+	}
+	return nil
 }
 
 // SetAutoFetch sets how many minutes apart the pool's repositories are

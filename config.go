@@ -251,8 +251,10 @@ type ImportPlan struct {
 type ExtraRepo struct {
 	Name  string `json:"name"`  // its pool name, such as github.com/idy/yesman
 	Label string `json:"label"` // owner/repo, or the pool name when it is not from GitHub
-	// InUse says why replacing keeps it: work depends on it.
-	InUse string `json:"inUse,omitempty"`
+	// InUse says why replacing keeps it: work depends on it, or removing
+	// it failed, as Failed tells.
+	InUse  string `json:"inUse,omitempty"`
+	Failed bool   `json:"failed,omitempty"`
 	// Clone is the state of a repository still on its way into the pool,
 	// whose clone replacing stops, or "" for one in the pool.
 	Clone CloneState `json:"clone,omitempty"`
@@ -313,7 +315,7 @@ func planImport(c config, current Settings, repos []pool.Repo, clones []Clone, i
 		}
 		e := ExtraRepo{Name: "github.com/" + cl.Repo, Label: cl.Repo, Clone: cl.State}
 		if cl.agents > 0 {
-			e.InUse = agentCloning
+			e.InUse = tr(agentCloning)
 		}
 		plan.Extra = append(plan.Extra, e)
 	}
@@ -394,9 +396,9 @@ func (a *app) previewImport(ctx context.Context, path string) (ImportPlan, error
 	plan := planImport(c, current, repos, a.clones.List(), func(r pool.Repo) string {
 		reason, err := a.pool.InUse(ctx, r)
 		if err != nil {
-			return "yesman could not check whether work depends on it: " + err.Error()
+			return tr("yesman could not check whether work depends on it: %s", err)
 		}
-		return reason
+		return inUseText(reason)
 	})
 	plan.Path = path
 	return plan, nil
@@ -449,7 +451,7 @@ func (a *app) importConfig(ctx context.Context, path string, mode importMode) (I
 			return res, fmt.Errorf("stop the clones the file leaves out: %w", err)
 		}
 		for _, r := range held {
-			res.Kept = append(res.Kept, ExtraRepo{Name: "github.com/" + r, Label: r, InUse: agentCloning, Clone: CloneCloning})
+			res.Kept = append(res.Kept, ExtraRepo{Name: "github.com/" + r, Label: r, InUse: tr(agentCloning), Clone: CloneCloning})
 		}
 	}
 
@@ -480,10 +482,10 @@ func (a *app) importConfig(ctx context.Context, path string, mode importMode) (I
 			case err == nil:
 				res.Removed = append(res.Removed, e.Name)
 			case errors.As(err, &used):
-				e.InUse = used.Reason
+				e.InUse = inUseText(used.Reason)
 				res.Kept = append(res.Kept, e)
 			default:
-				e.InUse = "removing it failed: " + err.Error()
+				e.InUse, e.Failed = tr("removing it failed: %s", err), true
 				res.Kept = append(res.Kept, e)
 			}
 		}
@@ -496,7 +498,9 @@ func (a *app) importConfig(ctx context.Context, path string, mode importMode) (I
 }
 
 // configFilters are what the file dialogs offer.
-var configFilters = []mygo.FileFilter{{Name: "yesman configuration", Extensions: []string{"toml"}}}
+func configFilters() []mygo.FileFilter {
+	return []mygo.FileFilter{{Name: tr("yesman configuration"), Extensions: []string{"toml"}}}
+}
 
 // The configuration file's dialogs. End-to-end builds may answer them
 // themselves, since automation cannot reach native dialogs.
@@ -516,8 +520,8 @@ func (a *app) window() *mygo.Window {
 func (s *service) ExportConfig() (ExportResult, error) {
 	dir, _ := os.UserHomeDir()
 	path, err := configSaveDialog(mygo.SaveDialogOptions{
-		Parent: s.app.window(), Title: "Export yesman configuration", ButtonLabel: "Export",
-		DefaultPath: filepath.Join(dir, "yesman.toml"), Filters: configFilters, CreateDirectories: true,
+		Parent: s.app.window(), Title: tr("Export yesman configuration"), ButtonLabel: tr("Export"),
+		DefaultPath: filepath.Join(dir, "yesman.toml"), Filters: configFilters(), CreateDirectories: true,
 	})
 	if err != nil || path == "" {
 		return ExportResult{Skipped: []string{}}, err
@@ -530,8 +534,8 @@ func (s *service) ExportConfig() (ExportResult, error) {
 func (s *service) ChooseConfigFile() (string, error) {
 	dir, _ := os.UserHomeDir()
 	paths, err := configOpenDialog(mygo.OpenDialogOptions{
-		Parent: s.app.window(), Title: "Import yesman configuration", ButtonLabel: "Choose",
-		DefaultPath: dir, Filters: configFilters,
+		Parent: s.app.window(), Title: tr("Import yesman configuration"), ButtonLabel: tr("Choose"),
+		DefaultPath: dir, Filters: configFilters(),
 	})
 	if err != nil || len(paths) == 0 {
 		return "", err

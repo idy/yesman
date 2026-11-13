@@ -87,12 +87,12 @@ func loadStorage(path, fallback string) (home.Home, *storageLocation, error) {
 func checkStorageFolder(destination string) (string, error) {
 	destination = strings.TrimSpace(destination)
 	if !filepath.IsAbs(destination) {
-		return "", errors.New("enter the full path of the yesman folder")
+		return "", errors.New(tr("enter the full path of the yesman folder"))
 	}
 	destination = filepath.Clean(destination)
 	if info, err := os.Stat(destination); err == nil {
 		if !info.IsDir() {
-			return "", errors.New("choose a folder, not a file")
+			return "", errors.New(tr("choose a folder, not a file"))
 		}
 		return filepath.EvalSymlinks(destination)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -105,7 +105,7 @@ func (l *storageLocation) setHome(destination string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.override {
-		return errors.New("YESMAN_HOME sets the folder for this launch; unset it and restart to change the folder in Settings")
+		return errors.New(tr("YESMAN_HOME sets the folder for this launch; unset it and restart to change the folder in Settings"))
 	}
 	destination, err := checkStorageFolder(destination)
 	if err != nil {
@@ -145,7 +145,7 @@ func (s *service) ChooseStorageFolder() (string, error) {
 	win := a.win
 	a.wmu.Unlock()
 	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
-		Parent: win, Title: "Choose a yesman folder", ButtonLabel: "Choose folder",
+		Parent: win, Title: tr("Choose a yesman folder"), ButtonLabel: tr("Choose folder"),
 		DefaultPath: filepath.Dir(a.home.Root), Directory: true, CreateDirectories: true,
 	})
 	if err != nil || len(paths) == 0 {
