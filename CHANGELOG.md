@@ -2,6 +2,10 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.1
+
+The first version installed copies of 0.1.0 update to by themselves, to check that updating works. Nothing else changes.
+
 ## 0.1.0
 
 The first release.
