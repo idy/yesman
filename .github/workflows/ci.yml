@@ -1,0 +1,66 @@
+name: CI
+
+# Builds and tests yesman on every system it ships for. It runs the PR's
+# code, so it has no secrets and is kept apart from the review workflow.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Run gofmt on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./... && go vet -tags e2e ./...
+
+      - name: Build
+        run: go build ./... && go build -tags e2e ./...
+
+      # The race detector needs cgo, which Windows runners lack a setup for.
+      - name: Test
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            go test ./...
+          else
+            go test -race ./...
+          fi
+
+      - name: Check the page's scripts
+        run: |
+          for f in web/*.js; do
+            node --check "$f"
+          done
