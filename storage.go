@@ -120,12 +120,15 @@ func (l *storageLocation) setHome(destination string) error {
 	if err != nil {
 		return err
 	}
-	probe, err := os.CreateTemp(h.Runtime(), ".write-check-*")
-	if err != nil {
-		return fmt.Errorf("the yesman folder is not writable: %w", err)
+	for _, dir := range []string{h.Root, h.Repos(), h.Yesmen(), h.Archive(), h.Runtime()} {
+		probe, err := os.CreateTemp(dir, ".write-check-*")
+		if err != nil {
+			return fmt.Errorf("the yesman folder is not writable at %s: %w", dir, err)
+		}
+		if err := errors.Join(probe.Close(), os.Remove(probe.Name())); err != nil {
+			return fmt.Errorf("check write access to %s: %w", dir, err)
+		}
 	}
-	probe.Close()
-	os.Remove(probe.Name())
 	next := storageConfig{Home: destination}
 	if err := next.save(l.path); err != nil {
 		return fmt.Errorf("save the location: %w", err)

@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+
+	"github.com/idy/yesman/internal/home"
 )
 
 func TestStorageSelectsExistingDataWithoutCopying(t *testing.T) {
@@ -78,6 +82,62 @@ func TestStorageCreatesNewFolderAndRejectsInvalidSelection(t *testing.T) {
 		if info, err := os.Stat(filepath.Join(destination, dir)); err != nil || !info.IsDir() {
 			t.Fatalf("missing %s: %v", dir, err)
 		}
+	}
+}
+
+func TestStorageRejectsReadOnlyDataDirectories(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows chmod does not restrict directory write access")
+	}
+	for _, name := range []string{"root", "repos", "yesmen", "archive", ".runtime"} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			path := filepath.Join(base, "config", "storage.json")
+			loc := &storageLocation{path: path}
+			if err := loc.setHome(filepath.Join(base, "current")); err != nil {
+				t.Fatal(err)
+			}
+			before := loc.config
+			selector, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := home.Home{Root: filepath.Join(base, "selected")}
+			if err := target.Ensure(); err != nil {
+				t.Fatal(err)
+			}
+			locked := target.Root
+			if name != "root" {
+				locked = filepath.Join(target.Root, name)
+			}
+			if err := os.Chmod(locked, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+			if probe, err := os.CreateTemp(locked, ".permission-check-*"); err == nil {
+				probe.Close()
+				os.Remove(probe.Name())
+				t.Skip("the current user can write through read-only directory permissions")
+			}
+			if err := loc.setHome(target.Root); err == nil || !strings.Contains(err.Error(), "not writable") {
+				t.Fatalf("accepted a read-only %s: %v", name, err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || string(after) != string(selector) || loc.config != before {
+				t.Fatalf("a failed permission check changed the selected folder: %s, %v", after, err)
+			}
+			for _, dir := range []string{target.Root, target.Repos(), target.Yesmen(), target.Archive(), target.Runtime()} {
+				entries, err := os.ReadDir(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if strings.HasPrefix(entry.Name(), ".write-check-") {
+						t.Errorf("permission probe left behind in %s", dir)
+					}
+				}
+			}
+		})
 	}
 }
 
