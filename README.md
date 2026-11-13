@@ -55,6 +55,8 @@ go run .
 go test ./...
 ```
 
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) vets, builds and tests on Linux, macOS and Windows for every pull request and every push to `main`. It does not start the app's window or real pi agents.
+
 The end-to-end test starts real pi agents and calls your configured model:
 
 ```bash
