@@ -103,12 +103,26 @@ func TestWithPi(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := m.Prompt(ctx, lead, "Use yesman_checkout to check out the pool repository demo on a new branch named try. "+
+	waitReport := func(worker string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Minute)
+		for time.Now().Before(deadline) {
+			conv, err := m.Messages(ctx, lead)
+			info, _ := m.Get(lead)
+			if err == nil && info.Status == agent.Idle && strings.Contains(string(conv.Messages), `Worker \"`+worker+`\" finished`) {
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		t.Fatalf("the lead did not handle %s's report", worker)
+	}
+	if err := m.Prompt(ctx, lead, "Start one worker named prepare with title Prepare demo fixture. Its task: use yesman_checkout to check out the pool repository demo on a new branch named try. "+
 		"Then write a knowledge note .yesman/knowledge/demo.md saying the demo repo is a test fixture, and add it to .yesman/knowledge/INDEX.md. "+
-		"Do not start workers. Reply with the word DONE."); err != nil {
+		"If it owns a board task, mark it done when finished. End its report with DONE. Delegate this; do not do the work yourself. When it reports, confirm with DONE."); err != nil {
 		t.Fatal(err)
 	}
-	waitSettled(lead, 1)
+	waitSettled(agent.ID("alice", "prepare"), 1)
+	waitReport("prepare")
 	y, _ := store.Get("alice")
 	wts, err := p.Worktrees(ctx, y.Path)
 	if err != nil || len(wts) != 1 || wts[0].Branch != "try" {
@@ -123,12 +137,12 @@ func TestWithPi(t *testing.T) {
 	}
 
 	// A worker's final message reaches the lead, which starts another run.
-	if err := m.Prompt(ctx, lead, "Start one worker named echo with yesman_worker_start whose task is: reply with the single word PONG and nothing else. "+
-		"Then stop and wait; do nothing else."); err != nil {
+	if err := m.Prompt(ctx, lead, "Start one worker named echo with title Echo check using yesman_worker_start, whose task is: reply with the single word PONG and nothing else. "+
+		"Then end your run. When it reports, mark any board task for it done and acknowledge its report."); err != nil {
 		t.Fatal(err)
 	}
 	waitSettled(agent.ID("alice", "echo"), 1)
-	waitSettled(lead, 3) // its own turn, then the run the report started
+	waitReport("echo")
 	conv, err := m.Messages(ctx, lead)
 	if err != nil {
 		t.Fatal(err)

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -56,8 +57,15 @@ type Info struct {
 	Yesman string `json:"yesman"`
 	Name   string `json:"name"`
 	Role   string `json:"role"`
-	Task   string `json:"task,omitempty"`
-	Status Status `json:"status"`
+	// Number tells a yesman's workers apart for the user, as a1, a2, …
+	Number int `json:"number,omitempty"`
+	// Title is the subject of a worker's work, for the user.
+	Title string `json:"title,omitempty"`
+	Task  string `json:"task,omitempty"`
+	// FinishedAt is when a worker's report reached its lead and its process
+	// closed; zero while it has work.
+	FinishedAt time.Time `json:"finishedAt,omitzero"`
+	Status     Status    `json:"status"`
 	// Since is when the yesman was hired, for a lead, or the worker
 	// started. With ID it identifies an agent across reuses of a name.
 	Since time.Time `json:"since,omitzero"`
@@ -67,12 +75,17 @@ type Info struct {
 	// Detail explains a failure.
 	Detail string `json:"detail,omitempty"`
 	// Dialog is the extension_ui_request a Waiting agent waits on.
-	Dialog       json.RawMessage `json:"dialog,omitempty"`
-	Model        string          `json:"model,omitempty"`
-	Provider     string          `json:"provider,omitempty"`
-	Effort       string          `json:"effort,omitempty"`
-	EffortLevels []string        `json:"effortLevels,omitempty"`
-	UpdatedAt    time.Time       `json:"updatedAt,omitzero"`
+	Dialog json.RawMessage `json:"dialog,omitempty"`
+	// Activity says what a working agent is doing now, from the events of
+	// its run, such as "Running go test ./...". Empty between steps.
+	Activity string `json:"activity,omitempty"`
+	// RunStartedAt is when the current run started; zero between runs.
+	RunStartedAt time.Time `json:"runStartedAt,omitzero"`
+	Model        string    `json:"model,omitempty"`
+	Provider     string    `json:"provider,omitempty"`
+	Effort       string    `json:"effort,omitempty"`
+	EffortLevels []string  `json:"effortLevels,omitempty"`
+	UpdatedAt    time.Time `json:"updatedAt,omitzero"`
 }
 
 // Event is one record an agent's pi process emitted.
@@ -126,8 +139,13 @@ type Manager struct {
 }
 
 type agent struct {
-	modelMu  sync.Mutex // orders prompt registration and model configuration
-	prompts  int        // outstanding prompt RPCs; guarded by modelMu
+	modelMu sync.Mutex // orders prompt registration and model configuration
+	// prompts counts outstanding prompt RPCs. Writers hold modelMu and the
+	// manager's mu; readers may hold either.
+	prompts int
+	// reports counts worker handoffs being read or delivered to the lead,
+	// registered before the worker becomes idle; guarded by the manager's mu.
+	reports  int
 	info     Info
 	proc     *proc
 	token    string
@@ -135,6 +153,16 @@ type agent struct {
 	turn     []Event       // the events of the assistant message in progress
 	starting chan struct{} // closed when a start finishes, nil otherwise
 	stopping bool
+	dir      string   // the workspace, to show paths in it relative to it
+	tools    []string // the tool calls running, oldest first
+	labels   map[string]string
+	// nudged: the lead was reminded of open tasks, and neither the user nor
+	// a worker has written to it since.
+	nudged bool
+	// inbox changes when a message is queued or registered. settledInbox is
+	// the inbox at the last settle, so accepted prompts awaiting agent_start
+	// still prevent reminders. Both are guarded by the manager's mu.
+	inbox, settledInbox uint64
 }
 
 // errStopped is returned to a start that Stop interrupted.
@@ -177,14 +205,25 @@ func (m *Manager) List() []Info {
 	defer m.mu.Unlock()
 	var out []Info
 	for _, y := range ys {
-		out = append(out, m.infoLocked(ID(y.Name, yesmen.LeadName), RoleLead, "", y.HiredAt))
+		out = append(out, m.infoLocked(ID(y.Name, yesmen.LeadName), RoleLead, yesmen.Worker{StartedAt: y.HiredAt}, ""))
 		ws, _ := m.cfg.Yesmen.Workers(y.Name)
 		sort.SliceStable(ws, func(i, j int) bool { return ws[i].StartedAt.Before(ws[j].StartedAt) })
+		board := m.boardFor(y.Name, ws)
 		for _, w := range ws {
-			out = append(out, m.infoLocked(ID(y.Name, w.Name), RoleWorker, w.Task, w.StartedAt))
+			out = append(out, m.infoLocked(ID(y.Name, w.Name), RoleWorker, w, w.Subject(board)))
 		}
 	}
 	return out
+}
+
+// boardFor reads a yesman's board when a worker needs it for its subject:
+// one the lead started without a title.
+func (m *Manager) boardFor(yesman string, ws []yesmen.Worker) yesmen.Board {
+	if slices.ContainsFunc(ws, func(w yesmen.Worker) bool { return w.Title == "" }) {
+		b, _ := m.cfg.Yesmen.Board(yesman)
+		return b
+	}
+	return yesmen.Board{}
 }
 
 // Get returns one agent.
@@ -197,7 +236,7 @@ func (m *Manager) Get(id string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	role, task, since := RoleLead, "", y.HiredAt
+	role, w, subject := RoleLead, yesmen.Worker{StartedAt: y.HiredAt}, ""
 	if name != yesmen.LeadName {
 		workers, err := m.cfg.Yesmen.Workers(yesman)
 		if err != nil {
@@ -207,21 +246,24 @@ func (m *Manager) Get(id string) (Info, error) {
 		if i < 0 {
 			return Info{}, fmt.Errorf("no agent %s", id)
 		}
-		role, task, since = RoleWorker, workers[i].Task, workers[i].StartedAt
+		role, w = RoleWorker, workers[i]
+		subject = w.Subject(m.boardFor(yesman, workers[i:i+1]))
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.infoLocked(id, role, task, since), nil
+	return m.infoLocked(id, role, w, subject), nil
 }
 
-func (m *Manager) infoLocked(id, role, task string, since time.Time) Info {
+// infoLocked describes an agent from what runs and, for a worker, its
+// record; a lead's record holds only when it was hired.
+func (m *Manager) infoLocked(id, role string, w yesmen.Worker, subject string) Info {
+	i := Info{ID: id, Status: Stopped}
 	if a := m.agents[id]; a != nil {
-		i := a.info
-		i.Role, i.Task, i.Since = role, task, since
-		return i
+		i = a.info
 	}
-	y, n, _ := SplitID(id)
-	return Info{ID: id, Yesman: y, Name: n, Role: role, Task: task, Since: since, Status: Stopped}
+	i.Yesman, i.Name, _ = SplitID(id)
+	i.Role, i.Number, i.Title, i.Task, i.Since, i.FinishedAt = role, w.Number, subject, w.Task, w.StartedAt, w.FinishedAt
+	return i
 }
 
 // Authenticate returns the running agent a YESMAN_TOKEN belongs to.
@@ -300,6 +342,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			a = &agent{info: Info{ID: id, Yesman: ys, Name: name, Role: role, Status: Stopped}}
 			m.agents[id] = a
 		}
+		a.dir = y.Path
 		if a.proc != nil {
 			p := a.proc
 			select {
@@ -412,6 +455,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 // record handles one record of an agent's process. It runs on the
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
+	m.follow(a, p, kind, raw)
 	switch kind {
 	case "agent_start":
 		m.setStatus(a, p, Working, "")
@@ -420,7 +464,22 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			Aborted bool `json:"aborted"`
 		}
 		_ = json.Unmarshal(raw, &e)
-		m.setStatus(a, p, Idle, "")
+		m.mu.Lock()
+		if a.proc != p {
+			m.mu.Unlock()
+			break
+		}
+		worker, stopping := a.info.Role == RoleWorker, a.stopping
+		handoff := worker && (!e.Aborted || !stopping)
+		if handoff {
+			// The worker is still busy until its report reaches the lead.
+			// Reserve this before publishing Idle, without waiting on RPC.
+			a.reports++
+		}
+		a.info.Status, a.info.Detail, a.info.Dialog, a.info.UpdatedAt = Idle, "", nil, time.Now()
+		a.settledInbox = a.inbox
+		m.mu.Unlock()
+		m.changed()
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -428,8 +487,20 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			defer a.modelMu.Unlock()
 			_, _ = m.syncModel(ctx, a, p)
 		}()
-		if a.info.Role == RoleWorker && !e.Aborted {
-			go m.reportToLead(a, p)
+		if !worker && !e.Aborted {
+			go m.followThrough(a, p)
+		} else if handoff {
+			go func() {
+				defer m.handoffDone(a)
+				if !e.Aborted {
+					m.reportToLead(a, p)
+					return
+				}
+				// The user stopped its run. A worker being put to sleep, removed
+				// or shut down with the app tells nobody: telling the lead would
+				// start it again.
+				m.tellLead(a, fmt.Sprintf("[yesman] Worker %q was stopped by the user before it finished its run. It keeps its session; message it to continue.", a.info.Name))
+			}()
 		}
 	case "thinking_level_changed":
 		var e struct {
@@ -451,11 +522,18 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 		switch e.Method {
 		case "select", "confirm", "input", "editor":
 			m.mu.Lock()
-			if a.proc == p || a.proc == nil {
+			current := a.proc == p || a.proc == nil
+			if current {
 				a.info.Status, a.info.Dialog, a.info.UpdatedAt = Waiting, raw, time.Now()
 			}
+			worker := a.info.Role == RoleWorker
 			m.mu.Unlock()
 			m.changed()
+			if current && worker {
+				// The lead answers for its workers; the user hears of it only
+				// if the lead cannot decide.
+				go m.askLead(a, raw)
+			}
 		}
 	}
 	m.cfg.OnEvent(m.number(a, kind, raw))
@@ -500,23 +578,29 @@ func (m *Manager) watch(a *agent, p *proc) {
 		return
 	}
 	m.clearLocked(a, p)
-	if a.stopping {
-		a.info.Status, a.info.Detail = Stopped, ""
-	} else {
+	failed := !a.stopping
+	if failed {
 		detail := "pi exited"
 		if msg := p.stderr.String(); msg != "" {
 			detail += ": " + lastLines(msg, 6)
 		}
 		a.info.Status, a.info.Detail = Failed, detail
+	} else {
+		a.info.Status, a.info.Detail = Stopped, ""
 	}
 	a.info.Dialog, a.info.UpdatedAt = nil, time.Now()
+	worker, detail := a.info.Role == RoleWorker, a.info.Detail
 	m.mu.Unlock()
 	m.changed()
+	if failed && worker {
+		go m.tellLead(a, fmt.Sprintf("[yesman] Worker %q stopped unexpectedly (%s). It keeps its session; message it to start it again.", a.info.Name, clip(strings.Join(strings.Fields(detail), " "))))
+	}
 }
 
 // Prompt sends a user message. While the agent works, it steers the run:
 // pi delivers it after the current tool calls.
 func (m *Manager) Prompt(ctx context.Context, id, text string) error {
+	m.unnudge(id)
 	return m.prompt(ctx, id, text, "steer")
 }
 
@@ -525,35 +609,56 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 		return errors.New("empty message")
 	}
 	var (
-		a   *agent
-		p   *proc
-		err error
+		a *agent
+		p *proc
 	)
 	for {
-		a, p, err = m.ensure(id)
-		if err != nil {
+		var err error
+		if a, p, err = m.ensure(id); err != nil {
 			return err
 		}
 		// Register before dispatch, under the same lock as configuration's
-		// idle check and writes, and SleepIfIdle's. Release it before waiting
-		// so other messages can steer a running turn. pi may await extensions
-		// before reporting isStreaming.
+		// idle check and writes, SleepIfIdle, and closing a finished worker.
+		// Release it before waiting so other messages can steer a running
+		// turn. pi may await extensions before reporting isStreaming.
 		a.modelMu.Lock()
 		if err := ctx.Err(); err != nil {
 			a.modelMu.Unlock()
 			return err
 		}
+		m.mu.Lock()
+		current := a.proc == p
+		m.mu.Unlock()
 		select {
 		case <-p.done:
-			// Put to sleep while this waited for the lock: start it again.
-			a.modelMu.Unlock()
-			continue
+			current = false
 		default:
 		}
-		a.prompts++
+		if current {
+			break
+		}
+		// Put to sleep or closed as finished while this waited: start again.
 		a.modelMu.Unlock()
-		break
 	}
+	m.mu.Lock()
+	a.prompts++
+	a.inbox++
+	m.mu.Unlock()
+	if a.info.Role == RoleWorker {
+		// A message gives a finished worker work again.
+		if reopened, err := m.cfg.Yesmen.ReopenWorker(a.info.Yesman, a.info.Name); err != nil {
+			log.Printf("yesman: reopen %s: %v", id, err)
+		} else if reopened {
+			m.changed()
+		}
+	}
+	a.modelMu.Unlock()
+	return m.sendPrompt(ctx, a, p, text, behavior)
+}
+
+// sendPrompt dispatches a prompt already registered under modelMu and mu.
+// No manager lock is held while sending or waiting for pi's answer.
+func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behavior string) error {
 	done := make(chan error, 1)
 	go func() {
 		// Cancelling the caller does not cancel the RPC already sent to pi.
@@ -561,7 +666,9 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 		// stops waiting, so configuration cannot slip into its startup gap.
 		_, err := p.call(context.Background(), map[string]any{"type": "prompt", "message": text, "streamingBehavior": behavior})
 		a.modelMu.Lock()
+		m.mu.Lock()
 		a.prompts--
+		m.mu.Unlock()
 		a.modelMu.Unlock()
 		done <- err
 	}()
@@ -583,11 +690,16 @@ func (m *Manager) Abort(ctx context.Context, id string) error {
 	return err
 }
 
-// Messages returns the agent's conversation, starting it if needed.
+// Messages returns the agent's conversation, starting it if needed. A
+// finished worker started only to be read is closed again.
 func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error) {
+	wasRunning := m.running(id) != nil
 	a, p, err := m.ensure(id)
 	if err != nil {
 		return Conversation{}, err
+	}
+	if !wasRunning {
+		defer func() { go m.closeIfFinished(a, p, time.Time{}) }()
 	}
 	// pi answers after emitting every earlier event, and the reader numbers
 	// those first. Capture the reply in progress and the last number on the
@@ -617,23 +729,35 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 func (m *Manager) Answer(id, requestID string, answer map[string]any) error {
 	m.mu.Lock()
 	a := m.agents[id]
-	var p *proc
-	if a != nil {
-		p = a.proc
-	}
-	m.mu.Unlock()
-	if p == nil {
+	if a == nil || a.proc == nil {
+		m.mu.Unlock()
 		return fmt.Errorf("%s is not running", id)
 	}
+	var d dialog
+	if a.info.Status != Waiting || json.Unmarshal(a.info.Dialog, &d) != nil || d.ID == "" || d.ID != requestID {
+		m.mu.Unlock()
+		return fmt.Errorf("%s is no longer waiting on question %q", id, requestID)
+	}
+	p, raw := a.proc, a.info.Dialog
+	// Reserve the question before sending. A second answer cannot consume
+	// it, and events after the response (including a new question) stay put.
+	a.info.Status, a.info.Dialog, a.info.UpdatedAt = Working, nil, time.Now()
+	m.mu.Unlock()
 	msg := map[string]any{}
 	for k, v := range answer {
 		msg[k] = v
 	}
 	msg["type"], msg["id"] = "extension_ui_response", requestID
 	if err := p.send(msg); err != nil {
+		m.mu.Lock()
+		if a.proc == p && a.info.Status == Working && a.info.Dialog == nil {
+			a.info.Status, a.info.Dialog = Waiting, raw
+		}
+		m.mu.Unlock()
+		m.changed()
 		return err
 	}
-	m.setStatus(a, p, Working, "")
+	m.changed()
 	return nil
 }
 
@@ -685,7 +809,7 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
 	p := a.proc
-	idle := p != nil && a.starting == nil && a.prompts == 0 && a.info.Status == Idle &&
+	idle := p != nil && a.starting == nil && a.prompts == 0 && a.reports == 0 && a.info.Status == Idle &&
 		!a.info.StartedAt.IsZero() && a.info.StartedAt.Before(startedBefore)
 	m.mu.Unlock()
 	if !idle {
@@ -708,6 +832,7 @@ func (m *Manager) clearLocked(a *agent, p *proc) {
 		a.proc = nil
 	}
 	a.turn = nil
+	a.endRun()
 	if a.token != "" {
 		delete(m.tokens, a.token)
 		a.token = ""
@@ -755,12 +880,17 @@ func (m *Manager) running(id string) *proc {
 	return nil
 }
 
-// StartWorker records a worker of a yesman and gives it its task.
-func (m *Manager) StartWorker(ctx context.Context, yesman, name, task string) (Info, error) {
+// StartWorker records a worker of a yesman and gives it its task. title is
+// the subject of its work in a few words, for the user.
+func (m *Manager) StartWorker(ctx context.Context, yesman, name, title, task string) (Info, error) {
 	if strings.TrimSpace(task) == "" {
 		return Info{}, errors.New("a worker needs a task")
 	}
-	if err := m.cfg.Yesmen.AddWorker(yesman, yesmen.Worker{Name: name, Task: task, StartedAt: time.Now().UTC()}); err != nil {
+	title = strings.Join(strings.Fields(title), " ")
+	if n := utf8.RuneCountInString(title); n > titleLimit {
+		return Info{}, fmt.Errorf("the title has %d characters: name the subject in at most %d, and put the rest in the task", n, titleLimit)
+	}
+	if err := m.cfg.Yesmen.AddWorker(yesman, yesmen.Worker{Name: name, Title: title, Task: task, StartedAt: time.Now().UTC()}); err != nil {
 		return Info{}, err
 	}
 	id := ID(yesman, name)
@@ -788,6 +918,22 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 	return err
 }
 
+// handoffDone releases the report reservation after delivery and closing.
+// The lead may already have settled while the handoff was still pending.
+func (m *Manager) handoffDone(a *agent) {
+	m.mu.Lock()
+	a.reports--
+	lead := m.agents[ID(a.info.Yesman, yesmen.LeadName)]
+	var p *proc
+	if lead != nil {
+		p = lead.proc
+	}
+	m.mu.Unlock()
+	if p != nil {
+		go m.followThrough(lead, p)
+	}
+}
+
 // reportToLead hands a worker's final message to its lead, which starts a
 // run or reads it after the current one. A report that cannot be delivered
 // after a few tries is shown on the worker, for the user.
@@ -806,12 +952,63 @@ func (m *Manager) reportToLead(a *agent, p *proc) {
 			report = *data.Text
 		}
 	}
-	msg := fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report)
+	if m.tellLeadWithin(ctx, a, fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report)) == nil {
+		m.closeIfFinished(a, p, time.Now().UTC())
+	}
+}
+
+// closeIfFinished ends a finished worker's process while it is idle with no
+// message on its way, so that a worker that is done takes nothing and shows
+// as done. A finishedAt other than zero first records that it finished;
+// zero closes it only if it already had. A message to it later starts it
+// again, with its session, and gives it work again.
+func (m *Manager) closeIfFinished(a *agent, p *proc, finishedAt time.Time) {
+	if a.info.Role != RoleWorker {
+		return
+	}
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	m.mu.Lock()
+	idle := a.proc == p && a.starting == nil && a.info.Status == Idle && a.prompts == 0
+	yesman, name := a.info.Yesman, a.info.Name
+	m.mu.Unlock()
+	if !idle {
+		return
+	}
+	if finishedAt.IsZero() {
+		ws, err := m.cfg.Yesmen.Workers(yesman)
+		if err != nil || !slices.ContainsFunc(ws, func(w yesmen.Worker) bool { return w.Name == name && !w.FinishedAt.IsZero() }) {
+			return
+		}
+	} else if err := m.cfg.Yesmen.FinishWorker(yesman, name, finishedAt); err != nil {
+		log.Printf("yesman: finish %s: %v", a.info.ID, err)
+		return
+	}
+	// Prompts wait for modelMu, held here, and start it again once it closed.
+	m.Stop(a.info.ID)
+}
+
+const titleLimit = 80
+
+// tellLead hands the lead a message about one of its workers, which starts
+// a run or is read after the current one. The lead never waits for its
+// workers, so it learns how each run ended this way: finished, stopped by
+// the user, or failed.
+func (m *Manager) tellLead(a *agent, msg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	m.tellLeadWithin(ctx, a, msg)
+}
+
+// tellLeadWithin tries a few times; a message that cannot be delivered is
+// shown on the worker, for the user.
+func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, msg string) error {
 	lead := ID(a.info.Yesman, yesmen.LeadName)
+	m.unnudge(lead)
 	var err error
 	for attempt := range reportAttempts {
 		if err = m.prompt(ctx, lead, msg, "followUp"); err == nil {
-			return
+			return nil
 		}
 		if attempt < reportAttempts-1 {
 			select {
@@ -825,6 +1022,7 @@ func (m *Manager) reportToLead(a *agent, p *proc) {
 	a.info.Detail, a.info.UpdatedAt = "Its last report did not reach the lead: "+err.Error(), time.Now()
 	m.mu.Unlock()
 	m.changed()
+	return err
 }
 
 // How often, and how patiently, a worker's report is offered to its lead.

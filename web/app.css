@@ -41,7 +41,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .titlebar-content .mds-crumbs { flex: 1 1 auto; }
 /* The files pane, when open, takes the titlebar over it, and with it the
    room for Windows' caption buttons. */
-:root[data-files="open"] .titlebar-content { padding-right: 16px; }
+:root[data-files="open"] .titlebar-content, :root[data-board="open"] .titlebar-content { padding-right: 16px; }
 
 /* Sidebar */
 .side { grid-column: 1; grid-row: 2; display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--mds-line); background: var(--mds-sidebar); }
@@ -69,9 +69,20 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .agent-row[aria-current] { background: var(--mds-selected); color: var(--mds-ink-strong); }
 .agent-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-row .meta { color: var(--mds-muted); font-size: var(--mds-text-caption); white-space: nowrap; }
-.agent-row--yesman { color: var(--mds-ink); margin-top: 6px; }
-.agent-row--worker { padding-left: 26px; grid-template-columns: 14px minmax(0, 1fr) auto; font-size: var(--mds-text-note); min-height: 30px; }
-.agent-row--worker .name { font-family: var(--mds-mono); font-size: var(--mds-text-caption); }
+.agent-row { grid-template-areas: "dot name meta"; }
+.agent-row > .dot-wrap { grid-area: dot; }
+.agent-row > .name { grid-area: name; }
+.agent-row > .meta { grid-area: meta; font-variant-numeric: tabular-nums; }
+.agent-row--yesman { color: var(--mds-ink); margin-top: 4px; min-height: 30px; padding-block: 4px; }
+/* Workers sit close: their name over their subject, both tight. */
+/* A worker is one line: mark, number, subject, run time. */
+.agent-row--worker { grid-template-columns: 14px auto minmax(0, 1fr) auto; grid-template-areas: "dot num subject meta"; gap: 6px; min-height: 0; padding: 3px 10px 3px 24px; font-size: var(--mds-text-note); line-height: 18px; }
+.agent-row > .num { grid-area: num; min-width: 2ch; color: var(--mds-muted); font-family: var(--mds-mono); font-size: var(--mds-text-caption); font-variant-numeric: tabular-nums; }
+.agent-row > .subject { grid-area: subject; min-width: 0; overflow: hidden; color: var(--mds-ink); text-overflow: ellipsis; white-space: nowrap; }
+.agent-row[aria-current] > .subject { color: var(--mds-ink-strong); }
+/* A done worker is greyed where it is. */
+.agent-row[data-done] > .subject, .agent-row[data-done] > .num { color: var(--mds-faint); }
+.agent-row .done-mark { width: 12px; height: 12px; color: var(--mds-faint); }
 
 .dot-wrap { display: grid; place-items: center; width: 14px; height: 14px; }
 [data-status="working"] { --mds-tone: var(--mds-accent); --mds-tone-ink: var(--mds-accent-ink); }
@@ -79,6 +90,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 [data-status="failed"] { --mds-tone: var(--mds-error); --mds-tone-ink: var(--mds-error); }
 [data-status="idle"] { --mds-tone: var(--mds-good); }
 [data-status="starting"] { --mds-tone: var(--mds-muted); }
+[data-status="asking"] { --mds-tone: var(--mds-accent); --mds-tone-ink: var(--mds-accent-ink); }
 [data-status="working"] .mds-dot { animation: pulse 1.2s var(--mds-ease) infinite; }
 @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
 @media (prefers-reduced-motion: reduce) { [data-status="working"] .mds-dot { animation: none; } }
@@ -216,6 +228,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 
 .ask { display: grid; gap: 10px; padding: 12px 14px; border: 1px solid var(--mds-warn-line); border-radius: var(--mds-radius-md); background: var(--mds-warn-bg); }
 .ask strong { font-family: var(--mds-font-heading); font-weight: 400; color: var(--mds-warn); }
+.ask .ask-hint { margin: 0; color: var(--mds-muted); font-size: var(--mds-text-caption); }
 .ask p { margin: 0; color: var(--mds-warn-detail); font-size: var(--mds-text-note); white-space: pre-wrap; }
 .ask-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
@@ -544,3 +557,46 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .mds-dialog .field { margin-top: 4px; }
 .mds-dialog .field + .field { margin-top: 12px; }
 .danger { color: var(--mds-error); }
+
+/* Board: the yesman's task list, beside the conversation in place of the
+   files. Rows keep their place; a finished task folds into Done. */
+.board { grid-column: 3; grid-row: 1 / -1; display: flex; flex-direction: column; width: var(--board-width, 340px); max-width: calc(100vw - 320px); min-width: 0; min-height: 0; border-left: 1px solid var(--mds-line); background: var(--app-pane); }
+.board .files-title { flex: 0 0 auto; }
+.board-count { color: var(--mds-muted); font-size: var(--mds-text-caption); white-space: nowrap; }
+.board-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 8px 24px; }
+.board-list { margin: 0; padding: 0; list-style: none; }
+.board-task { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; column-gap: 8px; padding: 2px 6px 2px 0; border-radius: var(--mds-radius-sm); }
+.board-task:hover { background: var(--mds-hover); }
+.board-toggle { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; gap: 8px; min-width: 0; padding: 6px 0 6px 8px; border: 0; background: none; color: var(--mds-ink); font: inherit; font-size: var(--mds-text-note); line-height: 1.45; text-align: left; cursor: default; }
+.board-toggle:focus-visible { outline: 2px solid var(--app-focus); outline-offset: -2px; border-radius: var(--mds-radius-sm); }
+.board-title { overflow-wrap: anywhere; }
+.board-mark { width: 14px; height: 14px; margin-top: 2px; }
+.board-dot { display: grid; place-items: center; }
+.board-dot::before { content: ""; width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; border: 1.5px solid var(--mds-faint); }
+[data-status="doing"] .board-dot::before { border-color: var(--mds-accent); background: var(--mds-accent); }
+[data-status="blocked"] .board-mark { color: var(--mds-warn); }
+[data-status="done"] .board-mark { color: var(--mds-good); }
+[data-status="dropped"] .board-mark { color: var(--mds-faint); }
+.board-task:is([data-status="done"], [data-status="dropped"]) .board-toggle { color: var(--mds-muted); }
+.board-task[data-status="dropped"] .board-title { text-decoration: line-through; text-decoration-color: var(--mds-faint); }
+.board-owner { margin-top: 5px; padding: 1px 6px; border: 0; border-radius: var(--mds-radius-xs); background: var(--app-quiet); color: var(--mds-ink-secondary); font-family: var(--mds-mono); font-size: var(--mds-text-caption); white-space: nowrap; cursor: default; }
+button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink-strong); }
+.board-owner[data-gone] { background: transparent; color: var(--mds-faint); }
+.board-inline, .board-details { grid-column: 1 / -1; margin: -2px 0 6px 32px; }
+.board-inline { overflow: hidden; color: var(--mds-warn); font-size: var(--mds-text-caption); text-overflow: ellipsis; white-space: nowrap; }
+.board-details { display: grid; gap: 8px; font-size: var(--mds-text-note); }
+.board-details .md { font-size: var(--mds-text-note); line-height: 1.6; }
+.board-note { display: grid; gap: 2px; }
+.board-label { color: var(--mds-muted); font-size: var(--mds-text-caption); }
+[data-status="blocked"] .board-label { color: var(--mds-warn); }
+.board-meta { margin: 0; color: var(--mds-faint); font-size: var(--mds-text-caption); }
+.board-done { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--mds-line); }
+.board-done > summary { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: var(--mds-radius-sm); color: var(--mds-muted); font-size: var(--mds-text-note); list-style: none; cursor: default; }
+.board-done > summary::-webkit-details-marker { display: none; }
+.board-done > summary:hover { background: var(--mds-hover); color: var(--mds-ink); }
+.board-fold { width: 12px; height: 12px; transition: transform var(--mds-duration-fast) var(--mds-ease); }
+.board-done[open] .board-fold { transform: rotate(90deg); }
+.board-empty { margin: 24px 12px; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.6; }
+.board-empty strong { display: block; margin-bottom: 4px; color: var(--mds-ink); font-family: var(--mds-font-heading); font-weight: 400; }
+.board-empty[data-tone="error"] { color: var(--mds-error); }
+@media (prefers-reduced-motion: reduce) { .board-fold { transition: none; } }

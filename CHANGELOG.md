@@ -2,12 +2,23 @@
 
 Each release's section is what installed copies show as its release notes.
 
-## 0.1.12
+## 0.1.13
 
 - Settings › Secrets keeps API keys, tokens and other secrets, and Settings › Variables keeps settings such as an account or a region. Every command of every agent gets each as an environment variable; agents read what each is for with the new `yesman_env` tool.
 - Edit them as a form, or as YAML in the editor. Each has a value and a description that tells agents what it is for.
 - Secrets are encrypted with sops and age and open with a password that yesman never stores; after each launch they stay locked until you unlock them. A secret's value never reaches an agent's context: output shows it as `[secret NAME]`. The sops command can edit the same file with the exported key.
 - Export secrets sealed with a password of their own, or as plain text, and variables as YAML. Importing shows what changes, then merges or replaces.
+
+## 0.1.12
+
+- Each yesman has a board: a task list its agents keep with the new `yesman_board` tool. Open it from the titlebar beside the conversation, where the files show. Open tasks keep their order, a blocked one says why, finished ones fold into Done, and a task's owner opens that worker's conversation.
+- The lead delegates instead of working, so it stays free to talk: it has no shell and writes only knowledge notes, and hands changes, commands and investigations to workers. Workers keep their own board tasks up to date.
+- Each worker has a compact, single-line sidebar row: status, a number such as a1, its subject in words, and its run time. Completed workers show a grey check; running workers show a pulsing blue dot. The board uses the same worker numbers.
+- A worker that finished and reported closes and shows greyed in its place. Right-click a yesman to hide or show its done workers. Messaging a done worker starts it again with its session.
+- The lead hears when a worker's run is stopped by you or its process fails, not only when it finishes, and restarts failed workers itself.
+- Workers no longer turn to you. A question a worker's tools ask goes to its lead, which answers it, and a worker shows as asking its yesman instead of needing you. Only a lead asks you things or notifies you.
+- The lead sees the work through: it decides what it can, finishes everything that does not wait on you, and then brings the open decisions together. If it ends a run with tasks open and nothing running, yesman reminds it once.
+- The finished notification waits until the whole yesman has settled.
 
 ## 0.1.11
 

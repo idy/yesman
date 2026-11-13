@@ -128,16 +128,25 @@ func (s *Server) describeEnv(context.Context, caller, *http.Request) (any, error
 	return s.Describe(), nil
 }
 
-// envContext is the context's part on environment variables.
-func (s *Server) envContext() string {
+// envContext is the context's part on environment variables. A lead has
+// no shell: its workers' commands get them.
+func (s *Server) envContext(lead bool) string {
 	vars, list, locked, _ := s.sources()
 	var b strings.Builder
 	b.WriteString("\n## Environment\n\n")
 	if len(vars)+len(list)+len(locked) == 0 {
-		b.WriteString("No secrets or variables are set. When a task needs a credential or a setting, ask the user to add it in yesman's Settings › Secrets (keys and tokens) or Settings › Variables; it then reaches your commands as an environment variable.\n")
+		whose := "your commands"
+		if lead {
+			whose = "your workers' commands"
+		}
+		b.WriteString("No secrets or variables are set. When a task needs a credential or a setting, ask the user to add it in yesman's Settings › Secrets (keys and tokens) or Settings › Variables; it then reaches " + whose + " as an environment variable.\n")
 		return b.String()
 	}
-	b.WriteString("All secrets and variables are set as environment variables in bash commands. Call yesman_env to see what each one is.\n")
+	if lead {
+		b.WriteString("All secrets and variables are set as environment variables in your workers' bash commands. Call yesman_env to see what each one is.\n")
+	} else {
+		b.WriteString("All secrets and variables are set as environment variables in bash commands. Call yesman_env to see what each one is.\n")
+	}
 	if len(locked) > 0 {
 		b.WriteString("The secrets are locked now, so commands get only the variables. If you need a secret, ask the user to unlock them in yesman's Settings › Secrets.\n")
 	} else if len(list) > 0 {

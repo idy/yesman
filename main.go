@@ -81,7 +81,8 @@ func main() {
 	a.vault = secrets.NewVault(h.Secrets())
 	a.variables = secrets.NewVariables(h.Variables())
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
-		Secrets: a.vault, Variables: a.variables}
+		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) },
+		Secrets:      a.vault, Variables: a.variables}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}

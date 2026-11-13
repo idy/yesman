@@ -15,7 +15,7 @@ func TestEnv(t *testing.T) {
 	vars := secrets.NewVariables(filepath.Join(dir, "variables.yaml"))
 	s := &Server{Secrets: vault, Variables: vars}
 
-	if got := s.envContext(); !strings.Contains(got, "No secrets or variables are set") {
+	if got := s.envContext(false); !strings.Contains(got, "No secrets or variables are set") {
 		t.Errorf("context with none:\n%s", got)
 	}
 
@@ -65,8 +65,11 @@ func TestEnv(t *testing.T) {
 			t.Errorf("REGION: %#v", v)
 		}
 	}
-	if got := s.envContext(); !strings.Contains(got, "All secrets and variables are set as environment variables in bash commands. Call yesman_env to see what each one is.") {
+	if got := s.envContext(false); !strings.Contains(got, "All secrets and variables are set as environment variables in bash commands. Call yesman_env to see what each one is.") {
 		t.Errorf("context:\n%s", got)
+	}
+	if got := s.envContext(true); !strings.Contains(got, "in your workers' bash commands") {
+		t.Errorf("a lead's context:\n%s", got)
 	}
 
 	vault.Lock()
@@ -74,7 +77,7 @@ func TestEnv(t *testing.T) {
 	if !env.Locked || env.Env["GH_TOKEN"] != "" || env.Env["REGION"] != "eu-west" || len(env.Hide) != 0 {
 		t.Errorf("locked env: %#v", env)
 	}
-	if got := s.envContext(); !strings.Contains(got, "locked") {
+	if got := s.envContext(false); !strings.Contains(got, "locked") {
 		t.Errorf("locked context:\n%s", got)
 	}
 	for _, v := range s.Describe().Vars {
