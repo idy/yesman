@@ -49,6 +49,8 @@ The sidebar lists each yesman's lead with its workers under it, in the order the
 
 The composer lets you choose the current agent's model and reasoning effort from the right side below the input box. Models come from pi's configured, authenticated catalog, grouped only when there is more than one provider; effort shows only the levels the selected model supports. Change them between runs without starting a new conversation. pi saves the selection in that agent's session once it has messages, and restores it when the agent resumes.
 
+The composer accepts images from its **Attach images** button, pasted screenshots or images, and files dropped onto the input. It previews each attachment and lets you remove it before sending. PNG, JPEG, GIF and WebP are supported, up to four images, 5 MB each and 10 MB in total. Images travel with the message to pi, including messages sent during a run; you can send an image with or without text. Draft text and attachments stay with their agent while switching conversations, and remain available to retry if submission fails.
+
 The context meter beside these choices opens pi's estimated current context usage and model limit, with free space, cumulative input/output and cache usage, and message/tool counts. It refreshes after messages, tool results and compaction. Current context and cumulative session totals are kept separate; when pi cannot report the current context size, such as just after compaction, the viewer shows it as unknown.
 
 The app keeps running in the tray with its window closed. Agents are child processes of the app, so quitting it stops them; they resume from their sessions next time.
@@ -148,6 +150,7 @@ go run .
 
 ```bash
 go test ./...
+node --test scripts/images.test.mjs
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) vets, builds and tests on Linux, macOS and Windows for every pull request and every push to `main`. It does not start the app's window or real pi agents.
