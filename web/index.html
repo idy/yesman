@@ -27,7 +27,8 @@
     <main class="main">
       <div class="body" id="body"></div>
     </main>
-    <aside class="files" id="info" aria-label="Files" hidden></aside>
+    <aside class="info-panel" id="yesman-info" aria-label="Info" hidden></aside>
+    <aside class="files" id="files" aria-label="Files" hidden></aside>
     <aside class="board" id="board" aria-label="Board" hidden></aside>
   </div>
 
@@ -73,6 +74,9 @@
 
   <!-- Filled by app.js: what importing a configuration file would change. -->
   <dialog class="mds-dialog import-dialog" id="import-dialog" aria-labelledby="import-title"></dialog>
+
+  <!-- Filled by env.js: passwords for the secrets and their files. -->
+  <dialog class="mds-dialog env-dialog" id="env-dialog" aria-labelledby="env-dialog-title"></dialog>
 
   <!-- Filled by pi.js: a pi package's details, and installing one from a source. -->
   <dialog class="mds-dialog pkg-dialog" id="pkg-dialog" aria-labelledby="pkg-title"></dialog>

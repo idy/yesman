@@ -20,6 +20,7 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -35,6 +36,9 @@ type Server struct {
 	// AddRepo, when set, clones a GitHub repository into the pool in place
 	// of resolving and cloning it here, so the app can show it cloning.
 	AddRepo func(ctx context.Context, repo string) (pool.Repo, error)
+	// Secrets and Variables, when set, are set in agents' commands.
+	Secrets   *secrets.Vault
+	Variables *secrets.Variables
 
 	url string
 }
@@ -66,6 +70,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/workers", s.handle(s.startWorker))
 	mux.HandleFunc("POST /v1/workers/send", s.handle(s.sendWorker))
 	mux.HandleFunc("POST /v1/workers/remove", s.handle(s.removeWorker))
+	mux.HandleFunc("GET /v1/env", s.handle(s.env))
+	mux.HandleFunc("GET /v1/env/describe", s.handle(s.describeEnv))
 	mux.HandleFunc("POST /v1/workers/answer", s.handle(s.answerWorker))
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
@@ -391,7 +397,7 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 
 func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, error) {
 	board, _ := s.Yesmen.Board(c.yesman.Name)
-	return BuildContext(ctx, s.Pool, s.Agents, c.yesman, c.agent, board), nil
+	return BuildContext(ctx, s.Pool, s.Agents, c.yesman, c.agent, board) + s.envContext(c.agent.Role == agent.RoleLead), nil
 }
 
 const knowledgeLimit = 8000

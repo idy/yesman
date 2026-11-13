@@ -16,6 +16,8 @@ function inline(text) {
     .replace(/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)/g, '<a href="$2" data-external>$1</a>')
     .replace(/\[([^\]\n]+)\]\((?:file:\/\/)?((?:\/|~\/|[A-Za-z]:[\\/])[^\s)]*)\)/g, '<a href="#" data-path="$2" title="$2">$1</a>')
     .replace(/(^|[\s(])((?:https?:\/\/)[^\s<)]+[^\s<).,;:!?])/g, '$1<a href="$2" data-external>$2</a>')
+    // In a document, a link to another file of it, relative to it.
+    .replace(/\[([^\]\n]+)\]\(((?![a-z][a-z0-9+.-]*:|[\/~#])[^\s)]+)\)/gi, (m, label, href) => (relativeLinks ? `<a href="${href}">${label}</a>` : m))
     .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
     .replace(/__([^_\n]+)__/g, '<strong>$1</strong>')
     .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\w)/g, '$1<em>$2</em>')
@@ -27,6 +29,21 @@ function inline(text) {
 const isTableRow = (line) => /^\s*\|.*\|\s*$/.test(line);
 const isTableRule = (line) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line);
 const cells = (line) => line.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+
+// relativeLinks says the text is a document of the workspace, whose links
+// to other files of it are relative, rather than an agent's reply.
+let relativeLinks = false;
+
+// renderDocument renders a Markdown file of the workspace: as a reply, but
+// with links to other files of it, which the files pane opens.
+export function renderDocument(src) {
+  relativeLinks = true;
+  try {
+    return renderMarkdown(src);
+  } finally {
+    relativeLinks = false;
+  }
+}
 
 export function renderMarkdown(src) {
   const lines = (src ?? '').replace(/\r\n?/g, '\n').split('\n');

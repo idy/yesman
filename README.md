@@ -21,7 +21,7 @@
 
 yesman is a tray app for hiring yesmen. A yesman takes on one project: it gets a workspace directory of its own, checks out whichever repositories the project needs from a shared repo pool, keeps notes its agents share, and starts workers when the job splits up. You talk to its lead in a Claude Code-style window.
 
-> Status: early prototype. Hiring, the repo pool, worktrees, lead and worker agents, shared knowledge, and the window work on macOS. The app also compiles for Linux and Windows, but only macOS has been run. Watching pull requests and managing service keys are not built yet.
+> Status: early prototype. Hiring, the repo pool, worktrees, lead and worker agents, shared knowledge, and the window work on macOS. The app also compiles for Linux and Windows, but only macOS has been run. Watching pull requests is not built yet.
 
 ## How it works
 
@@ -34,10 +34,11 @@ yesman is a tray app for hiring yesmen. A yesman takes on one project: it gets a
 | Knowledge | `.yesman/knowledge/`, notes every agent of the yesman reads and writes, listed in `INDEX.md`. |
 | Board | `.yesman/board.json`, the yesman's task list: each task has a status (todo, doing, blocked, done, dropped), an owner, and a note on where it stands. The lead adds tasks and hands them to workers; workers keep their own tasks current. It is the plan, not what the agents are doing now. |
 | Sessions | Each agent's pi session log in `.yesman/sessions/<agent>/`. Agents resume their latest session when they restart. |
+| Secrets and variables | Environment variables every agent's commands get, edited in Settings: secrets in `secrets/secrets.sops.yaml`, encrypted, and variables in `variables.yaml`. |
 
 Every agent runs your installed `pi` with your usual pi configuration (models, plugins, MCP servers), plus yesman's extension, [`pi/yesman.ts`](pi/yesman.ts). Before each run the extension gives the agent its yesman's context: the workspace, its worktrees, the pool, the knowledge index and the other agents. It also adds these tools, which call the app's loopback API:
 
-- `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`, `yesman_board`
+- `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`, `yesman_board`, `yesman_env`
 - for leads: `yesman_worker_start`, `yesman_worker_send`, `yesman_worker_answer`, `yesman_worker_remove`
 
 For a lead, the extension also takes away pi's `bash` and adds the read-only `grep`, `find` and `ls`, and refuses `edit` and `write` outside `.yesman/knowledge/`. Tools from your own pi configuration stay.
@@ -54,9 +55,13 @@ The app keeps running in the tray with its window closed. Agents are child proce
 
 The files pane, opened from the titlebar, shows the workspace of the yesman you are talking to as a tree, and opens its files in tabs: text and code in an editor with syntax highlighting that saves with Cmd/Ctrl+S or by itself as you type, Markdown rendered, images shown. It follows changes as agents make them, and never saves over a file that changed on disk since it was opened without asking. Large files stay quick: the editor draws only the lines in view, and files over 5 MB open read-only at their first 512 KB. Each folder in the path above a file opens a list of that folder. Cmd/Ctrl+P goes to a file by name, and its menu checks out repositories, opens the knowledge notes and dismisses the yesman. Its edges can be dragged.
 
+The info panel sits between the conversation and the files, and shows the yesman you are talking to at a glance; the titlebar hides or shows it. Knowledge opens the notes in the files pane, rendered and read-only. Storage folds into one row with the disk the workspace takes; open, it shows a bar of its largest parts (each worktree, the conversations, the knowledge, the rest of `.yesman`) and sums the others. Git's objects stay in the shared pool and are not counted. Worktrees lists the workspace's worktrees, each with the lines it changed against the remote's default branch, counting edits not committed yet and new files, or, when its branch is in a pull request, that pull request: its number, title, state, size and checks. yesman finds pull requests through the GitHub CLI, which also sees private repositories and checks, or else GitHub's public API, in the repository and, for a fork, in its upstream.
+
+A worktree opens in the files pane, as its files or as its changes. The pane's bar is one row: the part of the workspace shown, whose menu switches to all of it, the knowledge or another worktree, then the path of what is open, each segment a menu of its folder; in Changes those menus hold only what changed. The changes tree arrives a folder at a time: the Go side measures the changes once and lists one folder per request, opening as many folders below it as 200 rows allow, so a diff of thousands of files never arrives whole. A file's diff is read when it is chosen, up to 256 KB unless you ask for all of it (16 MB at most), and drawn as it scrolls into view. The tree can also show folders alone: choosing a folder then lists its changed files, to see what changed without reading every diff, a thousand at a time.
+
 The board, opened beside it in the titlebar, shows the same yesman's board as a list in the agents' order. Finished and dropped tasks fold into Done at the end, a blocked task shows why, a task's owner opens that agent's conversation, and a task expands to its detail and note. It follows the agents' changes; you change it by asking the lead. The board and the files share the place beside the conversation, one at a time.
 
-Settings, at the foot of the sidebar, has six pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and the language), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), Storage (where yesman keeps its data, below), pi (pi's packages, below), Import and export (below), and About (the versions yesman runs with, and updates).
+Settings, at the foot of the sidebar, has eight pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and the language), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), Secrets and Variables (the environment variables of agents' commands, below), Storage (where yesman keeps its data, below), pi (pi's packages, below), Import and export (below), and About (the versions yesman runs with, and updates).
 
 yesman is written in English and translated to Simplified Chinese. General › Language chooses one, or Match the system, the default, which shows the first of them among the languages of the system's settings, else English. The window, its menus, the tray and notifications change at once; MyGo keeps the choice (`App.SetLocale`): on macOS as the app's language in System Settings, which AppKit and WebKit also say their own texts in from the next launch, elsewhere in its `locale` file. The page translates itself in [`web/i18n.js`](web/i18n.js), with each message's English as its key in [`web/locales/zh-Hans.js`](web/locales/zh-Hans.js); Go translates its menus, tray, notifications and dialogs with `tr` in [`i18n.go`](i18n.go). A message without a translation shows in English.
 
@@ -64,16 +69,57 @@ The pi page manages [pi packages](https://pi.dev/packages): the extensions, skil
 
 Packages are installed for the user, in pi's agent directory (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`), so they load into every yesman agent and into pi wherever you run it. yesman changes them only by running `pi install`, `pi update` and `pi remove`, one at a time in the background; a change that fails stays listed with pi's or npm's error until you try it again or dismiss it. pi loads packages when it starts, so agents already running keep the packages they started with: the page says which, and puts the idle ones to sleep on request, to load the change when they next start.
 
-Import and export saves yesman's configuration as a TOML file, to back it up or carry it to another computer: the appearance, the fetch schedule and the pool's GitHub repositories as `owner/repo`. Workspaces, their knowledge and conversations stay out, as does where yesman keeps its data. Importing a file first shows what it would change, then either merges it, which clones the repositories it lists that the pool lacks and changes the settings it sets, or replaces with it, which also resets the settings it leaves out and removes the pool repositories it does not list. Replace keeps a repository that work depends on, one with a worktree checked out of it (in a workspace or the archive) or a branch with commits no remote has, and says why. It also stops the clones of repositories the file leaves out, except one an agent is waiting for.
+### Secrets and variables
+
+Secrets (API keys, tokens) and variables (an account name, a region, an endpoint) are environment variables that every command of every agent gets. Each has a name, which is the variable's, a value, and a description that tells agents what it is for. Settings › Secrets and Settings › Variables edit them as a form, or as YAML with the editor; switching converts between the two, and a mistake in the YAML keeps it open there. A name is set in one of them only, and a secret's must not end in `_unencrypted`, which sops keeps in the clear. Comments in the YAML are not kept.
+
+```yaml
+version: 1
+secrets:            # variables: in variables.yaml
+  GH_TOKEN:
+    description: GitHub token for idy; gh and git push read it
+    value: ghp_…
+  OPENAI_API_KEY: sk-…   # a value alone is short for one without a description
+```
+
+Secrets are kept in `secrets/secrets.sops.yaml` in the data directory, a [sops](https://getsops.io) file: names in the clear, every value and description encrypted with AES-256-GCM, a MAC over all of them, and the data key encrypted to an [age](https://age-encryption.org) key. The key is `secrets/identity.age`, encrypted with a password. Setting up makes the password at random and keeps it in the system's credential store (the login Keychain on macOS, the Credential Manager on Windows, the Secret Service on Linux), keyed by the vault's age recipient, so yesman unlocks the secrets when it starts; Settings › Secrets copies it. Where the system has no credential store, you choose the password and type it after each launch. Unlocking reads the key into memory until you lock again or quit yesman; while locked, commands run without the secrets. yesman reads and writes the sops format itself, so neither sops nor its key services are needed; with the age key, which `age -d secrets/identity.age` gives with the password, `SOPS_AGE_KEY_FILE=key.txt sops edit secrets/secrets.sops.yaml` edits the same file, and yesman keeps any other age recipient sops added. A lost password cannot be recovered: the exported configuration keeps a copy. Variables are kept in plain text in `variables.yaml`, which you may edit by hand.
+
+Agents get them through yesman's extension. Its `bash` tool (and `powershell` on Windows) replaces pi's own and asks the app, before each command, for the variables and, while unlocked, the secrets, and sets them in that command alone: a change reaches the next command without restarting anyone, and pi's process, its other extensions and its MCP servers never see the secrets. The context says one sentence about them, and `yesman_env` says what each variable is: its description, a variable's value, never a secret's. Whatever a tool returns, output or a file read, shows a secret's value, or a line of one, as `[secret NAME]`, for values of six characters or more, including values the agent was given before they changed or were removed. This keeps values out of the model's context and the session logs; it does not stop a command from using a secret as it likes, or a determined agent from encoding one.
+
+Neither page has a backup of its own: Settings › Import and export backs both up with the rest of the configuration, below.
+
+### Import and export
+
+Import and export saves yesman's configuration as a TOML file, to back it up or carry it to another computer: the appearance, the fetch schedule, the pool's GitHub repositories as `owner/repo`, the variables, and the secrets: the vault's key file and secrets file as they are, encrypted, with the password from the credential store. With the password in it the file opens the secrets, so it is written readable only by you; keep it private. Importing its secrets where none are set up sets them up as they are and keeps the password in the credential store; where there are secrets, the file's are opened with its password and merged or replaced into them. A name both variables and secrets would set stops the import before anything changes. A file without variables or secrets, such as one of version 1, leaves those here alone, replacing too. Workspaces, their knowledge and conversations stay out, as does where yesman keeps its data. Importing a file first shows what it would change, then either merges it, which clones the repositories it lists that the pool lacks and changes the settings it sets, or replaces with it, which also resets the settings it leaves out and removes the pool repositories it does not list. Replace keeps a repository that work depends on, one with a worktree checked out of it (in a workspace or the archive) or a branch with commits no remote has, and says why. It also stops the clones of repositories the file leaves out, except one an agent is waiting for.
 
 ```toml
-version = 1
+version = 2
 appearance = "dark"   # system, light or dark
 auto_fetch = 15       # minutes: 0, 1, 5, 15 or 60
 repos = ["idy/yesman", "idy/magpie"]
+
+[[variables]]
+name = "DEPLOY_REGION"
+value = "eu-west-1"
+description = "AWS region the deploy scripts use"
+
+[secrets]
+password = "…"        # from the credential store
+key = '''
+-----BEGIN AGE ENCRYPTED FILE-----
+…
+'''
+file = '''
+secrets:
+    GH_TOKEN:
+        description: ENC[AES256_GCM,…]
+        value: ENC[AES256_GCM,…]
+sops:
+    …
+'''
 ```
 
-In Settings › Storage, **Change…** lets you enter or browse to a data folder, then **Use folder and restart** opens it after restarting. Existing folders with data are accepted; a new folder starts fresh. To keep existing data elsewhere, quit yesman, copy the folder yourself, then reopen yesman and select the copy. Data transfers and any Git worktree path repairs are manual. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice. Storage also has a compact list of the repo pool, workspace parent, archive, runtime files, settings file and storage configuration, with a Reveal action for each and the full path on hover.
+In Settings › Storage, **Change…** lets you enter or browse to a data folder, then **Use folder and restart** opens it after restarting. Existing folders with data are accepted; a new folder starts fresh. To keep existing data elsewhere, quit yesman, copy the folder yourself, then reopen yesman and select the copy. Data transfers and any Git worktree path repairs are manual. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice. Storage also has a compact list of the repo pool, workspace parent, archive, secrets, variables, runtime files, settings file and storage configuration, with a Reveal action for each and the full path on hover.
 
 Release builds update themselves through MyGo's updater: they check GitHub releases of `idy/yesman` at launch and every 6 hours, and download and install a newer version in the background. The titlebar then offers to restart into it, and the next launch runs it anyway. Only release builds, made with `mygo build` and signed, do that; development builds (`go run`, `go build`) never check.
 
@@ -118,7 +164,7 @@ To drive the real window, build with the `e2e` tag and attach [`mygo-automation`
 go build -tags e2e -o /tmp/yesman . && YESMAN_HOME=/tmp/yesman-home MYGO_AUTOMATION=/tmp/yesman.sock /tmp/yesman
 ```
 
-Automation cannot reach native file dialogs, so in such builds `YESMAN_E2E_SAVE` and `YESMAN_E2E_OPEN` name the files that Export and Import use instead of asking.
+Automation cannot reach native file dialogs, so in such builds `YESMAN_E2E_SAVE` and `YESMAN_E2E_OPEN` name the files that Export and Import use instead of asking. `YESMAN_E2E_NAME` names the app otherwise, so that a test build runs beside another yesman instead of handing over to it.
 
 ## Release
 
@@ -143,15 +189,18 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | `settings.go`, `storage.go`, `internal/home/` | Settings and About, the remembered data location and directory layout |
 | `pipackages.go`, `internal/pipkg`, `web/pi.js` | Settings › pi: pi's packages, installed, updated and removed through pi, and found in the npm registry |
 | `config.go` | The configuration file: export, and import by merging or replacing |
+| `secrets.go`, `internal/secrets`, `web/env.js` | Settings › Secrets and Variables: the sops and age format, the vault, the variables file, and their pages |
 | `update.go` | Checking for and installing new versions |
 | `files.go`, `files_menu.go` | Listing, reading, finding and watching a workspace's files, and the files pane's menus |
 | `web/files.js`, `web/editor.js`, `web/code.js` | The files pane, its editor, and the language of each file |
 | `web/board.js` | The board pane |
+| `info.go`, `web/info.js` | The info panel: knowledge, worktrees with their changes and pull requests, and storage |
+| `internal/pool/changes.go`, `web/diff.js` | A worktree's changes against its base, listed a folder at a time, and each file's diff |
 | `i18n.go`, `web/i18n.js`, `web/locales/` | The languages yesman is written in, and their translations |
 | `tools/codemirror/` | Rebuilds the vendored CodeMirror bundle |
 | `mygo.json`, `resources/`, `icons.go` | Packaging, the yak app icon and the monochrome tray template; see [icon sources](resources/README.md) |
 | `internal/pool` | The repo pool and its worktrees |
-| `internal/github` | What the pool takes: GitHub repositories, their clone URLs and a fork's parent |
+| `internal/github` | What the pool takes: GitHub repositories, their clone URLs and a fork's parent, and the pull request of a branch |
 | `internal/yesmen` | Workspaces, workers, the board and their files |
 | `internal/agent` | pi processes in RPC mode, their status and current activity |
 | `internal/server` | The loopback API for the extension, and the context each agent gets |

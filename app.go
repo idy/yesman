@@ -13,6 +13,7 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/home"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -51,6 +52,12 @@ type app struct {
 	// runPi runs a pi command for the user, outside any workspace.
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs
+	// vault and variables are what agents' commands get as environment
+	// variables, in Settings › Secrets and Settings › Variables.
+	vault     *secrets.Vault
+	variables *secrets.Variables
+	keychain  keychain   // keeps the secrets' password; nil for none
+	envmu     sync.Mutex // one change of them at a time
 
 	wmu  sync.Mutex
 	win  *mygo.Window
@@ -83,6 +90,9 @@ type app struct {
 	updates *updates
 
 	files fileWatch // the workspace whose files the page shows
+
+	infoOnce sync.Once
+	info     *infoCache // what the info panel measured
 }
 
 // titlebarHeight is the height of the titlebar the page draws.
