@@ -256,12 +256,7 @@ func (s *service) saveAs(title, name string, filters []mygo.FileFilter, data []b
 	if err != nil || path == "" {
 		return "", err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return path, err
-	}
-	// WriteFile keeps the permissions of a file it replaces: an export over
-	// one others can read is made the user's alone too.
-	return path, os.Chmod(path, 0o600)
+	return path, writePrivate(path, data)
 }
 
 // ExportSecrets saves the secrets as YAML: sealed with a password, which
