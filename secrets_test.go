@@ -91,6 +91,16 @@ func TestExportAndImportSecrets(t *testing.T) {
 	if strings.Join(plan.Add, ",") != "A" || strings.Join(plan.Change, ",") != "B" || strings.Join(plan.Extra, ",") != "C" {
 		t.Errorf("plan: %#v", plan)
 	}
+	// A broken variables file is its error, not a clash of every name.
+	if err := os.WriteFile(s.app.variables.File(), []byte("variables: [broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PreviewEnvImport("secrets", out, "backup-pass"); err == nil || !strings.Contains(err.Error(), "variables.yaml") {
+		t.Errorf("preview with a broken variables file: %v", err)
+	}
+	if err := os.Remove(s.app.variables.File()); err != nil {
+		t.Fatal(err)
+	}
 	if n, err := s.ImportEnv("secrets", out, "backup-pass", "merge"); err != nil || n != 3 {
 		t.Fatalf("merge: %d, %v", n, err)
 	}

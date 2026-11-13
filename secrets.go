@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
@@ -22,11 +23,11 @@ import (
 const envLimit = 1 << 20
 
 // trError says a mistake the secrets package reports in the language
-// yesman shows.
+// yesman shows, keeping what wraps it, such as the file's name.
 func trError(err error) error {
 	var e *secrets.Error
 	if errors.As(err, &e) {
-		return errors.New(tr(e.Msg, e.Args...))
+		return errors.New(strings.Replace(err.Error(), e.Error(), tr(e.Msg, e.Args...), 1))
 	}
 	return err
 }
@@ -101,19 +102,9 @@ func kindOf(kind string) (secrets.Kind, error) {
 // checkApart refuses entries of one kind that the other sets too: a
 // command could get only one of them.
 func (a *app) checkApart(kind secrets.Kind, entries []secrets.Entry) error {
-	var other []string
-	if kind == secrets.KindSecrets {
-		vars, err := a.variables.Entries()
-		if err != nil {
-			return trError(err)
-		}
-		other = secrets.Names(vars)
-	} else {
-		names, err := a.vault.Names()
-		if err != nil {
-			return trError(err)
-		}
-		other = names
+	other, err := a.otherNames(kind)
+	if err != nil {
+		return err
 	}
 	for _, e := range entries {
 		if slices.Contains(other, e.Name) {
@@ -124,6 +115,16 @@ func (a *app) checkApart(kind secrets.Kind, entries []secrets.Entry) error {
 		}
 	}
 	return nil
+}
+
+// otherNames are the names the other kind sets.
+func (a *app) otherNames(kind secrets.Kind) ([]string, error) {
+	if kind == secrets.KindSecrets {
+		vars, err := a.variables.Entries()
+		return secrets.Names(vars), trError(err)
+	}
+	names, err := a.vault.Names()
+	return names, trError(err)
 }
 
 // save keeps the entries of a kind.
@@ -367,9 +368,13 @@ func (s *service) PreviewEnvImport(kind, path, password string) (EnvImportPlan, 
 	if err != nil {
 		return EnvImportPlan{}, err
 	}
+	other, err := s.app.otherNames(k)
+	if err != nil {
+		return EnvImportPlan{}, err // not a clash: the other file cannot be read
+	}
 	plan := EnvImportPlan{Path: path, Plan: secrets.PlanImport(current, incoming), Clash: []string{}}
 	for _, e := range incoming {
-		if s.app.checkApart(k, []secrets.Entry{e}) != nil {
+		if slices.Contains(other, e.Name) {
 			plan.Clash = append(plan.Clash, e.Name)
 		}
 	}

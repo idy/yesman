@@ -78,12 +78,16 @@ function hideContent<T extends Content>(content: T): T {
 
 // hideJSON hides values in a JSON value, as JSON writes them.
 function hideJSON(value: unknown): unknown {
-	let text = JSON.stringify(value);
-	for (const h of hidden) {
-		const quoted = JSON.stringify(h.value).slice(1, -1);
-		if (text.includes(quoted)) text = text.split(quoted).join(`[secret ${h.name}]`);
+	if (typeof value === "string") return hide(value);
+	if (typeof value === "number" || typeof value === "bigint") {
+		const h = hidden.find((h) => h.value === String(value));
+		return h ? `[secret ${h.name}]` : value; // a secret of digits
 	}
-	return JSON.parse(text);
+	if (Array.isArray(value)) return value.map(hideJSON);
+	if (value && typeof value === "object") {
+		return Object.fromEntries(Object.entries(value).map(([k, v]) => [hide(k), hideJSON(v)]));
+	}
+	return value;
 }
 
 // commandEnv asks the app for the variables to set in a command. Without
@@ -148,10 +152,14 @@ export default function yesman(pi: ExtensionAPI) {
 		if (!hidden.length) return;
 		const content = hideContent(event.content);
 		const changed = content.some((c, i) => (c as any).text !== (event.content[i] as any).text);
-		const structured = event.structuredContent === undefined ? undefined : hideJSON(event.structuredContent);
-		const structuredChanged = structured !== undefined && JSON.stringify(structured) !== JSON.stringify(event.structuredContent);
-		if (!changed && !structuredChanged) return;
-		return structured === undefined ? { content } : { content, structuredContent: structured as any };
+		if (event.structuredContent === undefined) return changed ? { content } : undefined;
+		try {
+			const structured = hideJSON(event.structuredContent);
+			if (!changed && JSON.stringify(structured) === JSON.stringify(event.structuredContent)) return;
+			return { content, structuredContent: structured as any };
+		} catch {
+			return { content }; // drops structuredContent rather than pass it on unhidden
+		}
 	});
 
 	pi.registerTool({
