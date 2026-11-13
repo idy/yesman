@@ -26,7 +26,7 @@ The app keeps running in the tray with its window closed. Agents are child proce
 
 Settings, at the foot of the sidebar, has three pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and where yesman keeps its data), Repositories (the repo pool), and About (the versions yesman runs with, and updates).
 
-Release builds update themselves through MyGo's updater: they check GitHub releases of `idy/yesman` at launch and every 6 hours, and an update pill in the titlebar installs a newer version and restarts into it. Only release builds, made with `mygo build` and signed, do that; development builds (`go run`, `go build`) never check.
+Release builds update themselves through MyGo's updater: they check GitHub releases of `idy/yesman` at launch and every 6 hours, and download and install a newer version in the background. The titlebar then offers to restart into it, and the next launch runs it anyway. Only release builds, made with `mygo build` and signed, do that; development builds (`go run`, `go build`) never check.
 
 ## Requirements
 
