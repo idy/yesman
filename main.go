@@ -60,7 +60,14 @@ func main() {
 		mygo.Theme.SetSource(a.settings.Appearance) // before Run, so the window opens in it
 	}
 
-	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged}
+	a.clones = newClones(addRepo(a.pool), func(list []Clone, arrived bool) {
+		_ = clonesEvent.Broadcast(list)
+		if arrived {
+			a.notifyChanged()
+		}
+	})
+
+	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}

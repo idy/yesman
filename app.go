@@ -24,11 +24,15 @@ var (
 	changedEvent = mygo.NewEvent[bool]("changed")
 	// focusEvent asks the page to show an agent, after a notification click.
 	focusEvent = mygo.NewEvent[string]("focus-agent")
+	// clonesEvent carries the repositories on their way into the pool
+	// whenever one starts, finishes or fails.
+	clonesEvent = mygo.NewEvent[[]Clone]("clones")
 )
 
 type app struct {
 	home   home.Home
 	pool   *pool.Pool
+	clones *clones
 	yesmen *yesmen.Store
 	agents *agent.Manager
 	pi     string

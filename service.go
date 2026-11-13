@@ -114,20 +114,38 @@ func (s *service) Repos() ([]pool.Repo, error) {
 	return repos, err
 }
 
-// AddRepo clones a GitHub repository into the pool: owner/repo or its
-// URL. A fork's parent is fetched too, as its upstream remote.
-func (s *service) AddRepo(repo string) (pool.Repo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+// AddRepos starts cloning GitHub repositories into the pool, owner/repo or
+// their URLs, and returns at once; the clones event follows them. A fork's
+// parent is fetched too, as its upstream remote.
+func (s *service) AddRepos(repos []string) ([]Clone, error) {
+	return s.app.clones.Queue(repos)
+}
+
+// Clones lists the repositories on their way into the pool.
+func (s *service) Clones() []Clone {
+	return s.app.clones.List()
+}
+
+// RetryClone tries a clone that failed again.
+func (s *service) RetryClone(repo string) {
+	s.app.clones.Retry(repo)
+}
+
+// DismissClone forgets a clone that failed.
+func (s *service) DismissClone(repo string) {
+	s.app.clones.Dismiss(repo)
+}
+
+// OwnerRepos lists a GitHub user's or organization's repositories, to
+// choose some to add.
+func (s *service) OwnerRepos(owner string) ([]github.Listed, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	gh, err := github.Resolve(ctx, repo)
-	if err != nil {
-		return pool.Repo{}, err
+	repos, err := github.List(ctx, owner)
+	if repos == nil {
+		repos = []github.Listed{}
 	}
-	r, err := s.app.pool.Add(ctx, gh.URL, gh.Upstream)
-	if err == nil {
-		s.app.notifyChanged()
-	}
-	return r, err
+	return repos, err
 }
 
 // FetchRepo fetches a pool repository from its remotes now.

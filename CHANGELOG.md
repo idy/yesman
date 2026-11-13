@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.6
+
+- Add several repositories at once: in Settings › Repositories, name a GitHub user or organization and tick the repositories you want. Text after a slash filters them, and private repositories your GitHub CLI login sees are listed too.
+- Adding returns at once. Repositories clone in the background, three at a time, and show in the list as waiting or cloning, the way a fetch does. A clone that fails stays listed with its error until you try it again or dismiss it.
+- Repositories an agent adds show as cloning while it waits for them.
+
 ## 0.1.4
 
 - Click a folder in the path above a file to list that folder, and go into its folders or open its files from there. The file's own name lists the folder it is in. The arrow keys move through the list.
