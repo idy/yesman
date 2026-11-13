@@ -312,7 +312,7 @@ func planImport(c config, current Settings, repos []pool.Repo, clones []Clone, i
 			continue
 		}
 		e := ExtraRepo{Name: "github.com/" + cl.Repo, Label: cl.Repo, Clone: cl.State}
-		if cl.agent {
+		if cl.agents > 0 {
 			e.InUse = agentCloning
 		}
 		plan.Extra = append(plan.Extra, e)

@@ -19,7 +19,7 @@ type Clone struct {
 
 	input string // as it was asked for, which may name a protocol
 
-	agent     bool               // an agent waits for it, through Add
+	agents    int                // agents waiting for it, through Add
 	cancel    context.CancelFunc // stops it while it clones for the page
 	done      chan struct{}      // closed when the page's clone of it ends
 	withdrawn bool               // Withdraw stopped it: it leaves no failure
@@ -182,7 +182,7 @@ func (c *clones) Withdraw(ctx context.Context, keep func(repo string) bool) (sto
 		switch {
 		case keep(j.Repo):
 			next = append(next, j)
-		case j.agent:
+		case j.agents > 0:
 			held = append(held, j.Repo)
 			next = append(next, j)
 		case j.State == CloneCloning:
@@ -254,10 +254,14 @@ func (c *clones) Add(ctx context.Context, input string) (pool.Repo, error) {
 	_, j := c.find(name)
 	mine := j == nil || j.State != CloneCloning
 	if j == nil {
-		c.jobs = append(c.jobs, &Clone{Repo: name, State: CloneCloning, input: input, agent: true})
+		j = &Clone{Repo: name, State: CloneCloning, input: input}
+		c.jobs = append(c.jobs, j)
 	} else if mine {
-		j.State, j.Error, j.agent = CloneCloning, "", true
+		j.State, j.Error = CloneCloning, ""
 	}
+	// While an agent waits for a clone, the page's own included, replacing
+	// the configuration leaves it alone.
+	j.agents++
 	if mine {
 		c.emitLocked(false)
 	}
@@ -265,6 +269,9 @@ func (c *clones) Add(ctx context.Context, input string) (pool.Repo, error) {
 	// The pool clones a repository once: when the page's clone of it is
 	// under way, this one waits for it and then finds it in the pool.
 	repo, err := c.add(ctx, input)
+	c.mu.Lock()
+	j.agents--
+	c.mu.Unlock()
 	if mine {
 		c.remove(name, err == nil)
 	}

@@ -111,7 +111,7 @@ repos = ["acme/kept", "acme/new", "acme/cloning", "acme/failed"]`))
 		{Name: "local/old", URL: "/src/old"},
 	}
 	clones := []Clone{{Repo: "acme/cloning", State: CloneCloning}, {Repo: "acme/failed", State: CloneFailed},
-		{Repo: "acme/stray", State: CloneQueued}, {Repo: "acme/helper", State: CloneCloning, agent: true}}
+		{Repo: "acme/stray", State: CloneQueued}, {Repo: "acme/helper", State: CloneCloning, agents: 1}}
 	plan := planImport(c, Settings{AutoFetch: 5}, repos, clones, func(r pool.Repo) string {
 		if r.Name == "github.com/acme/busy" {
 			return "a worktree is checked out of it"
