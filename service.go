@@ -173,6 +173,21 @@ func (s *service) Send(ctx context.Context, id, text string) error {
 	return s.app.agents.Prompt(ctx, id, text)
 }
 
+// Models lists pi's available models and this agent's effective selection.
+func (s *service) Models(ctx context.Context, id string) (agent.ModelOptions, error) {
+	return s.app.agents.Models(ctx, id)
+}
+
+// SetModel changes an idle agent's model, keeping its conversation.
+func (s *service) SetModel(ctx context.Context, id, provider, model string) (agent.Info, error) {
+	return s.app.agents.SetModel(ctx, id, provider, model)
+}
+
+// SetEffort changes an idle agent's reasoning effort.
+func (s *service) SetEffort(ctx context.Context, id, level string) (agent.Info, error) {
+	return s.app.agents.SetEffort(ctx, id, level)
+}
+
 // Abort stops an agent's current run.
 func (s *service) Abort(ctx context.Context, id string) error {
 	return s.app.agents.Abort(ctx, id)
