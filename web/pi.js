@@ -57,7 +57,7 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     view: null, // Yesman.PiPackages
     tab: 'info', // info, installed or browse
     updates: {}, // npm name -> its latest version
-    jobs: { jobs: [], changedAt: null }, // Yesman.PiJobs
+    jobs: { jobs: [], changedAt: null, version: -1 }, // Yesman.PiJobs, the newest seen
     query: '',
     results: null, // { query, total, packages } searched for the query
     searching: false,
@@ -66,6 +66,7 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     timer: 0,
   };
   let searchInput = null;
+  let loads = 0; // the last load asked for, which alone may land
   let tabs = null; // initTabs of the page shown
 
   const mounted = () => shown() && $('#pi-page');
@@ -75,16 +76,26 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
 
   // ---------- Loading ----------
 
+  // Job lists arrive by events, answers and loads, in any order: one older
+  // than the list shown is dropped.
+  function setJobs(next) {
+    if ((next?.version ?? 0) < s.jobs.version) return false;
+    s.jobs = { jobs: next.jobs ?? [], changedAt: next.changedAt, version: next.version ?? 0 };
+    return true;
+  }
+
   async function load() {
+    const seq = ++loads;
     let v;
     try {
       v = await call('PiPackages');
     } catch (err) {
-      fail(err);
+      if (seq === loads) fail(err);
       return;
     }
+    if (seq !== loads) return; // a later load answers for the page
     s.view = v;
-    s.jobs = { jobs: v.jobs, changedAt: v.changedAt };
+    setJobs(v);
     if (mounted()) paint();
     else if (shown()) rerender();
     loadUpdates();
@@ -106,7 +117,7 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
   async function onJobs(next) {
     const ids = new Set(next.jobs.map((j) => j.id));
     const ended = jobs().some((j) => !ids.has(j.id));
-    s.jobs = next;
+    if (!setJobs(next)) return;
     if (ended) await load();
     else if (mounted()) paint();
   }
@@ -184,8 +195,7 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
   }
 
   function acceptJobs(next) {
-    s.jobs = next;
-    if (mounted()) paint();
+    if (setJobs(next) && mounted()) paint();
   }
 
   // Agents started before the packages last changed run with them as

@@ -242,3 +242,27 @@ func TestRefusedSourcesAreTranslated(t *testing.T) {
 		t.Errorf("translated = %q", got)
 	}
 }
+
+func TestPiJobsVersionGrows(t *testing.T) {
+	var got []int
+	var mu sync.Mutex
+	j := newPiJobs(func(context.Context, ...string) (string, error) { return "", errors.New("no") },
+		func(l PiJobs) { mu.Lock(); got = append(got, l.Version); mu.Unlock() })
+	before := j.List().Version
+	l, _ := j.Queue(PiInstall, "npm:a", "")
+	if l.Version <= before {
+		t.Errorf("queueing kept version %d", l.Version)
+	}
+	waitJobs(t, j, func(l PiJobs) bool { return len(l.Jobs) == 1 && l.Jobs[0].State == JobFailed })
+	j.Dismiss(j.List().Jobs[0].ID)
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(got); i++ {
+		if got[i] <= got[i-1] {
+			t.Fatalf("versions went %v", got)
+		}
+	}
+	if got[len(got)-1] != j.List().Version {
+		t.Errorf("the last event says %d, the list %d", got[len(got)-1], j.List().Version)
+	}
+}

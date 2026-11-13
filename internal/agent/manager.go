@@ -524,20 +524,36 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 	if strings.TrimSpace(text) == "" {
 		return errors.New("empty message")
 	}
-	a, p, err := m.ensure(id)
-	if err != nil {
-		return err
-	}
-	// Register before dispatch, under the same lock as configuration's idle
-	// check and writes. Release it before waiting so other messages can steer
-	// a running turn. pi may await extensions before reporting isStreaming.
-	a.modelMu.Lock()
-	if err := ctx.Err(); err != nil {
+	var (
+		a   *agent
+		p   *proc
+		err error
+	)
+	for {
+		a, p, err = m.ensure(id)
+		if err != nil {
+			return err
+		}
+		// Register before dispatch, under the same lock as configuration's
+		// idle check and writes, and SleepIfIdle's. Release it before waiting
+		// so other messages can steer a running turn. pi may await extensions
+		// before reporting isStreaming.
+		a.modelMu.Lock()
+		if err := ctx.Err(); err != nil {
+			a.modelMu.Unlock()
+			return err
+		}
+		select {
+		case <-p.done:
+			// Put to sleep while this waited for the lock: start it again.
+			a.modelMu.Unlock()
+			continue
+		default:
+		}
+		a.prompts++
 		a.modelMu.Unlock()
-		return err
+		break
 	}
-	a.prompts++
-	a.modelMu.Unlock()
 	done := make(chan error, 1)
 	go func() {
 		// Cancelling the caller does not cancel the RPC already sent to pi.
@@ -650,6 +666,39 @@ func (m *Manager) Stop(id string) {
 	}
 	m.mu.Unlock()
 	m.changed()
+}
+
+// SleepIfIdle stops the agent's process, as Stop does, only if it is idle
+// and started before the time given, and reports whether it stopped it.
+// It holds the lock prompts register under from its check to the end of the
+// stop, so no message slips in between: one sent meanwhile waits, then
+// starts the agent again. pi is asked too, as it may be running or
+// compacting before yesman hears of it.
+func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
+	m.mu.Lock()
+	a := m.agents[id]
+	m.mu.Unlock()
+	if a == nil {
+		return false
+	}
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	m.mu.Lock()
+	p := a.proc
+	idle := p != nil && a.starting == nil && a.prompts == 0 && a.info.Status == Idle &&
+		!a.info.StartedAt.IsZero() && a.info.StartedAt.Before(startedBefore)
+	m.mu.Unlock()
+	if !idle {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	state, err := p.modelState(ctx)
+	cancel()
+	if err != nil || state.IsStreaming || state.IsCompacting {
+		return false
+	}
+	m.Stop(id)
+	return true
 }
 
 // clearLocked forgets an agent's process, its credential, and the reply

@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/idy/yesman/internal/agent"
@@ -56,6 +57,9 @@ const (
 type PiJobs struct {
 	Jobs      []PiJob   `json:"jobs"`
 	ChangedAt time.Time `json:"changedAt,omitzero"`
+	// Version counts the changes to the jobs. Lists reach the page by
+	// events, answers and reloads, in any order: the highest is the newest.
+	Version int `json:"version"`
 }
 
 // piJobTimeout bounds one pi command; installing runs npm.
@@ -76,6 +80,7 @@ type piJobs struct {
 	seq       int
 	busy      bool
 	changedAt time.Time
+	version   int
 }
 
 func newPiJobs(run func(context.Context, ...string) (string, error), changed func(PiJobs)) *piJobs {
@@ -151,14 +156,16 @@ func (j *piJobs) List() PiJobs {
 }
 
 func (j *piJobs) listLocked() PiJobs {
-	list := PiJobs{Jobs: make([]PiJob, 0, len(j.jobs)), ChangedAt: j.changedAt}
+	list := PiJobs{Jobs: make([]PiJob, 0, len(j.jobs)), ChangedAt: j.changedAt, Version: j.version}
 	for _, job := range j.jobs {
 		list.Jobs = append(list.Jobs, *job)
 	}
 	return list
 }
 
+// emitLocked follows every change to the jobs.
 func (j *piJobs) emitLocked() {
+	j.version++
 	if j.changed != nil {
 		j.changed(j.listLocked())
 	}
@@ -341,9 +348,10 @@ func npmCommand(settingsFile string) []string {
 func (s *service) PiPackages(ctx context.Context) PiView {
 	a := s.app
 	settings := filepath.Join(piAgentDir(), "settings.json")
-	v := PiView{Pi: a.pi, SettingsFile: settings, NpmCommand: npmCommand(settings), Packages: []pipkg.Installed{}, PiJobs: a.piJobs.List()}
+	v := PiView{Pi: a.pi, SettingsFile: settings, NpmCommand: npmCommand(settings), Packages: []pipkg.Installed{}}
 	if a.piErr != nil {
 		v.PiError = a.piErr.Error()
+		v.PiJobs = a.piJobs.List()
 		return v
 	}
 	var wg sync.WaitGroup
@@ -365,6 +373,8 @@ func (s *service) PiPackages(ctx context.Context) PiView {
 	}
 	wg.Wait()
 	v.Version = version
+	// The jobs as they are once pi has listed the packages, not before.
+	v.PiJobs = a.piJobs.List()
 	return v
 }
 
@@ -461,19 +471,25 @@ func staleAgents(list []agent.Info, changedAt time.Time) []agent.Info {
 
 // SleepStaleAgents puts the agents that run with the packages as they were
 // before the last change to sleep, unless they are busy: working, waiting
-// for an answer, or starting. They load the packages as they are now when
-// they next start, resuming their sessions. It returns how many it stopped.
+// for an answer, starting, or sent a message meanwhile. They load the
+// packages as they are now when they next start, resuming their sessions.
+// It returns how many it stopped.
 func (s *service) SleepStaleAgents() int {
 	a := s.app
+	changed := a.piJobs.ChangedAt()
 	var wg sync.WaitGroup
-	n := 0
-	for _, i := range staleAgents(a.agents.List(), a.piJobs.ChangedAt()) {
+	var n atomic.Int32
+	for _, i := range staleAgents(a.agents.List(), changed) {
 		if i.Status != agent.Idle {
 			continue
 		}
-		n++
-		wg.Go(func() { a.agents.Stop(i.ID) })
+		// The list only picks candidates: the manager checks again.
+		wg.Go(func() {
+			if a.agents.SleepIfIdle(i.ID, changed) {
+				n.Add(1)
+			}
+		})
 	}
 	wg.Wait()
-	return n
+	return int(n.Load())
 }
