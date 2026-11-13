@@ -5,11 +5,33 @@
 package pipkg
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 )
+
+// Error is why a source was refused: an English message with at most one
+// %q in it, kept apart from its argument so that the app can say it in
+// the user's language.
+type Error struct {
+	Format string
+	Arg    string
+}
+
+func (e *Error) Error() string {
+	if strings.Contains(e.Format, "%") {
+		return fmt.Sprintf(e.Format, e.Arg)
+	}
+	return e.Format
+}
+
+func refuse(format string, arg ...string) error {
+	e := &Error{Format: format}
+	if len(arg) > 0 {
+		e.Arg = arg[0]
+	}
+	return e
+}
 
 // Source is a package source as `pi install` takes it.
 type Source struct {
@@ -40,11 +62,11 @@ func ParseSource(input string) (Source, error) {
 	lower := strings.ToLower(in)
 	switch {
 	case in == "":
-		return s, errors.New("enter a package source, such as npm:pi-web-access")
+		return s, refuse("enter a package source, such as npm:pi-web-access")
 	case strings.HasPrefix(in, "-"):
-		return s, fmt.Errorf("%q is not a package source", in)
+		return s, refuse("%q is not a package source", in)
 	case strings.ContainsAny(in, "\r\n\x00"):
-		return s, errors.New("a package source is one line")
+		return s, refuse("a package source is one line")
 	case strings.HasPrefix(lower, "npm:"):
 		s.Kind = "npm"
 		spec := in[len("npm:"):]
@@ -53,28 +75,28 @@ func ParseSource(input string) (Source, error) {
 		if at > 0 {
 			s.Name, s.Version = spec[:at], spec[at+1:]
 			if s.Version == "" {
-				return s, fmt.Errorf("%q names no version after @", in)
+				return s, refuse("%q names no version after @", in)
 			}
 		} else {
 			s.Name = spec
 		}
 		if !npmNameRE.MatchString(s.Name) || len(s.Name) > 214 {
-			return s, fmt.Errorf("%q is not an npm package name", s.Name)
+			return s, refuse("%q is not an npm package name", s.Name)
 		}
 		if strings.ContainsAny(s.Version, " \t") {
-			return s, fmt.Errorf("%q is not a version", s.Version)
+			return s, refuse("%q is not a version", s.Version)
 		}
 	case strings.HasPrefix(lower, "git:"), strings.HasPrefix(lower, "git@"),
 		strings.HasPrefix(lower, "https://"), strings.HasPrefix(lower, "http://"), strings.HasPrefix(lower, "ssh://"):
 		s.Kind = "git"
 		if strings.ContainsAny(in, " \t") {
-			return s, fmt.Errorf("%q is not a git source", in)
+			return s, refuse("%q is not a git source", in)
 		}
 	case strings.HasPrefix(in, "/"), strings.HasPrefix(in, "./"), strings.HasPrefix(in, "../"),
 		strings.HasPrefix(in, "~"), strings.HasPrefix(in, `.\`), strings.HasPrefix(in, `..\`), driveRE.MatchString(in):
 		s.Kind = "local"
 	default:
-		return s, fmt.Errorf("%q is not a package source: use npm:name, git:host/path, a URL or a local path", in)
+		return s, refuse("%q is not a package source: use npm:name, git:host/path, a URL or a local path", in)
 	}
 	return s, nil
 }
@@ -87,7 +109,7 @@ func (s Source) Pinned() bool { return s.Kind == "npm" && exactRE.MatchString(s.
 // which updates move forward.
 func NPM(name string) (Source, error) {
 	if !npmNameRE.MatchString(name) || len(name) > 214 {
-		return Source{}, fmt.Errorf("%q is not an npm package name", name)
+		return Source{}, refuse("%q is not an npm package name", name)
 	}
 	return Source{Raw: "npm:" + name, Kind: "npm", Name: name}, nil
 }

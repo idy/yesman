@@ -1240,6 +1240,7 @@ function importLines(plan, result) {
 const AGO = {
   fetched: ['never fetched', 'fetched just now', 'fetched {n} min ago', 'fetched {n} h ago', 'fetched {n} d ago'],
   checked: ['never checked', 'checked just now', 'checked {n} min ago', 'checked {n} h ago', 'checked {n} d ago'],
+  published: ['never published', 'published just now', 'published {n} min ago', 'published {n} h ago', 'published {n} d ago'],
 };
 
 function ago(iso, what = 'fetched') {

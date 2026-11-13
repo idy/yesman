@@ -95,7 +95,7 @@ func runPi(pi, dir string) func(context.Context, ...string) (string, error) {
 		text := pipkg.StripANSI(out.String())
 		if err != nil {
 			if ctx.Err() != nil {
-				return text, fmt.Errorf("pi %s took too long", args[0])
+				return text, errors.New(tr("pi %s took too long", args[0]))
 			}
 			if msg := failureText(text); msg != "" {
 				return text, errors.New(msg)
@@ -176,7 +176,7 @@ func (j *piJobs) Queue(op PiOp, source, title string) (PiJobs, error) {
 	if source != "" || op != PiUpdate {
 		src, err := pipkg.ParseSource(source)
 		if err != nil {
-			return PiJobs{}, err
+			return PiJobs{}, sourceError(err)
 		}
 		source = src.Raw
 		if title == "" {
@@ -235,6 +235,18 @@ func (j *piJobs) do(job *PiJob) {
 	}
 	j.startLocked()
 	j.emitLocked()
+}
+
+// sourceError says why a source was refused in the user's language.
+func sourceError(err error) error {
+	var e *pipkg.Error
+	if !errors.As(err, &e) {
+		return err
+	}
+	if strings.Contains(e.Format, "%") {
+		return errors.New(tr(e.Format, e.Arg))
+	}
+	return errors.New(tr(e.Format))
 }
 
 // piArgs is the pi command for a job.
@@ -401,7 +413,7 @@ func (s *service) InstallPiPackage(source string) (PiJobs, error) {
 		// A bare name is an npm package's.
 		src, err := pipkg.NPM(source)
 		if err != nil {
-			return PiJobs{}, err
+			return PiJobs{}, sourceError(err)
 		}
 		source = src.Raw
 	}

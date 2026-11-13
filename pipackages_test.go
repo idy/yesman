@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/pipkg"
 )
 
 // fakePi runs each pi command once the test answers it.
@@ -218,5 +219,26 @@ func TestStaleAgents(t *testing.T) {
 	}
 	if got := staleAgents(list, time.Time{}); len(got) != 0 {
 		t.Errorf("stale with no change = %v", got)
+	}
+}
+
+func TestRefusedSourcesAreTranslated(t *testing.T) {
+	for _, in := range []string{"", "-x", "a\nb", "npm:tools@", "npm:Bad", "npm:x@a b", "git:a b", "nope"} {
+		_, err := pipkg.ParseSource(in)
+		var e *pipkg.Error
+		if !errors.As(err, &e) {
+			t.Errorf("ParseSource(%q) = %v, want a *pipkg.Error", in, err)
+			continue
+		}
+		if _, ok := zhHans[e.Format]; !ok {
+			t.Errorf("%q has no translation", e.Format)
+		}
+		// Tests run in English: the message reads as pipkg wrote it.
+		if got := sourceError(err).Error(); got != err.Error() {
+			t.Errorf("sourceError(%q) = %q, want %q", in, got, err.Error())
+		}
+	}
+	if got := trIn("zh-Hans", "%q is not an npm package name", "Bad"); got != `"Bad" 不是 npm 包名` {
+		t.Errorf("translated = %q", got)
 	}
 }

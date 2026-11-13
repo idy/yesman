@@ -5,25 +5,29 @@
 import { $, h, icon } from './dom.js';
 import { renderMarkdown } from './markdown.js';
 import { initTabs, openDialog } from './mds/js/magpie.js';
+import { t, tn, tNodes, locale, formatNumber } from './i18n.js';
 
-const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+const compact = (n) => formatNumber(n, { notation: 'compact', maximumFractionDigits: 1 });
 const KINDS = { extensions: 'extensions', skills: 'skills', prompts: 'prompt templates', themes: 'themes' };
 const GALLERY = 'https://pi.dev/packages';
-const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const exactVersion = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/;
+const errorText = (err) => String(err?.message || err?.error || err);
 
 // What a package gives pi, in words.
-const provides = (kinds) => (kinds?.length ? kinds.map((k) => KINDS[k] ?? k).join(', ') : '');
+const provides = (kinds) => (kinds?.length
+  ? new Intl.ListFormat(locale(), { style: 'short', type: 'conjunction' }).format(kinds.map((k) => t(KINDS[k] ?? k)))
+  : '');
 
 // An npm source pinned to an exact version, which updates keep.
 const pinned = (p) => p.kind === 'npm' && exactVersion.test(p.version ?? '');
 
 // A job's state, as a row says it.
 const JOB_WORDS = {
-  install: { queued: 'waiting to install', running: 'installing…', failed: 'Could not install' },
-  update: { queued: 'waiting to update', running: 'updating…', failed: 'Could not update' },
-  remove: { queued: 'waiting to remove', running: 'removing…', failed: 'Could not remove' },
+  install: { queued: 'waiting to install', running: 'installing…', failed: 'Could not install: {error}' },
+  update: { queued: 'waiting to update', running: 'updating…', failed: 'Could not update: {error}' },
+  remove: { queued: 'waiting to remove', running: 'removing…', failed: 'Could not remove: {error}' },
 };
+const jobWords = (j) => t(JOB_WORDS[j.op][j.state], { error: j.error });
 
 // READMEs are written for GitHub, in Markdown with HTML in it, which the
 // page's renderer shows as text: outside code, drop the HTML, images and
@@ -111,14 +115,14 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
 
   function render(inner) {
     if (!s.view) {
-      inner.append(h('p', { class: 'toolbar-lead' }, 'Reading pi’s packages…'));
+      inner.append(h('p', { class: 'toolbar-lead' }, t('Reading pi’s packages…')));
       return;
     }
     const tab = (id, label) => h('button', { type: 'button', role: 'tab', id: `pi-tab-${id}`, 'aria-controls': `pi-${id}`, 'aria-selected': String(s.tab === id) }, label);
     const tablist = h('div', { class: 'mds-tabs', role: 'tablist', 'aria-label': 'pi' },
-      tab('info', 'Info'), tab('installed', h('span', { id: 'pi-installed-label' }, 'Installed')), tab('browse', 'Browse'));
+      tab('info', t('Info')), tab('installed', h('span', { id: 'pi-installed-label' }, t('Installed'))), tab('browse', t('Browse')));
     inner.append(h('div', { id: 'pi-page', class: 'pi-page' },
-      h('p', { class: 'toolbar-lead' }, 'Packages add extensions, skills, prompt templates and themes to pi. The ones installed here load into every yesman agent, and into pi wherever you run it.'),
+      h('p', { class: 'toolbar-lead' }, t('Packages add extensions, skills, prompt templates and themes to pi. The ones installed here load into every yesman agent, and into pi wherever you run it.')),
       h('div', { class: 'mds-toolbar' }, tablist, h('div', { class: 'mds-toolbar-actions', id: 'pi-actions' })),
       h('div', { id: 'pi-notice', hidden: true }),
       h('div', { id: 'pi-info', role: 'tabpanel', 'aria-labelledby': 'pi-tab-info' }),
@@ -155,10 +159,12 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
         $('.pi-search').toggleAttribute('data-busy', s.searching);
         return;
       }
-      searchInput ??= h('input', { class: 'mds-input', type: 'search', placeholder: 'Search packages', 'aria-label': 'Search pi packages', spellcheck: 'false', autocomplete: 'off',
+      searchInput ??= h('input', { class: 'mds-input', type: 'search', spellcheck: 'false', autocomplete: 'off',
         oninput: (e) => { s.query = e.currentTarget.value; clearTimeout(s.timer); s.timer = setTimeout(search, 350); },
         onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(s.timer); search(); } } });
       searchInput.value = s.query;
+      searchInput.placeholder = t('Search packages');
+      searchInput.setAttribute('aria-label', t('Search pi packages'));
       actions.replaceChildren(h('label', { class: 'search pi-search' }, icon('search'), searchInput, h('span', { class: 'mds-spinner', 'aria-hidden': 'true' })));
       $('.pi-search').toggleAttribute('data-busy', s.searching);
       return;
@@ -171,10 +177,10 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     const busy = all && all.state !== 'failed';
     const any = (s.view?.packages ?? []).some((p) => p.path);
     actions.replaceChildren(
-      h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: openSourceDialog }, icon('plus'), 'Install from source…'),
-      h('button', { class: 'mds-button mds-button--small pi-update-all', type: 'button', disabled: busy || !any, title: 'Update every package that is not pinned to a version',
+      h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: openSourceDialog }, icon('plus'), t('Install from source…')),
+      h('button', { class: 'mds-button mds-button--small pi-update-all', type: 'button', disabled: busy || !any, title: t('Update every package that is not pinned to a version'),
         onclick: () => call('UpdatePiPackage', '', 'all packages').then(acceptJobs, fail) },
-        busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('up'), 'Update all'));
+        busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('up'), t('Update all')));
   }
 
   function acceptJobs(next) {
@@ -199,9 +205,11 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     const names = stale.map((a) => a.id).join(', ');
     el.replaceChildren(h('div', { class: 'mds-notice pi-notice', role: 'status' },
       h('div', null,
-        h('strong', null, `${plural(stale.length, 'agent')} still ${stale.length === 1 ? 'runs' : 'run'} with the packages as they were`),
-        h('p', { title: names }, `pi loads packages when it starts. An agent put to sleep loads them when you next talk to it, and resumes its session.${busy ? ` ${busy === 1 ? 'One is' : `${busy} are`} busy; put ${busy === 1 ? 'it' : 'them'} to sleep from ${busy === 1 ? 'its' : 'their'} conversation once ${busy === 1 ? 'it is' : 'they are'} done.` : ''}`)),
-      idle ? h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: sleepStale }, busy ? `Put ${idle} idle to sleep` : stale.length === 1 ? 'Put it to sleep' : 'Put them to sleep') : null));
+        h('strong', null, tn(stale.length, '{n} agent still runs with the packages as they were', '{n} agents still run with the packages as they were')),
+        h('p', { title: names }, t('pi loads packages when it starts. An agent put to sleep loads them when you next talk to it, and resumes its session.'),
+          busy ? ` ${tn(busy, 'One is busy; put it to sleep from its conversation once it is done.', '{n} are busy; put them to sleep from their conversations once they are done.')}` : null)),
+      idle ? h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: sleepStale },
+        busy ? tn(idle, 'Put {n} idle agent to sleep', 'Put {n} idle agents to sleep') : tn(stale.length, 'Put it to sleep', 'Put them to sleep')) : null));
   }
 
   async function sleepStale(e) {
@@ -221,14 +229,14 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     if (!list) return;
     const v = s.view;
     const label = $('#pi-installed-label');
-    if (label) label.textContent = v.packages.length ? `Installed · ${v.packages.length}` : 'Installed';
+    if (label) label.textContent = v.packages.length ? t('Installed · {n}', { n: formatNumber(v.packages.length) }) : t('Installed');
     if (v.piError) {
-      list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, 'pi was not found'), h('span', { class: 'danger' }, v.piError)));
+      list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, t('pi was not found')), h('span', { class: 'danger' }, v.piError)));
       return;
     }
     const rows = [];
     const all = jobFor('update', '');
-    if (all) rows.push(jobRow(all, 'All packages'));
+    if (all) rows.push(jobRow(all, t('All packages')));
     const listed = new Set();
     for (const p of v.packages) {
       listed.add(p.raw);
@@ -239,10 +247,10 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     for (const j of jobs()) {
       if (j.op === 'install' && !listed.has(j.source)) rows.push(jobRow(j, j.title));
     }
-    if (v.listError) rows.unshift(h('div', { class: 'card-empty' }, h('span', { class: 'danger' }, `pi list failed: ${v.listError}`)));
+    if (v.listError) rows.unshift(h('div', { class: 'card-empty' }, h('span', { class: 'danger' }, t('pi list failed: {error}', { error: v.listError }))));
     if (!rows.length) {
-      list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, 'No packages yet'),
-        h('span', null, 'Browse pi’s gallery for extensions, skills, prompt templates and themes, or install one from npm, git or a folder.')));
+      list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, t('No packages yet')),
+        h('span', null, t('Browse pi’s gallery for extensions, skills, prompt templates and themes, or install one from npm, git or a folder.'))));
       return;
     }
     list.replaceChildren(...rows);
@@ -252,52 +260,50 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     const latest = p.kind === 'npm' && !pinned(p) ? s.updates[p.name] : '';
     const outdated = latest && p.current && latest !== p.current;
     const busy = job && job.state !== 'failed';
-    const words = job && JOB_WORDS[job.op];
-    const where = p.kind === 'npm' ? (pinned(p) ? `npm, pinned to ${p.version}` : 'npm') : p.kind === 'git' ? p.raw.replace(/^git:/, '') : p.raw;
-    const meta = [p.current ? `v${p.current}` : p.path ? null : 'not installed yet', where, provides(p.provides), p.filtered ? 'some resources off' : null]
+    const where = p.kind === 'npm' ? (pinned(p) ? t('npm, pinned to {version}', { version: p.version }) : 'npm') : p.kind === 'git' ? p.raw.replace(/^git:/, '') : p.raw;
+    const meta = [p.current ? `v${p.current}` : p.path ? null : t('not installed yet'), where, provides(p.provides), p.filtered ? t('some resources off') : null]
       .filter(Boolean).join(' · ');
     const action = (label, glyph, onclick, extra = {}) =>
       h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: label, 'aria-label': label, onclick, ...extra }, icon(glyph));
     const name = p.kind === 'npm'
-      ? h('button', { class: 'pi-name', type: 'button', title: `About ${p.name}`, onclick: () => openDetails(p.name) }, p.title)
+      ? h('button', { class: 'pi-name', type: 'button', title: t('About {name}', { name: p.name }), onclick: () => openDetails(p.name) }, p.title)
       : h('strong', { title: p.raw }, p.title);
     return h('div', { class: 'card-row pi-row', role: 'listitem', 'data-busy': busy ? 'true' : null },
       h('span', { class: 'card-row-icon' }, icon('package')),
       h('div', { class: 'card-row-text' }, name,
         job?.state === 'failed'
-          ? h('span', { class: 'danger', title: job.error }, `${words.failed}: ${job.error}`)
-          : h('span', { title: p.description || p.raw }, busy ? words[job.state] : p.description ? `${meta} — ${p.description}` : meta)),
-      outdated && !busy ? h('span', { class: 'card-row-aside pi-latest' }, `${latest} available`) : null,
+          ? h('span', { class: 'danger', title: job.error }, jobWords(job))
+          : h('span', { title: p.description || p.raw }, busy ? jobWords(job) : p.description ? `${meta} — ${p.description}` : meta)),
+      outdated && !busy ? h('span', { class: 'card-row-aside pi-latest' }, t('{version} available', { version: latest })) : null,
       busy
-        ? h('span', { class: 'card-row-actions' }, h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', disabled: true, 'aria-label': `${p.title} is ${words[job.state].replace('…', '')}` }, h('span', { class: 'mds-spinner', 'aria-hidden': 'true' })))
+        ? h('span', { class: 'card-row-actions' }, h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', disabled: true, 'aria-label': `${p.title}: ${jobWords(job)}` }, h('span', { class: 'mds-spinner', 'aria-hidden': 'true' })))
         : h('span', { class: 'card-row-actions' },
-            job?.state === 'failed' ? action(`Try again`, 'reload', () => call('RetryPiJob', job.id).catch(fail)) : null,
-            job?.state === 'failed' ? action(`Dismiss`, 'x', () => call('DismissPiJob', job.id).catch(fail)) : null,
-            !job && !pinned(p) ? action(outdated ? `Update ${p.title} to ${latest}` : `Update ${p.title}`, 'up', () => call('UpdatePiPackage', p.raw, p.title).then(acceptJobs, fail)) : null,
-            !job ? action(`Remove ${p.title}`, 'trash', () => removePackage(p)) : null));
+            job?.state === 'failed' ? action(t('Try again'), 'reload', () => call('RetryPiJob', job.id).catch(fail)) : null,
+            job?.state === 'failed' ? action(t('Dismiss {name}', { name: p.title }), 'x', () => call('DismissPiJob', job.id).catch(fail)) : null,
+            !job && !pinned(p) ? action(outdated ? t('Update {name} to {version}', { name: p.title, version: latest }) : t('Update {name}', { name: p.title }), 'up', () => call('UpdatePiPackage', p.raw, p.title).then(acceptJobs, fail)) : null,
+            !job ? action(t('Remove {name}', { name: p.title }), 'trash', () => removePackage(p)) : null));
   }
 
   // A job with no installed package to show it on: installing a new one,
   // or updating them all.
   function jobRow(j, title) {
     const failed = j.state === 'failed';
-    const words = JOB_WORDS[j.op];
     const action = (label, glyph, onclick) =>
       h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: label, 'aria-label': label, onclick }, icon(glyph));
     return h('div', { class: 'card-row pi-row', role: 'listitem', 'data-busy': failed ? null : 'true' },
       h('span', { class: 'card-row-icon' }, icon('package')),
       h('div', { class: 'card-row-text' }, h('strong', { title: j.source || title }, title),
-        failed ? h('span', { class: 'danger', title: j.error }, `${words.failed}: ${j.error}`) : h('span', null, words[j.state])),
+        h('span', failed ? { class: 'danger', title: j.error } : null, jobWords(j))),
       failed
         ? h('span', { class: 'card-row-actions' },
-            action('Try again', 'reload', () => call('RetryPiJob', j.id).catch(fail)),
-            action(`Dismiss`, 'x', () => call('DismissPiJob', j.id).catch(fail)))
-        : h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', disabled: true, 'aria-label': `${title} is ${words[j.state].replace('…', '')}` },
+            action(t('Try again'), 'reload', () => call('RetryPiJob', j.id).catch(fail)),
+            action(t('Dismiss {name}', { name: title }), 'x', () => call('DismissPiJob', j.id).catch(fail)))
+        : h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', disabled: true, 'aria-label': `${title}: ${jobWords(j)}` },
             h('span', { class: 'mds-spinner', 'aria-hidden': 'true' })));
   }
 
   async function removePackage(p) {
-    if (!(await confirm(`Remove ${p.title}?`, 'pi stops loading it, here and wherever you run pi. Agents running now keep it until they restart.', 'Remove'))) return;
+    if (!(await confirm(t('Remove {name}?', { name: p.title }), t('pi stops loading it, here and wherever you run pi. Agents running now keep it until they restart.'), t('Remove')))) return;
     call('RemovePiPackage', p.raw, p.title).then(acceptJobs, fail);
   }
 
@@ -317,7 +323,7 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     } catch (err) {
       if (seq !== s.seq) return;
       s.searching = false;
-      s.searchError = String(err?.message || err?.error || err);
+      s.searchError = errorText(err);
       if (mounted()) paint();
       return;
     }
@@ -335,11 +341,11 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     if (!list) return;
     list.setAttribute('aria-busy', String(s.searching));
     const r = s.results;
-    const credit = h('p', { class: 'pi-credit' }, 'From npm packages tagged pi-package, as ',
-      h('a', { href: GALLERY }, 'pi’s package gallery'), ' lists them. Packages run code with your account’s permissions: install the ones you trust.');
+    const credit = h('p', { class: 'pi-credit' }, tNodes('From npm packages tagged pi-package, as {gallery} lists them. Packages run code with your account’s permissions: install the ones you trust.',
+      { gallery: h('a', { href: GALLERY }, t('pi’s package gallery')) }));
     if (s.searchError) {
-      list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, 'Could not search'), h('span', { class: 'danger' }, s.searchError),
-        h('div', null, h('button', { class: 'mds-link-button', type: 'button', onclick: () => search() }, 'Try again'))));
+      list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, t('Could not search')), h('span', { class: 'danger' }, s.searchError),
+        h('div', null, h('button', { class: 'mds-link-button', type: 'button', onclick: () => search() }, t('Try again')))));
       foot.replaceChildren(credit);
       return;
     }
@@ -349,16 +355,16 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
       return;
     }
     if (!r.packages.length) {
-      list.replaceChildren(h('div', { class: 'card-empty' }, h('span', null, r.query ? `No pi package matches “${r.query}”.` : 'The registry lists no pi packages.')));
+      list.replaceChildren(h('div', { class: 'card-empty' }, h('span', null, r.query ? t('No pi package matches “{query}”.', { query: r.query }) : t('The registry lists no pi packages.'))));
       foot.replaceChildren(credit);
       return;
     }
     list.replaceChildren(...r.packages.map(resultRow));
     const more = r.packages.length < r.total
       ? h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: s.searching, onclick: () => search(r.packages.length) },
-          s.searching ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : null, `Show more · ${compact.format(r.total - r.packages.length)} left`)
+          s.searching ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : null, t('Show more · {n} left', { n: compact(r.total - r.packages.length) }))
       : null;
-    foot.replaceChildren(h('div', { class: 'pi-more' }, h('span', null, `${compact.format(r.total)} ${r.total === 1 ? 'package' : 'packages'}`), more), credit);
+    foot.replaceChildren(h('div', { class: 'pi-more' }, h('span', null, tn(r.total, '{n} package', '{n} packages', { n: compact(r.total) })), more), credit);
   }
 
   function skeletonRow() {
@@ -371,20 +377,20 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
   function installButton(name) {
     const source = `npm:${name}`;
     const job = jobFor('install', source);
-    if (installedNames().has(name) && !job) return h('span', { class: 'card-row-aside pi-installed' }, icon('check'), 'Installed');
+    if (installedNames().has(name) && !job) return h('span', { class: 'card-row-aside pi-installed' }, icon('check'), t('Installed'));
     if (job && job.state !== 'failed') {
-      return h('span', { class: 'card-row-aside pi-installing' }, h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }), job.state === 'queued' ? 'Waiting' : 'Installing');
+      return h('span', { class: 'card-row-aside pi-installing' }, h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }), job.state === 'queued' ? t('Waiting') : t('Installing'));
     }
-    return h('button', { class: 'mds-button mds-button--small', type: 'button', title: job?.error ? `The last install failed: ${job.error}` : `Install ${name}`,
-      onclick: () => confirmInstall(name) }, job ? 'Try again' : 'Install');
+    return h('button', { class: 'mds-button mds-button--small', type: 'button', title: job?.error ? t('The last install failed: {error}', { error: job.error }) : t('Install {name}', { name }),
+      onclick: () => confirmInstall(name) }, job ? t('Try again') : t('Install'));
   }
 
   function resultRow(p) {
-    const meta = [`v${p.version}`, p.weekly ? `${compact.format(p.weekly)} a week` : null, p.date ? ago(p.date, 'published') : null, p.publisher ? `by ${p.publisher}` : null]
+    const meta = [`v${p.version}`, p.weekly ? t('{n} a week', { n: compact(p.weekly) }) : null, p.date ? ago(p.date, 'published') : null, p.publisher ? t('by {name}', { name: p.publisher }) : null]
       .filter(Boolean).join(' · ');
     return h('div', { class: 'card-row pi-row', role: 'listitem' },
       h('span', { class: 'card-row-icon' }, icon('package')),
-      h('button', { class: 'card-row-text pi-open', type: 'button', title: `About ${p.name}`, onclick: () => openDetails(p.name) },
+      h('button', { class: 'card-row-text pi-open', type: 'button', title: t('About {name}', { name: p.name }), onclick: () => openDetails(p.name) },
         h('strong', null, p.name),
         p.description ? h('span', { class: 'pi-desc' }, p.description) : null,
         h('span', null, meta)),
@@ -392,7 +398,7 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
   }
 
   async function confirmInstall(name) {
-    if (!(await confirm(`Install ${name}?`, `pi loads it into every yesman agent and wherever you run pi. Its code runs with your account’s permissions, so install it only if you trust it.`, 'Install'))) return;
+    if (!(await confirm(t('Install {name}?', { name }), t('pi loads it into every yesman agent and wherever you run pi. Its code runs with your account’s permissions, so install it only if you trust it.'), t('Install')))) return;
     install(name);
   }
 
@@ -404,16 +410,16 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
 
   async function openDetails(name) {
     const dialog = $('#pkg-dialog');
-    const close = h('button', { class: 'mds-icon-button mds-icon-button--compact pkg-close', type: 'button', title: 'Close', 'aria-label': 'Close', onclick: () => dialog.close('close') }, icon('x'));
+    const close = h('button', { class: 'mds-icon-button mds-icon-button--compact pkg-close', type: 'button', title: t('Close'), 'aria-label': t('Close'), onclick: () => dialog.close('close') }, icon('x'));
     dialog.replaceChildren(h('div', { class: 'pkg-head' }, h('h2', { class: 'mds-heading', id: 'pkg-title' }, name), close),
-      h('div', { class: 'pkg-body' }, h('p', { class: 'pkg-loading' }, h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }), 'Reading it from the npm registry…')));
+      h('div', { class: 'pkg-body' }, h('p', { class: 'pkg-loading' }, h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }), t('Reading it from the npm registry…'))));
     const answer = openDialog(dialog);
     close.focus();
     let d;
     try {
       d = await call('PiPackage', name);
     } catch (err) {
-      if (dialog.open) dialog.querySelector('.pkg-body').replaceChildren(h('p', { class: 'danger' }, String(err?.message || err?.error || err)));
+      if (dialog.open) dialog.querySelector('.pkg-body').replaceChildren(h('p', { class: 'danger' }, errorText(err)));
       return answer;
     }
     if (!dialog.open || $('#pkg-title')?.textContent !== name) return answer;
@@ -423,8 +429,8 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
 
   function paintDetails(dialog, d, close) {
     const link = (label, url) => url ? h('a', { class: 'pkg-link', href: url, title: url }, label, icon('external')) : null;
-    const meta = [d.author || d.publisher ? `by ${d.author || d.publisher}` : null, d.license, d.weekly ? `${compact.format(d.weekly)} a week` : null,
-      d.date ? ago(d.date, 'published') : null, d.versions ? plural(d.versions, 'version') : null].filter(Boolean).join(' · ');
+    const meta = [d.author || d.publisher ? t('by {name}', { name: d.author || d.publisher }) : null, d.license, d.weekly ? t('{n} a week', { n: compact(d.weekly) }) : null,
+      d.date ? ago(d.date, 'published') : null, d.versions ? tn(d.versions, '{n} version', '{n} versions') : null].filter(Boolean).join(' · ');
     const readme = h('div', { class: 'md pkg-readme', html: renderMarkdown(readmeText(d.readme)) });
     // Links in a README go to the web, never to files on this computer.
     for (const a of readme.querySelectorAll('a[data-path]')) a.replaceWith(a.textContent);
@@ -435,8 +441,8 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     const job = jobFor('install', `npm:${d.name}`);
     const busy = job && job.state !== 'failed';
     const primary = installed || busy
-      ? h('button', { class: 'mds-button mds-button--primary', type: 'button', disabled: true }, installed ? 'Installed' : 'Installing…')
-      : h('button', { class: 'mds-button mds-button--primary', type: 'button', onclick: () => { install(d.name); dialog.close('install'); } }, 'Install');
+      ? h('button', { class: 'mds-button mds-button--primary', type: 'button', disabled: true }, installed ? t('Installed') : t('Installing…'))
+      : h('button', { class: 'mds-button mds-button--primary', type: 'button', onclick: () => { install(d.name); dialog.close('install'); } }, t('Install'));
     dialog.replaceChildren(
       h('div', { class: 'pkg-head' },
         h('div', { class: 'pkg-heading' }, h('h2', { class: 'mds-heading', id: 'pkg-title' }, d.name), h('span', { class: 'pkg-version' }, `v${d.version}`)),
@@ -444,14 +450,14 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
       h('div', { class: 'pkg-body' },
         d.description ? h('p', { class: 'pkg-desc' }, d.description) : null,
         meta ? h('p', { class: 'pkg-meta' }, meta) : null,
-        h('div', { class: 'pkg-links' }, link('npm', d.npm), link('Repository', d.repository), d.homepage && d.homepage !== d.repository && !d.homepage.startsWith(`${d.repository}#`) ? link('Homepage', d.homepage) : null),
-        d.provides?.length ? h('p', { class: 'pkg-meta' }, `Gives pi ${provides(d.provides)}.`) : null,
-        d.isPi ? null : h('p', { class: 'pkg-meta danger' }, 'This npm package is not tagged pi-package, so pi may find nothing to load in it.'),
+        h('div', { class: 'pkg-links' }, link('npm', d.npm), link(t('Repository'), d.repository), d.homepage && d.homepage !== d.repository && !d.homepage.startsWith(`${d.repository}#`) ? link(t('Homepage'), d.homepage) : null),
+        d.provides?.length ? h('p', { class: 'pkg-meta' }, t('Gives pi {kinds}.', { kinds: provides(d.provides) })) : null,
+        d.isPi ? null : h('p', { class: 'pkg-meta danger' }, t('This npm package is not tagged pi-package, so pi may find nothing to load in it.')),
         media,
-        d.readme ? readme : h('p', { class: 'pkg-meta' }, 'It has no README.')),
+        d.readme ? readme : h('p', { class: 'pkg-meta' }, t('It has no README.'))),
       h('div', { class: 'mds-dialog-actions pkg-actions' },
-        h('p', { class: 'pkg-warning' }, 'Its code runs with your account’s permissions in every agent. Install it only if you trust it.'),
-        h('button', { class: 'mds-button', type: 'button', onclick: () => dialog.close('close') }, 'Close'),
+        h('p', { class: 'pkg-warning' }, t('Its code runs with your account’s permissions in every agent. Install it only if you trust it.')),
+        h('button', { class: 'mds-button', type: 'button', onclick: () => dialog.close('close') }, t('Close')),
         primary));
   }
 
@@ -461,8 +467,8 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     const dialog = $('#pi-source-dialog');
     const error = h('p', { class: 'danger pi-source-error', id: 'pi-source-error', role: 'alert', hidden: true });
     const input = h('input', { class: 'mds-input mds-mono', name: 'source', required: true, autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off',
-      placeholder: 'npm:name, git:github.com/owner/repo, a URL or a folder', 'aria-describedby': 'pi-source-hint pi-source-error' });
-    const submit = h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, 'Install');
+      placeholder: t('npm:name, git:github.com/owner/repo, a URL or a folder'), 'aria-describedby': 'pi-source-hint pi-source-error' });
+    const submit = h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, t('Install'));
     dialog.replaceChildren(h('form', { onsubmit: async (e) => {
       e.preventDefault();
       submit.disabled = true;
@@ -471,17 +477,17 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
         dialog.close('install');
       } catch (err) {
         error.hidden = false;
-        error.textContent = String(err?.message || err?.error || err);
+        error.textContent = errorText(err);
       } finally {
         submit.disabled = false;
       }
     } },
-      h('h2', { class: 'mds-heading' }, 'Install a package'),
-      h('p', { class: 'dialog-hint', id: 'pi-source-hint' }, 'Any source pi installs: an npm package, optionally at a version, a git repository at a branch, tag or commit, or a folder on this computer. Its code runs with your account’s permissions in every agent.'),
-      h('label', { class: 'field' }, h('span', null, 'Source'), input),
+      h('h2', { class: 'mds-heading' }, t('Install a package')),
+      h('p', { class: 'dialog-hint', id: 'pi-source-hint' }, t('Any source pi installs: an npm package, optionally at a version, a git repository at a branch, tag or commit, or a folder on this computer. Its code runs with your account’s permissions in every agent.')),
+      h('label', { class: 'field' }, h('span', null, t('Package source')), input),
       error,
       h('div', { class: 'mds-dialog-actions' },
-        h('button', { class: 'mds-button', type: 'button', onclick: () => dialog.close('cancel') }, 'Cancel'),
+        h('button', { class: 'mds-button', type: 'button', onclick: () => dialog.close('cancel') }, t('Cancel')),
         submit)));
     const answer = openDialog(dialog);
     input.focus();
@@ -494,28 +500,30 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     const panel = $('#pi-info');
     if (!panel) return;
     const v = s.view;
-    const status = h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : 'idle' }, h('i', { class: 'mds-dot' }), h('span', null, v.piError ? 'Not found' : 'Found'));
+    const status = h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : 'idle' }, h('i', { class: 'mds-dot' }), h('span', null, v.piError ? t('Not found') : t('Found')));
     const installed = v.packages.filter((p) => p.path);
     const outdated = installed.filter((p) => p.kind === 'npm' && !pinned(p) && s.updates[p.name] && p.current && s.updates[p.name] !== p.current);
     const failed = jobs().filter((j) => j.state === 'failed').length;
     const running = jobs().filter((j) => j.state !== 'failed').length;
+    const missing = v.packages.length - installed.length;
     const summary = [
-      installed.length ? plural(installed.length, 'package') + ' installed' : 'None installed yet',
-      outdated.length ? `${outdated.length} with ${outdated.length === 1 ? 'an update' : 'updates'}` : null,
-      running ? `${running} ${running === 1 ? 'change' : 'changes'} under way` : null,
-      failed ? `${failed} failed` : null,
+      installed.length ? tn(installed.length, '{n} package installed', '{n} packages installed') : missing ? null : t('None installed yet'),
+      missing ? tn(missing, '{n} not installed yet', '{n} not installed yet') : null,
+      outdated.length ? tn(outdated.length, '{n} with an update', '{n} with updates') : null,
+      running ? tn(running, '{n} change under way', '{n} changes under way') : null,
+      failed ? tn(failed, '{n} failed', '{n} failed') : null,
     ].filter(Boolean).join(' · ');
     const kinds = provides([...new Set(installed.flatMap((p) => p.provides ?? []))].sort((a, b) => Object.keys(KINDS).indexOf(a) - Object.keys(KINDS).indexOf(b)));
     panel.replaceChildren(h('div', { class: 'mds-group' },
       preferenceRow(v.version ? `pi ${v.version}` : 'pi',
-        v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null, 'Every lead and worker runs this pi, with your usual pi configuration. Set YESMAN_PI to use another. ', h('span', { class: 'path' }, v.pi)),
+        v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null, t('Every lead and worker runs this pi. Set YESMAN_PI to use another.'), ' ', h('span', { class: 'path' }, v.pi)),
         status),
-      preferenceRow('Packages', h('p', null, summary, kinds ? h('span', { class: 'pi-info-kinds' }, `They give pi ${kinds}.`) : null),
-        h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => showTab(installed.length || running || failed ? 'installed' : 'browse') },
-          installed.length || running || failed ? 'Manage' : 'Browse')),
-      preferenceRow('Settings', h('p', null, 'pi’s own settings, which list the packages installed for you. ', h('span', { class: 'path' }, v.settingsFile)),
-        revealButton(v.settingsFile, 'pi’s settings')),
-      preferenceRow('Installs with', h('p', null, 'pi installs npm packages with its npmCommand setting, npm unless set. Set it in pi’s settings to use bun or pnpm.'),
+      preferenceRow(t('Packages'), h('p', null, summary, kinds ? h('span', { class: 'pi-info-kinds' }, t('They give pi {kinds}.', { kinds })) : null),
+        h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => showTab(v.packages.length || running || failed ? 'installed' : 'browse') },
+          v.packages.length || running || failed ? t('Manage') : t('Browse'))),
+      preferenceRow(t('Settings'), h('p', null, t('pi’s own settings, which list the packages installed for you.'), ' ', h('span', { class: 'path' }, v.settingsFile)),
+        revealButton(v.settingsFile, t('pi’s settings'))),
+      preferenceRow(t('Installs with'), h('p', null, t('pi installs npm packages with its npmCommand setting, npm unless set. Set it in pi’s settings to use bun or pnpm.')),
         h('code', { class: 'pi-npm' }, v.npmCommand.join(' ')))));
   }
 
