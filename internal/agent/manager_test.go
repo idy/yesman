@@ -34,7 +34,7 @@ func fakePi() {
 		return
 	}
 	delay, _ := time.ParseDuration(os.Getenv("FAKE_PI_DELAY"))
-	models := []Model{{ID: "shared", Provider: "alpha", Name: "Reasoner"}, {ID: "shared", Provider: "beta", Name: "Plain"}}
+	models := []Model{{ID: "shared", Provider: "alpha", Name: "Reasoner", ContextWindow: 200000}, {ID: "shared", Provider: "beta", Name: "Plain"}}
 	model, effort := models[0], "high"
 	levels := func() []string {
 		if model.Provider == "beta" {
@@ -93,6 +93,35 @@ func fakePi() {
 			heldPrompts = nil
 		case "get_state":
 			data = modelState{Model: model, ThinkingLevel: effort, IsStreaming: os.Getenv("FAKE_PI_BUSY") != ""}
+		case "get_session_stats":
+			stats := map[string]any{
+				"sessionFile":       "/private/pi/sessions/context-test.jsonl",
+				"sessionId":         "private-context-session-id",
+				"userMessages":      4,
+				"assistantMessages": 6,
+				"toolCalls":         3,
+				"toolResults":       3,
+				"totalMessages":     13,
+				"tokens": map[string]any{
+					"input": 600000, "output": 40000, "cacheRead": 200000, "cacheWrite": 10000, "total": 850000,
+				},
+				"cost":         1.25,
+				"contextUsage": map[string]any{"tokens": 32000, "contextWindow": 200000, "percent": 16},
+			}
+			switch os.Getenv("FAKE_PI_SESSION_STATS") {
+			case "unknown":
+				stats["contextUsage"] = map[string]any{"tokens": nil, "contextWindow": 200000, "percent": nil}
+			case "zero":
+				stats["contextUsage"] = map[string]any{"tokens": 0, "contextWindow": 200000, "percent": 0}
+			case "missing":
+				delete(stats, "contextUsage")
+			case "invalid":
+				stats["tokens"] = "invalid token usage"
+			case "error":
+				write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": false, "error": "stats unavailable"})
+				continue
+			}
+			data = stats
 		case "get_available_models":
 			data = map[string]any{"models": models}
 		case "get_available_thinking_levels":

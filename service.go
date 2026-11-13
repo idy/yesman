@@ -210,6 +210,11 @@ func (s *service) SetEffort(ctx context.Context, id, level string) (agent.Info, 
 	return s.app.agents.SetEffort(ctx, id, level)
 }
 
+// Context reads an agent's current context usage and cumulative session statistics.
+func (s *service) Context(ctx context.Context, id string) (agent.ContextStats, error) {
+	return s.app.agents.Context(ctx, id)
+}
+
 // Abort stops an agent's current run.
 func (s *service) Abort(ctx context.Context, id string) error {
 	return s.app.agents.Abort(ctx, id)

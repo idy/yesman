@@ -7,6 +7,8 @@
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
+import { createContextViewer } from './context.js';
+import { createModelPicker } from './models.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 
 const mygo = window.mygo;
@@ -62,6 +64,8 @@ class Convo {
 // again, and a lead can start a new worker with a removed one's name. Its
 // hiring or start time tells those agents apart.
 const keyOf = (a) => `${a.id}@${a.since ?? ''}`;
+const contextViewer = createContextViewer({ call, keyOf });
+const contextEvents = new Set(['message_end', 'tool_execution_end', 'agent_settled', 'compaction_end', 'auto_compaction_end']);
 
 function convo(a) {
   let c = state.convos.get(keyOf(a));
@@ -75,6 +79,7 @@ function pruneCaches() {
   for (const map of [state.convos, state.drafts, state.modelOptions]) {
     for (const key of map.keys()) if (!keys.has(key)) map.delete(key);
   }
+  contextViewer.prune(keys);
 }
 
 // Records that arrive while the history loads are queued, then replayed on
@@ -311,6 +316,7 @@ function onAgentEvent(ev) {
     return;
   }
   const agent = agentById(id);
+  if (contextEvents.has(e.type)) contextViewer.refresh(agent);
   const c = agent && state.convos.get(keyOf(agent));
   if (!c) return;
   if (!c.loaded) {
@@ -639,34 +645,11 @@ function modelOptionsEl(a, working) {
     }, entry?.error ? 'Retry loading models' : 'Loading models…');
   }
   const disabled = entry.busy || working || a.status === 'starting';
-  const model = h('select', {
-    class: 'mds-select mds-select--text composer-model', 'aria-label': 'Model', disabled,
-    onchange: () => {
-      const selected = entry.models[Number(model.value)];
-      if (selected) changeModelOption(a, 'SetModel', selected.provider, selected.id);
-    },
+  const picker = createModelPicker({
+    models: entry.models, provider: a.provider, model: a.model, disabled,
+    onSelect: (selected) => changeModelOption(a, 'SetModel', selected.provider, selected.id),
   });
-  const grouped = new Set(entry.models.map((m) => m.provider)).size > 1;
-  model.dataset.grouped = String(grouped);
-  const groups = new Map();
-  let current = -1;
-  entry.models.forEach((m, index) => {
-    let parent = model;
-    if (grouped) {
-      if (!groups.has(m.provider)) {
-        const group = h('optgroup', { label: m.provider });
-        groups.set(m.provider, group);
-        model.append(group);
-      }
-      parent = groups.get(m.provider);
-    }
-    parent.append(h('option', { value: index }, m.name || m.id));
-    if (m.id === a.model && m.provider === a.provider) current = index;
-  });
-  if (current < 0) model.prepend(h('option', { value: -1, disabled: true }, a.model || 'No models available'));
-  model.value = String(current);
-  model.disabled = disabled || !entry.models.length;
-  model.title = disabled ? 'Wait for the current run or change to finish' : `${a.provider}/${a.model}`;
+  composerSelects.push(picker);
   const levels = a.effortLevels ?? [];
   const effort = h('select', {
     class: 'mds-select mds-select--text', 'aria-label': 'Effort', disabled: disabled || levels.length < 2,
@@ -676,7 +659,7 @@ function modelOptionsEl(a, working) {
   if (!levels.length) effort.append(h('option', { value: '' }, 'Unavailable'));
   effort.value = a.effort ?? '';
   return h('div', { class: 'composer-options', 'aria-busy': String(entry.busy) },
-    h('span', { class: 'composer-choice composer-choice--model' }, model),
+    h('span', { class: 'composer-choice composer-choice--model' }, picker.trigger),
     h('label', { class: 'composer-choice' }, h('span', null, 'Effort'), effort));
 }
 
@@ -692,6 +675,7 @@ function renderBody() {
   const body = $('#body');
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
+  contextViewer.close();
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
   body.replaceChildren();
@@ -740,7 +724,7 @@ function renderDock() {
     placeholder: a.role === 'lead' ? `Message ${a.yesman}…` : `Message worker ${a.name}…`,
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
-  const send = h('button', { class: 'round', type: 'submit', 'aria-label': 'Send', title: working ? 'Send: delivered after its current step' : 'Send' }, icon('send'));
+  const send = h('button', { class: 'round', type: 'submit', 'aria-label': 'Send', title: working ? 'Send: delivered after its current step' : 'Send' }, icon('enter'));
   const stop = working ? h('button', { class: 'round round--stop', type: 'button', 'aria-label': 'Stop', title: 'Stop the current run', onclick: () => call('Abort', a.id).catch(fail) }, icon('stop')) : null;
   const sync = () => {
     send.disabled = !textarea.value.trim() || !!state.modelOptions.get(keyOf(a))?.busy;
@@ -756,15 +740,14 @@ function renderDock() {
   });
   const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea); } },
     h('div', { class: 'composer-input' }, textarea, h('div', { class: 'ask-actions' }, stop, send)),
-    h('div', { class: 'composer-controls' }, modelOptionsEl(a, working)),
+    h('div', { class: 'composer-controls' }, modelOptionsEl(a, working), contextViewer.mount(a)),
   );
   dock.append(form);
-  composerSelects = [...form.querySelectorAll('select')].map((el) => {
+  composerSelects.push(...[...form.querySelectorAll('select')].map((el) => {
     const select = initSelect(el);
     select.trigger.title = el.title;
-    if (el.dataset.grouped === 'false') document.getElementById(select.trigger.getAttribute('aria-controls')).classList.add('composer-model-menu--flat');
     return select;
-  });
+  }));
   sync();
   const nextControl = composerSelects.find((select) => select.trigger.getAttribute('aria-label') === control);
   if (nextControl && !nextControl.trigger.disabled) nextControl.trigger.focus({ preventScroll: true });

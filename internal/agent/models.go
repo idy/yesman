@@ -11,9 +11,10 @@ import (
 // Model is a choice from pi's authenticated catalog. Keep provider headers and
 // other connection settings out of the page's model list.
 type Model struct {
-	ID       string `json:"id"`
-	Provider string `json:"provider"`
-	Name     string `json:"name"`
+	ID            string `json:"id"`
+	Provider      string `json:"provider"`
+	Name          string `json:"name"`
+	ContextWindow int    `json:"contextWindow,omitempty"`
 }
 
 // ModelOptions includes the agent's current selection and the models it can use.
