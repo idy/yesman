@@ -85,7 +85,12 @@ export function createFiles(host) {
 
   const parentOf = (rel) => (rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '.');
   const baseOf = (rel) => rel.slice(rel.lastIndexOf('/') + 1);
-  const absOf = (p, rel) => `${p.path}/${rel}`;
+  // Paths from Go use the system's separator: backslashes on Windows.
+  const slashed = (path) => path.replace(/\\/g, '/');
+  const absOf = (p, rel) => {
+    const sep = p.path.includes('\\') ? '\\' : '/';
+    return p.path.replace(/[\\/]+$/, '') + sep + rel.split('/').join(sep);
+  };
 
   // ---------- Loading ----------
 
@@ -161,11 +166,20 @@ export function createFiles(host) {
   }
 
   // save writes a file's text, unless it changed on disk since it was read:
-  // then the file keeps both until the user reloads or overwrites it.
-  async function save(p, rel, force = false) {
+  // then the file keeps both until the user reloads or overwrites it. The
+  // saves of a file run one after another, each from the hash the one
+  // before wrote, so that two never race.
+  function save(p, rel, force = false) {
     const tab = tabOf(p, rel);
+    if (!tab) return Promise.resolve(false);
+    const run = (tab.saving ?? Promise.resolve()).then(() => write(p, rel, tab, force));
+    tab.saving = run.catch(() => {});
+    return run;
+  }
+
+  async function write(p, rel, tab, force) {
     const k = keyOf(p, rel);
-    if (!tab || tab.readOnly || !editor?.has(k)) return false;
+    if (tabOf(p, rel) !== tab || tab.readOnly || !editor?.has(k)) return false;
     if (!force && (!tab.dirty || tab.conflict)) return !tab.dirty;
     clearTimeout(timers.get(k));
     const text = editor.text(k);
@@ -192,6 +206,9 @@ export function createFiles(host) {
   async function refresh(p, rel) {
     const tab = tabOf(p, rel);
     if (!tab) return;
+    // A save in progress changes the file and the hash it is compared with.
+    await tab.saving;
+    if (tabOf(p, rel) !== tab) return;
     const k = keyOf(p, rel);
     let v;
     try {
@@ -215,10 +232,17 @@ export function createFiles(host) {
     }
     editor.replace(k, v.text);
     tab.base = v.hash;
-    tab.readOnly = Boolean(v.truncated);
     tab.conflict = null;
     p.views.set(rel, v);
-    if (current() === p && p.active === rel && languageOf(rel) === 'markdown') renderView();
+    // A file that grew past the limit can only be read now, or the other
+    // way round.
+    const readOnly = Boolean(v.truncated);
+    const changed = tab.readOnly !== readOnly;
+    if (changed) {
+      tab.readOnly = readOnly;
+      editor.setReadOnly(k, readOnly);
+    }
+    if (current() === p && p.active === rel && (changed || languageOf(rel) === 'markdown')) renderView();
   }
 
   // reload throws away unsaved changes for what is on disk.
@@ -286,8 +310,13 @@ export function createFiles(host) {
   // shown, and reports whether it did.
   function openPath(abs) {
     const y = host.yesman();
-    if (!y || !abs.startsWith(`${y.path}/`)) return false;
-    const rel = abs.slice(y.path.length + 1).replace(/\/+$/, '');
+    if (!y) return false;
+    const root = `${slashed(y.path).replace(/\/+$/, '')}/`;
+    const path = slashed(abs);
+    // Windows paths match regardless of case.
+    const inside = /^[A-Za-z]:\//.test(root) ? path.toLowerCase().startsWith(root.toLowerCase()) : path.startsWith(root);
+    if (!inside) return false;
+    const rel = path.slice(root.length).replace(/\/+$/, '');
     if (!rel) return false;
     open(rel, true);
     return true;
@@ -505,6 +534,7 @@ export function createFiles(host) {
       if (seq !== findSeq) return;
       p.results = results;
     } catch (err) {
+      if (seq !== findSeq) return; // a newer query answers
       p.results = [];
       host.fail(err);
     }
