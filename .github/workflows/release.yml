@@ -65,6 +65,10 @@ jobs:
 
       - name: Build and upload
         env:
+          # The app-owned macOS permission bridge links Apple's frameworks.
+          CGO_ENABLED: ${{ matrix.name == 'macOS' && '1' || '0' }}
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+          CGO_CFLAGS: "-O2 -g -mmacosx-version-min=13.0"
           GH_TOKEN: ${{ github.token }}
           MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
         run: go tool mygo build -platform "${{ matrix.platform }}" -upload

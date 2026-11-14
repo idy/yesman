@@ -56,7 +56,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .settings-branch[data-open] .settings-drawer { grid-template-rows: 1fr; }
 .settings-clip { min-height: 0; overflow: hidden; }
 /* The pages hang compactly from a rail under the Settings icon. */
-.settings-clip > .mds-subnav { gap: 1px; margin: 2px 0 6px 18px; padding-inline-start: 6px; }
+.settings-clip > .mds-subnav { flex-direction: column; gap: 1px; margin: 2px 0 6px 18px; padding-inline-start: 6px; }
 .settings-clip > .mds-subnav > .mds-nav-item { gap: 8px; min-height: 30px; padding: 5px 10px; }
 .settings-clip > .mds-subnav .mds-icon { width: 14px; height: 14px; font-size: 14px; }
 @media (pointer: coarse) { .settings-clip > .mds-subnav > .mds-nav-item { min-height: 44px; } }
@@ -326,6 +326,31 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .add-link .mds-icon { width: 14px; height: 14px; font-size: 14px; }
 @media (max-width: 720px) {
   .card-row-aside { display: none; }
+}
+
+/* Settings › Grant: status and actions keep their own space at narrow widths. */
+.grant-page { display: grid; gap: 16px; }
+.grant-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.grant-toolbar h2 { margin: 0; }
+.grant-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 220px); gap: 12px 24px; padding: 16px; align-items: start; }
+.grant-label { min-width: 0; }
+.grant-label h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; font-size: var(--mds-text-body); font-weight: 400; }
+.grant-label .mds-icon { width: 16px; height: 16px; font-size: 16px; }
+.grant-label p, .grant-feedback { margin: 0; font-size: var(--mds-text-note); color: var(--mds-ink-subtle); line-height: 1.55; overflow-wrap: anywhere; }
+.grant-label p.grant-detail { margin-top: 6px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.grant-controls { display: grid; gap: 8px; justify-items: end; min-width: 0; }
+.grant-state { font-size: var(--mds-text-note); text-align: end; overflow-wrap: anywhere; }
+.grant-state[data-state="granted"] { color: var(--mds-good); }
+.grant-pending { color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.grant-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.grant-page [aria-disabled="true"] { opacity: .55; cursor: default; }
+.grant-feedback { grid-column: 1 / -1; }
+.grant-feedback.danger { color: var(--mds-error); }
+@media (max-width: 760px) {
+  .grant-row { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .grant-controls { justify-items: start; }
+  .grant-state { text-align: start; }
+  .grant-actions { justify-content: flex-start; }
 }
 
 /* Settings › yesman: what new yesmen run as, and the crew's models. */
