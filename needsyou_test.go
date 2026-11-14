@@ -91,3 +91,33 @@ func TestHandoffsCountAndNotice(t *testing.T) {
 		}
 	}
 }
+
+// On startup, the handoffs kept from before count for the tray at once,
+// without a notification; agents and handoffs count once each.
+func TestStartupCountsKeptHandoffs(t *testing.T) {
+	original, _ := crewApp(t)
+	if _, err := original.yesmen.Hire("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := original.yesmen.AddHandoff("alice", yesmen.Handoff{Type: yesmen.HandoffManual, Title: "kept"}); err != nil {
+		t.Fatal(err)
+	}
+	var notes []string
+	restarted := &app{yesmen: original.yesmen, notifier: func(_, _, body string) { notes = append(notes, body) }}
+	restarted.keepAwake = func(string) func() { return func() {} }
+	restarted.countHandoffs()
+	if restarted.waiting != 1 || len(notes) != 0 {
+		t.Fatalf("on startup: waiting %d, notifications %q", restarted.waiting, notes)
+	}
+	lead := agent.Info{ID: "alice/lead", Yesman: "alice", Name: "lead", Role: agent.RoleLead, Status: agent.Waiting}
+	restarted.agentsChanged([]agent.Info{lead})
+	restarted.countHandoffs("alice")
+	if restarted.waiting != 2 {
+		t.Errorf("a waiting lead and a handoff: waiting %d", restarted.waiting)
+	}
+	lead.Status = agent.Idle
+	restarted.agentsChanged([]agent.Info{lead})
+	if restarted.waiting != 1 {
+		t.Errorf("the lead answered: waiting %d", restarted.waiting)
+	}
+}

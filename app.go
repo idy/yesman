@@ -71,10 +71,11 @@ type app struct {
 	release     func() // ends KeepRunning while no agent works
 	completions completionNotices
 	// working and waiting count the agents, for the tray's tooltip; waiting
-	// counts everything under Needs you.
-	working, waiting int
-	handoffs         map[string]int    // open handoffs per yesman
-	handed           map[string]string // the handed-over dialog each worker was announced for
+	// counts everything under Needs you: agentWaiting agents, and the open
+	// handoffs.
+	working, waiting, agentWaiting int
+	handoffs                       map[string]int    // open handoffs per yesman
+	handed                         map[string]string // the handed-over dialog each worker was announced for
 	// notifier and keepAwake, when set, stand in for the system's
 	// notifications and power management, in tests.
 	notifier  func(id, title, body string)
@@ -184,6 +185,23 @@ func (a *app) setupTray() {
 	}
 	mygo.App.OnLocaleChanged(func(string) { a.localeChanged() })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { t.Destroy() })
+	a.showCounts() // counted before the tray existed, such as kept handoffs
+}
+
+// showCounts shows what works and what waits in the tray, once it exists.
+func (a *app) showCounts() {
+	if a.tray == nil {
+		return
+	}
+	a.smu.Lock()
+	working, waiting := a.working, a.waiting
+	a.smu.Unlock()
+	title := ""
+	if waiting > 0 {
+		title = strconv.Itoa(waiting)
+	}
+	a.tray.SetTitle(title)
+	a.tray.SetToolTip(trayToolTip(working, waiting))
 }
 
 // trayMenu is the tray's menu, in the language yesman shows.
@@ -272,18 +290,10 @@ func (a *app) agentsChanged(list []agent.Info) {
 		a.release()
 		a.release = nil
 	}
-	waiting += a.openHandoffsLocked()
-	a.working, a.waiting = working, waiting
+	a.working, a.agentWaiting = working, waiting
+	a.waiting = waiting + a.openHandoffsLocked()
 	a.smu.Unlock()
-
-	if a.tray != nil {
-		title := ""
-		if waiting > 0 {
-			title = strconv.Itoa(waiting)
-		}
-		a.tray.SetTitle(title)
-		a.tray.SetToolTip(trayToolTip(working, waiting))
-	}
+	a.showCounts()
 	// A lead that ends a run often carries on at once, with a worker's
 	// report or a reminder of open tasks: tell the user only once the whole
 	// yesman has stayed settled for a moment.

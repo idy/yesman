@@ -85,7 +85,9 @@ func (a *app) needsYouChanged(yesman string, added *yesmen.Handoff) {
 }
 
 // countHandoffs updates the open handoffs counted for the tray, so that
-// agentsChanged never reads workspaces. With no yesman named, all are read.
+// agentsChanged never reads workspaces, and shows the count: on startup, the
+// handoffs kept from before count at once, without notifying the user again
+// or starting a lead. With no yesman named, all are read.
 func (a *app) countHandoffs(names ...string) {
 	if len(names) == 0 {
 		ys, _ := a.yesmen.List()
@@ -110,8 +112,10 @@ func (a *app) countHandoffs(names ...string) {
 		} else {
 			a.handoffs[name] = n
 		}
+		a.waiting = a.agentWaiting + a.openHandoffsLocked()
 		a.smu.Unlock()
 	}
+	a.showCounts()
 }
 
 // openHandoffsLocked is the number counted; a.smu must be held.

@@ -68,16 +68,23 @@ func TestHandOverWorkerDialog(t *testing.T) {
 	if i, _ := m.Get(id); i.HandedOver || i.Dialog != nil || !i.DialogAt.IsZero() {
 		t.Fatalf("an answered question still shows: %+v", i)
 	}
-	// Stopping the worker ends a handed-over question too.
-	m.record(a, p, "extension_ui_request", json.RawMessage(`{"type":"extension_ui_request","id":"q3","method":"input","title":"Name?"}`))
-	if err := m.HandOver(id, "q3"); err != nil {
+	// The answer lets w1's run settle; its report and close then race any
+	// question made up for its old process. Stopping is shown with a second
+	// worker, which waits on its own first question.
+	w2 := ID("alice", "w2")
+	if _, err := m.StartWorker(context.Background(), "alice", "w2", "Lint", "a task"); err != nil {
 		t.Fatal(err)
 	}
-	m.Stop(id)
-	if i, _ := m.Get(id); i.HandedOver || i.Dialog != nil {
+	waitStatus(t, m, w2, Waiting)
+	if err := m.HandOver(w2, "q1"); err != nil {
+		t.Fatal(err)
+	}
+	// Stopping the worker ends a handed-over question too.
+	m.Stop(w2)
+	if i, _ := m.Get(w2); i.HandedOver || i.Dialog != nil {
 		t.Fatalf("a stopped worker's question still shows: %+v", i)
 	}
-	if err := m.HandOver(id, "q3"); err == nil {
+	if err := m.HandOver(w2, "q1"); err == nil {
 		t.Error("handed over the question of a stopped worker")
 	}
 }
