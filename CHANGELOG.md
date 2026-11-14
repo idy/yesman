@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.33
+
+- Add Settings › Model usage to compare actual usage by provider, full model ID and recorded effort: worker participation, current done board-task attribution, responses, and input, output, cache and total tokens. Filter by yesman, agent role and period.
+- Show measured output tokens per second across timed completed responses, weighted by their response durations and including first-token latency. Keep these measurements separate from Artificial Analysis benchmarks; missing effort or timing stays unknown.
+- Explain coverage and attribution: only current workspaces and retained logs are included, and tasks follow the owner's latest response that ended by completion. A done board task does not establish independent verification or a model's causal contribution; these totals are not a billing statement or a reconstruction of all past usage.
+
 ## 0.1.32
 
 - Add application shortcuts with Command on macOS and Ctrl on Windows and Linux. Open the searchable command palette with Cmd/Ctrl+K or Cmd/Ctrl+Shift+P to find actions, yesmen and workers, see their keys and availability, and run the same actions as their buttons and menus.
