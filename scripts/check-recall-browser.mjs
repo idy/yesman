@@ -13,7 +13,9 @@ if(out)await mkdir(out,{recursive:true});
 const http=createServer(async(req,res)=>{try{const path=new URL(req.url,'http://localhost').pathname;res.setHeader('Content-Type',path.endsWith('.js')?'application/javascript':path.endsWith('.css')?'text/css':path.endsWith('.woff2')?'font/woff2':'text/html');res.end(await readFile(`${root}/web${path==='/'?'/index.html':path}`));}catch{res.writeHead(404).end();}}).listen(0,'127.0.0.1');
 await new Promise(r=>http.on('listening',r));
 const reports=[];
-try{for(const[name,engine]of Object.entries({chromium,webkit}))for(const language of ['en','zh-Hans']){
+const selectedEngines=Object.entries({chromium,webkit}).filter(([name])=>!process.env.YESMAN_TEST_BROWSERS||process.env.YESMAN_TEST_BROWSERS.split(',').includes(name));
+assert(selectedEngines.length,'No browser engine selected');
+try{for(const[name,engine]of selectedEngines)for(const language of ['en','zh-Hans']){
  const temp=await mkdtemp(`${tmpdir()}/recall-browser-`),ready=`${temp}/ready`;
  const executable=process.env.YESMAN_TEST_BRIDGE_BIN || 'go';
  const args=process.env.YESMAN_TEST_BRIDGE_BIN ? ['-test.run=^TestRecallBrowserBridge$','-test.timeout=100s'] : ['test','-run','^TestRecallBrowserBridge$','-count=1','-timeout=100s','.'];
@@ -23,8 +25,13 @@ try{for(const[name,engine]of Object.entries({chromium,webkit}))for(const languag
  while(!api){try{api=await readFile(ready,'utf8')}catch{if(exit!==undefined||Date.now()>deadline){fixture.kill('SIGTERM');await rm(temp,{recursive:true,force:true});throw Error(`bridge startup: ${log}`);}await new Promise(r=>setTimeout(r,20));}}
  const control=async(method,...args)=>{const res=await(await fetch(api,{method:'POST',body:JSON.stringify({method,args})})).json();if(res.error)throw Error(res.error);return res.value;};
  const browser=await engine.launch({headless:true});
+ let activePage;
  try{
-  const page=await browser.newPage({viewport:{width:1000,height:760}}),errors=[];
+  const page=activePage=await browser.newPage({viewport:{width:1000,height:760}}),errors=[];
+  if(process.env.YESMAN_TEST_POLL_FAILURE){
+   let failed=false;
+   await page.route('**/events?*',route=>{if(!failed){failed=true;return route.abort('failed')}return route.continue()});
+  }
   page.on('pageerror',e=>errors.push(String(e)));
   await page.addInitScript(({api,language})=>{
    localStorage.setItem('yesman.info','hidden');window.events={};window.sent=[];window.copied=[];
@@ -34,12 +41,29 @@ try{for(const[name,engine]of Object.entries({chromium,webkit}))for(const languag
     const result=await(await fetch(api,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({method,args})})).json();
     if(result.error)throw Error(result.error);return result.value;
    }};
-   let cursor=0,agents='';
-   const poll=async()=>{try{const r=await(await fetch(`${api}/events?cursor=${cursor}`)).json();cursor=r.cursor;for(const e of r.events??[])window.events['agent-event']?.(e);const s=JSON.stringify(r.agents);if(s!==agents){agents=s;window.events.agents?.(r.agents);}}catch{}setTimeout(poll,15);};
-   setTimeout(poll,30);
+   let cursor=0,agents='',stopped=false,timer,inFlight=Promise.resolve();
+   const pollErrors=[];
+   const poll=()=>{
+    if(stopped)return;
+    inFlight=(async()=>{
+     try{
+      const response=await fetch(`${api}/events?cursor=${cursor}`);
+      if(!response.ok)throw Error(`event poll HTTP ${response.status}`);
+      const r=await response.json();cursor=r.cursor;
+      for(const e of r.events??[])window.events['agent-event']?.(e);
+      const s=JSON.stringify(r.agents);if(s!==agents){agents=s;window.events.agents?.(r.agents);}
+     }catch(error){pollErrors.push(String(error));}
+     finally{if(!stopped)timer=setTimeout(poll,15);}
+    })();
+   };
+   window.stopFixturePolling=async()=>{stopped=true;clearTimeout(timer);await inFlight;return pollErrors;};
+   window.addEventListener('pagehide',()=>{stopped=true;clearTimeout(timer);});
+   timer=setTimeout(poll,30);
   },{api,language});
   await page.goto(`http://127.0.0.1:${http.address().port}`);
   const input=page.locator('.composer textarea');await input.waitFor();
+  const stopPolling=async()=>assert.deepEqual(await page.evaluate(()=>window.stopFixturePolling()),[],'Unexpected bridge poll failure');
+  const reload=async()=>{await stopPolling();await page.reload();await input.waitFor();};
   const text='  Original 中文\n'+('full text **markdown** '.repeat(50))+'END  ';
   const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg==','base64');
   const attach=async(count)=>page.locator('.composer input[type=file]').setInputFiles(Array.from({length:count},(_,i)=>({name:`original-${i}.png`,mimeType:'image/png',buffer:bytes})));
@@ -104,7 +128,7 @@ try{for(const[name,engine]of Object.entries({chromium,webkit}))for(const languag
   await page.waitForFunction(()=>[...document.querySelectorAll('.delivery-status')].some(el=>['Recalled','已撤回'].includes(el.textContent)));
   // Wait for this exact original to be cancelled before severing the reply.
   await page.waitForFunction(id=>document.querySelector(`[data-delivery="${id}"] .message-recall`)?.getAttribute('aria-label')?.match(/Return recalled|已撤回/),recovery.args[1]);
-  await page.reload();await input.waitFor();
+  await reload();
   await row(recovery.args[1]).locator('.message-recall').waitFor();
   await control('ReleaseCancel');
   await row(recovery.args[1]).locator('.message-recall').click();
@@ -118,10 +142,11 @@ try{for(const[name,engine]of Object.entries({chromium,webkit}))for(const languag
   await page.setViewportSize({width:480,height:740});await page.evaluate(()=>document.documentElement.dataset.theme='dark');
   if(out)await page.screenshot({path:`${out}/${name}-${language}-real-recall.png`});
   const counts=await control('Counts');assert.equal(counts.submit,5);assert.equal(counts.cancel,6);
-  await page.reload();await input.waitFor();
+  await reload();
   assert.equal(await page.locator('.message-recall').count(),0); // acknowledged originals cannot reappear
+  await stopPolling();
   assert.deepEqual(errors,[]);reports.push({engine:name,language,...counts,originalImages:'exact',editedIntent:'new',drafts:'protected',native:'real managed pi + production Go service'});
- }finally{await browser.close();await fetch(`${api}/stop`);await new Promise(r=>exit!==undefined?r():fixture.once('exit',r));if(out)await writeFile(`${out}/${name}-${language}-bridge.log`,log);await rm(temp,{recursive:true,force:true});}
+ }finally{if(activePage&&!activePage.isClosed())await activePage.evaluate(()=>window.stopFixturePolling?.()).catch(()=>{});await browser.close();await fetch(`${api}/stop`);await new Promise(r=>exit!==undefined?r():fixture.once('exit',r));if(out)await writeFile(`${out}/${name}-${language}-bridge.log`,log);await rm(temp,{recursive:true,force:true});}
  assert.equal(exit,0,log);
 }}finally{await new Promise(r=>http.close(r));}
 if(out)await writeFile(`${out}/results.json`,JSON.stringify(reports,null,2)+'\n');console.log(JSON.stringify(reports,null,2));

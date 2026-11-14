@@ -76,20 +76,31 @@ func TestExternalWrappersArePreserved(t *testing.T) {
 	}
 }
 func TestPreparationWaitHonorsContext(t *testing.T) {
-	r := &Runtime{gate: make(chan struct{}, 1)}
-	r.gate <- struct{}{}
+	r, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	r.prepareBuild = func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	if _, _, err := r.Command(ctx); err == nil {
-		t.Fatal("preparation ignored deadline")
+		t.Fatal("preparation ignored caller deadline")
+	}
+	if r.State() != "preparing" {
+		t.Fatal("caller deadline cancelled shared preparation")
 	}
 }
 func TestCloseCancelsRuntimeWaiters(t *testing.T) {
-	life, cancel := context.WithCancel(context.Background())
-	r := &Runtime{gate: make(chan struct{}, 1), life: life, closeLife: cancel}
-	r.gate <- struct{}{} // an installer is finishing its cancelled subprocess
+	r, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, finishing := make(chan struct{}), make(chan struct{})
+	r.prepareBuild = func(ctx context.Context) error { close(entered); <-ctx.Done(); <-finishing; return ctx.Err() }
 	waiting := make(chan error, 1)
 	go func() { _, _, err := r.Command(context.Background()); waiting <- err }()
+	<-entered
 	closed := make(chan struct{})
 	go func() { r.Close(); close(closed) }()
 	select {
@@ -105,7 +116,7 @@ func TestCloseCancelsRuntimeWaiters(t *testing.T) {
 		t.Fatal("Close did not join the active installer")
 	default:
 	}
-	<-r.gate
+	close(finishing)
 	select {
 	case <-closed:
 	case <-time.After(time.Second):

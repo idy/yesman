@@ -81,7 +81,7 @@ func (a *agent) deliveryView(d Delivery) Delivery {
 // applyPendingLocked runs on the ordered RPC reader. This identity comes from
 // the queue owner, never from matching user text, image content or whole counts.
 func (m *Manager) applyPendingLocked(a *agent, p *proc, q pendingQueue) []Event {
-	if q.Capability != 1 || q.Epoch == "" || a.proc != p || a.retiring {
+	if q.Capability != 1 || q.Epoch == "" || m.agents[a.info.ID] != a || a.proc != p || a.retiring || a.removing || a.deliverySealed {
 		return nil
 	}
 	if a.nativeQueue.Epoch == q.Epoch && q.Revision <= a.nativeQueue.Revision {
@@ -204,6 +204,10 @@ func (m *Manager) CancelSubmission(ctx context.Context, agentID, id string, sinc
 	}
 	a.recalls++
 	m.mu.Unlock()
+	// The reservation and captured generation/epoch survive without holding the
+	// workspace lease. An unresponsive RPC must not hold Archive's writer lock
+	// (and, behind it, all other users of the same workspace) hostage.
+	release()
 	defer func() { m.mu.Lock(); a.recalls--; m.mu.Unlock() }()
 	if d.State != "cancelled" {
 		// Bound the RPC even if its client disconnects. The ordered queue event can
@@ -232,32 +236,50 @@ func (m *Manager) CancelSubmission(ctx context.Context, agentID, id string, sinc
 			return RecallResult{}, errors.New("pi already took this message; it was not recalled")
 		}
 	}
+	active, commitRelease, err := m.cfg.Yesmen.BeginUse(info.Yesman)
+	if err != nil {
+		return RecallResult{}, err
+	}
+	defer commitRelease()
 	m.mu.Lock()
-	if m.agents[agentID] != a || a.retiring || a.removing || a.deliverySealed || !a.workspaceSince.Equal(y.HiredAt) {
+	if !active.HiredAt.Equal(y.HiredAt) || !m.recallOwnerLocked(a, since, y.HiredAt) {
 		m.mu.Unlock()
 		return RecallResult{}, errStopped
 	}
 	current := a.deliveries[id]
-	if current.State != "cancelled" {
+	if current.State != "cancelled" || current.Session != d.Session || current.queueEpoch != d.queueEpoch || !current.AgentSince.Equal(since) {
 		m.mu.Unlock()
 		return RecallResult{}, errors.New("cancellation could not be confirmed")
 	}
 	writer := a.deliveryWriter
 	revision := m.persistDeliveriesLocked(a) // retries can recover a prior disk-write failure
 	m.mu.Unlock()
-	// Publish a successful restore only after the cancelled tombstone is durable.
+	commitRelease()
+	// The writer owns this revision independently of our lease; retirement seals
+	// and joins it. Reacquire a fresh lease before exposing a durable payload.
 	if err = writer.wait(ctx, revision, m.shutdown); err != nil {
 		return RecallResult{}, err
 	}
+	active, finishRelease, err := m.cfg.Yesmen.BeginUse(info.Yesman)
+	if err != nil {
+		return RecallResult{}, err
+	}
+	defer finishRelease()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.agents[agentID] != a || a.retiring || a.removing || a.deliverySealed {
+	if !active.HiredAt.Equal(y.HiredAt) || !m.recallOwnerLocked(a, since, y.HiredAt) {
 		return RecallResult{}, errStopped
 	}
 	if _, ok := a.recallPayloads[id]; !ok {
 		return RecallResult{}, errors.New("this recalled message was already restored")
 	}
 	return RecallResult{a.deliveryView(a.deliveries[id]), RecallPayload{payload.Text, slices.Clone(payload.Images)}}, nil
+}
+
+// Called under m.mu, while a fresh Store lease pins the workspace generation.
+func (m *Manager) recallOwnerLocked(a *agent, since, hiredAt time.Time) bool {
+	return m.agents[a.info.ID] == a && !m.closed && !a.retiring && !a.removing && !a.deliverySealed &&
+		a.info.Since.Equal(since) && a.workspaceSince.Equal(hiredAt) && !m.worktreeCleanup[a.info.ID]
 }
 
 func (m *Manager) SubmissionText(agentID, id string, since time.Time) (string, error) {

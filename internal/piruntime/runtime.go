@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,14 +26,24 @@ var assets embed.FS
 const Version = "1.5.2-yesman.1"
 const cli = "node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 
+type preparation struct {
+	done chan struct{}
+	err  error // assigned before done closes; each waiter keeps its own attempt
+}
+
 type Runtime struct {
 	root      string
 	node      string
 	npm       string
-	gate      chan struct{}
+	mu        sync.Mutex
+	preparing *preparation
 	ready     bool
+	lastErr   error
 	life      context.Context
 	closeLife context.CancelFunc
+	// prepareBuild lets tests gate preparation without a registry/network wait.
+	// Production always uses prepare, including its integrity and process checks.
+	prepareBuild func(context.Context) error
 }
 
 // New discovers Node/npm only. Downloading happens on first Command, outside
@@ -52,7 +63,7 @@ func New(parent string) (*Runtime, error) {
 	root := filepath.Join(parent, "pi-managed", Version+"-"+hex.EncodeToString(h.Sum(nil))[:16])
 	npm := findNpm(node)
 	life, closeLife := context.WithCancel(context.Background())
-	return &Runtime{root: root, node: node, npm: npm, gate: make(chan struct{}, 1), life: life, closeLife: closeLife}, nil
+	return &Runtime{root: root, node: node, npm: npm, life: life, closeLife: closeLife}, nil
 }
 func findNpm(node string) string {
 	// npm's entry script is portable; execute with Node, never through a shell or
@@ -77,42 +88,105 @@ func findNpm(node string) string {
 	return ""
 }
 func (r *Runtime) Directory() string   { return r.root }
-func (r *Runtime) Description() string { return "Managed pi " + Version + " (" + r.root + ")" }
-func (r *Runtime) Close() {
-	if r.closeLife != nil {
-		r.closeLife()
+func (r *Runtime) Description() string { return "Managed pi " + Version }
+
+// State is observational: it does not install, run pi, or read user settings.
+func (r *Runtime) State() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch {
+	case r.life.Err() != nil:
+		return "closed"
+	case r.preparing != nil:
+		return "preparing"
+	case r.ready:
+		return "ready"
+	case r.lastErr != nil:
+		return "failed"
+	default:
+		return "unprepared"
 	}
-	// Wait until a cancelled installer has killed/joined its process tree and
-	// removed its own staging directory before the application exits.
-	r.gate <- struct{}{}
-	<-r.gate
+}
+
+func (r *Runtime) PreparationError() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.preparing == nil && !r.ready && r.lastErr != nil {
+		return r.lastErr.Error()
+	}
+	return ""
+}
+
+func (r *Runtime) Close() {
+	r.closeLife()
+	r.mu.Lock()
+	attempt := r.preparing
+	r.mu.Unlock()
+	if attempt != nil {
+		<-attempt.done
+	} // includes process-tree join and staging cleanup
+}
+
+// Start prepares this digest at most once concurrently. Only the runtime/app
+// owns the bounded build lifetime; Settings/agent deadlines only end their wait.
+func (r *Runtime) Start() error { _, err := r.start(); return err }
+func (r *Runtime) start() (*preparation, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.life.Err(); err != nil {
+		return nil, err
+	}
+	if r.ready {
+		return nil, nil
+	}
+	if r.preparing == nil {
+		attempt := &preparation{done: make(chan struct{})}
+		r.preparing = attempt
+		ctx, cancel := context.WithTimeout(r.life, 10*time.Minute)
+		go func() {
+			defer cancel()
+			prepare := r.prepare
+			if r.prepareBuild != nil {
+				prepare = r.prepareBuild
+			}
+			err := prepare(ctx)
+			if err == nil {
+				err = ctx.Err()
+			}
+			r.mu.Lock()
+			attempt.err, r.lastErr = err, err
+			r.ready = err == nil
+			r.preparing = nil
+			close(attempt.done)
+			r.mu.Unlock()
+		}()
+	}
+	return r.preparing, nil
 }
 func (r *Runtime) Command(ctx context.Context) (string, []string, error) {
-	if r.life != nil {
-		if err := r.life.Err(); err != nil {
-			return "", nil, err
-		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
-		stop := context.AfterFunc(r.life, cancel)
-		defer func() { stop(); cancel() }()
-	}
-	select {
-	case r.gate <- struct{}{}:
-	case <-ctx.Done():
-		return "", nil, ctx.Err()
-	}
-	defer func() { <-r.gate }()
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
-	if !r.ready {
-		if err := r.prepare(ctx); err != nil {
-			return "", nil, err
+	attempt, err := r.start()
+	if err != nil {
+		return "", nil, err
+	}
+	if attempt != nil {
+		select {
+		case <-ctx.Done():
+			return "", nil, ctx.Err()
+		case <-r.life.Done():
+			return "", nil, r.life.Err()
+		case <-attempt.done:
 		}
-		r.ready = true
+		if attempt.err != nil {
+			return "", nil, attempt.err
+		}
 	}
 	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
+	if err := r.life.Err(); err != nil {
 		return "", nil, err
 	}
 	return r.node, []string{filepath.Join(r.root, filepath.FromSlash(cli))}, nil

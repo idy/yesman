@@ -10,14 +10,16 @@ normal sending/Copy and only expose recall if they report the supported protocol
 The app honors `YESMAN_PI` exactly. An unrecognized executable/wrapper found as
 `pi` on PATH also keeps its execution behavior. The official npm CLI (including
 npm's exact standard Windows `.cmd` shim), or no installed pi, selects the managed
-runtime. `Settings → pi` identifies managed mode and its cache path.
+runtime. `Settings → pi` and About identify the selected managed/external source
+and report its actual available version. Preparing or unknown versions are shown
+explicitly; About does not trigger installation or probe a separate global pi.
 
 Managed mode requires **Node.js 22.19+**, with npm for the first preparation. The
 app embeds the package manifest, complete npm lockfile, source patch manifest,
 queue implementation, installer and MIT license through Go `embed`; these assets
 ship in every platform build. It does not modify a global npm/pi installation.
 
-`internal/piruntime` prepares the runtime under the app's own `runtime/pi-managed/`
+`internal/piruntime` prepares the runtime under `<yesman-data>/.runtime/pi-managed/`
 directory. A hash of all embedded assets selects an immutable version directory.
 Preparation runs outside the UI and Manager mutex, in a unique temporary staging
 directory. It uses `npm ci --ignore-scripts --no-audit --no-fund`: every transitive
@@ -29,10 +31,14 @@ needs only Node. Failed preparation is reported and can be retried.
 Every patched input/output is SHA256 checked. The complete embedded assets,
 patched source, queue module and ready manifest are verified before atomic
 publication and on first use by each application process. Unexpected existing
-cache contents fail closed and stay available for diagnosis. Installation has a
-10-minute deadline and terminates its subprocess tree on cancellation. Concurrent
-callers wait with their own cancellation/deadline; another completed preparation
-is accepted only after verification.
+cache contents in those verified files fail closed and stay available for diagnosis.
+Unpatched dependency files are integrity checked by npm during installation, not
+rehash checked on every cached launch. One shared preparation per Runtime instance
+has a 10-minute deadline owned by the runtime/app lifecycle. Callers cancel only
+their wait: a short Settings deadline or stopping one agent cannot kill an install
+another agent needs. App quit cancels and joins the installer subprocess tree and
+cleans that attempt's staging directory. Failed attempts can be explicitly retried;
+a competing process's completed preparation is accepted only after verification.
 
 The runtime uses pi's original CLI, configuration/resource loader, user agent
 directory, providers, auth, models, packages and MCP behavior. It preserves the
@@ -67,6 +73,21 @@ Maintainers regenerate `assets/patch.json` from an **unmodified** `npm ci` using
 Review both the generator and generated before/after hashes. Any lock, patch or
 asset change selects a new cache directory. CI prepares the dependency with this
 same Go preparer and runs the real RPC/SDK/Manager fixtures on all three OSes.
+The root `protobufjs: 7.6.6` override repeats upstream pi 1.5.2's override because
+npm does not inherit a dependency package's overrides; it satisfies the
+`@google/genai` dependency's `^7.5.4` range.
+
+Managed pi stays at the app's fixed reviewed version when the global pi or shared
+pi packages are updated. A package requiring a newer host may need a later yesman
+release or an explicit `YESMAN_PI` choice. There is no automatic npm/latest update
+or implicit external fallback. A runtime dependency upgrade must regenerate the
+lockfile and patch hashes, review the source delta, and rerun the full native
+RPC/SDK/Manager and browser acceptance matrix on all supported platforms.
+
+Old digest directories and the shared npm download cache are retained across
+upgrades (each runtime can occupy roughly 154 MB). They may still be used by
+running processes. This feature does not automatically delete them or implement
+cache GC; an ownership-aware cache collector is optional future work.
 
 ## Protocol and atomicity
 
@@ -128,8 +149,11 @@ Original images/full text are never written to `delivery.json`.
 
 Cancel captures agent `Since`, workspace `HiredAt`, process/session epoch and the
 exact handle. It reserves the operation against cleanup, validates retirement and
-removal, and calls only native selective removal. RPC and persistence waits happen
-outside the global Manager mutex. A successful result returns original content
+removal, and calls only native selective removal. The initial workspace lease is
+released before RPC; fresh leases verify the same workspace/agent incarnation for
+the short commit and final payload-return phases. RPC and durability waits happen
+outside both the workspace lease and global Manager mutex, so a frozen pi does not
+block Archive or other workspace submissions. A successful result returns original content
 only after the cancelled receipt is durable. A disk failure reports failure and
 can safely retry the same cancellation/persistence; a lost RPC response is
 reconciled by the ordered native event or an idempotent retry. Unknown outcomes

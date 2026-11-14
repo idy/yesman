@@ -1745,7 +1745,7 @@ function renderAbout(inner) {
     settingsSection('yesman', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
       row(t('Build'), build),
       row(t('Updates'), updateStatus()),
-      row('pi', v ? (v.pi || h('span', { class: 'danger' }, v.piError)) : checking()),
+      row(!v ? 'pi' : v.piManaged ? t('Managed pi') : t('External pi'), v ? (v.pi || (v.piState && v.piState !== 'failed' ? t({ preparing: 'Preparing…', unprepared: 'Not prepared', closed: 'Stopped.' }[v.piState] || 'Version unknown') : h('span', { class: 'danger' }, v.piError || t('Version unknown')))) : checking()),
       row('MyGo', v ? v.mygo || faint(t('unknown')) : checking()),
       row('Magpie', v ? v.magpie || faint(t('unknown')) : checking()),
       row('Go', v ? v.go : checking())),

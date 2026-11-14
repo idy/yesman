@@ -67,13 +67,14 @@ func main() {
 	var piCommand func(context.Context) (string, []string, error)
 	var managedRuntime *piruntime.Runtime
 	if os.Getenv("YESMAN_PI") == "" && (a.piErr != nil || piruntime.OfficialNPM(a.pi)) {
+		a.managedPi = true
 		managed, err := piruntime.New(h.Runtime())
 		a.piErr = err
 		if err == nil {
 			a.pi = managed.Description()
-			a.managedPi = true
 			piCommand = managed.Command
 			managedRuntime = managed
+			a.piRuntime = managed
 		}
 	}
 	a.runPi = runPi(a.pi, h.Runtime())

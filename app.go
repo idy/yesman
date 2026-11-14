@@ -12,6 +12,7 @@ import (
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/home"
+	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
@@ -50,6 +51,7 @@ type app struct {
 	pi        string
 	piErr     error
 	managedPi bool
+	piRuntime *piruntime.Runtime
 	// runPi runs a pi command for the user, outside any workspace.
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs
