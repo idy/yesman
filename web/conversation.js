@@ -38,7 +38,8 @@ const textOf = (content) =>
 //
 // convo: { messages, live: message being written or null, tools: Map(id -> {status}),
 //          deliveries: Map(id -> receipt), sent: Map(id -> { text, images }) of what
-//          this window submitted and has not seen tied to a message yet }
+//          this window submitted and has not seen tied to a message yet,
+//          lastSent: the ID this window submitted last }
 // agent: { status } — working, waiting, failed... of the agent shown.
 export function project(convo, agent = {}) {
   const rows = [];
@@ -144,18 +145,19 @@ export function project(convo, agent = {}) {
   // stays for as long as yesman keeps receipts. Those that need nothing more,
   // and failures a later submission has superseded, fold into one row.
   const all = [...(convo.deliveries?.values() ?? [])];
+  // A receipt the server has not answered for yet has no order: the one this
+  // window sent last is the latest; an earlier one never is.
+  const order = (d) => (d.revision > 0 ? (d.order ?? 0) : d.id === convo.lastSent ? Infinity : -Infinity);
   const latest = all.reduce((a, d) => (!a || order(d) > order(a) ? d : a), null);
-  const receipts = all.filter((d) => !bound.has(d.id)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  // Those the server has not answered for yet were sent after all it has.
+  const made = (d) => (d.revision > 0 ? (d.order ?? 0) : Infinity);
+  const receipts = all.filter((d) => !bound.has(d.id)).sort((a, b) => made(a) - made(b) || 0);
   const own = (d) => !FINISHED.has(d.state) || convo.sent?.has(d.id) || (d === latest && !settled(d));
   const earlier = receipts.filter((d) => !own(d));
   if (earlier.length) rows.push({ type: 'receipts', key: 'd:earlier', deliveries: earlier });
   for (const d of receipts) if (own(d)) rows.push({ type: 'receipt', key: `d:${d.id}`, delivery: d, sent: convo.sent?.get(d.id) });
   return rows;
 }
-
-// A receipt this window has not heard back about yet has no order: it is the
-// latest.
-const order = (d) => (d.revision > 0 ? (d.order ?? 0) : Infinity);
 
 // The states after which nothing more is known about a submission. Any
 // other, or one this page does not know, keeps its row.

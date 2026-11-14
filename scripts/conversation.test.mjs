@@ -186,7 +186,7 @@ test('earlier receipts no message is tied to fold into one row, and the conversa
     receipt(32, 'sending', { revision: 1 }),
     ['local', { id: 'local', revision: 0, state: 'sending', text: 'on its way' }],
   ]);
-  const rows = project({ messages, deliveries }, { status: 'working' });
+  const rows = project({ messages, deliveries, lastSent: 'local' }, { status: 'working' });
   // Every person's message and every reply is there, in order, whatever its receipt.
   const people = rows.filter((r) => r.type === 'user');
   assert.deepEqual(people.map((r) => r.message.content[0].text), [...Array.from({ length: 24 }, (_, i) => `question ${i + 1}`), 'a bound question', 'another bound one']);
@@ -214,14 +214,14 @@ test('the latest failure stays in view until a later submission, and old settled
   // The latest refused, interrupted or uncertain: it is in view.
   for (const last of [receipt(23, 'failed', { error: 'rejected' }), receipt(23, 'interrupted'), receipt(23, 'unconfirmed', { error: 'lost' }),
     ['local', { id: 'local', revision: 0, state: 'unconfirmed', text: 'the bridge failed' }]]) {
-    rows = project({ messages, deliveries: new Map([...old, last]) });
+    rows = project({ messages, deliveries: new Map([...old, last]), lastSent: 'local' });
     assert.deepEqual(rows.slice(-2).map((r) => r.type), ['receipts', 'receipt'], last[1].state);
     assert.equal(rows.at(-1).delivery.id, last[0]);
     assert.equal(rows.at(-2).key, key, 'the folded row keeps its key');
   }
   // A new submission on its way supersedes the failure; the failure joins the
   // folded row, still saying it was not sent.
-  rows = project({ messages, deliveries: new Map([...old, receipt(23, 'failed', { error: 'rejected' }), ['local', { id: 'local', revision: 0, state: 'sending', text: 'new' }]]) });
+  rows = project({ messages, deliveries: new Map([...old, receipt(23, 'failed', { error: 'rejected' }), ['local', { id: 'local', revision: 0, state: 'sending', text: 'new' }]]), lastSent: 'local' });
   assert.deepEqual(rows.slice(-2).map((r) => r.type), ['receipts', 'receipt']);
   assert.deepEqual(rows.at(-2).deliveries.map((d) => d.state).slice(-1), ['failed']);
   assert.equal(rows.at(-1).delivery.id, 'local');
@@ -257,4 +257,18 @@ test('what this window sent shows as sent, with its state, until a message is ti
   const twice = new Map([receipt(4, 'steering', { text: 'same' }), receipt(5, 'steering', { text: 'same' })]);
   rows = project({ messages: [user('same', { source: 'user', submission: sub(5) })], deliveries: twice });
   assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['user', sub(5)], ['receipt', sub(4)]]);
+});
+
+test('a submission the server never heard of is superseded by the next one this window sends', () => {
+  const old = Array.from({ length: 3 }, (_, i) => receipt(i + 1, 'unconfirmed'));
+  // The bridge failed before the server heard of it: only this window knows it.
+  const lost = ['lost', { id: 'lost', revision: 0, state: 'unconfirmed', text: 'did this arrive?' }];
+  let rows = project({ messages: [], deliveries: new Map([...old, lost]), lastSent: 'lost' });
+  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['receipts', undefined], ['receipt', 'lost']]);
+  // An edited draft is sent instead, and the server answers for it.
+  rows = project({ messages: [], deliveries: new Map([...old, lost, receipt(4, 'steering', { text: 'edited' })]), lastSent: sub(4) });
+  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['receipts', undefined], ['receipt', sub(4)]]);
+  assert.deepEqual(rows[0].deliveries.map((d) => d.id), [sub(1), sub(2), sub(3), 'lost']);
+  rows = project({ messages: [], deliveries: new Map([...old, lost, receipt(4, 'unconfirmed', { error: 'lost' })]), lastSent: sub(4) });
+  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['receipts', undefined], ['receipt', sub(4)]]);
 });

@@ -348,12 +348,33 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.match(await row(edited).innerText(), /^did this arrive\? \(edited\)\s*Accepted for steering/);
     assert.equal(await row(lost).count(), 0);
     assert.equal(await folded.locator(`[data-delivery="${lost}"]`).count(), 1);
+    // One the server never heard of, superseded by an edited draft the server
+    // answers for, folds too: it is no longer the latest.
+    await page.evaluate(() => (window.fixture.bridgeDown = true));
+    await input.fill("never heard of");
+    await input.press("Enter");
+    await settled();
+    const unheard = await sentID();
+    assert.match(await row(unheard).innerText(), /^never heard of\s*Delivery unconfirmed$/);
+    let count = await page.evaluate(() => window.sent.length);
+    await input.fill("never heard of (edited)");
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    const reworded = await sentID();
+    assert.notEqual(reworded, unheard);
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), reworded);
+    await settled();
+    assert.equal(await row(unheard).count(), 0, "a submission the server never heard of stays the latest");
+    assert.match(await folded.locator(`[data-delivery="${unheard}"]`).innerText(), /Submission: never heard of\s*Delivery unconfirmed/);
+    assert.deepEqual(await folded.locator(".receipts-body > [data-delivery]").evaluateAll((els) => els.slice(-2).map((el) => el.dataset.delivery)), [lost, unheard]);
+    assert.match(await row(reworded).innerText(), /^never heard of \(edited\)\s*Accepted for steering/);
 
     // A refusal while it is the latest is in view, with its error, and the
     // draft kept; a new submission supersedes it.
     await input.fill("this will be refused");
+    count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
-    await page.waitForFunction(() => window.sent.length === 7);
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
     const refused = await sentID();
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "failed", { error: "pi refused the prompt" }), refused);
     await settled();
@@ -364,8 +385,9 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await input.fill("");
     await page.locator("input[type=file]").setInputFiles([{ name: "c.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") }]);
     await page.waitForFunction(() => document.querySelectorAll(".composer-image").length === 1);
+    count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
-    await page.waitForFunction(() => window.sent.length === 8);
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
     const alone = await sentID();
     assert.equal(await row(alone).locator(".msg-user img").count(), 1);
     assert.equal(await row(alone).locator(".msg-user").evaluate((el) => el.firstChild?.nodeType === 3 ? el.firstChild.textContent : ""), "");
@@ -373,7 +395,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await settled();
     assert.equal(await row(alone).locator(".delivery-status").innerText(), "Accepted for follow-up · delivery unconfirmed");
     assert.equal(await row(refused).count(), 0, "a superseded refusal stays in view");
-    assert.equal((await seen(page)).foldedSummary, "28 earlier submissions | 26 delivery unconfirmed · 1 handled by an extension · 1 not sent");
+    assert.equal((await seen(page)).foldedSummary, "29 earlier submissions | 27 delivery unconfirmed · 1 handled by an extension · 1 not sent");
     // The uncertain answer from the server, the latest now, is in view.
     await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed", { error: "pi stopped before answering" }), alone);
     await frame(page);
@@ -401,14 +423,16 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     const reloaded = await seen(page);
     assert.deepEqual(reloaded.people, live.people);
     assert.equal(reloaded.replies, live.replies);
-    assert.equal(reloaded.foldedSummary, live.foldedSummary);
+    // The one the server never heard of was only ever this window's.
+    assert.equal(reloaded.foldedSummary, "28 earlier submissions | 26 delivery unconfirmed · 1 handled by an extension · 1 not sent");
     assert.equal(await folded.evaluate((el) => el.open), false);
     assert.equal(await row(alone).locator(".delivery-image-count").innerText(), "1 image submitted");
     assert.equal(await row(alone).locator("img").count(), 0, "an image was made up from a receipt");
     assert.match(await row(alone).innerText(), /Delivery unconfirmed/);
     // The steering one, still to come, from what its receipt keeps.
     assert.match(await row(edited).innerText(), /^did this arrive\? \(edited\)\s*Accepted for steering/);
-    assert.equal(reloaded.ownReceipts, 2);
+    assert.match(await row(reworded).innerText(), /^never heard of \(edited\)\s*Accepted for steering/);
+    assert.equal(reloaded.ownReceipts, 3);
 
     // Chinese.
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));

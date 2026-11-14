@@ -89,6 +89,7 @@ class Convo {
     // message ID -> { text, images } this window submitted, shown as sent until
     // a message is tied to it. Only in memory; see holdSent.
     this.sent = new Map();
+    this.lastSent = null; // the message ID this window submitted last
     this.seq = 0;
     this.eventSeqs = new Set();
     this.piQueue = { known: false };
@@ -1446,6 +1447,7 @@ async function sendMessage(a, textarea, submitter = null) {
       pruneDeliveryRows(c,excess);
     }
     holdSent(c, messageID, attachments.submission);
+    c.lastSent = messageID;
     schedulePatch(c);
   }
   // SubmitEvent retains the activated Send button even after WebKit's mouse
