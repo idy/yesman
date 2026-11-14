@@ -201,6 +201,11 @@ func (hs *Handoffs) forgetCalls(at time.Time) int {
 	}
 	hs.memory.Epoch++
 	hs.memory.Set = nil
+	// The calls a pre-release filter held are forgotten; fields a later
+	// version wrote beside them are not.
+	if hs.filter != nil && len(hs.filter.extra) > 0 {
+		hs.retired = &retiredFilter{Epoch: hs.memory.Epoch, extra: hs.filter.extra}
+	}
 	hs.memory.Resets = append(hs.memory.Resets, callReset{Epoch: hs.memory.Epoch, At: at, Cleared: cleared, SHA256: hex.EncodeToString(sum.Sum(nil))})
 	if n := len(hs.memory.Resets) - keptResets; n > 0 {
 		hs.memory.Resets = slices.Clone(hs.memory.Resets[n:])
@@ -214,7 +219,18 @@ func (hs *Handoffs) forgetCalls(at time.Time) int {
 // filter of a fixed size, which fills up and then refuses new calls more and
 // more often. A file that has one keeps it as it is: it is still checked, so
 // that what it holds is still refused, but nothing is added to it any more,
-// and a reset forgets it.
+// and a reset forgets it. A reset forgets the calls only: the filter's
+// fields this version does not know stay where they were, with
+// forgottenByReset, the epoch of the reset, in place of the calls.
+
+// retiredFilter is what a reset kept of a pre-release filter.
+type retiredFilter struct {
+	Epoch int
+	extra map[string]json.RawMessage
+}
+
+// retiredKey marks a filter whose calls a reset forgot.
+const retiredKey = "forgottenByReset"
 
 const (
 	maxCallFilterBytes  = 1 << 20

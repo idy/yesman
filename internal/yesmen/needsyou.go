@@ -83,10 +83,12 @@ type Handoffs struct {
 	// added to. unsure is when the latest of the calls it forgot without a
 	// trace was registered: since those cannot be told from new calls,
 	// every call it does not know is refused, until the user starts a new
-	// tool-call memory.
-	filter *callFilter
-	unsure time.Time
-	extra  map[string]json.RawMessage
+	// tool-call memory. retired is what a reset kept of a filter: the
+	// fields this version does not know, none of its calls.
+	filter  *callFilter
+	retired *retiredFilter
+	unsure  time.Time
+	extra   map[string]json.RawMessage
 }
 
 // trimmedCall is the tool call of a handoff no longer kept.

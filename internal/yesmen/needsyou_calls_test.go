@@ -450,3 +450,128 @@ func TestHandoffsPreReleaseFilterIsKept(t *testing.T) {
 		}
 	})
 }
+
+// A reset forgets the calls a pre-release filter held, never the fields a
+// later version wrote beside them: those stay at the filter's key, read back
+// and kept through later writes and resets, with the reset that forgot the
+// calls. What stays is no membership: nothing is refused for it, nothing is
+// left to forget, and none of it reaches what the lead or the page see.
+func TestResetKeepsPreReleaseFilterFields(t *testing.T) {
+	s := handoffStore(t)
+	y, _ := s.Get("alice")
+	unknown := map[string]json.RawMessage{
+		"futureMetadata": json.RawMessage(`{"mustKeep":9007199254740993}`),
+		"huge":           json.RawMessage(`1e400`),
+	}
+	filter := preReleaseFilter("legacy-", 3)
+	filter.extra = unknown
+	writeHandoffsFile(t, y, Handoffs{Items: []Handoff{}, filter: filter, extra: map[string]json.RawMessage{"top": json.RawMessage(`9007199254740995`)}})
+	sentinels := []string{"9007199254740993", "1e400", "9007199254740995"}
+	kept := func(why string) []byte {
+		t.Helper()
+		raw, _ := os.ReadFile(y.HandoffsFile())
+		for _, v := range sentinels {
+			if !bytes.Contains(raw, []byte(v)) {
+				t.Fatalf("%s: lost %s", why, v)
+			}
+		}
+		return raw
+	}
+	fresh := func() *Store { return New(filepath.Dir(y.Path), filepath.Join(t.TempDir(), "archive")) }
+	if _, _, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "x", ToolCall: "legacy-1"}); err == nil {
+		t.Fatal("a call the filter holds registered before the reset")
+	}
+
+	hs, _ := s.Handoffs("alice")
+	m := hs.CallMemory()
+	if _, cleared, err := s.ResetCallMemory("alice", y.HiredAt, m.Epoch, m.Used, m.Forgettable); err != nil || cleared != 3 {
+		t.Fatalf("reset: %d %v", cleared, err)
+	}
+	raw := kept("the reset")
+	var file map[string]map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &file)
+	if f := file[filterKey]; string(f[retiredKey]) != "1" || f["places"] != nil || f["bits"] != nil || f["count"] != nil || string(f["huge"]) != "1e400" {
+		t.Fatalf("the filter after the reset: %v", f)
+	}
+	read, err := fresh().Handoffs("alice")
+	if err != nil || read.filter != nil || read.retired == nil || read.retired.Epoch != 1 {
+		t.Fatalf("cold read: %+v %v", read.retired, err)
+	}
+	if m := read.CallMemory(); m.State != "" || m.Forgettable != 0 || m.Resettable() || m.Epoch != 1 {
+		t.Fatalf("call memory after the reset: %+v", m)
+	}
+	// Nothing left to forget: no endless resets, the file untouched.
+	before, _ := os.ReadFile(y.HandoffsFile())
+	if _, _, err := fresh().ResetCallMemory("alice", y.HiredAt, 1, 0, 0); err == nil || errors.Is(err, ErrCallMemoryChanged) {
+		t.Fatalf("a reset with nothing to forget: %v", err)
+	}
+	if after, _ := os.ReadFile(y.HandoffsFile()); !bytes.Equal(before, after) {
+		t.Fatal("a refused reset changed the file")
+	}
+	// The forgotten membership: a call the filter held registers once.
+	h, created, err := fresh().AddHandoff("alice", Handoff{Type: HandoffManual, Title: "x", ToolCall: "legacy-1"})
+	if err != nil || !created {
+		t.Fatalf("a call the filter held, after the reset: %v %v", created, err)
+	}
+	if again, created, err := fresh().AddHandoff("alice", Handoff{Type: HandoffManual, Title: "x", ToolCall: "legacy-1"}); err != nil || created || again.ID != h.ID {
+		t.Fatalf("the same call again: %+v %v %v", again, created, err)
+	}
+	if _, err := fresh().CloseHandoff("alice", h.ID, HandoffDone, "user", ""); err != nil {
+		t.Fatal(err)
+	}
+	kept("an add and a close")
+
+	// A later reset forgets the new fingerprints; the kept fields stay, with
+	// the reset that forgot the filter's calls.
+	read, _ = fresh().Handoffs("alice")
+	read.memory.Set = fingerprintSet(t, "later-", 4)
+	writeHandoffsFile(t, y, read)
+	m = read.CallMemory()
+	if _, cleared, err := fresh().ResetCallMemory("alice", y.HiredAt, m.Epoch, m.Used, m.Forgettable); err != nil || cleared != 4 {
+		t.Fatalf("second reset: %d %v", cleared, err)
+	}
+	kept("the second reset")
+	read, _ = fresh().Handoffs("alice")
+	if read.retired == nil || read.retired.Epoch != 1 || read.memory.Epoch != 2 || len(read.memory.Resets) != 2 ||
+		read.memory.Resets[0].Cleared != 3 || read.memory.Resets[1].Cleared != 4 {
+		t.Fatalf("after the second reset: %+v %+v", read.retired, read.memory.Resets)
+	}
+
+	// None of it is shown to the lead or the page.
+	for _, v := range []any{read, read.Open(), read.CallMemory()} {
+		out, _ := json.Marshal(v)
+		for _, s := range append(sentinels, "futureMetadata", retiredKey, filterKey) {
+			if bytes.Contains(out, []byte(s)) {
+				t.Errorf("%s shown in %s", s, out)
+			}
+		}
+	}
+}
+
+// Kept filter fields near the read limit: the reset makes the file smaller
+// (the calls go), and it reads back with every field.
+func TestResetKeepsPreReleaseFilterFieldsNearTheLimit(t *testing.T) {
+	s := handoffStore(t)
+	y, _ := s.Get("alice")
+	filter := preReleaseFilter("legacy-", 2)
+	filter.extra = map[string]json.RawMessage{"pad": json.RawMessage(`""`), "n": json.RawMessage(`9007199254740993`)}
+	small, _ := encodeHandoffs(Handoffs{Items: []Handoff{}, filter: filter})
+	filter.extra["pad"] = json.RawMessage(`"` + strings.Repeat("x", maxHandoffsBytes-len(small)-64) + `"`)
+	before := writeHandoffsFile(t, y, Handoffs{Items: []Handoff{}, filter: filter})
+	if len(before) > maxHandoffsBytes {
+		t.Fatalf("fixture %d bytes", len(before))
+	}
+	hs, _ := s.Handoffs("alice")
+	m := hs.CallMemory()
+	if _, _, err := s.ResetCallMemory("alice", y.HiredAt, m.Epoch, m.Used, m.Forgettable); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(y.HandoffsFile())
+	t.Logf("before %d bytes, after %d bytes, limit %d", len(before), len(after), maxHandoffsBytes)
+	if len(after) >= len(before) || !bytes.Contains(after, []byte("9007199254740993")) || !bytes.Contains(after, filter.extra["pad"]) {
+		t.Fatal("the reset did not keep the fields in a smaller file")
+	}
+	if read, err := New(filepath.Dir(y.Path), filepath.Join(t.TempDir(), "archive")).Handoffs("alice"); err != nil || read.retired == nil {
+		t.Fatalf("cold read: %v", err)
+	}
+}

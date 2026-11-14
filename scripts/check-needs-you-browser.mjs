@@ -55,6 +55,8 @@ function bridge() {
           await new Promise((resolve) => { window.releaseMessages = resolve; });
         }
         if (m === 'Info' && window.holdInfo === args[0]) await new Promise((resolve) => { window.releaseInfo = resolve; });
+        // A test can hold a reset's answer, the reset already made.
+        if (m === 'ResetCallMemory' && window.holdReset) await new Promise((resolve) => { window.releaseReset = resolve; });
         if (body.error) throw Error(body.error);
         if (m === 'State') { body.value.agents ??= []; window.fixtureState = body.value; }
         return body.value;
@@ -480,6 +482,48 @@ async function scenario(engineName, page) {
   await memoryIs('');
   await ctl('prompt', { agent: 'bob/lead', message: needsYou({ add: { type: 'manual', title: 'Confirm the release notes' }, toolCall: 'call-bob-after' }) });
   await until('a new call taken after the reset', async () => (await ctl('call-memory', { yesman: 'bob' })).used === 2);
+
+  // Two resets asked in one turn, Alice's cancelled and Bob's confirmed,
+  // before the first close event: only Bob's memory starts anew.
+  const aliceMemory = page.locator('.needs-you-memory[data-memory="alice"]');
+  const epoch = async (name) => (await ctl('call-memory', { yesman: name })).epoch;
+  await ctl('call-memory', { yesman: 'alice', message: 'near' });
+  await ctl('call-memory', { yesman: 'bob', message: 'near' });
+  await memoryIs('near');
+  await aliceMemory.waitFor();
+  const before = { alice: await epoch('alice'), bob: await epoch('bob') };
+  await page.evaluate(() => {
+    const d = document.querySelector('#confirm-dialog');
+    document.querySelector('[data-memory="alice"] button').click();
+    d.close('cancel');
+    document.querySelector('[data-memory="bob"] button').click();
+    d.close('ok');
+  });
+  await memoryIs('');
+  assert.equal(await epoch('bob'), before.bob + 1);
+  assert.equal(await epoch('alice'), before.alice);
+  assert.equal(await aliceMemory.getAttribute('data-state'), 'near');
+
+  // A reset answered after the user went to Bob's requests and focused his
+  // request memory leaves focus where they put it.
+  await ctl('call-memory', { yesman: 'bob', message: 'near' });
+  await memoryIs('near');
+  await page.evaluate(() => { window.holdReset = true; });
+  await aliceMemory.getByRole('button').click();
+  await dialog.waitFor({ state: 'visible' });
+  await page.locator('#confirm-ok').click();
+  await until('the reset answer held', () => page.evaluate(() => !!window.releaseReset));
+  await lead('bob').click();
+  if (!(await page.locator('#yesman-info [data-info-entry]').count())) await page.getByRole('button', { name: 'Show the info' }).click();
+  await infoRow('needs-you').click();
+  await page.locator('.needs-you-scope').waitFor();
+  await memory.getByRole('button').focus();
+  await page.evaluate(() => { window.holdReset = false; window.releaseReset(); });
+  await until('Alice reset', async () => (await epoch('alice')) === before.alice + 1);
+  await page.evaluate(() => handlers.changed(true));
+  await page.waitForTimeout(400);
+  assert.equal(await page.evaluate(() => document.activeElement?.closest('[data-memory]')?.dataset.memory), 'bob', 'focus stayed on the control the user chose');
+  assert.match(await page.locator('.needs-you-scope').innerText(), /From bob only/);
 }
 
 try {
@@ -501,7 +545,7 @@ try {
       });
       assert.deepEqual(errors, []);
       results.push(`${engineName}: PASS`);
-      console.log(`${engineName}: Needs you sources, count, jump/focus/draft, answer, done, expiry, archive/rehire, remove, reload, Info card rows/counts/scope/back/late response, focus across refresh, history re-read with a live reply, long handoffs, zh/dark/narrow, request memory near/full/pre-release with a keyboard reset, a stale confirmation and the lead told passed`);
+      console.log(`${engineName}: Needs you sources, count, jump/focus/draft, answer, done, expiry, archive/rehire, remove, reload, Info card rows/counts/scope/back/late response, focus across refresh, history re-read with a live reply, long handoffs, zh/dark/narrow, request memory near/full/pre-release with a keyboard reset, a stale confirmation, the lead told, a cancelled reset never answered by another's confirmation and a late reset not taking focus passed`);
     } finally {
       await browser?.close();
       await backend.close();

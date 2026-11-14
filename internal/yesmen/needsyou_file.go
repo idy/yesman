@@ -474,12 +474,23 @@ func decodeTrimmed(top map[string]json.RawMessage, hs *Handoffs) error {
 	}
 	if raw, ok := top[filterKey]; ok {
 		var obj map[string]json.RawMessage
-		var c callFilter
-		if json.Unmarshal(raw, &obj) != nil || obj == nil || json.Unmarshal(raw, &c) != nil || c.valid() != nil {
+		if json.Unmarshal(raw, &obj) != nil || obj == nil {
 			return fmt.Errorf("%q is not a filter of tool calls", filterKey)
 		}
-		c.extra = unknownFields(obj, callFilterKeys...)
-		hs.filter = &c
+		if _, retired := obj[retiredKey]; retired {
+			r, err := decodeRetiredFilter(obj)
+			if err != nil {
+				return fmt.Errorf("%q: %w", filterKey, err)
+			}
+			hs.retired = r
+		} else {
+			var c callFilter
+			if json.Unmarshal(raw, &c) != nil || c.valid() != nil {
+				return fmt.Errorf("%q is not a filter of tool calls", filterKey)
+			}
+			c.extra = unknownFields(obj, callFilterKeys...)
+			hs.filter = &c
+		}
 	}
 	if raw, ok := top[memoryKey]; ok {
 		if err := decodeCallMemory(raw, &hs.memory); err != nil {
@@ -575,6 +586,12 @@ func encodeHandoffs(hs Handoffs) ([]byte, error) {
 		b.WriteString(`,"` + filterKey + `":`)
 		b.Write(known[:len(known)-1])
 		if err := writeFields(&b, hs.filter.extra); err != nil {
+			return nil, err
+		}
+		b.WriteByte('}')
+	} else if hs.retired != nil {
+		b.WriteString(`,"` + filterKey + `":{"` + retiredKey + `":` + strconv.Itoa(hs.retired.Epoch))
+		if err := writeFields(&b, hs.retired.extra); err != nil {
 			return nil, err
 		}
 		b.WriteByte('}')
@@ -690,4 +707,19 @@ func encodeCallMemory(b *bytes.Buffer, m *callMemory) error {
 	}
 	b.WriteByte('}')
 	return nil
+}
+
+// decodeRetiredFilter reads what a reset kept of a pre-release filter: the
+// epoch of the reset, which must be a reset's, and no calls.
+func decodeRetiredFilter(obj map[string]json.RawMessage) (*retiredFilter, error) {
+	for _, k := range callFilterKeys {
+		if _, ok := obj[k]; ok {
+			return nil, fmt.Errorf("a filter forgotten by a reset still has %q", k)
+		}
+	}
+	var epoch int
+	if err := json.Unmarshal(obj[retiredKey], &epoch); err != nil || epoch < 1 {
+		return nil, fmt.Errorf("%q is not the epoch of a reset", retiredKey)
+	}
+	return &retiredFilter{Epoch: epoch, extra: unknownFields(obj, retiredKey)}, nil
 }

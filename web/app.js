@@ -1136,6 +1136,9 @@ async function resetCallMemory(y, m) {
     t('Requests waiting for you, recently handled ones and the latest tool calls stay.'),
     t('A request handled long ago may show up once more if its lead repeats an old tool call; it is remembered again then. A later reset can let it back once more.')].join(' ');
   if (!(await confirmAction(t('Start a new request memory for {name}?', { name }), body, t('Start a new memory')))) return;
+  // Where the reset was asked: focus goes back there only if the user is
+  // still on that page and has not put it on something else meanwhile.
+  const asked = needsYouPageKey();
   state.resetting.add(y.name);
   render();
   try {
@@ -1146,8 +1149,27 @@ async function resetCallMemory(y, m) {
   } finally {
     state.resetting.delete(y.name);
     await refreshState();
-    if (state.view.kind === 'needs-you') ($(`#body [data-memory="${CSS.escape(y.name)}"] button`) || $('#body .needs-you-page h1'))?.focus();
+    if (asked && needsYouPageKey() === asked && focusIsFree(y.name)) {
+      const same = state.snap.yesmen.some((v) => v.name === y.name && (v.hiredAt ?? '') === (y.hiredAt ?? ''));
+      ((same && $(`#body [data-memory="${CSS.escape(y.name)}"] button`)) || $('#body .needs-you-page h1'))?.focus();
+    }
   }
+}
+
+// needsYouPageKey names the Needs you page shown: every yesman's, or one's
+// (by name and hire); null when another view is shown.
+function needsYouPageKey() {
+  const v = state.view;
+  return v.kind === 'needs-you' ? JSON.stringify([v.yesman ?? '', v.hiredAt ?? '']) : null;
+}
+
+// focusIsFree reports whether focus is on nothing the user chose: nowhere,
+// left in a closed dialog (WebKit keeps it on the confirmation a click
+// closed), the page's heading, or this yesman's request memory.
+function focusIsFree(name) {
+  const a = document.activeElement;
+  const dialog = a?.closest('dialog');
+  return !a || a === document.body || (dialog && !dialog.open) || a.matches('.needs-you-page h1') || !!a.closest(`#body [data-memory="${CSS.escape(name)}"]`);
 }
 
 function requestCard(item) {
