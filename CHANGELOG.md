@@ -2,6 +2,10 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.17
+
+- This release retains the image submission support shipped in 0.1.16. There are no additional application changes.
+
 ## 0.1.16
 
 - Settings › Storage shows how much space yesman's data takes. Usage, between Data folder and Locations, measures the yesman folder in the background: its total size and file count, a bar of the repositories, workspaces, archive, runtime files and the rest, each with its share, and the space left on its disk. Measure again refreshes it.
