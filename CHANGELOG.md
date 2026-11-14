@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.20
+
+- Show active workers above completed, stopped and failed workers in the sidebar, keeping the existing order within each group. Reactivated workers return to the active group.
+- Keep keyboard focus on the same sidebar entry during updates and after closing its menu, including yesmen also shown under Needs you.
+- Keep Secrets descriptions readable at medium widths and names and values together in narrow windows, with actions moving to their own row when needed.
+
 ## 0.1.19
 
 - Keep Secrets list value fields at a fixed width, and constrain long values and editors within the list in narrow windows.

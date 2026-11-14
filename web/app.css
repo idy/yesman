@@ -383,6 +383,10 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 /* Secret values keep one width; only a narrow row may shrink them. */
 #env-secrets-list .env-cell--value { flex: 0 1 200px; max-width: 100%; }
 .env-cell--description { flex-grow: 1.7; color: var(--mds-ink-subtle); }
+/* Give descriptions a share of shrink space instead of a zero flex basis. */
+@media (min-width: 721px) {
+  #env-secrets-list .env-cell--description { flex-basis: 120px; }
+}
 .env-cell-empty { color: var(--mds-faint); }
 .env-cell--editing { background: var(--mds-hover); text-decoration-color: var(--mds-accent-ink); }
 .env-cell-edit { position: absolute; z-index: 5; border-radius: var(--mds-radius-sm); box-shadow: 0 8px 24px var(--mds-dialog-shadow); }
@@ -408,6 +412,12 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 @media (max-width: 720px) {
   .env-row { flex-wrap: wrap; }
   .env-cell--description { flex-basis: 100%; order: 1; }
+  /* Share the first line before wrapping; 220px + 200px bases wrap apart. */
+  #env-secrets-list .env-cell--name { flex: 1.1 1 0; max-width: 220px; }
+  #env-secrets-list .env-cell--value { flex: 1 1 0; max-width: 200px; }
+}
+@media (max-width: 560px) {
+  #env-secrets-list .env-row-actions { flex-basis: 100%; justify-content: flex-end; order: 2; }
 }
 
 /* The add dialog: an owner's repositories to tick. */

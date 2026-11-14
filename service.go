@@ -74,6 +74,15 @@ func (s *service) Hire(ctx context.Context, name string) (yesmen.Yesman, error) 
 	return y, nil
 }
 
+// Rename changes a yesman's visible name without restarting its agents.
+func (s *service) Rename(name, displayName string) (yesmen.Yesman, error) {
+	y, err := s.app.yesmen.Rename(name, displayName)
+	if err == nil {
+		s.app.notifyChanged()
+	}
+	return y, err
+}
+
 // Dismiss stops a yesman's agents and moves its workspace into the archive.
 func (s *service) Dismiss(name string) (string, error) {
 	a := s.app
