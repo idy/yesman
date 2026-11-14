@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/pool"
@@ -27,7 +30,9 @@ func TestSchedulesAreTheLeadsAndDraftsStayOff(t *testing.T) {
 	svc := schedule.New(schedule.Config{Yesmen: store, Agents: m})
 	defer svc.Close()
 	s := &Server{Pool: pool.New(filepath.Join(tmp, "repos")), Yesmen: store, Agents: m, Schedules: svc}
-	lead := caller{agent: agent.Info{ID: "alice/lead", Yesman: "alice", Name: "lead", Role: agent.RoleLead}, yesman: y}
+	// No agent runs here: the lead's credential is one this test says holds.
+	s.credentialCurrent = func(token, id string) bool { return token == "lead-credential" && id == "alice/lead" }
+	lead := caller{agent: agent.Info{ID: "alice/lead", Yesman: "alice", Name: "lead", Role: agent.RoleLead}, yesman: y, token: "lead-credential"}
 	worker := caller{agent: agent.Info{ID: "alice/w1", Yesman: "alice", Name: "w1", Role: agent.RoleWorker}, yesman: y}
 	ctx := context.Background()
 	draft := `{"title":"Morning check","instructions":"Check overnight CI.","kind":"daily","time":"09:00","timezone":"Asia/Shanghai"}`
@@ -53,6 +58,19 @@ func TestSchedulesAreTheLeadsAndDraftsStayOff(t *testing.T) {
 	if _, err := s.draftSchedule(ctx, lead, httptest.NewRequest("POST", "/v1/schedules/draft", strings.NewReader(`{"title":"Bad","instructions":"x","kind":"daily","time":"9","timezone":"Asia/Shanghai"}`))); err == nil {
 		t.Fatal("an invalid draft was saved")
 	}
+	// A lead whose credential ended (stopped, restarted, dismissed), or of
+	// an earlier workspace generation, saves nothing.
+	stopped, earlier := lead, lead
+	stopped.token = "ended"
+	earlier.yesman.HiredAt = y.HiredAt.Add(-time.Second)
+	for _, c := range []caller{stopped, earlier} {
+		if _, err := s.draftSchedule(ctx, c, httptest.NewRequest("POST", "/v1/schedules/draft", strings.NewReader(draft))); !errors.Is(err, schedule.ErrStaleCaller) {
+			t.Fatalf("a stale lead's draft: %v", err)
+		}
+	}
+	if v, _ := svc.View("alice"); len(v.Plans) != 1 {
+		t.Fatalf("%d plans after stale drafts", len(v.Plans))
+	}
 
 	if _, _, err := store.AddScheduledTask("alice", yesmen.TaskSchedule{Plan: "s1", Run: "s1-m-0123456789abcdef"}, "Morning check", "detail"); err != nil {
 		t.Fatal(err)
@@ -63,5 +81,47 @@ func TestSchedulesAreTheLeadsAndDraftsStayOff(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("the lead's context lacks %q:\n%s", want, text)
 		}
+	}
+}
+
+// The board agents read and change names a scheduled run's plan, never the
+// scheduler's run handle, for a lead and a worker alike.
+func TestAgentBoardLeavesOutTheRunHandle(t *testing.T) {
+	tmp := t.TempDir()
+	store := yesmen.New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
+	y, err := store.Hire("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const run = "s1-m-0123456789abcdef"
+	if _, _, err := store.AddScheduledTask("alice", yesmen.TaskSchedule{Plan: "s1", Run: run}, "Morning check", "detail"); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Yesmen: store}
+	ctx := context.Background()
+	for _, role := range []string{agent.RoleLead, agent.RoleWorker} {
+		c := caller{agent: agent.Info{ID: "alice/x", Yesman: "alice", Role: role}, yesman: y}
+		read, err := s.board(ctx, c, httptest.NewRequest("GET", "/v1/board", nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed, err := s.changeBoard(ctx, c, httptest.NewRequest("POST", "/v1/board", strings.NewReader(`{"update":[{"id":"t1","status":"doing"}]}`)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		empty, err := s.changeBoard(ctx, c, httptest.NewRequest("POST", "/v1/board", strings.NewReader(`{}`)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, out := range []any{read, changed, empty} {
+			data, _ := json.Marshal(out)
+			if strings.Contains(string(data), run) || !strings.Contains(string(data), `"schedule":{"plan":"s1"}`) || !strings.Contains(string(data), `"id":"t1"`) {
+				t.Fatalf("%s sees %s", role, data)
+			}
+		}
+	}
+	// The run handle stays on the board itself, for the scheduler.
+	if b, _ := store.Board("alice"); b.Tasks[0].Schedule == nil || b.Tasks[0].Schedule.Run != run || b.Tasks[0].Status != yesmen.TaskDoing {
+		t.Fatalf("board: %+v", b.Tasks[0])
 	}
 }

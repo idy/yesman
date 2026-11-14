@@ -165,6 +165,26 @@ async function refreshHidden(signal?: AbortSignal) {
 	} catch {}
 }
 
+// publicBoard keeps of a board what the tool shows the model, as text and
+// as details: a task's own fields and, for one that tracks a scheduled run,
+// its scheduled task (plan). The app's API already leaves the scheduler's run
+// handle out; this keeps any other field it might add out of the model's
+// context as well.
+function publicBoard(board: any): { tasks: any[]; next?: number } {
+	const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+	const tasks = (Array.isArray(board?.tasks) ? board.tasks : []).map((t: any) => {
+		const out: Record<string, unknown> = {};
+		for (const k of ["id", "title", "status", "owner", "detail", "note", "createdAt", "updatedAt"]) {
+			const v = str(t?.[k]);
+			if (v !== undefined) out[k] = v;
+		}
+		const plan = str(t?.schedule?.plan);
+		if (plan && /^s[1-9][0-9]{0,5}$/.test(plan)) out.schedule = { plan };
+		return out;
+	});
+	return typeof board?.next === "number" ? { tasks, next: board.next } : { tasks };
+}
+
 function boardText(board: any): string {
 	const tasks: any[] = board?.tasks ?? [];
 	if (!tasks.length) return "The board is empty.";
@@ -453,7 +473,8 @@ export default function yesman(pi: ExtensionAPI) {
 			const board = Object.keys(change).length
 				? await call("POST", "/v1/board", change, signal)
 				: await call("GET", "/v1/board", undefined, signal);
-			return result(boardText(board), board);
+			const view = publicBoard(board);
+			return result(boardText(view), view);
 		},
 	});
 

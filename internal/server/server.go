@@ -56,6 +56,9 @@ type Server struct {
 	worktreeLocks map[string]*sync.Mutex // serialize lifecycle operations per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
+	// credentialCurrent replaces Agents.CredentialCurrent in tests that run
+	// no agent.
+	credentialCurrent func(token, id string) bool
 }
 
 // Start listens on a loopback port and serves in the background.
@@ -101,13 +104,28 @@ func (s *Server) Handler() http.Handler {
 type Schedules interface {
 	LeadContext(yesman string) string
 	ListText(yesman string) (string, error)
-	Draft(yesman string, in schedule.PlanInput) (schedule.Plan, error)
+	// Draft saves a draft for the lead of the workspace generation since,
+	// while current still holds: it is asked with the workspace held, just
+	// before the plan is saved.
+	Draft(yesman string, since time.Time, current func() bool, in schedule.PlanInput) (schedule.Plan, error)
 }
 
 // caller is the agent a request comes from.
 type caller struct {
 	agent  agent.Info
 	yesman yesmen.Yesman
+	// token is the credential the request came with, to check again that it
+	// is still the running agent's before a change.
+	token string
+}
+
+// current reports whether the caller is still the running agent it
+// authenticated as.
+func (s *Server) current(c caller) bool {
+	if s.credentialCurrent != nil {
+		return s.credentialCurrent(c.token, c.agent.ID)
+	}
+	return s.Agents.CredentialCurrent(c.token, c.agent.ID)
 }
 
 type handlerFunc func(ctx context.Context, c caller, r *http.Request) (any, error)
@@ -129,7 +147,7 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, err)
 			return
 		}
-		out, err := fn(r.Context(), caller{agent: info, yesman: y}, r)
+		out, err := fn(r.Context(), caller{agent: info, yesman: y, token: token}, r)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -480,7 +498,49 @@ func (s *Server) removeWorker(_ context.Context, c caller, r *http.Request) (any
 // board returns the caller's yesman's board. Every agent of the yesman reads
 // and keeps it, so that the lead can hand keeping it to a worker.
 func (s *Server) board(_ context.Context, c caller, _ *http.Request) (any, error) {
-	return s.Yesmen.Board(c.yesman.Name)
+	b, err := s.Yesmen.Board(c.yesman.Name)
+	if err != nil {
+		return nil, err
+	}
+	return agentBoardOf(b), nil
+}
+
+// agentBoard is the board as an agent's tools return it, field by field: a
+// task that tracks a scheduled run names its scheduled task (plan), which
+// the lead's messages name too, and not the scheduler's run handle, which
+// stays between the app and its window. A field the board gains is not
+// shown to agents until it is added here.
+type agentBoard struct {
+	Tasks []agentTask `json:"tasks"`
+	Next  int         `json:"next"`
+}
+
+type agentTask struct {
+	ID        string         `json:"id"`
+	Title     string         `json:"title"`
+	Status    string         `json:"status"`
+	Owner     string         `json:"owner,omitempty"`
+	Detail    string         `json:"detail,omitempty"`
+	Note      string         `json:"note,omitempty"`
+	CreatedAt time.Time      `json:"createdAt"`
+	UpdatedAt time.Time      `json:"updatedAt"`
+	Schedule  *agentSchedule `json:"schedule,omitempty"`
+}
+
+type agentSchedule struct {
+	Plan string `json:"plan"`
+}
+
+func agentBoardOf(b yesmen.Board) agentBoard {
+	out := agentBoard{Tasks: make([]agentTask, 0, len(b.Tasks)), Next: b.Next}
+	for _, t := range b.Tasks {
+		at := agentTask{ID: t.ID, Title: t.Title, Status: t.Status, Owner: t.Owner, Detail: t.Detail, Note: t.Note, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt}
+		if t.Schedule != nil {
+			at.Schedule = &agentSchedule{Plan: t.Schedule.Plan}
+		}
+		out.Tasks = append(out.Tasks, at)
+	}
+	return out
 }
 
 func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any, error) {
@@ -489,7 +549,7 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 		return nil, err
 	}
 	if change.Empty() {
-		return s.Yesmen.Board(c.yesman.Name)
+		return s.board(context.Background(), c, r)
 	}
 	var b yesmen.Board
 	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
@@ -502,7 +562,7 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 	if s.BoardChanged != nil {
 		s.BoardChanged(c.yesman.Name)
 	}
-	return b, nil
+	return agentBoardOf(b), nil
 }
 
 func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, error) {
@@ -552,7 +612,9 @@ func (s *Server) draftSchedule(_ context.Context, c caller, r *http.Request) (an
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
-	p, err := s.Schedules.Draft(c.yesman.Name, schedule.PlanInput{
+	// The body arrived after authentication: the plan is saved only if the
+	// caller is still the lead of the same workspace generation.
+	p, err := s.Schedules.Draft(c.yesman.Name, c.yesman.HiredAt, func() bool { return s.current(c) }, schedule.PlanInput{
 		Title: req.Title, Instructions: req.Instructions, Timezone: req.Timezone,
 		Schedule: schedule.Spec{Kind: req.Kind, Date: req.Date, Time: req.Time, Days: req.Days, Every: req.Every},
 	})

@@ -408,7 +408,7 @@ func TestCrashAfterBoardWrite(t *testing.T) {
 		if strings.Contains(string(data), `"state": "boarded"`) && !failed.Swap(true) {
 			return errors.New("crash")
 		}
-		return writeFile(path, data)
+		return nil
 	}})
 	e.save(PlanInput{Schedule: daily("09:00"), Enabled: true})
 	e.clock.Set(utc("2026-11-16T09:00:01Z"))
@@ -484,7 +484,7 @@ func TestLostAcknowledgmentIsNeverResent(t *testing.T) {
 		if crashed.Load() {
 			return errors.New("the app is gone")
 		}
-		return writeFile(path, data)
+		return nil
 	}})
 	e.save(PlanInput{Schedule: daily("09:00"), Enabled: true})
 	e.clock.Set(utc("2026-11-16T09:00:01Z"))
@@ -759,9 +759,24 @@ func TestValidation(t *testing.T) {
 			t.Errorf("saved %+v", in)
 		}
 	}
-	d, err := e.svc.Draft(ws, PlanInput{Title: "Lead's draft", Instructions: "x", Schedule: daily("09:00"), Timezone: "UTC", Enabled: true})
+	y, _ := e.store.Get(ws)
+	draft := PlanInput{Title: "Lead's draft", Instructions: "x", Schedule: daily("09:00"), Timezone: "UTC", Enabled: true}
+	d, err := e.svc.Draft(ws, y.HiredAt, func() bool { return true }, draft)
 	if err != nil || d.Enabled || d.CreatedBy != "lead" {
 		t.Fatalf("draft = %+v %v", d, err)
+	}
+	// A lead no longer running, or of another generation, saves nothing.
+	plans := len(e.view().Plans)
+	for _, c := range []struct {
+		since   time.Time
+		current bool
+	}{{y.HiredAt, false}, {y.HiredAt.Add(-time.Second), true}, {time.Time{}, true}} {
+		if _, err := e.svc.Draft(ws, c.since, func() bool { return c.current }, draft); !errors.Is(err, ErrStaleCaller) {
+			t.Fatalf("a stale lead's draft: %v", err)
+		}
+	}
+	if n := len(e.view().Plans); n != plans {
+		t.Fatalf("%d plans, want %d", n, plans)
 	}
 }
 

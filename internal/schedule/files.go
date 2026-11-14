@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -366,121 +364,10 @@ func planNumber(id string) int {
 	return n
 }
 
-// errUnsafePath reports a path yesman will not write through.
-type errUnsafePath struct{ path string }
-
-func (e errUnsafePath) Error() string {
-	return fmt.Sprintf("%s is a link or not a regular file or folder, so yesman left it unchanged", e.path)
-}
-
-// safeDir makes sure dir is a real directory, creating it when missing. A
-// link or a file at its path is left alone.
-func safeDir(dir string) error {
-	info, err := os.Lstat(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-			return err
-		}
-		info, err = os.Lstat(dir)
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errUnsafePath{dir}
-	}
-	return nil
-}
-
-// readLimited reads a regular file of at most limit bytes. A missing file
-// reads as nil.
-func readLimited(path string, limit int64) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errUnsafePath{path}
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%s is larger than %d KiB, so yesman left it unchanged", filepath.Base(path), limit>>10)
-	}
-	return data, nil
-}
-
 func randomHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-// writeFile replaces a file atomically, unless something other than a
-// regular file is at its path.
-func writeFile(path string, data []byte) error {
-	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
-		return errUnsafePath{path}
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	tmp := path + "." + randomHex(4) + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(tmp, path)
-	}
-	if err != nil {
-		_ = os.Remove(tmp)
-	}
-	return err
-}
-
-// errClaimed: the record already exists, made by another tick, process or
-// click.
-var errClaimed = errors.New("already claimed")
-
-// createFile creates a file that must not exist yet: the claim of a run.
-func createFile(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if errors.Is(err, os.ErrExist) {
-		return errClaimed
-	}
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		// The claim was ours; without its content it must not stand. If it
-		// cannot be removed, it reads as damaged and its occurrence as handled.
-		_ = os.Remove(path)
-	}
-	return err
 }
 
 // record is a run as kept in memory, with the fields of its file this
@@ -501,50 +388,6 @@ func encodeRun(r record) ([]byte, error) {
 	}
 	out.WriteByte('\n')
 	return out.Bytes(), nil
-}
-
-// readRuns reads every run record of a workspace. A record that cannot be
-// read stays on disk and reads as damaged: its occurrence counts as handled
-// and it is never sent.
-func readRuns(dir string) (map[string]*record, error) {
-	runs := map[string]*record{}
-	info, err := os.Lstat(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return runs, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, errUnsafePath{dir}
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	for _, e := range entries {
-		name, ok := strings.CutSuffix(e.Name(), ".json")
-		if !ok || !runIDRE.MatchString(name) {
-			continue // temporary files and anything else
-		}
-		plan, _, _ := strings.Cut(name, "-")
-		data, err := readLimited(filepath.Join(dir, e.Name()), maxRunFile)
-		r := &record{}
-		if err == nil {
-			err = json.Unmarshal(data, &r.Run)
-		}
-		if err == nil && (r.ID != name || r.Plan != plan) {
-			err = errors.New("its ID does not match its file")
-		}
-		if err == nil {
-			r.extra, err = unknown(data, runKeys)
-		}
-		if err != nil {
-			r = &record{Run: Run{ID: name, Plan: plan, Kind: RunScheduled, State: StateDamaged, Reason: "This record cannot be read: " + clip(err.Error(), 200)}}
-		}
-		runs[name] = r
-	}
-	return runs, nil
 }
 
 // plansOf returns a plan's records, newest first.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"maps"
 	"os"
@@ -52,7 +53,9 @@ type Config struct {
 	// Fault injection for tests: an error stops a run's pipeline at that
 	// point, as a crash would, leaving its records as they are.
 	afterClaim, afterBoard, afterAttempt func(Run) error
-	writeRun                             func(path string, data []byte) error
+	// writeRun is asked before a run record or pruned.json is written: an
+	// error fails the write, as a crash would; nil lets it go on.
+	writeRun func(path string, data []byte) error
 }
 
 // Errors a caller may show as they are.
@@ -65,6 +68,9 @@ var (
 	// left the history; it is not taken for a new run.
 	ErrRequestUsed = errors.New("this run was already made and its record has left the history, so it was not sent again: use Run now again for a new run")
 	errCaughtUp    = errors.New("this missed run was caught up already")
+	// ErrStaleCaller: the lead that asked was stopped, restarted or
+	// dismissed, or the workspace replaced, before the change was made.
+	ErrStaleCaller = errors.New("the lead that asked is no longer running in this yesman, so nothing was saved")
 )
 
 // Service runs the scheduled tasks of every workspace while the app runs.
@@ -98,11 +104,13 @@ type space struct {
 
 	mu     sync.Mutex
 	loaded bool
-	err    error // the plans file cannot be read; nothing is written over it
-	stamp  fileStamp
-	plans  plansFile
-	runs   map[string]*record
-	active map[string]bool // runs whose pipeline is queued or running
+	err    error // the plans file or the runs cannot be read; nothing is written over them
+	// runsErr says why the runs could not be read; they are read again.
+	runsErr error
+	stamp   fileStamp
+	plans   plansFile
+	runs    map[string]*record
+	active  map[string]bool // runs whose pipeline is queued or running
 	// fresh holds runs this scheduler claimed (or was asked to send again)
 	// and queued at once: waiting their turn does not make them late. A run
 	// picked up again later, after a crash, a quit or a step that failed,
@@ -126,14 +134,6 @@ type fileStamp struct {
 	size int64
 	mod  time.Time
 	ok   bool
-}
-
-func stampOf(path string) fileStamp {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return fileStamp{}
-	}
-	return fileStamp{size: info.Size(), mod: info.ModTime(), ok: true}
 }
 
 // New returns a Service. Start begins scheduling.
@@ -317,35 +317,58 @@ func (s *Service) RetireYesman(name string, since time.Time) {
 // loadLocked reads a workspace's plans, again when the file changed, and
 // its runs once.
 func (s *Service) loadLocked(sp *space, y yesmen.Yesman) {
-	path := plansPath(y)
-	st := stampOf(path)
-	if sp.loaded && st == sp.stamp && sp.err == nil {
+	// Every file is read through the folder opened here: a missing folder
+	// holds nothing yet, a link on the way is an error.
+	dir, err := openSchedules(y, false)
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	if dir != nil {
+		defer dir.Close()
+	}
+	st := stampIn(dir, "plans.json")
+	if sp.loaded && st == sp.stamp && sp.err == nil && err == nil {
 		return
 	}
-	data, err := readLimited(path, maxPlansFile)
+	dirErr := err
+	var data []byte
+	if dir != nil {
+		data, err = readIn(dir, "plans.json", maxPlansFile)
+	}
 	var f plansFile
 	if err == nil && data != nil {
 		f, err = decodePlans(data)
 	} else if err == nil {
 		f = plansFile{Version: plansVersion, planExtras: map[string]map[string]json.RawMessage{}}
 	}
+	var plansErr error
 	if err != nil {
-		sp.err = fmt.Errorf("the tasks file cannot be read, so yesman left it unchanged and runs none of its tasks: %w", err)
+		plansErr = fmt.Errorf("the tasks file cannot be read, so yesman left it unchanged and runs none of its tasks: %w", err)
 		if !sp.loaded {
 			sp.plans = plansFile{Version: plansVersion}
 		}
 	} else {
-		sp.err, sp.plans = nil, f
+		sp.plans = f
 	}
-	if !sp.loaded || sp.runs == nil {
-		runs, rerr := readRuns(runsDir(y))
+	// The runs are read once, and again while they could not be: until
+	// then nothing is claimed, saved or sent for the workspace.
+	if !sp.loaded || sp.runs == nil || sp.runsErr != nil {
+		runs, rerr := readRunsIn(dir)
+		if dirErr != nil {
+			rerr = dirErr
+		}
+		sp.runsErr = nil
 		if rerr != nil {
-			sp.err = errors.Join(sp.err, fmt.Errorf("the run history cannot be read: %w", rerr))
+			sp.runsErr = fmt.Errorf("the run history cannot be read: %w", rerr)
 			runs = map[string]*record{}
 		}
 		sp.runs = runs
 		clear(sp.checked)
-		data, perr := readLimited(prunedPath(y), maxPrunedFile)
+		var data []byte
+		perr := dirErr
+		if dir != nil && perr == nil {
+			data, perr = readIn(dir, "pruned.json", maxPrunedFile)
+		}
 		if perr == nil {
 			sp.pruned, perr = decodePruned(data)
 		}
@@ -354,22 +377,35 @@ func (s *Service) loadLocked(sp *space, y yesmen.Yesman) {
 			sp.prunedErr = fmt.Errorf("what yesman keeps of pruned runs (pruned.json) cannot be read, so it left it unchanged: %w", perr)
 		}
 	}
+	sp.err = errors.Join(plansErr, sp.runsErr)
 	sp.loaded, sp.stamp = true, st
 }
 
 func (s *Service) writePlansLocked(sp *space, y yesmen.Yesman, f plansFile) error {
-	if err := safeDir(schedulesDir(y)); err != nil {
-		return err
-	}
 	data, err := f.encode()
 	if err != nil {
 		return err
 	}
-	if err := writeFile(plansPath(y), data); err != nil {
+	dir, err := openSchedules(y, true)
+	if err != nil {
 		return err
 	}
-	sp.plans, sp.stamp = f, stampOf(plansPath(y))
+	defer dir.Close()
+	if err := writeIn(dir, "plans.json", data); err != nil {
+		return err
+	}
+	sp.plans, sp.stamp = f, stampIn(dir, "plans.json")
 	return nil
+}
+
+// runsFolder opens a workspace's runs folder for a write, creating it.
+func runsFolder(y yesmen.Yesman) (*os.Root, error) {
+	dir, err := openSchedules(y, true)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	return openRuns(dir, true)
 }
 
 func (s *Service) writeRunLocked(y yesmen.Yesman, r *record) error {
@@ -378,30 +414,34 @@ func (s *Service) writeRunLocked(y yesmen.Yesman, r *record) error {
 		return err
 	}
 	if s.cfg.writeRun != nil {
-		return s.cfg.writeRun(runPath(y, r.ID), data)
+		if err := s.cfg.writeRun(runPath(y, r.ID), data); err != nil {
+			return err
+		}
 	}
-	return writeFile(runPath(y, r.ID), data)
+	rd, err := runsFolder(y)
+	if err != nil {
+		return err
+	}
+	defer rd.Close()
+	return writeIn(rd, r.ID+".json", data)
 }
 
 // claimLocked creates a run's record, which must not exist yet.
 func (s *Service) claimLocked(sp *space, y yesmen.Yesman, r Run) (*record, error) {
-	if err := safeDir(schedulesDir(y)); err != nil {
-		return nil, err
-	}
-	if err := safeDir(runsDir(y)); err != nil {
-		return nil, err
-	}
 	rec := &record{Run: r}
 	data, err := encodeRun(*rec)
 	if err != nil {
 		return nil, err
 	}
-	if err := createFile(runPath(y, r.ID), data); err != nil {
+	rd, err := runsFolder(y)
+	if err != nil {
+		return nil, err
+	}
+	defer rd.Close()
+	if err := createIn(rd, r.ID+".json", data); err != nil {
 		if errors.Is(err, errClaimed) {
 			// Made by another tick or process: take theirs.
-			if runs, rerr := readRuns(runsDir(y)); rerr == nil && runs[r.ID] != nil {
-				sp.runs[r.ID] = runs[r.ID]
-			}
+			sp.runs[r.ID] = readRecordIn(rd, r.ID)
 		}
 		return nil, err
 	}
@@ -911,9 +951,14 @@ func (s *Service) pruneLocked(sp *space, y yesmen.Yesman, tasks map[string]yesme
 			sp.pruned = next
 		}
 	}
+	rd, err := runsFolder(y)
+	if err != nil {
+		return false
+	}
+	defer rd.Close()
 	changed := false
 	for _, r := range remove {
-		if err := os.Remove(runPath(y, r.ID)); err == nil || errors.Is(err, os.ErrNotExist) {
+		if removeIn(rd, r.ID+".json") == nil {
 			delete(sp.runs, r.ID)
 			delete(sp.checked, r.ID)
 			changed = true
@@ -931,13 +976,17 @@ func (s *Service) writePrunedLocked(y yesmen.Yesman, f prunedFile) error {
 	if len(data) > maxPrunedFile {
 		return fmt.Errorf("pruned.json would be larger than %d KiB", maxPrunedFile>>10)
 	}
-	if err := safeDir(schedulesDir(y)); err != nil {
+	if s.cfg.writeRun != nil {
+		if err := s.cfg.writeRun(prunedPath(y), data); err != nil {
+			return err
+		}
+	}
+	dir, err := openSchedules(y, true)
+	if err != nil {
 		return err
 	}
-	if s.cfg.writeRun != nil {
-		return s.cfg.writeRun(prunedPath(y), data)
-	}
-	return writeFile(prunedPath(y), data)
+	defer dir.Close()
+	return writeIn(dir, "pruned.json", data)
 }
 
 // retainedCount counts a plan's runs that stay whatever their age.
@@ -1388,14 +1437,16 @@ func (s *Service) ownerError() error {
 
 // edit runs a change of a workspace's plans with it held and loaded.
 func (s *Service) edit(name string, fn func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) error) error {
-	return s.editThen(name, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error) {
+	return s.editThen(name, nil, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error) {
 		return nil, fn(sp, y, f, now)
 	})
 }
 
 // editThen is edit with a step to take, still held, once the plans file
 // was written: what must not happen unless the change was saved.
-func (s *Service) editThen(name string, fn func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error)) error {
+// guard, when given, is asked with the workspace held before anything is
+// changed: an error leaves everything as it was.
+func (s *Service) editThen(name string, guard func(yesmen.Yesman) error, fn func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error)) error {
 	if err := s.ownerError(); err != nil {
 		return err
 	}
@@ -1404,6 +1455,11 @@ func (s *Service) editThen(name string, fn func(sp *space, y yesmen.Yesman, f *p
 		return err
 	}
 	defer release()
+	if guard != nil {
+		if err := guard(y); err != nil {
+			return err
+		}
+	}
 	sp := s.spaceFor(y)
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
@@ -1466,15 +1522,30 @@ func (s *Service) Save(name string, in PlanInput) (Plan, error) {
 }
 
 // Draft saves a plan for the lead, at the user's request; it is always off
-// until the user turns it on in Tasks.
-func (s *Service) Draft(name string, in PlanInput) (Plan, error) {
+// until the user turns it on in Tasks. since is the workspace generation the
+// lead belongs to, and current reports whether the lead that asked still
+// runs (nil: not checked); both are checked with the workspace held, just
+// before the plan is saved, so a lead stopped, restarted or dismissed while
+// its request was on its way, or a same-name workspace hired since, gets
+// nothing saved.
+func (s *Service) Draft(name string, since time.Time, current func() bool, in PlanInput) (Plan, error) {
 	in.ID, in.Revision, in.Enabled = "", 0, false
-	return s.save(name, in, "lead")
+	guard := func(y yesmen.Yesman) error {
+		if since.IsZero() || !y.HiredAt.Equal(since) || current != nil && !current() {
+			return ErrStaleCaller
+		}
+		return nil
+	}
+	return s.save(name, in, "lead", guard)
 }
 
-func (s *Service) save(name string, in PlanInput, by string) (Plan, error) {
+func (s *Service) save(name string, in PlanInput, by string, guard ...func(yesmen.Yesman) error) (Plan, error) {
 	var saved Plan
-	err := s.editThen(name, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error) {
+	var check func(yesmen.Yesman) error
+	if len(guard) > 0 {
+		check = guard[0]
+	}
+	err := s.editThen(name, check, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error) {
 		var then func()
 		err := func() error {
 			in, loc, err := in.normalize(now)
@@ -1574,12 +1645,20 @@ func (s *Service) forgetPlansLocked(sp *space, f *plansFile, n int, tasks map[st
 // what pruned.json keeps of them. A record that cannot be removed stays;
 // its plan's ID is never given again.
 func (s *Service) dropRunsLocked(sp *space, y yesmen.Yesman, plans []string) {
+	var rd *os.Root
 	for _, id := range sortedIDs(sp.runs) {
 		r := sp.runs[id]
 		if !slices.Contains(plans, r.Plan) || sp.active[id] {
 			continue
 		}
-		if err := os.Remove(runPath(y, id)); err == nil || errors.Is(err, os.ErrNotExist) {
+		if rd == nil {
+			var err error
+			if rd, err = runsFolder(y); err != nil {
+				break
+			}
+			defer rd.Close() // once: rd is opened once
+		}
+		if removeIn(rd, id+".json") == nil {
 			delete(sp.runs, id)
 			delete(sp.checked, id)
 		}

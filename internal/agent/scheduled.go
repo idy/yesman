@@ -91,3 +91,18 @@ func (m *Manager) LookupDelivery(ctx context.Context, id, messageID string, expe
 	}
 	return Delivery{}, DeliveryUnknown, nil
 }
+
+// CredentialCurrent reports whether token still belongs to the running agent
+// id it authenticated as: false once that agent was stopped, restarted or
+// dismissed, or the manager quit. A request that authenticated, then waited
+// for its body, checks again with it before it changes anything. It reads
+// only memory.
+func (m *Manager) CredentialCurrent(token, id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if token == "" || m.closed || m.tokens[token] != id {
+		return false
+	}
+	a := m.agents[id]
+	return a != nil && a.token == token && !a.retiring
+}
