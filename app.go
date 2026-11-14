@@ -12,6 +12,7 @@ import (
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/home"
+	"github.com/idy/yesman/internal/nativepermissions"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
@@ -94,6 +95,9 @@ type app struct {
 	updates *updates
 
 	files fileWatch // the workspace whose files the page shows
+
+	grantsOnce sync.Once
+	grants     *nativepermissions.Manager
 
 	infoOnce sync.Once
 	info     *infoCache // what the info panel measured
