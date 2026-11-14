@@ -36,6 +36,13 @@ func (s *Server) githubAppPull(ctx context.Context, c caller, r *http.Request) (
 	if decoder.Decode(&extra) != io.EOF {
 		return nil, errors.New("invalid GitHub App PR request")
 	}
-	// Workspace/actor come from Authenticate, never request fields or cwd.
+	// Revalidate after decoding, then bind token mint/gh execution to this
+	// actor's retirement fence. Archive/worker removal cancels and drains the
+	// operation without holding the workspace lock during network or gh I/O.
+	ctx, finish, err := s.Agents.BeginOperation(ctx, c.credential, c.agent, c.yesman.HiredAt)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	return s.GitHubApp.Create(ctx, c.yesman.Name, c.yesman.HiredAt.UTC().Format(time.RFC3339Nano), in)
 }

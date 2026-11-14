@@ -153,6 +153,9 @@ func (c *Client) CreateWithGH(ctx context.Context, gh string, in PullInput) (Pul
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, gh, args...)
+	// Retirement drains this operation. Bound pipe draining too if a child
+	// inherited gh's stdout/stderr and survives its cancellation.
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Dir = dir
 	cmd.Env = c.ghEnv(dir, token.value)
 	cmd.Stdin = strings.NewReader(in.Body)

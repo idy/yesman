@@ -26,7 +26,7 @@ func (n *closeNotice) Close() error { close(n.closed); return nil }
 
 func TestGitHubAppCanceledCallbackCannotReplaceNewRegistration(t *testing.T) {
 	a := newConfigApp(t, &fakeKeychain{})
-	a.githubApp = githubapp.NewManager(filepath.Join(a.home.Root, "github-app"), a.keychain, "/installed/gh")
+	a.githubApp = githubapp.NewManager(filepath.Join(a.home.Root, "github-app"), githubAppKeychain{a.keychain}, "/installed/gh")
 	t.Cleanup(func() { a.stopGitHubAppSetup(); a.githubApp.Close() })
 	s := &service{app: a}
 	if _, err := s.PrepareGitHubApp(""); err != nil {

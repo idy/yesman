@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -198,7 +199,19 @@ func helpRequested(args []string) bool {
 		if strings.HasPrefix(args[i], "-") && !takesValue(name) && !booleanOption(name) {
 			return false
 		}
-		if name == "--help" && (!inline || value == "true") {
+		if name == "--help" {
+			// gh accepts boolean spellings such as 0/1 and uses the last
+			// repeated flag. Only bypass for one proven read-only help flag;
+			// duplicates/ambiguity go through the broker and fail closed.
+			if requested {
+				return false
+			}
+			if inline {
+				value, err := strconv.ParseBool(value)
+				if err != nil || !value {
+					return false
+				}
+			}
 			requested = true
 		}
 		if takesValue(name) && !inline {

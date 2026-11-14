@@ -37,7 +37,7 @@ The app prepares a private `gh` executable wrapper under its runtime directory a
 
 The wrapper checks the authenticated caller's workspace mode through the loopback API. In personal mode it preserves arguments, stdin and the command environment. In App mode it sends only the PR fields to Go. The backend runs the installed real gh in an isolated directory with a repository-scoped installation token in that child alone. No App token reaches the wrapper, pi, the shell command environment, an extension, the model, or the webview. After gh creates the PR, a repository API read verifies the Bot author and registered App slug before reporting success.
 
-An unavailable broker, a conflicting non-github.com `GH_HOST`, or unreadable App configuration fails without personal fallback. A changed/locked/disabled configuration cancels outstanding App operations. An interrupted write may already have reached GitHub, so its error directs the caller to inspect the repository before retrying; creation is never blindly replayed.
+An unavailable broker, a conflicting non-github.com `GH_HOST`, or unreadable App configuration fails without personal fallback. A changed/locked/disabled configuration cancels outstanding App operations. Archiving a workspace, removing a worker or stopping its process also cancels and drains its App operations; already-admitted requests cannot borrow a replacement actor or workspace. An interrupted write may already have reached GitHub, so its error directs the caller to inspect the repository before retrying; creation is never blindly replayed.
 
 ## Key and token lifecycle
 
@@ -51,14 +51,14 @@ Registration uses random state, one conversion, duplicate parameter and Host val
 
 ## Validate the real identity
 
-A connection test is read-only and does not create a PR. For an authorized smoke test, create a distinct synthetic branch/commit with the existing push identity, then create a clearly titled **draft** PR using the selected App path. Independently verify REST `user.type = Bot`, the expected `user.login = <slug>[bot]`, avatar/profile URLs and the head repository/branch/SHA. Preserve the PR link; close the synthetic draft afterward without merging it or deleting its reference.
+A connection test is read-only and does not create a PR. Starting a new test clears the prior verification; only the latest successful test of the current key and scope can permit Enable. Failure or cancellation clears stale connection details. For an authorized smoke test, create a distinct synthetic branch/commit with the existing push identity, then create a clearly titled **draft** PR using the selected App path. Independently verify REST `user.type = Bot`, the expected `user.login = <slug>[bot]`, avatar/profile URLs and the head repository/branch/SHA. Preserve the PR link; close the synthetic draft afterward without merging it or deleting its reference.
 
 The current yesman OpenAI dispatcher skips draft PRs. A draft proves the author/avatar path, not ready-PR review admission or merge gates. App-created events must still trigger normal CI and current-head reviews; this App must not serve as an independent reviewer of its own PR. Ordinary GitHub Apps do not automatically join GitHub's partner Agents selector, and historical PR/comment authors are not rewritten.
 
 ## Development checks and standalone helper
 
 ```sh
-go test -race ./internal/githubapp ./internal/server .
+go test -race ./internal/githubapp ./internal/agent ./internal/server .
 go vet ./...
 node --test scripts/*.test.mjs
 node scripts/check-github-app-pi.mjs

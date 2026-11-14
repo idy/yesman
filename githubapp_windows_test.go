@@ -34,7 +34,7 @@ func TestGitHubAppWindowsCredentialManager(t *testing.T) {
 	_, _ = rand.Read(suffix)
 	native := mygo.Secrets.Service("yesman.github-app-fixture." + hex.EncodeToString(suffix))
 	dir := filepath.Join(t.TempDir(), "app vault")
-	manager := githubapp.NewManager(dir, native, `C:\fixture\gh.exe`)
+	manager := githubapp.NewManager(dir, githubAppKeychain{native}, `C:\fixture\gh.exe`)
 	t.Cleanup(manager.Close)
 	t.Cleanup(func() {
 		recipients, err := secrets.NewVault(filepath.Join(dir, "vault")).Recipients()
@@ -59,7 +59,7 @@ func TestGitHubAppWindowsCredentialManager(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager.Lock()
-	restarted := githubapp.NewManager(dir, native, `C:\fixture\gh.exe`)
+	restarted := githubapp.NewManager(dir, githubAppKeychain{native}, `C:\fixture\gh.exe`)
 	t.Cleanup(restarted.Close)
 	if err := restarted.Prepare(""); err != nil {
 		t.Fatal("native credential auto-unlock:", err)

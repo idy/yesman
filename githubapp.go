@@ -30,6 +30,19 @@ type GitHubAppView struct {
 	Workspaces []GitHubAppWorkspace `json:"workspaces"`
 }
 
+// githubAppKeychain normalizes only an absent item. An unavailable/denied store
+// is not reported as available, and generated setup still requires a real Set.
+// Keeping the adapter here avoids a desktop dependency in the broker package.
+type githubAppKeychain struct{ keychain }
+
+func (k githubAppKeychain) Get(name string) ([]byte, error) {
+	value, err := k.keychain.Get(name)
+	if errors.Is(err, mygo.ErrSecretNotFound) {
+		return nil, os.ErrNotExist
+	}
+	return value, err
+}
+
 // prepareGitHubAppRouting is deliberately non-fatal. A locked/missing wrapper
 // must not prevent the desktop or unrelated workspaces from starting. The shell
 // extension receives a separate fail-closed guard if a saved App mode needs it.
@@ -47,7 +60,11 @@ func (a *app) prepareGitHubAppRouting(gh, executable string) (string, error) {
 	if shim == "" {
 		availableGH = ""
 	}
-	a.githubApp = githubapp.NewManager(filepath.Join(a.home.Root, "github-app"), a.keychain, availableGH)
+	var store githubapp.Keychain
+	if a.keychain != nil {
+		store = githubAppKeychain{a.keychain}
+	}
+	a.githubApp = githubapp.NewManager(filepath.Join(a.home.Root, "github-app"), store, availableGH)
 	return shim, err
 }
 

@@ -20,7 +20,9 @@ import (
 
 // Keychain is implemented by the desktop's existing native credential store
 // (Keychain, Windows Credential Manager, Secret Service). It only stores the
-// random vault password, never a key in an agent environment.
+// random vault password, never a key in an agent environment. Get reports a
+// missing item as os.ErrNotExist (or nil/empty); other errors are availability
+// failures, not proof that generated-password storage will succeed.
 type Keychain interface {
 	Get(string) ([]byte, error)
 	Set(string, []byte) error
@@ -66,6 +68,7 @@ type Manager struct {
 	epoch       context.Context
 	cancel      context.CancelFunc
 	revision    uint64
+	testAttempt uint64 // latest connection test, independently of settings revision
 	newClient   func(Registration, []byte, []string) (*Client, error)
 }
 
@@ -140,7 +143,7 @@ func (m *Manager) hasKeychain() bool {
 		return false
 	}
 	_, err := m.keychain.Get("github-app-password/probe")
-	return !errors.Is(err, errors.ErrUnsupported)
+	return err == nil || errors.Is(err, os.ErrNotExist)
 }
 func (m *Manager) passwordKey() (string, error) {
 	recipients, err := m.vault.Recipients()
@@ -221,13 +224,20 @@ func (m *Manager) Prepare(password string) error {
 		if err := m.vault.Create(password); err != nil {
 			return err
 		}
-		if m.hasKeychain() {
+		// A generated password must be persisted even if the native store
+		// disappears after its first probe. A second availability probe is
+		// not evidence that Set succeeded.
+		if generated || m.hasKeychain() {
 			key, err := m.passwordKey()
 			if err == nil {
 				err = m.keychain.Set(key, []byte(password))
 			}
 			if err != nil && generated {
-				_ = m.vault.RemoveEmpty()
+				rollback := m.vault.RemoveEmpty()
+				m.vault.Lock() // also fail closed if rollback could not finish
+				if rollback != nil {
+					return errors.New("the credential store did not keep the GitHub App vault password; empty vault cleanup failed")
+				}
 				return errors.New("the credential store did not keep the GitHub App vault password")
 			}
 		}
@@ -478,6 +488,11 @@ func (m *Manager) Test(ctx context.Context) ([]Connection, error) {
 		m.mu.Unlock()
 		return nil, errManagerClosed
 	}
+	// Starting any new attempt revokes the old proof, including an attempt
+	// that fails/cancels. A late success from an older test cannot restore it.
+	m.testAttempt++
+	m.verified, m.connections = false, nil
+	attempt := m.testAttempt
 	c, revision, epoch, repos := m.client, m.revision, m.epoch, slices.Clone(m.cfg.Repositories)
 	m.mu.Unlock()
 	if c == nil {
@@ -498,8 +513,8 @@ func (m *Manager) Test(ctx context.Context) ([]Connection, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if revision != m.revision || ctx.Err() != nil {
-		return nil, errors.New("GitHub App configuration changed during the connection test; test again")
+	if revision != m.revision || attempt != m.testAttempt || ctx.Err() != nil {
+		return nil, errors.New("GitHub App configuration or connection test changed; test again")
 	}
 	m.verified = true
 	m.connections = results

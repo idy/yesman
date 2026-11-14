@@ -158,6 +158,7 @@ type agent struct {
 	info                           Info
 	proc                           *proc
 	token                          string
+	operations                     map[*externalOperation]struct{}
 	seq                            uint64        // the last event's number
 	turn                           []Event       // the events of the assistant message in progress
 	starting                       chan struct{} // closed when a start finishes, nil otherwise
@@ -889,8 +890,10 @@ func (m *Manager) Stop(id string) {
 		return
 	}
 	a.stopping = true
+	operations := cancelOperationsLocked(a)
 	wait := a.starting
 	m.mu.Unlock()
+	defer drainOperations(operations)
 	if wait != nil {
 		<-wait // the start sees stopping and ends its process
 	}
@@ -946,6 +949,7 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 // clearLocked forgets an agent's process, its credential, and the reply
 // it was writing, which a new process will not continue.
 func (m *Manager) clearLocked(a *agent, p *proc) {
+	cancelOperationsLocked(a)
 	if a.proc == p {
 		a.proc = nil
 	}
@@ -982,6 +986,7 @@ func (m *Manager) StopAll() {
 		ids = append(ids, id)
 		a := m.agents[id]
 		a.retiring = true
+		cancelOperationsLocked(a)
 	}
 	m.mu.Unlock()
 	// Initializers already published their agent before leaving the manager
@@ -1086,6 +1091,7 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 			return errStopped
 		}
 		a.retiring, a.removing = true, true
+		cancelOperationsLocked(a)
 	}
 	m.mu.Unlock()
 	fail := func(err error) error {

@@ -82,6 +82,7 @@ func (m *Manager) StopYesmanContext(ctx context.Context, name string) error {
 	for _, a := range m.agents {
 		if a.info.Yesman == name && (a.workspaceSince.IsZero() || a.workspaceSince.Equal(y.HiredAt)) {
 			a.retiring = true
+			cancelOperationsLocked(a)
 			agents = append(agents, a)
 		}
 	}

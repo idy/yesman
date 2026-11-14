@@ -96,8 +96,9 @@ func (s *Server) Handler() http.Handler {
 
 // caller is the agent a request comes from.
 type caller struct {
-	agent  agent.Info
-	yesman yesmen.Yesman
+	agent      agent.Info
+	yesman     yesmen.Yesman
+	credential string // internal revalidation only; never serialized
 }
 
 type handlerFunc func(ctx context.Context, c caller, r *http.Request) (any, error)
@@ -119,7 +120,7 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, err)
 			return
 		}
-		out, err := fn(r.Context(), caller{agent: info, yesman: y}, r)
+		out, err := fn(r.Context(), caller{agent: info, yesman: y, credential: token}, r)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
