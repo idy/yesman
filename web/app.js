@@ -371,7 +371,10 @@ function userBubble(m) {
 }
 
 function userRowEl(row) {
-  const legacy = !row.origin && legacyNoteEl(textOf(row.message.content));
+  // yesman wrote its notices as text alone: a message with images is a
+  // person's whatever its text says, and is shown in full with them.
+  const images = Array.isArray(row.message.content) && row.message.content.some((b) => b?.type === 'image');
+  const legacy = !row.origin && !images && legacyNoteEl(textOf(row.message.content));
   if (legacy) return legacy;
   const bubble = userBubble(row.message);
   if (!row.delivery) return bubble;

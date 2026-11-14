@@ -254,6 +254,89 @@ async function hookedTools(browser, engine) {
   return shown;
 }
 
+
+// A message nobody is known to have written is a person's: its images show,
+// in order, whatever its text says, including text in the form of yesman's
+// old notices (an input hook can rewrite a person's steering into a queued
+// report's text: pi's records then cannot tell the two apart). Only text alone
+// in that form, as yesman wrote its notices, keeps their old look.
+const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+async function unknownImages(browser, engine) {
+  const { page, errors } = await open(browser, after);
+  const emit = (data) => page.evaluate((d) => window.fixture.emit("alice/lead", d), data);
+  const frame = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const T = 1_794_656_000_000;
+  const text = (t) => ({ type: "text", text: t });
+  // As pi 1.5.2 recorded it: the image block's fields in pi's order.
+  const image = (data) => ({ type: "image", data, mimeType: "image/png" });
+  const report = '[yesman] Worker "2nd-pass" finished a run. Its final message:\n\nfixture reply';
+  const cases = [
+    { name: "report text and an image", message: { role: "user", timestamp: T + 1, content: [text(report), image(png)] }, images: [png] },
+    { name: "the report itself", message: { role: "user", timestamp: T + 2, content: [text(report)] }, images: [], note: "Report from worker 2nd-pass" },
+    { name: "lead text and two images", message: { role: "user", timestamp: T + 3, content: [text("[from your lead] see these"), image(png1x1), image(png)] }, images: [png1x1, png] },
+    { name: "notice text and an image", message: { role: "user", timestamp: T + 4, content: [text('[yesman] Worker "w1" has a question.'), image(png1x1)] }, images: [png1x1] },
+    { name: "images alone", message: { role: "user", timestamp: T + 5, content: [image(png), image(png1x1)] }, images: [png, png1x1] },
+    { name: "a person's message with its receipt", message: { role: "user", timestamp: T + 6, yesman: { source: "user", submission: sub(8) }, content: [text("and this one"), image(png)] }, images: [png], bound: sub(8) },
+  ];
+  // An open line of work stays open, kept and focused while rows arrive.
+  const work = page.locator("#thread > .work").first();
+  await work.locator(":scope > summary").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelector("#thread > .work")?.open);
+  await work.evaluate((el) => (el.dataset.kept = "1"));
+  await emit({ type: "delivery_update", delivery: { id: sub(7), revision: 2, state: "unconfirmed", text: report, imageCount: 1, order: 7 } });
+  await emit({ type: "delivery_update", delivery: { id: sub(8), revision: 2, state: "accepted", text: "and this one", imageCount: 1, order: 8 } });
+  for (const c of cases) await emit({ type: "message_end", message: c.message });
+  await frame();
+  const check = async (when) => {
+    const seen = {};
+    for (const c of cases) {
+      const row = page.locator(`[data-row="user:${c.message.timestamp}"]`);
+      await row.waitFor();
+      await row.scrollIntoViewIfNeeded();
+      const imgs = row.locator("img");
+      await page.waitForFunction((n) => [...document.querySelectorAll(`[data-row="user:${n}"] img`)].every((el) => el.complete && el.naturalWidth > 0), c.message.timestamp);
+      const shown = await imgs.evaluateAll((els) => els.map((el) => ({ src: el.getAttribute("src"), alt: el.alt, width: el.naturalWidth, height: el.naturalHeight })));
+      const label = `${when}: ${c.name}`;
+      assert.deepEqual(shown.map((i) => i.src), c.images.map((d) => `data:image/png;base64,${d}`), `${label}: the images shown`);
+      for (const i of shown) {
+        assert.equal(i.alt, "Attached image", label);
+        assert.deepEqual([i.width, i.height], i.src.endsWith(png1x1) ? [1, 1] : [16, 16], `${label}: image size`);
+      }
+      if (c.note) {
+        assert.equal(await row.evaluate((el) => el.matches("details.note[open]")), true, `${label}: not the old note`);
+        assert.equal(await row.locator(":scope > summary").innerText(), c.note);
+      } else {
+        // The row is the person's bubble, or holds it with its receipt.
+        const bubble = await row.evaluate((el) => {
+          const b = el.matches(".msg-user") ? el : el.querySelector(":scope > .msg-user");
+          return b && !el.matches(".note") && !el.querySelector(".note") ? (b.firstChild?.nodeType === 3 ? b.firstChild.textContent : "") : null;
+        });
+        const words = c.message.content.find((b) => b.type === "text")?.text ?? "";
+        assert.equal(bubble, words, `${label}: not a person's message with its text in full`);
+      }
+      assert.equal(await row.getAttribute("data-bound"), c.bound ? "true" : null, `${label}: bound to a receipt`);
+      seen[c.name] = shown.length;
+    }
+    assert.deepEqual(await page.locator(`[data-row="user:${T + 6}"] .delivery-status`).allInnerTexts(), ["Delivered"]);
+    // The receipt of a submission no message is tied to stays a light line.
+    assert.match(await page.locator(`[data-delivery="${sub(7)}"]`).innerText(), /Submission: \[yesman\] Worker[\s\S]*1 image submitted/);
+    assert.equal(await page.locator(`[data-delivery="${sub(7)}"]`).getAttribute("data-bound"), null);
+    return seen;
+  };
+  const live = await check("live");
+  assert.equal(await work.getAttribute("data-kept"), "1", "the open work was redrawn");
+  assert.equal(await work.evaluate((el) => el.open), true);
+  assert.equal(await work.locator(":scope > summary").evaluate((el) => document.activeElement === el), true, "focus left the open work");
+  await page.reload();
+  await page.locator('[data-agent="alice/lead"]').first().click();
+  await page.locator("#thread > .work").first().waitFor();
+  assert.deepEqual(await check("history"), live);
+  assert.deepEqual(errors, []);
+  await page.close();
+  return live;
+}
+
 const results = {};
 const engines = process.env.YESMAN_TEST_ENGINES?.split(",") ?? ["chromium", "webkit"];
 for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) => engines.includes(e))) {
@@ -439,7 +522,8 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await shot(dark.page, "dark-narrow", engine);
     assert.deepEqual(dark.errors, []);
     results[`${engine}-hooked-tools`] = await hookedTools(browser, engine);
-    console.log(engine, "folded work/people and replies in full/receipts/keyboard/live/steering/scroll/agents/reload/i18n/dark/narrow/final tool results PASS");
+    results[`${engine}-unknown-images`] = await unknownImages(browser, engine);
+    console.log(engine, "folded work/people and replies in full/receipts/keyboard/live/steering/scroll/agents/reload/i18n/dark/narrow/final tool results/unknown writers' images PASS");
   } finally {
     await browser.close();
   }
