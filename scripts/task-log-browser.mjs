@@ -20,6 +20,7 @@ window.filesFixture={
  ['.yesman/task-log/legacy-'+hash+'-original.md']:'# Legacy original\\n\\n## Old heading\\n\\nOriginal evidence and [Knowledge](knowledge/rules.md#durable)\\n',
  '.yesman/knowledge/INDEX.md':'# Knowledge\\n[Rules](rules.md)',
  '.yesman/knowledge/rules.md':'# Durable\\nRules only',
+ '.yesman/task-log/资料/旧 记录.md':'# Existing custom history\\n\\n[Contents](../../task-log.md)',
  '.yesman/task-log/empty.md':'',
  '.yesman/task-log/large.md':'# Large preview\\n'+('bounded preview line\\n'.repeat(26000)),
  'notes.md':'# Plain file\\nEdit me',
@@ -28,6 +29,7 @@ window.filesFixture={
 const recordPath='.yesman/task-log/2026-01-15-t3-picker.md';
 const nl=String.fromCharCode(10);
 filesFixture[recordPath]=filesFixture[recordPath].replace('## Validation',('Synthetic historical paragraph'+nl+nl).repeat(160)+'## Validation')+nl+nl+'[Top](#picker-detail)'+nl;
+filesFixture[toc]+=nl+'[Custom history](task-log/'+encodeURIComponent('资料')+'/'+encodeURIComponent('旧 记录.md')+')'+nl;
 const agents=['alice','bob'].map(name=>({id:name+'/lead',name:'lead',yesman:name,role:'lead',status:'idle'}));
 window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...args)=>{
  const m=method.replace('Yesman.','');calls.push([m,...args]);
@@ -140,6 +142,11 @@ try {
    await page.keyboard.press(process.platform==='darwin'?'Meta+s':'Control+s');
    await page.waitForFunction(()=>calls.some(c=>c[0]==='WriteFile'&&c[2]==='notes.md.bak'&&c[3]==='edited backup'));
    await page.getByRole('button',{name:'Working log',exact:true}).click();
+   await files.getByRole('link',{name:'Custom history',exact:true}).click();
+   await files.getByText('Existing custom history',{exact:true}).waitFor();
+   assert.equal(await files.getByRole('button',{name:'Source',exact:true}).count(),0);
+   assert.equal(await page.evaluate(()=>calls.filter(c=>c[0]==='ReadFile').at(-1)[2]),'.yesman/task-log/资料/旧 记录.md');
+   await files.getByRole('link',{name:'Contents',exact:true}).click();
    await files.getByRole('link',{name:'Empty',exact:true}).click();
    await files.locator('article.md').waitFor();assert.equal(await files.locator('article.md').innerText(),'');
    assert.equal(await files.getByRole('button',{name:'Source',exact:true}).count(),0);

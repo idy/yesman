@@ -412,7 +412,12 @@ export function createFiles(host) {
     // Windows paths match regardless of case.
     const inside = /^[A-Za-z]:\//.test(root) ? path.toLowerCase().startsWith(root.toLowerCase()) : path.startsWith(root);
     if (!inside) return false;
-    const rel = path.slice(root.length).replace(/\/+$/, '');
+    const parts = [];
+    for (const part of path.slice(root.length).split('/')) {
+      if (part === '..') { if (!parts.length) return false; parts.pop(); }
+      else if (part && part !== '.') parts.push(part);
+    }
+    const rel = parts.join('/');
     if (!rel) return false;
     const anchored = rel.match(/^(.+\.md)#(.*)$/i);
     if (anchored && isTaskLog(anchored[1])) {

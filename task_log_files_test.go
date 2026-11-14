@@ -25,6 +25,19 @@ func TestTaskLogFilesReadOnlyAndLinkedPaths(t *testing.T) {
 			t.Fatalf("history writable: %s", path)
 		}
 	}
+	custom := ".yesman/task-log/资料/旧 记录.md"
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(ws, custom)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, custom), []byte("# Existing custom history\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := s.ReadFile("alice", custom); err != nil || v.Kind != "text" {
+		t.Fatalf("custom Markdown read: %v", err)
+	}
+	if _, err := s.WriteFile("alice", custom, "overwrite", ""); err == nil {
+		t.Fatal("custom history was editable")
+	}
 	large := ".yesman/task-log/large.md"
 	if err := os.WriteFile(filepath.Join(ws, large), []byte(strings.Repeat("bounded history line\n", 300000)), 0o600); err != nil {
 		t.Fatal(err)

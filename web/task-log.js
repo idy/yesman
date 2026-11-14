@@ -4,7 +4,9 @@ export const TASK_LOG_DIR = '.yesman/task-log';
 const platformPath = (path) => typeof navigator !== 'undefined' && /Win/i.test(navigator.platform) ? path?.toLowerCase() : path;
 export const isTaskLog = (path) => {
   const value = platformPath(path);
-  return value === TASK_LOG || Boolean(value?.startsWith(`${TASK_LOG_DIR}/`) && /^[a-z0-9][a-z0-9._-]*\.md$/i.test(value.slice(TASK_LOG_DIR.length + 1)));
+  if (value === TASK_LOG) return true;
+  if (typeof value !== 'string' || !value.startsWith(`${TASK_LOG_DIR}/`) || !/\.md$/i.test(value)) return false;
+  return value.slice(TASK_LOG_DIR.length + 1).split('/').every((part) => part && part !== '.' && part !== '..' && !/[\\\u0000]/.test(part));
 };
 export const legacyLog = (path) => /^\.yesman\/task-log\/legacy-[0-9a-f]{64}-(?:original|\d{4})\.md$/.test(platformPath(path));
 export const logBase = (path) => legacyLog(path) ? '.yesman' : path.slice(0, path.lastIndexOf('/'));

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 )
@@ -16,9 +15,9 @@ const Dir = ".yesman/task-log"
 const Recovery = ".yesman/task-log-recovery"
 const Marker = ".yesman/task-log-migration.json"
 
-var partName = regexp.MustCompile(`(?i)^[a-z0-9][a-z0-9._-]*\.md$`)
-
-// IsPath accepts the TOC and flat Markdown records, never backups or nested paths.
+// IsPath recognizes the TOC and Markdown documents below the record root.
+// Reading/preview protection is broader than the lead's flat creation policy;
+// existing custom TOCs can link Unicode names, spaces and nested Markdown.
 func IsPath(path string) bool {
 	if runtime.GOOS == "windows" {
 		path = strings.ToLower(path)
@@ -26,8 +25,16 @@ func IsPath(path string) bool {
 	if path == TOC {
 		return true
 	}
-	name, ok := strings.CutPrefix(path, Dir+"/")
-	return ok && partName.MatchString(name)
+	rel, ok := strings.CutPrefix(path, Dir+"/")
+	if !ok || !strings.EqualFold(filepath.Ext(rel), ".md") {
+		return false
+	}
+	for _, part := range strings.Split(rel, "/") {
+		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, "\\\x00") {
+			return false
+		}
+	}
+	return true
 }
 
 const Template = `# Working log
