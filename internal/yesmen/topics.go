@@ -364,7 +364,7 @@ func (s *Store) useTopics(name string, since time.Time, fn func(Yesman, *topicsF
 	}
 	unlock := s.lockTopics(name)
 	defer unlock()
-	meta, err := openTopicsDir(y, false)
+	meta, err := s.openTopicsDir(y, false)
 	if err != nil {
 		return err
 	}
@@ -382,7 +382,7 @@ func (s *Store) useTopics(name string, since time.Time, fn func(Yesman, *topicsF
 		return err
 	}
 	if meta == nil {
-		if meta, err = openTopicsDir(y, true); err != nil {
+		if meta, err = s.openTopicsDir(y, true); err != nil {
 			return err
 		}
 		defer meta.Close()
@@ -393,37 +393,81 @@ func (s *Store) useTopics(name string, since time.Time, fn func(Yesman, *topicsF
 
 const topicsFileName = "topics.json"
 
-// openTopicsDir opens the workspace's .yesman directory through the
-// workspace itself, so neither it nor topics.json can lead outside: a link
-// out of the workspace is refused rather than followed. All reads and writes
-// then go through this one open directory. It returns nil, nil when the
-// directory does not exist and create is false.
-func openTopicsDir(y Yesman, create bool) (*os.Root, error) {
-	root, err := os.OpenRoot(y.Path)
-	if err != nil {
-		return nil, err
+// openTopicsDir opens the workspace's .yesman directory from the store's own
+// root, the one directory yesman was configured with (which may itself be
+// reached through a link). Below it the workspace and .yesman must be real
+// directories: a link standing in for either, whether it leads out of the
+// store or to another workspace, is refused rather than followed. All reads
+// and writes then go through this one open directory. It returns nil, nil
+// when .yesman does not exist and create is false.
+func (s *Store) openTopicsDir(y Yesman, create bool) (*os.Root, error) {
+	fail := func(err error) error {
+		return fmt.Errorf("%s cannot be opened inside the workspace (%v); topics are left as they are", filepath.Join(".yesman", topicsFileName), err)
 	}
-	defer root.Close()
+	store, err := os.OpenRoot(s.root)
+	if err != nil {
+		return nil, fail(err)
+	}
+	defer store.Close()
+	ws, err := openPlainDir(store, y.Name)
+	if err != nil {
+		return nil, fail(err)
+	}
+	defer ws.Close()
 	if create {
-		if err := root.Mkdir(".yesman", 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-			return nil, err
+		if err := ws.Mkdir(".yesman", 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, fail(err)
 		}
 	}
-	meta, err := root.OpenRoot(".yesman")
+	meta, err := openPlainDir(ws, ".yesman")
 	if errors.Is(err, os.ErrNotExist) && !create {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s cannot be opened inside the workspace (%v); topics are left as they are", filepath.Join(".yesman", topicsFileName), err)
+		return nil, fail(err)
 	}
 	return meta, nil
 }
 
+// openPlainDir opens directory name in parent only when it is a real
+// directory entry there, not a link or junction, and checks that the
+// directory opened is the one looked at, so an entry swapped meanwhile is not
+// taken for it.
+func openPlainDir(parent *os.Root, name string) (*os.Root, error) {
+	seen, err := parent.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !seen.IsDir() || seen.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return nil, fmt.Errorf("%s is a link or not a directory", name)
+	}
+	dir, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := dir.Stat(".")
+	if err == nil && !os.SameFile(seen, opened) {
+		err = fmt.Errorf("%s changed while it was opened", name)
+	}
+	if err != nil {
+		dir.Close()
+		return nil, err
+	}
+	return dir, nil
+}
+
 func readTopics(meta *os.Root) (*topicsFile, error) {
-	fh, err := meta.OpenFile(topicsFileName, os.O_RDONLY|topicsOpenFlags, 0)
+	seen, err := meta.Lstat(topicsFileName)
 	if errors.Is(err, os.ErrNotExist) {
 		return &topicsFile{Version: topicsFileVersion, Topics: []Topic{}}, nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("%s cannot be opened inside the workspace (%v); it is left as it is", topicsFileName, err)
+	}
+	if !seen.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file; it is left as it is", topicsFileName)
+	}
+	fh, err := meta.OpenFile(topicsFileName, os.O_RDONLY|topicsOpenFlags, 0)
 	if err != nil {
 		return nil, fmt.Errorf("%s cannot be opened inside the workspace (%v); it is left as it is", topicsFileName, err)
 	}
@@ -436,6 +480,16 @@ func readTopics(meta *os.Root) (*topicsFile, error) {
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file; it is left as it is", topicsFileName)
+	}
+	if !os.SameFile(seen, info) {
+		return nil, fmt.Errorf("%s changed while it was opened; it is left as it is", topicsFileName)
+	}
+	// A file with other names may be another workspace's or anyone's data:
+	// it is neither read nor replaced.
+	if n, err := fileLinks(fh); err != nil {
+		return nil, err
+	} else if n != 1 {
+		return nil, fmt.Errorf("%s has %d names (a hard link); it is left as it is", topicsFileName, n)
 	}
 	data, err := io.ReadAll(io.LimitReader(fh, maxTopicsFileRead+1))
 	if err != nil {

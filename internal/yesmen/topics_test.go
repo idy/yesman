@@ -462,8 +462,8 @@ func TestTopicsStayInsideTheWorkspace(t *testing.T) {
 	})
 
 	t.Run("link inside the workspace", func(t *testing.T) {
-		// A link that stays inside the workspace's .yesman is followed for
-		// reading; a write replaces the link itself, never its target.
+		// topics.json is a file of its own: even a link to another file of
+		// .yesman is neither read nor written through.
 		s, y := topicStore(t)
 		inner := filepath.Join(y.MetaDir(), "kept.json")
 		if err := os.WriteFile(inner, []byte(`{"version": 1, "topics": []}`), 0o644); err != nil {
@@ -472,11 +472,112 @@ func TestTopicsStayInsideTheWorkspace(t *testing.T) {
 		if err := os.Symlink("kept.json", y.TopicsFile()); err != nil {
 			t.Skip("symlinks unavailable:", err)
 		}
-		if _, err := s.CreateTopic("alice", y.HiredAt, TopicByUser, TopicInput{Title: "inside"}); err != nil {
-			t.Fatal(err)
+		if _, err := s.CreateTopic("alice", y.HiredAt, TopicByUser, TopicInput{Title: "inside"}); err == nil {
+			t.Fatal("wrote through a link")
 		}
 		if data, _ := os.ReadFile(inner); string(data) != `{"version": 1, "topics": []}` {
 			t.Fatalf("the link's target was written: %s", data)
+		}
+	})
+
+	t.Run("hard link", func(t *testing.T) {
+		s, y := topicStore(t)
+		target := outsideFile(t, outside)
+		if err := os.Link(target, y.TopicsFile()); err != nil {
+			t.Skip("hard links unavailable:", err)
+		}
+		if list, err := s.Topics("alice", y.HiredAt); err == nil || !strings.Contains(err.Error(), "hard link") {
+			t.Fatalf("read a hard-linked file: %+v %v", list, err)
+		}
+		if _, err := s.CreateTopic("alice", y.HiredAt, TopicByLead, TopicInput{Title: "x"}); err == nil {
+			t.Fatal("wrote over a hard-linked file")
+		}
+		if c := s.TopicCounts("alice"); c.Error == "" {
+			t.Fatal("counts must report the hard link")
+		}
+		if data, _ := os.ReadFile(target); string(data) != outside {
+			t.Fatalf("outside file changed: %s", data)
+		}
+		if data, _ := os.ReadFile(y.TopicsFile()); string(data) != outside {
+			t.Fatal("the workspace's name for it was replaced")
+		}
+	})
+
+	// The workspace directory itself replaced by a link, out of the store or
+	// to another workspace: neither is that workspace's .yesman.
+	for _, to := range []string{"outside", "another workspace"} {
+		t.Run("linked workspace to "+to, func(t *testing.T) {
+			s, y := topicStore(t)
+			dest := filepath.Join(t.TempDir(), "moved")
+			if to == "another workspace" {
+				bob, err := s.Hire("bob")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(bob.TopicsFile(), []byte(outside), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.RemoveAll(y.Path); err != nil {
+					t.Fatal(err)
+				}
+				dest = bob.Path
+			} else {
+				if err := os.Rename(y.Path, dest); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dest, ".yesman", "topics.json"), []byte(outside), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(dest, y.Path); err != nil {
+				t.Skip("symlinks unavailable:", err)
+			}
+			if list, err := s.Topics("alice", time.Time{}); err == nil {
+				t.Fatalf("read through a linked workspace: %+v", list)
+			}
+			if _, err := s.CreateTopic("alice", time.Time{}, TopicByLead, TopicInput{Title: "x"}); err == nil {
+				t.Fatal("wrote through a linked workspace")
+			}
+			if data, _ := os.ReadFile(filepath.Join(dest, ".yesman", "topics.json")); string(data) != outside {
+				t.Fatalf("the link's target changed: %s", data)
+			}
+		})
+	}
+
+	t.Run(".yesman linked inside the workspace", func(t *testing.T) {
+		s, y := topicStore(t)
+		other := filepath.Join(y.Path, "other")
+		if err := os.Rename(y.MetaDir(), other); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("other", y.MetaDir()); err != nil {
+			t.Skip("symlinks unavailable:", err)
+		}
+		if _, err := s.CreateTopic("alice", time.Time{}, TopicByLead, TopicInput{Title: "x"}); err == nil {
+			t.Fatal("wrote through a linked .yesman")
+		}
+		if _, err := os.Stat(filepath.Join(other, "topics.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("created topics.json through the link")
+		}
+	})
+
+	t.Run("store reached through a link", func(t *testing.T) {
+		// The store's own directory may be an alias the user configured.
+		real := t.TempDir()
+		alias := filepath.Join(t.TempDir(), "alias")
+		if err := os.Symlink(real, alias); err != nil {
+			t.Skip("symlinks unavailable:", err)
+		}
+		s := New(alias, filepath.Join(t.TempDir(), "archive"))
+		y, err := s.Hire("alice")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CreateTopic("alice", y.HiredAt, TopicByUser, TopicInput{Title: "via alias"}); err != nil {
+			t.Fatal(err)
+		}
+		if list, err := s.Topics("alice", y.HiredAt); err != nil || len(list) != 1 {
+			t.Fatalf("%v %v", list, err)
 		}
 	})
 
