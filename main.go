@@ -21,6 +21,7 @@ import (
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/server"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -31,8 +32,11 @@ var webFS embed.FS
 //go:embed pi/yesman.ts
 var extensionSource []byte
 
+// appName names the app, and with it the lock that keeps one instance.
+var appName = "yesman"
+
 func main() {
-	mygo.App.SetName("yesman")
+	mygo.App.SetName(appName)
 	mygo.App.SetLanguages(languages...)
 	if !mygo.App.RequestSingleInstanceLock() {
 		return // the running instance shows its window
@@ -77,8 +81,13 @@ func main() {
 	a.fetcher.SetInterval(time.Duration(a.settings.AutoFetch) * time.Minute)
 	go a.fetcher.Schedule(context.Background())
 
+	a.vault = secrets.NewVault(h.Secrets())
+	a.variables = secrets.NewVariables(h.Variables())
+	a.keychain = appKeychain()
+	go a.unlockFromKeychain() // the system may ask the user first
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
-		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) }, Crew: a.leadCrew}
+		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) },
+		Secrets:      a.vault, Variables: a.variables, Crew: a.leadCrew}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}

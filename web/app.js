@@ -7,11 +7,15 @@
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
+import { createInfo } from './info.js';
 import { createBoard } from './board.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
 import { createCrew } from './crew.js';
+import { createEnvPage } from './env.js';
+import { formatSize } from './diff.js';
+import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, formatNumber, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
@@ -41,13 +45,18 @@ const state = {
   view: { kind: 'none' },
   convos: new Map(),
   drafts: new Map(),
+  attachments: new Map(),
   modelOptions: new Map(),
   pane: null, // the pane beside the conversation: 'files', 'board' or null
   hideDone: new Set(JSON.parse(localStorage.getItem('yesman.hideDone') ?? '[]')), // yesmen whose done workers are hidden
+  // The info panel between the conversation and the files, open unless
+  // closed, as it was last.
+  panelOpen: localStorage.getItem('yesman.info') !== 'hidden',
   repos: [],
   settingsPage: 'general',
   settings: null, // Yesman.Settings, for the General page
   storageDraft: null, // destination and inline feedback while changing folders
+  storageUsage: { u: null, busy: false, error: '' }, // Yesman.StorageUsage, measured in the background
   about: null, // Yesman.About
   config: { busy: false, exported: null, imported: null }, // the last export and import, for Import and export
   repoQuery: '',
@@ -90,7 +99,7 @@ function convo(a) {
 // Forget conversations and drafts of agents that are gone.
 function pruneCaches() {
   const keys = new Set(state.snap.agents.map(keyOf));
-  for (const map of [state.convos, state.drafts, state.modelOptions]) {
+  for (const map of [state.convos, state.drafts, state.attachments, state.modelOptions]) {
     for (const key of map.keys()) if (!keys.has(key)) map.delete(key);
   }
   contextViewer.prune(keys);
@@ -232,7 +241,10 @@ function messageEl(c, m) {
       // when it did not finish, or the tasks still open.
       const notice = text.match(/^\[yesman\] ([\s\S]*)$/);
       if (notice) return h('div', { class: 'note note--quiet' }, h('div', { class: 'md', html: renderMarkdown(notice[1]) }));
-      return h('div', { class: 'msg-user' }, text);
+      const images = Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image' && imageURL(b)) : [];
+      return h('div', { class: 'msg-user' }, text,
+        images.length ? h('div', { class: 'message-images' }, images.map((image) =>
+          h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
     }
     case 'assistant': {
       const el = h('div', { class: 'msg-assistant' });
@@ -359,6 +371,7 @@ function workingLabel(a) {
 // Live records from an agent's pi process.
 function onAgentEvent(ev) {
   const { agent: id, data: e } = ev;
+  info.onAgentEvent(ev);
   if (e.type === 'extension_ui_request' && e.method === 'notify') {
     toast(`${id}: ${e.message}`);
     return;
@@ -649,6 +662,7 @@ function renderBarActions() {
       ? button('power', t('Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.'), () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
+    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }) : null,
     a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }) : null,
     a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }) : null,
   ].filter(Boolean));
@@ -790,7 +804,7 @@ function renderBody() {
     const again = active?.id && document.getElementById(active.id);
     if (again) {
       again.focus();
-      if (again.tagName === 'INPUT') again.setSelectionRange(active.selectionStart, active.selectionEnd);
+      if (['INPUT', 'TEXTAREA'].includes(again.tagName) && again.type !== 'password') again.setSelectionRange(active.selectionStart, active.selectionEnd);
     }
     return;
   }
@@ -804,7 +818,7 @@ function renderBody() {
   renderThread();
 }
 
-function renderDock() {
+function renderDock({ focusComposer = false } = {}) {
   const dock = $('#dock');
   const a = selectedAgent();
   const keep = dock?.querySelector('textarea');
@@ -825,15 +839,51 @@ function renderDock() {
   if (a.status === 'waiting' && a.dialog) dock.append(askEl(a));
 
   const working = a.status === 'working' || a.status === 'waiting';
+  const key = keyOf(a);
+  let attachments = state.attachments.get(key);
+  if (!attachments) state.attachments.set(key, (attachments = { items: [], reading: false, sending: false }));
+  const busy = attachments.reading || attachments.sending;
+  const previews = h('div', { class: 'composer-images', hidden: !attachments.items.length }, attachments.items.map((image) =>
+    h('div', { class: 'composer-image' },
+      h('img', { src: imageURL(image), alt: image.name, title: image.name }),
+      h('button', { class: 'round', type: 'button', disabled: busy, title: t('Remove image'), 'aria-label': t('Remove image'), onclick: () => {
+        attachments.items = attachments.items.filter((item) => item !== image);
+        renderDock();
+      } }, icon('trash')))));
+  const refresh = () => { if (keyOf(selectedAgent() ?? {}) === key) renderDock(); };
+  const addImages = async (files) => {
+    if (attachments.reading || attachments.sending || !files.length) return;
+    const error = imageFileError(files, attachments.items);
+    if (error) return fail(t(error));
+    attachments.reading = true;
+    refresh();
+    try {
+      const images = await Promise.all(files.map(readImageFile));
+      attachments.items.push(...images);
+    } catch (err) {
+      fail(t(errorText(err)));
+    } finally {
+      attachments.reading = false;
+      refresh();
+    }
+  };
+  const fileInput = h('input', { type: 'file', accept: IMAGE_ACCEPT, multiple: true, hidden: true, onchange: () => {
+    addImages([...fileInput.files]);
+    fileInput.value = '';
+  } });
+  const attach = h('button', { class: 'round', type: 'button', disabled: busy, 'aria-label': t('Attach images'),
+    title: t('Attach images (PNG, JPEG, GIF, WebP; 4 images, 5 MB each, 10 MB total)'), onclick: () => fileInput.click() }, icon('plus'));
   const textarea = h('textarea', {
-    rows: 1, 'aria-label': t('Message'),
+    // Read-only keeps the caret/focus while RPC acceptance is pending. A
+    // disabled textarea would drop focus to BODY before the next render.
+    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending,
     placeholder: a.role === 'lead' ? t('Message {name}…', { name: a.yesman }) : t('Message worker {name}…', { name: a.name }),
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
   const send = h('button', { class: 'round', type: 'submit', 'aria-label': t('Send'), title: working ? t('Send: delivered after its current step') : t('Send') }, icon('enter'));
   const stop = working ? h('button', { class: 'round round--stop', type: 'button', 'aria-label': t('Stop'), title: t('Stop the current run'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop')) : null;
   const sync = () => {
-    send.disabled = !textarea.value.trim() || !!state.modelOptions.get(keyOf(a))?.busy;
+    send.disabled = (!textarea.value.trim() && !attachments.items.length) || busy || !!state.modelOptions.get(keyOf(a))?.busy;
     textarea.style.height = 'auto';
     textarea.style.height = `${textarea.scrollHeight}px`;
   };
@@ -844,10 +894,21 @@ function renderDock() {
       form.requestSubmit();
     }
   });
+  textarea.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.items ?? [])].filter((item) => item.kind === 'file' && item.type.startsWith('image/')).map((item) => item.getAsFile()).filter(Boolean);
+    if (files.length) { e.preventDefault(); addImages(files); }
+  });
   const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea); } },
-    h('div', { class: 'composer-input' }, textarea, h('div', { class: 'ask-actions' }, stop, send)),
+    fileInput, previews,
+    h('div', { class: 'composer-input' }, textarea, h('div', { class: 'ask-actions' }, attach, stop, send)),
     h('div', { class: 'composer-controls' }, modelOptionsEl(a, working), contextViewer.mount(a)),
   );
+  form.addEventListener('dragover', (e) => {
+    if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = busy ? 'none' : 'copy'; }
+  });
+  form.addEventListener('drop', (e) => {
+    if (e.dataTransfer?.files.length) { e.preventDefault(); addImages([...e.dataTransfer.files]); }
+  });
   dock.append(form);
   composerSelects.push(...[...form.querySelectorAll('select')].map((el) => {
     const select = initSelect(el);
@@ -857,25 +918,36 @@ function renderDock() {
   sync();
   const nextControl = composerSelects.find((select) => select.trigger.getAttribute('aria-label') === control);
   if (nextControl && !nextControl.trigger.disabled) nextControl.trigger.focus({ preventScroll: true });
-  else if (focused || !keep) {
+  else if (focusComposer || focused || !keep) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
   }
 }
 
 async function sendMessage(a, textarea) {
+  const key = keyOf(a);
+  const attachments = state.attachments.get(key);
   const text = textarea.value.trim();
-  if (!text || state.modelOptions.get(keyOf(a))?.busy) return;
-  textarea.value = '';
-  state.drafts.delete(keyOf(a));
-  textarea.dispatchEvent(new Event('input'));
+  if ((!text && !attachments?.items.length) || attachments?.reading || attachments?.sending || state.modelOptions.get(key)?.busy) return;
+  const images = imagePayload(attachments?.items ?? []);
+  // A keyboard submit or a click on Send intends to continue composing.
+  // Keep that focus through pending renders; subsequent renders follow the
+  // actual focus, so moving to another control or agent cancels restoration.
+  const focusComposer = document.activeElement === textarea ||
+    document.activeElement === textarea.form?.querySelector('button[type="submit"]');
+  attachments.sending = true;
+  renderDock({ focusComposer });
   try {
-    await call('Send', a.id, text);
+    if (images.length) await call('SendImages', a.id, text, images);
+    else await call('Send', a.id, text);
+    state.drafts.delete(key);
+    attachments.items = [];
   } catch (err) {
-    textarea.value = text;
-    state.drafts.set(keyOf(a), text);
-    textarea.dispatchEvent(new Event('input'));
+    // Keep both text and images for retry if pi rejects the prompt.
     fail(err);
+  } finally {
+    attachments.sending = false;
+    if (keyOf(selectedAgent() ?? {}) === key) renderDock();
   }
 }
 
@@ -937,6 +1009,8 @@ const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
   { page: 'yesman', label: 'yesman', icon: 'users' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
+  { page: 'secrets', label: 'Secrets', icon: 'lock' },
+  { page: 'variables', label: 'Variables', icon: 'code' },
   { page: 'storage', label: 'Storage', icon: 'folder' },
   { page: 'pi', label: 'pi', icon: 'package' },
   { page: 'config', label: 'Import and export', icon: 'transfer' },
@@ -976,12 +1050,15 @@ function showSettings(page) {
 
 // Pages render what they last had at once and refresh it from the app.
 async function loadSettingsPage(page) {
+  if (page === 'storage') loadStorageUsage();
   try {
     if (page === 'general' || page === 'storage') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
     else if (page === 'pi') { await piPage.load(); return; }
     else if (page === 'yesman') { await crewPage.load(); return; }
+    else if (page === 'secrets') { await secretsPage.load(); return; }
+    else if (page === 'variables') { await variablesPage.load(); return; }
   } catch (err) {
     fail(err);
     return;
@@ -996,6 +1073,8 @@ function renderSettings(body) {
   else if (state.view.page === 'storage') renderStorage(inner);
   else if (state.view.page === 'pi') piPage.render(inner);
   else if (state.view.page === 'yesman') crewPage.renderPage(inner);
+  else if (state.view.page === 'secrets') secretsPage.render(inner);
+  else if (state.view.page === 'variables') variablesPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
   else if (state.view.page === 'about') renderAbout(inner);
   else renderGeneral(inner);
@@ -1059,6 +1138,19 @@ const crewPage = createCrew({
   openPage: () => showSettings('yesman'),
   preferenceRow,
 });
+// Settings › Secrets and Settings › Variables, in env.js.
+const envPage = (kind) => createEnvPage(kind, {
+  call,
+  fail,
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  shown: () => state.view.kind === 'settings' && state.view.page === kind,
+  rerender: () => renderBody(),
+  preferenceRow,
+  settingsSection,
+  revealButton,
+});
+const secretsPage = envPage('secrets');
+const variablesPage = envPage('variables');
 
 function renderGeneral(inner) {
   const v = state.settings;
@@ -1079,16 +1171,87 @@ function renderStorage(inner) {
   if (!v) return;
   inner.append(
     settingsSection(t('Data folder'), t('Choose where yesman keeps its data.'), ...storageRows(v)),
+    storageUsageSection(),
     settingsSection(t('Locations'), t('What yesman keeps, and where. Hover over a row for its full path.'),
       ...[
         ['Repositories', 'The shared pool of bare Git repositories.', v.pool],
         ['Workspaces', 'The parent folder for all yesman workspaces.', v.yesmen],
         ['Archive', 'Workspaces of dismissed yesmen, with their worktrees.', v.archive],
+        ['Secrets', 'The secrets, encrypted, and the key that opens them.', v.secrets],
+        ['Variables', 'The variables, in plain text.', v.variables],
         ['Runtime', 'Files yesman generates when it starts.', v.runtime],
         ['Settings file', 'Appearance and repository fetch preferences.', v.settingsFile],
         ['Storage configuration', 'Remembers the data folder across launches.', v.storageConfig],
       ].filter(([, , path]) => path).map(([label, hint, path]) => storagePathRow(t(label), t(hint), path))),
   );
+}
+
+// The locations Usage measures, in the order Locations lists them.
+const STORAGE_PARTS = { repos: 'Repositories', yesmen: 'Workspaces', archive: 'Archive', runtime: 'Runtime', other: 'Other files' };
+
+// loadStorageUsage measures the yesman folder, which can take a while, and
+// draws the card again in place: a folder being typed keeps its focus.
+async function loadStorageUsage(refresh = false) {
+  const s = state.storageUsage;
+  if (s.busy) return;
+  s.busy = true;
+  redrawStorageUsage();
+  try {
+    s.u = await call('StorageUsage', refresh);
+    s.error = '';
+  } catch (err) {
+    s.error = errorText(err);
+  } finally {
+    s.busy = false;
+    redrawStorageUsage();
+  }
+}
+
+function redrawStorageUsage() {
+  if (state.view.kind === 'settings' && state.view.page === 'storage') $('#storage-usage')?.replaceWith(storageUsageSection());
+}
+
+// The yesman folder's size, a bar of its locations, then each, and what
+// is left on the disk.
+function storageUsageSection() {
+  const { u, busy, error } = state.storageUsage;
+  const refresh = h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Measure again'), 'aria-label': t('Measure again'), disabled: busy, 'aria-busy': busy ? 'true' : null, onclick: () => loadStorageUsage(true) },
+    busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload'));
+  let body;
+  if (!u) {
+    body = [h('div', { class: 'storage-usage-head' },
+      error ? h('p', { class: 'danger', role: 'alert' }, error) : h('p', { class: 'storage-usage-meta' }, t('Measuring…')),
+      h('div', { class: 'storage-usage-when' }, refresh))];
+  } else {
+    const whole = u.bytes || 1;
+    const parts = u.parts.map((p) => ({ ...p, label: t(STORAGE_PARTS[p.kind] ?? p.kind) }));
+    const share = (p) => {
+      const pct = (p.bytes / whole) * 100;
+      return p.bytes > 0 && pct < 1 ? '<1%' : `${Math.round(pct)}%`;
+    };
+    const files = tn(u.files, '{n} file', '{n} files');
+    const meta = [u.partial ? t('At least, in {files}', { files }) : files];
+    if (u.disk) meta.push(t('{free} free of {total} on this disk', { free: formatSize(u.disk.free), total: formatSize(u.disk.total) }));
+    body = [
+      h('div', { class: 'storage-usage-head' },
+        h('div', null,
+          h('p', { class: 'storage-usage-total' }, formatSize(u.bytes)),
+          h('p', { class: 'storage-usage-meta' }, meta.join(' · '))),
+        h('div', { class: 'storage-usage-when' }, h('span', null, ago(u.measuredAt, 'measured')), refresh)),
+      error ? h('p', { class: 'danger', role: 'alert' }, error) : null,
+      h('div', { class: 'storage-meter', role: 'img', 'aria-label': t('{size} in all', { size: formatSize(u.bytes) }) },
+        parts.filter((p) => p.bytes > 0).map((p) => h('span', { 'data-tone': p.kind, style: `flex-grow: ${p.bytes / whole}`, title: `${p.label}: ${formatSize(p.bytes)}` }))),
+      h('ul', { class: 'storage-legend', role: 'list' }, parts.map((p) => h('li', { title: `${p.label}\n${tn(p.files, '{n} file', '{n} files')}` },
+        h('i', { class: 'storage-swatch', 'data-tone': p.kind, 'aria-hidden': 'true' }),
+        h('span', { class: 'storage-legend-label' }, p.label),
+        h('span', { class: 'storage-legend-size' }, formatSize(p.bytes)),
+        h('span', { class: 'storage-legend-share' }, share(p))))),
+    ];
+  }
+  const section = settingsSection(t('Usage'), t('The disk yesman’s data takes, by location.'),
+    h('div', { class: 'storage-usage', 'aria-busy': String(busy) }, body));
+  section.id = 'storage-usage';
+  return section;
 }
 
 function storagePathRow(label, hint, path) {
@@ -1235,14 +1398,16 @@ function renderConfig(inner) {
   const action = (label, onclick) => h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: c.busy, onclick }, label);
   const e = c.exported;
   const exportHint = e
-    ? h('p', null, tNodes('Exported {repos} and the settings to {path}.', { repos: repositories(e.repos), path: h('span', { class: 'path', title: e.path }, e.path) }),
-        e.skipped.length ? [' ', t('Left out, as they are not from GitHub: {names}.', { names: e.skipped.join(', ') })] : null)
-    : h('p', null, t('The theme, the fetch schedule and every GitHub repository in the pool, as a TOML file.'));
+    ? h('div', null,
+        h('p', null, tNodes('Exported {repos} and the settings to {path}.', { repos: repositories(e.repos), path: h('span', { class: 'path', title: e.path }, e.path) }),
+          e.skipped.length ? [' ', t('Left out, as they are not from GitHub: {names}.', { names: e.skipped.join(', ') })] : null),
+        h('p', null, exportedEnv(e)))
+    : h('p', null, t('The theme, the fetch schedule, every GitHub repository in the pool, the variables and the secrets with the password that opens them, as a TOML file. Keep it private.'));
   const i = c.imported;
   const importHint = i ? h('div', { class: 'config-imported' }, i.lines.map((line) => h('p', { class: line.danger ? 'danger' : null }, line.text)))
     : h('p', null, t('A file exported from yesman. You see what it changes, then merge it or replace with it.'));
   inner.append(
-    settingsSection(t('Configuration'), t('Back up yesman’s settings and repo pool, or carry them to another computer. Workspaces, their knowledge and conversations are not included.'),
+    settingsSection(t('Configuration'), t('Back up yesman’s settings, repo pool, variables and secrets, or carry them to another computer. Workspaces, their knowledge and conversations are not included.'),
       preferenceRow(t('Export'), exportHint, h('div', { class: 'storage-actions' }, e ? revealButton(e.path, t('the exported file')) : null, action(t('Export…'), exportConfig))),
       preferenceRow(t('Import'), importHint, action(t('Import…'), importConfig))));
 }
@@ -1260,6 +1425,17 @@ async function exportConfig() {
     c.busy = false;
     if (state.view.kind === 'settings' && state.view.page === 'config') renderBody();
   }
+}
+
+const variablesCount = (n) => tn(n, '{n} variable', '{n} variables');
+const secretsCount = (n) => tn(n, '{n} secret', '{n} secrets');
+
+// What an export says of the variables and secrets it carries.
+function exportedEnv(e) {
+  if (e.secrets == null) return t('It has {variables}, and no secrets, as none are set up.', { variables: variablesCount(e.variables) });
+  return e.password
+    ? t('It has {variables} and {secrets}, with the password that opens them: keep it private.', { variables: variablesCount(e.variables), secrets: secretsCount(e.secrets) })
+    : t('It has {variables} and {secrets}, but not their password, which the keychain does not keep: you need it to open them after importing.', { variables: variablesCount(e.variables), secrets: secretsCount(e.secrets) });
 }
 
 async function importConfig() {
@@ -1307,7 +1483,9 @@ function askImport(plan) {
   const settings = settingChanges(plan);
   const extra = plan.extra;
   const removable = extra.filter((r) => !r.inUse).length;
-  const replaceDiffers = removable > 0 || settings.some((s) => s.replaceOnly);
+  const env = plan.env;
+  const replaceDiffers = removable > 0 || settings.some((s) => s.replaceOnly)
+    || Boolean(env.variables?.extra.length) || Boolean(env.secrets?.plan?.extra.length);
   dialog.replaceChildren(h('form', { method: 'dialog' },
     h('h2', { class: 'mds-heading', id: 'import-title' }, t('Import {file}', { file: fileName(plan.path) })),
     h('p', { class: 'dialog-hint path', title: plan.path }, plan.path),
@@ -1326,14 +1504,45 @@ function askImport(plan) {
           h('span', { class: 'import-faint' }, ` · ${r.inUse ? t('kept: {reason}', { reason: r.inUse })
             : r.clone ? (r.clone === 'failed' ? t('failed to clone, stopped with Replace') : t('cloning, stopped with Replace'))
             : t('removed with Replace')}`))))) : null,
+      ...envParts(plan.env, part),
       plan.ignored.length ? h('p', { class: 'import-faint' }, t('Ignored, as this yesman does not know them: {keys}', { keys: plan.ignored.join(', ') })) : null),
     h('div', { class: 'mds-dialog-actions' },
       h('button', { class: 'mds-button', value: 'cancel' }, t('Cancel')),
-      replaceDiffers ? h('button', { class: 'mds-button', value: 'replace', title: t('Also reset the settings the file leaves out and remove the repositories it does not list') }, t('Replace')) : null,
-      h('button', { class: 'mds-button mds-button--primary', value: 'merge' }, t('Merge')))));
+      replaceDiffers && !env.replaceClash.length ? h('button', { class: 'mds-button', value: 'replace', title: t('Also reset the settings the file leaves out and remove the repositories, variables and secrets it does not list') }, t('Replace')) : null,
+      env.clash.length ? null : h('button', { class: 'mds-button mds-button--primary', value: 'merge' }, t('Merge')))));
   const answer = openDialog(dialog);
-  dialog.querySelector('.mds-button--primary').focus();
+  (dialog.querySelector('.mds-button--primary') ?? dialog.querySelector('.mds-button'))?.focus();
   return answer;
+}
+
+// envParts say what importing does to the variables and secrets, a part
+// for each the file has.
+function envParts(env, part) {
+  const names = (list) => h('span', { class: 'import-names mds-mono' }, list.join(', '));
+  const changes = (p) => [
+    p.add.length ? h('p', null, tNodes('Adds {names}', { names: names(p.add) })) : null,
+    p.change.length ? h('p', null, tNodes('Changes {names}', { names: names(p.change) })) : null,
+    p.extra.length ? h('p', null, tNodes('Only here: {names}. Merge keeps them; Replace removes them.', { names: names(p.extra) })) : null,
+    !p.add.length && !p.change.length && !p.extra.length ? h('p', null, t('Unchanged.')) : null,
+  ];
+  const parts = [];
+  if (env.variables) parts.push(part(t('Variables'), changes(env.variables)));
+  const s = env.secrets;
+  if (s) {
+    parts.push(part(t('Secrets'),
+      s.skipped ? h('p', { class: 'danger' }, t('Left out: {reason}.', { reason: s.skipped }))
+        : s.restore ? h('p', null, s.password
+          ? t('Sets up {secrets} from the file, and keeps their password in the keychain.', { secrets: secretsCount(s.names.length) })
+          : t('Sets up {secrets} from the file, locked: the file has no password, so enter it in Settings › Secrets.', { secrets: secretsCount(s.names.length) }))
+          : changes(s.plan)));
+  }
+  const clash = env.clash.length ? env.clash : env.replaceClash;
+  if (clash.length) {
+    parts.push(h('p', { class: 'danger' }, env.clash.length
+      ? t('Variables and secrets would both set {names}. Rename one, then import again.', { names: clash.join(', ') })
+      : t('Replace would have variables and secrets both set {names}, so only Merge is offered.', { names: clash.join(', ') })));
+  }
+  return parts;
 }
 
 // What an import did, in lines for the Import row.
@@ -1343,9 +1552,14 @@ function importLines(plan, result) {
   if (result.cloning.length) parts.push(tn(result.cloning.length, '1 repository cloning', '{n} repositories cloning'));
   if (result.removed.length) parts.push(t('{n} removed', { n: result.removed.length }));
   if (result.stopped.length) parts.push(tn(result.stopped.length, '1 clone stopped', '{n} clones stopped'));
+  if (result.env.variables != null) parts.push(t('{variables} now', { variables: variablesCount(result.env.variables) }));
+  if (result.env.secrets != null) parts.push(result.env.restored
+    ? (result.env.locked ? t('{secrets} set up, locked', { secrets: secretsCount(result.env.secrets) }) : t('{secrets} set up', { secrets: secretsCount(result.env.secrets) }))
+    : t('{secrets} now', { secrets: secretsCount(result.env.secrets) }));
   const changes = { file: fileName(plan.path), changes: parts.length ? parts.join(' · ') : t('nothing to change') };
   const lines = [{ text: result.mode === 'replace' ? t('Replaced with {file}: {changes}.', changes) : t('Merged {file}: {changes}.', changes) }];
   for (const r of result.kept) lines.push({ text: t('Kept {name}: {reason}.', { name: r.label, reason: r.inUse }), danger: Boolean(r.failed) });
+  if (result.env.skipped) lines.push({ text: t('Secrets left out: {reason}.', { reason: result.env.skipped }), danger: true });
   return lines;
 }
 
@@ -1356,6 +1570,7 @@ const AGO = {
   fetched: ['never fetched', 'fetched just now', 'fetched {n} min ago', 'fetched {n} h ago', 'fetched {n} d ago'],
   checked: ['never checked', 'checked just now', 'checked {n} min ago', 'checked {n} h ago', 'checked {n} d ago'],
   published: ['never published', 'published just now', 'published {n} min ago', 'published {n} h ago', 'published {n} d ago'],
+  measured: ['never measured', 'measured just now', 'measured {n} min ago', 'measured {n} h ago', 'measured {n} d ago'],
 };
 
 function ago(iso, what = 'fetched') {
@@ -1807,7 +2022,35 @@ const files = createFiles({
   checkout: (y) => openCheckout(y),
   dismiss: (name) => dismiss(name),
   confirm: (title, body, ok) => confirmAction(title, body, ok),
+  shown: () => info.render(),
+  worktrees: (y) => info.worktrees(y),
 });
+
+// ---------- Info panel ----------
+
+// The panel shows the yesman whose agent is shown, and opens its parts in
+// the files pane.
+const info = createInfo({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.panelOpen,
+  files: () => files.shown(),
+  openKnowledge: () => files.openKnowledge(),
+  openWorktree: (dir, show) => files.openWorktree(dir, show),
+  checkout: (y) => openCheckout(y),
+  openURL: (url) => call('OpenURL', url).catch(fail),
+});
+
+function togglePanel() {
+  state.panelOpen = !state.panelOpen;
+  localStorage.setItem('yesman.info', state.panelOpen ? 'shown' : 'hidden');
+  info.render();
+  renderBarActions();
+}
 
 // ---------- Board pane ----------
 
@@ -2019,12 +2262,12 @@ async function start() {
   });
   mygo.on('agents', onAgents);
   mygo.on('agent-event', onAgentEvent);
-  mygo.on('changed', refreshSoon);
+  mygo.on('changed', () => { refreshSoon(); info.onChanged(); });
   mygo.on('clones', onClones);
   mygo.on('fetches', onFetches);
   mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
-  mygo.on('files', (change) => files.onChange(change));
+  mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
   mygo.on('board', (yesman) => board.onChange(yesman));
   document.addEventListener('keydown', (e) => files.onKey(e));
   call('Update').then(onUpdate, () => {});

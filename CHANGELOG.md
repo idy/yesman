@@ -2,13 +2,42 @@
 
 Each release's section is what installed copies show as its release notes.
 
-## 0.1.13
+## 0.1.18
 
 - Settings › yesman lists the crew: the models agents run as, each one of pi's models at one reasoning effort. Add and remove them there, and choose what new yesmen run as.
 - Hiring a yesman asks only for its name: its lead runs as the model chosen for new yesmen.
 - The lead chooses a member of the crew for each worker, weighing how smart, fast and costly each is for the task, from Artificial Analysis's scores. Without a choice, a worker runs as its lead's model.
 - yesman finds each model's scores by its name. For a model Artificial Analysis has no record of, you give your own estimate when you add it.
 - You can still run any agent as any of pi's models from the composer.
+## 0.1.17
+
+- This release retains the image submission support shipped in 0.1.16. There are no additional application changes.
+
+## 0.1.16
+
+- Settings › Storage shows how much space yesman's data takes. Usage, between Data folder and Locations, measures the yesman folder in the background: its total size and file count, a bar of the repositories, workspaces, archive, runtime files and the rest, each with its share, and the space left on its disk. Measure again refreshes it.
+- Attach PNG, JPEG, GIF or WebP images to messages with the image picker, by pasting, or by dragging them into the composer. Send images with text or on their own, preview them and remove any before sending. Each message supports up to four images, 5 MiB each and 10 MiB in total.
+- Text and image drafts stay with each agent while switching conversations, and a failed send keeps the draft ready to retry. Sent images also appear in the conversation history.
+- Sending a message keeps the composer ready for the next one, while respecting focus moved to another control or conversation.
+
+## 0.1.15
+
+- Worktrees whose pull request is merged fold into one row at the end of the info panel's Worktrees list, so the work in progress stays on top. The row opens to show them, and a merged worktree the files pane shows stays in the list.
+- Quitting yesman stops every agent for good: a worker's report to its lead can no longer start the lead again while the app quits.
+
+## 0.1.14
+
+- Settings › Secrets keeps API keys, tokens and other secrets, and Settings › Variables keeps settings such as an account or a region. Every command of every agent gets each as an environment variable; agents read what each is for with the new `yesman_env` tool.
+- Edit them as a form, or as YAML in the editor. Each has a value and a description that tells agents what it is for.
+- Secrets are encrypted with sops and age, with a random password kept in the system's keychain (Keychain, Credential Manager or Secret Service), which unlocks them when yesman starts. Without one, you choose the password and type it after each launch. A secret's value never reaches an agent's context: output shows it as `[secret NAME]`. The sops command can edit the same file with its age key.
+- The configuration file (Settings › Import and export) now carries the variables and the secrets, still encrypted, with their password: importing it on another computer sets them up and unlocks them. Keep the file private.
+
+## 0.1.13
+
+- An info panel sits between the conversation and the files. Knowledge opens the agents' notes, rendered and read-only. Worktrees lists each worktree with the lines it changed, uncommitted edits too, or, when its branch is in a pull request, that pull request with its state and checks. Storage folds into one row with the disk the workspace takes, and opens to its largest parts.
+- A worktree opens in the files pane, as its files or its changes. Changes shows the changed files as a tree beside each file's diff, and stays quick with thousands of files: the tree arrives a folder at a time, and a diff is read when you choose it and drawn as you scroll.
+- The tree can show folders alone: choose a folder to list what changed in it, to see what the agents changed without reading every diff.
+- The files pane's bar is one row: the part shown, which switches to all files, the knowledge or another worktree, then the path, each folder a menu of its contents, holding only what changed in Changes.
 
 ## 0.1.12
 

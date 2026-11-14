@@ -154,4 +154,51 @@ var zhHans = map[string]string{
 	"an agent is cloning it":                                "有智能体正在克隆它",
 	"yesman could not check whether work depends on it: %s": "yesman 无法确认是否有工作依赖它：%s",
 	"removing it failed: %s":                                "移除失败：%s",
+
+	// Settings › Secrets and Variables: dialogs
+
+	// Settings › Secrets and Variables: what cannot be kept
+	"%s is a variable already: remove it from Variables first": "%s 已经是变量：请先从变量中移除",
+	"%s is a secret already: remove it from Secrets first":     "%s 已经是机密：请先从机密中移除",
+	"every entry needs a name":                                 "每一项都需要名称",
+	"%s is longer than 128 characters":                         "%s 超过 128 个字符",
+	"%q is not an environment variable name: use letters, digits and underscores, not starting with a digit": "%q 不是环境变量名：请使用字母、数字和下划线，且不要以数字开头",
+	"%s is set by the system, so it cannot be set here":                                                      "%s 由系统设置，不能在这里设置",
+	"%s is set by yesman or pi, so it cannot be set here":                                                    "%s 由 yesman 或 pi 设置，不能在这里设置",
+	"%s ends in %s, which sops keeps unencrypted: name the secret otherwise":                                 "%s 以 %s 结尾，sops 会以明文保存它：请换一个名称",
+	"%s is there twice": "%s 出现了两次",
+	"the value of %s has a NUL character, which an environment variable cannot hold":     "%s 的值含有 NUL 字符，环境变量无法保存它",
+	"the file should be a mapping with version and %s":                                   "文件应是包含 version 和 %s 的映射",
+	"version should be a number":                                                         "version 应为数字",
+	"this file is for a newer yesman (version %d); update yesman to read it":             "这个文件来自更新版本的 yesman（版本 %d）；请更新 yesman 后再读取",
+	"version %d is unknown":                                                              "未知的版本 %d",
+	"line %d: %s should be a mapping of names to values":                                 "第 %d 行：%s 应是从名称到值的映射",
+	"line %d: %q is not a key of this file; it has version and %s":                       "第 %d 行：%q 不是这个文件的键；它只有 version 和 %s",
+	"line %d: a name should be a word":                                                   "第 %d 行：名称应是一个单词",
+	"line %d: %s has %q; an entry has only value and description":                        "第 %d 行：%s 含有 %q；每一项只有 value 和 description",
+	"line %d: %s should have a value, or a value and a description":                      "第 %d 行：%s 应有一个值，或一个值和一段说明",
+	"line %d: a value should be text":                                                    "第 %d 行：值应是文本",
+	"this is not YAML: %s":                                                               "这不是 YAML：%s",
+	"line %d: %s is there twice":                                                         "第 %d 行：%s 出现了两次",
+	"the secrets are locked: unlock them with their password":                            "机密已锁定：请用密码解锁",
+	"secrets are not set up yet":                                                         "还没有设置机密",
+	"the password is wrong":                                                              "密码错误",
+	"the password should have at least %d characters":                                    "密码至少需要 %d 个字符",
+	"secrets are set up already":                                                         "机密已经设置好了",
+	"%s is there without its key, identity.age: put the key back, or move the file away": "%s 存在，但缺少它的密钥 identity.age：请放回密钥，或把这个文件移走",
+	"the secrets file is also encrypted to %s, which yesman cannot encrypt to":           "机密文件还加密给了 %s，yesman 无法为它加密",
+	"the secrets file has secrets, so it stays":                                          "机密文件中还有机密，因此保留它",
+
+	// Settings › Secrets: the password in the keychain
+	"this system keeps no passwords for apps: choose a password for the secrets": "这个系统不能为应用保存密码：请为机密设置一个密码",
+	"the keychain did not keep the password: %s":                                 "钥匙串没有保存密码：%s",
+	"the keychain has no password for these secrets: enter it":                   "钥匙串中没有这些机密的密码：请输入",
+	"the keychain has no password for these secrets":                             "钥匙串中没有这些机密的密码",
+
+	// The configuration file's variables and secrets
+	"secrets: the key is not an age file":                                                        "secrets：key 不是 age 文件",
+	"the file's password does not open its secrets: %s":                                          "文件中的密码打不开它的机密：%s",
+	"the file has no password for its secrets, so they cannot join the secrets here":             "文件中没有机密的密码，因此无法并入这里的机密",
+	"the secrets here are locked: unlock them in Settings › Secrets, then import the file again": "这里的机密已锁定：请在 设置 › 机密 中解锁，再重新导入文件",
+	"the variables and secrets would both set %s: rename one, then import again":                 "变量和机密会同时设置 %s：请重命名其中一个，再重新导入",
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -156,6 +157,70 @@ func (s *service) ChooseStorageFolder() (string, error) {
 
 func (s *service) CheckStorageFolder(destination string) (string, error) {
 	return checkStorageFolder(destination)
+}
+
+// StorageUsage is the disk the yesman folder takes, by location, and the
+// space of the disk it is on. Its parts come in a fixed order, as Settings ›
+// Storage lists the locations: repos, yesmen, archive, runtime, then other,
+// which holds the secrets, the variables, the settings and anything else.
+type StorageUsage struct {
+	WorkspaceUsage
+	// Disk is the disk the yesman folder is on, when the system says.
+	Disk *DiskSpace `json:"disk,omitempty"`
+}
+
+// DiskSpace is the size of a disk and how much of it is free to use.
+type DiskSpace struct {
+	Total int64 `json:"total"`
+	Free  int64 `json:"free"`
+}
+
+// StorageUsage measures the yesman folder, reusing a measure of the last
+// minute unless refresh asks again.
+func (s *service) StorageUsage(ctx context.Context, refresh bool) (StorageUsage, error) {
+	h := s.app.home
+	u, err := s.app.infoCache().measured(ctx, h.Root, refresh, func(ctx context.Context) (WorkspaceUsage, error) {
+		return measureStorage(ctx, h)
+	})
+	if err != nil {
+		return StorageUsage{}, err
+	}
+	v := StorageUsage{WorkspaceUsage: u}
+	if d, err := diskSpace(h.Root); err == nil {
+		v.Disk = &d
+	}
+	return v, nil
+}
+
+// measureStorage adds up the sizes of the files in the yesman folder by
+// location. Runtime and other files show only when there are some.
+func measureStorage(ctx context.Context, h home.Home) (WorkspaceUsage, error) {
+	root := h.Root
+	if real, err := filepath.EvalSymlinks(root); err == nil {
+		root = real // the walk does not follow a link, even the root
+	}
+	var parts []UsagePart
+	for _, p := range []struct{ kind, dir string }{
+		{"repos", h.Repos()}, {"yesmen", h.Yesmen()}, {"archive", h.Archive()}, {"runtime", h.Runtime()},
+	} {
+		rel, err := filepath.Rel(h.Root, p.dir)
+		if err != nil {
+			return WorkspaceUsage{}, err
+		}
+		parts = append(parts, UsagePart{Kind: p.kind, Path: filepath.ToSlash(rel)})
+	}
+	u, err := measureTree(ctx, root, parts)
+	if err != nil {
+		return u, err
+	}
+	all := u.Parts
+	u.Parts = []UsagePart{}
+	for _, pt := range all {
+		if pt.Files > 0 || (pt.Kind != "runtime" && pt.Kind != "other") {
+			u.Parts = append(u.Parts, pt)
+		}
+	}
+	return u, nil
 }
 
 // SetStorageFolder remembers the selected folder and restarts to open it.

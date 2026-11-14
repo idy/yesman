@@ -20,7 +20,7 @@ import (
 )
 
 func TestConfigRoundTrip(t *testing.T) {
-	data := formatConfig(Settings{Appearance: mygo.ThemeDark, AutoFetch: 15}, []string{"idy/magpie", "idy/yesman"})
+	data := formatConfig(Settings{Appearance: mygo.ThemeDark, AutoFetch: 15}, []string{"idy/magpie", "idy/yesman"}, nil, nil)
 	c, err := parseConfig(data)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, data)
@@ -33,7 +33,7 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 
 	// No repositories and no appearance chosen still make a full file.
-	c, err = parseConfig(formatConfig(Settings{}, nil))
+	c, err = parseConfig(formatConfig(Settings{}, nil, nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ key = 1
 
 	for text, want := range map[string]string{
 		`repos = []`:                          "no version",
-		"version = 2":                         "newer yesman",
+		"version = 3":                         "newer yesman",
 		"version = 0":                         "unknown",
 		"version = 1\nappearance = \"blue\"":  "appearance",
 		"version = 1\nauto_fetch = 7":         "auto_fetch",

@@ -131,9 +131,11 @@ type Config struct {
 type Manager struct {
 	cfg Config
 
-	mu     sync.Mutex
-	agents map[string]*agent
-	tokens map[string]string // credential -> agent ID, while its process runs
+	mu       sync.Mutex
+	agents   map[string]*agent
+	tokens   map[string]string // credential -> agent ID, while its process runs
+	closed   bool              // StopAll permanently prevents further starts; guarded by mu
+	shutdown chan struct{}     // closed by StopAll to wake pending report retries
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
 }
@@ -165,7 +167,7 @@ type agent struct {
 	inbox, settledInbox uint64
 }
 
-// errStopped is returned to a start that Stop interrupted.
+// errStopped is returned when Stop interrupts a start or the manager has quit.
 var errStopped = errors.New("the agent was stopped")
 
 // New returns a Manager.
@@ -176,7 +178,7 @@ func New(cfg Config) *Manager {
 	if cfg.OnChange == nil {
 		cfg.OnChange = func([]Info) {}
 	}
-	m := &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}, notify: make(chan struct{}, 1)}
+	m := &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}, shutdown: make(chan struct{}), notify: make(chan struct{}, 1)}
 	go func() {
 		for range m.notify {
 			m.cfg.OnChange(m.List())
@@ -337,6 +339,10 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 
 	for {
 		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return nil, nil, errStopped
+		}
 		a := m.agents[id]
 		if a == nil {
 			a = &agent{info: Info{ID: id, Yesman: ys, Name: name, Role: role, Status: Stopped}}
@@ -370,7 +376,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		p, state, err := m.spawn(a, y, name, role)
 
 		m.mu.Lock()
-		if err == nil && a.stopping {
+		if err == nil && (a.stopping || m.closed) {
 			// Stop came during the start: end what it started before
 			// letting Stop return.
 			m.mu.Unlock()
@@ -614,12 +620,20 @@ func (m *Manager) watch(a *agent, p *proc) {
 // Prompt sends a user message. While the agent works, it steers the run:
 // pi delivers it after the current tool calls.
 func (m *Manager) Prompt(ctx context.Context, id, text string) error {
-	m.unnudge(id)
-	return m.prompt(ctx, id, text, "steer")
+	return m.PromptImages(ctx, id, text, nil)
 }
 
-func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
-	if strings.TrimSpace(text) == "" {
+// PromptImages sends text and image content together, including when steering.
+func (m *Manager) PromptImages(ctx context.Context, id, text string, images []Image) error {
+	if err := validateImages(images); err != nil {
+		return err
+	}
+	m.unnudge(id)
+	return m.prompt(ctx, id, text, "steer", images...)
+}
+
+func (m *Manager) prompt(ctx context.Context, id, text, behavior string, images ...Image) error {
+	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return errors.New("empty message")
 	}
 	var (
@@ -667,18 +681,22 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string) error {
 		}
 	}
 	a.modelMu.Unlock()
-	return m.sendPrompt(ctx, a, p, text, behavior)
+	return m.sendPrompt(ctx, a, p, text, behavior, images...)
 }
 
 // sendPrompt dispatches a prompt already registered under modelMu and mu.
 // No manager lock is held while sending or waiting for pi's answer.
-func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behavior string) error {
+func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behavior string, images ...Image) error {
 	done := make(chan error, 1)
 	go func() {
 		// Cancelling the caller does not cancel the RPC already sent to pi.
 		// Keep it registered until pi answers (or exits), even if the caller
 		// stops waiting, so configuration cannot slip into its startup gap.
-		_, err := p.call(context.Background(), map[string]any{"type": "prompt", "message": text, "streamingBehavior": behavior})
+		cmd := map[string]any{"type": "prompt", "message": text, "streamingBehavior": behavior}
+		if len(images) > 0 {
+			cmd["images"] = images
+		}
+		_, err := p.call(context.Background(), cmd)
 		a.modelMu.Lock()
 		m.mu.Lock()
 		a.prompts--
@@ -870,9 +888,13 @@ func (m *Manager) StopYesman(name string) {
 	wg.Wait()
 }
 
-// StopAll stops every agent, for quitting.
+// StopAll permanently closes the manager and stops every agent, for quitting.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		close(m.shutdown)
+	}
 	ids := make([]string, 0, len(m.agents))
 	for id := range m.agents {
 		ids = append(ids, id)
@@ -1032,13 +1054,28 @@ func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, msg string) erro
 	m.unnudge(lead)
 	var err error
 	for attempt := range reportAttempts {
+		select {
+		case <-m.shutdown:
+			return errStopped
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if err = m.prompt(ctx, lead, msg, "followUp"); err == nil {
 			return nil
+		}
+		select {
+		case <-m.shutdown:
+			return errStopped
+		default:
 		}
 		if attempt < reportAttempts-1 {
 			select {
 			case <-time.After(time.Duration(attempt+1) * reportBackoff):
+			case <-m.shutdown:
+				return errStopped
 			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}

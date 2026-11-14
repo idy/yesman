@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -171,5 +174,45 @@ func TestStorageDoesNotReplaceUnavailableOrBrokenConfiguration(t *testing.T) {
 		if err != nil || string(got) != data {
 			t.Fatalf("rewrote a broken configuration: %s, %v", got, err)
 		}
+	}
+}
+
+func TestMeasureStorage(t *testing.T) {
+	h := home.Home{Root: t.TempDir()}
+	if err := h.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	writeSized(t, filepath.Join(h.Repos(), "github.com", "o", "r.git", "objects", "pack", "p.pack"), 200)
+	writeSized(t, filepath.Join(h.Yesmen(), "demo", "app--work", "main.go"), 30)
+	writeSized(t, filepath.Join(h.Yesmen(), "demo", ".yesman", "sessions", "s.jsonl"), 20)
+	writeSized(t, filepath.Join(h.Secrets(), "secrets.yaml"), 5)
+	writeSized(t, h.Settings(), 2)
+
+	u, err := measureStorage(context.Background(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Bytes != 257 || u.Files != 5 || u.Partial {
+		t.Errorf("total %d bytes in %d files, partial %v", u.Bytes, u.Files, u.Partial)
+	}
+	var got []string
+	for _, p := range u.Parts {
+		got = append(got, fmt.Sprintf("%s:%s=%d/%d", p.Kind, p.Path, p.Bytes, p.Files))
+	}
+	// In the order Settings lists them; an empty runtime is left out, an
+	// empty archive is not.
+	want := []string{"repos:repos=200/1", "yesmen:yesmen=50/2", "archive:archive=0/0", "other:.=7/2"}
+	if !slices.Equal(got, want) {
+		t.Errorf("parts %v, want %v", got, want)
+	}
+}
+
+func TestDiskSpace(t *testing.T) {
+	d, err := diskSpace(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Total <= 0 || d.Free < 0 || d.Free > d.Total {
+		t.Errorf("disk %+v", d)
 	}
 }

@@ -102,17 +102,24 @@ func TestReadFile(t *testing.T) {
 
 func TestFindFiles(t *testing.T) {
 	s, _ := testFiles(t)
-	got, err := s.FindFiles(context.Background(), "alice", "main")
+	got, err := s.FindFiles(context.Background(), "alice", "main", "")
 	if err != nil || len(got) == 0 || got[0] != "shop/cmd/main.go" {
 		t.Errorf("main = %v, %v", got, err)
 	}
 	// Names first, then paths, then characters in order; never sessions.
-	got, _ = s.FindFiles(context.Background(), "alice", "md")
+	got, _ = s.FindFiles(context.Background(), "alice", "md", "")
 	if len(got) < 2 || got[0] != "shop/README.md" || !slices.Contains(got, "shop/cmd/main.go") {
 		t.Errorf("md = %v", got)
 	}
-	if got, _ := s.FindFiles(context.Background(), "alice", "run.jsonl"); len(got) != 0 {
+	if got, _ := s.FindFiles(context.Background(), "alice", "run.jsonl", ""); len(got) != 0 {
 		t.Errorf("session logs were found: %v", got)
+	}
+	// Within a folder, its own name matches nothing.
+	if got, _ := s.FindFiles(context.Background(), "alice", "main", "shop/cmd"); len(got) != 1 || got[0] != "shop/cmd/main.go" {
+		t.Errorf("main under shop/cmd = %v", got)
+	}
+	if got, _ := s.FindFiles(context.Background(), "alice", "shop", "shop"); len(got) != 0 {
+		t.Errorf("shop under shop = %v", got)
 	}
 }
 

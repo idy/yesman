@@ -206,6 +206,14 @@ func (s *service) Send(ctx context.Context, id, text string) error {
 	return s.app.agents.Prompt(ctx, id, text)
 }
 
+// SendImages sends text and image content in the same pi prompt.
+func (s *service) SendImages(ctx context.Context, id, text string, images []agent.Image) error {
+	if s.app.piErr != nil {
+		return s.app.piErr
+	}
+	return s.app.agents.PromptImages(ctx, id, text, images)
+}
+
 // Models lists pi's available models and this agent's effective selection.
 // The user may run an agent as any of them; the crew is what yesman starts
 // agents as.
