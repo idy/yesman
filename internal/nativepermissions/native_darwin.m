@@ -153,8 +153,23 @@ static void request(uint64_t token, int permission) {
         case Accessibility:
             AXIsProcessTrustedWithOptions((CFDictionaryRef)@{(NSString *)kAXTrustedCheckOptionPrompt:@YES});
             break;
-        case Screen: CGRequestScreenCaptureAccess(); break;
-        case Input: CGRequestListenEventAccess(); break;
+        case Screen:
+        case Input:
+            // CoreGraphics has synchronous request APIs. Keep any system wait
+            // off MyGo's UI thread; pending remains owned by the main queue.
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                @autoreleasepool {
+                    NSString *failure = nil;
+                    @try {
+                        if (goPermissionActive(token)) {
+                            if (permission == Screen) CGRequestScreenCaptureAccess();
+                            else CGRequestListenEventAccess();
+                        }
+                    } @catch (NSException *exception) { failure = exception.reason ?: @"The system permission API failed."; }
+                    dispatch_async(dispatch_get_main_queue(), ^{ completeRequest(token, permission, failure); });
+                }
+            });
+            return;
         default: break;
     }
     completeRequest(token, permission, nil);
@@ -172,8 +187,11 @@ void ym_permission_start(uint64_t token, int permission, int action, const char 
                     case 0: query(token, permission); break;
                     case 1: request(token, permission); break;
                     case 2: {
-                        BOOL opened = [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:destination]];
-                        finish(token, Unknown, NO, NO, nil, opened ? nil : @"System Settings could not be opened. Open it manually and choose Privacy & Security or Notifications.");
+                        [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:destination] configuration:NSWorkspaceOpenConfiguration.configuration completionHandler:^(NSRunningApplication *app, NSError *error) {
+                            NSString *failure = error.localizedDescription;
+                            if (!app && !failure) failure = @"System Settings could not be opened. Open it manually and choose Privacy & Security or Notifications.";
+                            finish(token, Unknown, NO, NO, nil, failure);
+                        }];
                         break;
                     }
                     default: finish(token, Unknown, NO, NO, nil, @"Unknown permission action."); break;
