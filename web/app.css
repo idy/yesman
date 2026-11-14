@@ -333,7 +333,10 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .crew-dialog .dialog-hint { margin: 0; }
 .crew-pick { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 160px); align-items: start; gap: 12px; }
 .crew-dialog .field :is(.mds-select, .mds-input) { font-size: var(--mds-text-note); }
-.crew-dialog :is(.crew-pick, .crew-scores) .field + .field { margin-top: 0; } /* the grid spaces them */
+.mds-dialog.crew-dialog :is(.crew-pick, .crew-scores) .field { min-width: 0; margin: 0; } /* the grid spaces every field */
+@media (max-width: 560px) {
+  .crew-pick { grid-template-columns: minmax(0, 1fr); }
+}
 .crew-scores { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
 .crew-scores[hidden] { display: none; }
 .crew-scores .mds-hint { grid-column: 1 / -1; margin: 0; }
