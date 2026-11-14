@@ -41,14 +41,15 @@ var (
 )
 
 type app struct {
-	home    home.Home
-	pool    *pool.Pool
-	clones  *clones
-	fetcher *fetcher
-	yesmen  *yesmen.Store
-	agents  *agent.Manager
-	pi      string
-	piErr   error
+	home      home.Home
+	pool      *pool.Pool
+	clones    *clones
+	fetcher   *fetcher
+	yesmen    *yesmen.Store
+	agents    *agent.Manager
+	pi        string
+	piErr     error
+	managedPi bool
 	// runPi runs a pi command for the user, outside any workspace.
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs

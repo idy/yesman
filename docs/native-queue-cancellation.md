@@ -1,171 +1,198 @@
-# Native queue cancellation: dependency boundary and proposed API
+# Managed pi and native message recall
 
-Status: **not implemented in yesman**. Message Copy is available; Cancel/Edit and
-ArrowUp recall remain blocked on a native pi queue API. A queue count or a successful
-prompt acknowledgement cannot authorize cancellation of an individual receipt.
+yesman's default supported runtime is **pi 1.5.2 with queue protocol patch 1**
+(`1.5.2-yesman.1`). It provides actual per-occurrence pending identity and atomic
+cancellation. Original upstream pi 1.5.2 lacks that API; external runtimes retain
+normal sending/Copy and only expose recall if they report the supported protocol.
 
-## Verified current behavior
+## Runtime selection and distribution
 
-The audited installed packages are `@earendil-works/pi-coding-agent@1.5.2` and
-`@earendil-works/pi-agent-core@1.5.2`. yesman currently launches the user's installed
-`pi` executable; it does not own a pinned npm runtime.
+The app honors `YESMAN_PI` exactly. An unrecognized executable/wrapper found as
+`pi` on PATH also keeps its execution behavior. The official npm CLI (including
+npm's exact standard Windows `.cmd` shim), or no installed pi, selects the managed
+runtime. `Settings → pi` identifies managed mode and its cache path.
 
-| Boundary | Installed implementation | Missing capability |
-| --- | --- | --- |
-| RPC | `dist/modes/rpc/rpc-mode.js:314–355` forwards raw text/images; the request ID only correlates the response; `clear_queue` calls `session.clearQueue()` | No stable item ID, snapshot of item membership, or selective cancellation command |
-| Session SDK | `dist/core/agent-session.js:1836–1905` runs input hooks then creates a new user object; `:2046–2065` clears both queues or returns text arrays | No pending-item handle or selective removal method |
-| Session display | `agent-session.js:784–807` removes a pending display string using `indexOf(messageText)` at `message_start` | Text equality cannot establish which original intent was consumed, especially across hooks and equal inputs |
-| Core | `node_modules/@earendil-works/pi-agent-core/dist/agent.js:60–86` owns `PendingMessageQueue`; `:186–215` exposes enqueue, clear-all and peek | No selective removal; peek only previews the next batch, not all pending entries |
-| Extension SDK | `ExtensionContext` exposes `isIdle`, `abort`, `hasPendingMessages`, read-only session history; commands add session navigation | No access to a native pending-item handle or supported cancellation API |
+Managed mode requires **Node.js 22.19+**, with npm for the first preparation. The
+app embeds the package manifest, complete npm lockfile, source patch manifest,
+queue implementation, installer and MIT license through Go `embed`; these assets
+ship in every platform build. It does not modify a global npm/pi installation.
 
-`Agent.continue()` and the low-level loop call the same synchronous `drain()`
-(`agent.js:263–270,334–342`). That is the ownership boundary. `message_start`
-happens later, after the queue item has already left the pending set. Retrofitting
-cancellation at a message hook is too late.
+`internal/piruntime` prepares the runtime under the app's own `runtime/pi-managed/`
+directory. A hash of all embedded assets selects an immutable version directory.
+Preparation runs outside the UI and Manager mutex, in a unique temporary staging
+directory. It uses `npm ci --ignore-scripts --no-audit --no-fund`: every transitive
+version and tarball integrity is fixed by the lockfile, lifecycle scripts do not
+run, and npm's download cache remains under the application's runtime directory.
+The first preparation needs a network connection; a verified installed cache
+needs only Node. Failed preparation is reported and can be retried.
 
-SHA-256 of the audited installed JavaScript:
+Every patched input/output is SHA256 checked. The complete embedded assets,
+patched source, queue module and ready manifest are verified before atomic
+publication and on first use by each application process. Unexpected existing
+cache contents fail closed and stay available for diagnosis. Installation has a
+10-minute deadline and terminates its subprocess tree on cancellation. Concurrent
+callers wait with their own cancellation/deadline; another completed preparation
+is accepted only after verification.
 
-- `agent-session.js`: `ee756f6f74afe9f8930ebf216c95334605d913a275a0eec2c9702f101baef3c3`
-- `rpc-mode.js`: `505297dba2df1de3003c0399b3312fd581359a4e27a5e9262b274b6cb5cb4ef3`
-- `pi-agent-core/dist/agent.js`: `f45ae001e2b14fced8ae151f0a00303b5fbdb5fc4b25418d45de6a5546f48a8c`
+The runtime uses pi's original CLI, configuration/resource loader, user agent
+directory, providers, auth, models, packages and MCP behavior. It preserves the
+original environment, workspace cwd, `--session-dir`, `--continue`, model selection
+and production yesman extension. The installer does not read or rewrite pi user
+settings. Package-management actions still run pi's explicit package commands.
+Explicit external runtimes remain responsible for their own dependencies.
 
-Run the unmodified installed RPC probe:
+The upstream npm version is `@earendil-works/pi-coding-agent@1.5.2`, MIT licensed;
+upstream tag `v1.5.2` resolves to `b4afdddf44e059c67ccf5097e5317d913521b470`.
+`assets/LICENSE-pi` preserves the upstream license. Downloaded dependencies retain
+the files/licenses published in their integrity-pinned npm packages. The source
+patch covers nine files: core implementation/declarations; AgentSession
+implementation/declarations; RPC mode/types/client implementation/declarations;
+and the package CLI/RPC entrypoint paths. It adds one queue implementation module.
+No dependency code is patched dynamically at runtime.
+
+Rebuild the same dependency as the application in an isolated cache:
 
 ```sh
-node scripts/check-queue-capabilities-pi.mjs
+go run ./tools/pi-runtime /tmp/yesman-runtime-cache > runtime.json
+# runtime.json contains root, node, argv prefix, and the managed version.
+YESMAN_TEST_RUNTIME=/path/from/runtime.json node scripts/check-queue-runtime.mjs
+YESMAN_TEST_RUNTIME=/path/from/runtime.json node scripts/check-queue-sdk.mjs
+YESMAN_TEST_RUNTIME=/path/from/runtime.json go test -race ./internal/agent ./internal/piruntime
 ```
 
-It uses isolated configuration, synthetic images and a local deterministic
-provider. Two identical-text steering inputs with different image counts plus
-one follow-up produce string-only queue arrays. `cancel_queued_message` returns
-`Unknown command`; the three pending items remain. Passing `queueId` to
-`clear_queue` still clears all three, returning only text. This destructive command
-is exercised only in the isolated probe and is not used by yesman.
+Maintainers regenerate `assets/patch.json` from an **unmodified** `npm ci` using
+`node tools/pi-runtime/generate-patch.mjs /path/to/pristine-runtime <patch.json>`.
+Review both the generator and generated before/after hashes. Any lock, patch or
+asset change selects a new cache directory. CI prepares the dependency with this
+same Go preparer and runs the real RPC/SDK/Manager fixtures on all three OSes.
 
-## Proposed native change
+## Protocol and atomicity
 
-Prefer upstream pi support. If an independently maintained runtime is selected,
-carry a small reviewed source patch in that pinned runtime and test its built CLI;
-do not modify the user's global installation or introspect/mutate private queue
-arrays from yesman's extension. Depending on a different pi runtime also requires
-preserving the user's provider, package, resource, MCP and tool configuration.
-That deployment decision is larger than an extension-only change.
+Core enqueue returns a unique handle for each occurrence, even if two writers
+submit identical text/images or enqueue the same message object twice. Core
+records contain the handle, queue kind and optional host submission identity
+**separately from the AgentMessage**. Nothing is appended to user text, content
+blocks, persisted model messages or input/context/provider hook inputs.
 
-1. Give each core **enqueue occurrence** an opaque handle, returned by `steer()` or
-   `followUp()`. A token is separate from the message object: two writers may enqueue
-   the very same object, and each occurrence must be independently removable.
-2. Add synchronous `cancelQueued(handle): boolean` at the core queue owner. It must
-   remove exactly that entry without awaiting, rebuilding either queue, clearing
-   others, aborting the run or invoking model hooks. `drain()` and cancellation run
-   in the same event loop: whichever removes the entry first wins. After drain,
-   cancellation returns false even if no `message_start` event has reached the host.
-3. Add native enqueue/drain/remove notifications carrying handles and monotonically
-   increasing revisions. Session bookkeeping must update at those transitions,
-   not by matching displayed text. Include custom/extension-injected messages in
-   queue accounting, with their own provenance, without granting human edit actions.
-4. Carry the original submission identity in the **prompt invocation's private
-   closure** through asynchronous hooks and expansion. At enqueue, bind it to the
-   returned handle. Do not correlate by final text, timestamp or image fingerprint,
-   and do not append metadata to user content, `AgentMessage`, or model/context
-   hook inputs. Handled commands and inputs never create a pending handle.
-5. Expose a capability version plus session/process epoch, per-item snapshot and
-   cancellation in SDK/RPC. Illustrative wire contract (not a current command):
+`AgentSession.prompt`, `steer` and `followUp` carry an optional `submissionId` in
+the invocation's private options through asynchronous input hooks and expansion.
+At actual enqueue it binds to the new native handle. Extension-handled input
+creates no pending occurrence. Extension messages without a yesman submission ID
+remain native queue entries and cannot be edited through a human receipt row.
+
+Core `drain()` and `cancelQueuedMessage(epoch, queueId)` synchronously mutate the
+same pending registry. Exactly one can remove an occurrence. Cancellation after
+drain returns `not_pending`, even before a `message_start` observer has seen it.
+Cancellation never aborts the current response, clears another item, rebuilds
+queues, invokes input hooks again or changes survivor order. `taken` means pi
+removed it for dispatch; it does not claim a provider has already read it.
+
+The additive SDK and RPC methods are `getPendingQueue`/`get_pending_queue` and
+`cancelQueuedMessage`/`cancel_queued_message`. `get_state` includes `pendingQueue`
+and runtime identity. `queue_update` preserves the legacy `steering`/`followUp`
+string arrays and adds a revisioned `pending` snapshot with exact transitions.
+Legacy display bookkeeping is updated from native membership, never `indexOf`
+on user text.
 
 ```json
-{"type":"get_queue","id":"read-1"}
-{"type":"response","id":"read-1","success":true,"data":{"capability":1,"epoch":"process-session-nonce","revision":12,"items":[{"queueId":"opaque-id","submissionId":"immutable-intent-id","mode":"steer"}]}}
-{"type":"cancel_queued_message","id":"cancel-1","epoch":"process-session-nonce","queueId":"opaque-id"}
-{"type":"response","id":"cancel-1","success":true,"data":{"outcome":"cancelled","revision":13}}
+{"type":"get_pending_queue","id":"read-1"}
+{"type":"response","id":"read-1","success":true,"data":{"capability":1,"epoch":"session-nonce","revision":12,"items":[{"queueId":"session-nonce:3","submissionId":"48-hex-intent-id","kind":"steer"}],"steering":["message"],"followUp":[]}}
+{"type":"cancel_queued_message","id":"cancel-1","epoch":"session-nonce","queueId":"session-nonce:3"}
+{"type":"response","id":"cancel-1","success":true,"data":{"outcome":"cancelled","capability":1,"epoch":"session-nonce","revision":13,"items":[],"steering":[],"followUp":[]}}
 ```
 
-A stale epoch, wrong owner, or already-drained entry cannot succeed. A repeated
-cancel is distinguishable from an unknown handle through bounded terminal records;
-item IDs are never recycled within an epoch. Snapshot membership is useful for
-showing an action, but the cancellation result is the final authority. A missing
-capability means no Cancel/Edit or ArrowUp recall, including on old histories.
+The core keeps the last 1024 cancellation handles for idempotent acknowledgement
+recovery. Handles are never reused within an epoch; expired/unknown handles return
+`not_pending` without removing anything. A different epoch returns `stale`.
+Go's durable submission receipts provide the longer-lived idempotence contract.
+Snapshot membership enables the button; the atomic cancellation result decides
+whether recall actually succeeded.
 
-An executable, **test-only** core prototype is in
-[`scripts/probe-queue-cancel-core.mjs`](../scripts/probe-queue-cancel-core.mjs). On
-Node 24.22+ it checks the exact audited source hash and uses a loader hook to apply
-an in-memory delta; it writes no installed files and never runs in the app. It
-executes the actual installed agent loop with a deterministic stream to prove:
+## Receipt and original-payload lifecycle
 
-- cancellation of a middle steering and middle follow-up preserves survivor order;
-- same text/different images, equal images and even repeated identical object
-  references have distinct handles;
-- duplicate cancellation succeeds once; unknown handles leave all items intact;
-- cancellation before drain wins; cancellation at `message_start` loses;
-- both queue modes (`all` and `one-at-a-time`) behave correctly;
-- handles never enter the model messages, and the installed file is unchanged.
+Go sends its immutable submission ID only after a capability handshake. Its
+existing durable registration, fingerprint, 256 metadata/64 active bounds,
+retention floor and owner-generation checks remain. Exact native transitions can
+establish per-item pending membership, `dispatched`, or `cancelled`; unsupported
+runtimes keep the previous acceptance/uncertainty semantics.
 
-```sh
-node scripts/probe-queue-cancel-core.mjs
-# For a non-global installation:
-YESMAN_TEST_PI_PACKAGE=/path/to/pi-coding-agent node scripts/probe-queue-cancel-core.mjs
-```
+Complete original text plus ordered `{type,mimeType,data}` images are retained
+before pi hooks/normalization in bounded runtime memory: **32 MiB and 64 payloads
+per agent, 128 MiB across the Manager**. A record without its original payload has
+no Cancel/Edit action. This includes inputs that exceed available cache capacity
+and histories restored after a whole app restart. Receipt previews, transformed
+transcripts and thumbnails are never used to reconstruct the original input.
+Original images/full text are never written to `delivery.json`.
 
-This proves only the proposed core primitive. It does **not** validate a patched
-Session SDK/RPC, a shipped dependency, Go lifecycle cancellation, or composer
-restoration. Those layers must be implemented and independently reviewed before
-claiming native recall support.
+Cancel captures agent `Since`, workspace `HiredAt`, process/session epoch and the
+exact handle. It reserves the operation against cleanup, validates retirement and
+removal, and calls only native selective removal. RPC and persistence waits happen
+outside the global Manager mutex. A successful result returns original content
+only after the cancelled receipt is durable. A disk failure reports failure and
+can safely retry the same cancellation/persistence; a lost RPC response is
+reconciled by the ordered native event or an idempotent retry. Unknown outcomes
+are never automatically resent.
 
-## yesman integration once the API exists
+A cancelled submission ID remains bound to its old immutable intent. Submit retry
+returns its existing receipt without another dispatch; edited resend allocates a
+new ID. After terminal receipt eviction, the persisted floor still rejects the old
+ID before starting pi. Full Manager restart retains the tombstone but cannot offer
+full-payload restoration after the volatile cache is lost.
 
-Keep this separate from receipt acknowledgements. An eligible row needs a known
-current epoch, exact submission-to-native-handle binding, positive pending
-membership and the full original payload. Preserve original text plus ordered
-`{type,mimeType,data}` images before hooks or image normalization in a separately
-bounded in-memory cache; never store full images in `delivery.json`, and never
-reconstruct original input from a preview, transcript transformation or thumbnail.
-If cache capacity is exhausted or the payload is lost, omit recall eligibility.
-The existing receipt limits (256 metadata entries/64 active) and disk bounds stay.
+Original payloads are released when taken, definitively failed/handled, retired,
+evicted, or explicitly acknowledged after the UI restores them. A cancelled
+payload can survive a normal pi-process stop for same-agent recovery, but not
+workspace/worker retirement. Archive/removal continue sealing and joining writers;
+old callbacks cannot attach to a same-name replacement. If the UI disconnects
+before acknowledging restoration, the cancelled row offers **Return recalled
+message to input** while its original payload remains available. Once acknowledged,
+restored drafts have the same in-memory lifetime as other composer drafts.
 
-A cancel transaction must:
+## User behavior
 
-- capture the agent ID, `Since`, workspace `HiredAt`, native process/session epoch,
-  submission ID and queue handle; reserve against dispatch/retirement/removal;
-- acquire the complete original payload for the destination composer before asking
-  native pi to remove it; protect a nonempty draft with an explicit user choice or
-  safe separate draft storage; never silently replace or concatenate drafts;
-- atomically remove that native occurrence, then persist a terminal cancellation
-  receipt before reporting success; leave failed/uncertain outcomes truthful;
-- preserve the immutable intent's fingerprint and tombstone/floor semantics:
-  same-ID Submit retries return the old terminal record, never dispatch again;
-  edited resubmission uses a fresh ID; terminal-record eviction still advances the
-  persisted floor so a full Manager restart cannot revive the old intent;
-- revalidate owner/process/generation on callbacks. Slow native RPC or persistence
-  waits must not hold the global Manager mutex. Archive and worker removal seal
-  and join writers using the existing lifecycle barriers;
-- make lost-ack retries idempotent. The result can be reconfirmed, but restoring
-  the draft must happen once. Refresh/process loss without a full payload cannot
-  fabricate a successful text/image restore. A native removal with failed durable
-  acknowledgement remains uncertain until reconciled, never automatically resent.
+Reliable pending human receipt rows show **Cancel and edit**. Consumed, historical,
+unknown and unsupported-runtime messages offer Copy only. A nonempty draft or
+attachments block recall before any native mutation, with an explanation to send
+or clear that draft first. While waiting, only that agent's empty composer is
+read-only; agent switching remains available. Late results restore only the
+captured generation, never another agent or an intervening draft. Restore occurs
+once per client/agent generation, and resend is an explicit user action.
 
-ArrowUp is a composer-local action: empty text **and** no attachments, collapsed
-selection at the appropriate boundary, no IME composition, no active higher-priority
-menu/palette/dialog/recording, no pending send/read/cancel. Choose the current
-agent's newest reliably eligible handle. Suppress repeated activation while pending;
-late results update only that agent generation and cannot overwrite a new draft.
-Integrate through the final shortcuts registry rather than creating another global
-keyboard listener. No history editing, fork, implicit abort, clear/replay or restart.
+ArrowUp uses the same path for the current agent's newest reliably pending item.
+It applies only to an empty native composer with no attachments and a collapsed
+selection at position zero. IME composition, modifiers, held-key repeat, pending
+image/send/recall, and visible dialog/menu/listbox/recording consumers take priority.
+It is a textarea-local handler, not a second global shortcut manager. Final
+integration must also preserve the shortcuts feature's recording/palette guards.
 
-Required end-to-end acceptance includes both native queue modes and delivery kinds,
-multiple writers, middle-item cancellation, identical inputs, transformed input
-hooks, double clicks, consume/cancel and ack races, full image restoration,
-new-intent resend exactly once, lost acknowledgements, failed persistence, process
-exit and full restart, receipt eviction, archive/removal/same-name replacement,
-and production DOM/bridge tests for drafts, IME, keyboard consumers, refresh and
-cross-agent late results. Canceled input must not invent model usage or task
-completion. The existing unmodified-pi capability probe is evidence of the blocker,
-not acceptance evidence for that future implementation.
+Copy reads canonical raw text, preserving Markdown and line breaks, through the
+existing clipboard bridge. Pending original text is retrieved from the bounded
+payload cache, so long submissions can be copied completely. Complete short
+receipts and native transcript text are also copyable. Truncated historical
+receipts and image-only inputs disable text copying with explicit labels. Images
+are not copied to the clipboard. No history rewrite, fork or response rerun exists.
 
-## Current Copy behavior
+## Validation boundaries
 
-`web/message-actions.js` reads raw text blocks, never rendered Markdown. Native
-messages have Copy only. Submission receipts copy only when their stored text is
-complete (`preview` is absent/false); a truncated receipt disables Copy rather
-than losing content silently. Image-only inputs disable text copying with an
-explicit tooltip. Original images are not copied to the clipboard. Copy uses the
-existing `CopyValue` bridge, leaves drafts and queue state alone, prevents duplicate
-pending clicks, and surfaces clipboard failures. Internal notes/reports keep their
-existing renderer and have no message action toolbar.
+- `check-queue-runtime.mjs`: actual managed CLI/SDK/native queues/RPC, production
+  yesman extension plus third-party transform/context audit and local provider;
+  both kinds/modes, concurrent writers, middle cancellation, duplicate retries,
+  epoch mismatch, survivor order, post-drain failure and metadata isolation.
+- `check-queue-sdk.mjs`: actual managed public core SDK; same-object repeated
+  enqueue, 100 interleaved occurrences, ordering/race and bounded terminal handles.
+- `TestRecallWithManagedPi`: actual Go Manager and runtime, complete text/images,
+  cancelled-ID replay, new-intent resend, durability failure/recovery, full Manager
+  restart, archive/same-name generation and no full-payload receipt persistence.
+- `check-recall-browser.mjs`: production Chromium/WebKit → controlled bridge
+  transport → real Go service/Manager → actual managed pi, deterministic provider;
+  toolbar, original bytes, new intent, protected draft, ArrowUp priorities,
+  cross-agent late result, pure images, Copy and reload, English/Chinese.
+- Controlled bridge-only fixtures still test broader visual/clipboard-error and
+  legacy delivery cases. These are not OS clipboard/native MyGo GUI or external
+  paid-provider evidence. All new runtime/native tests use synthetic data and
+  isolated settings/workspaces; no real user's queue or session is exercised.
+
+The earlier `check-queue-capabilities-pi.mjs` and `probe-queue-cancel-core.mjs`
+remain diagnostic/history tools for unmodified installed pi1.5.2. The production
+implementation and acceptance evidence use the reproducibly prepared runtime,
+not that test-only loader prototype.

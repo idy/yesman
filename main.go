@@ -20,6 +20,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/server"
@@ -63,7 +64,20 @@ func main() {
 		log.Print("workspace task logs: ", err)
 	}
 	a.pi, a.piErr = findPi()
+	var piCommand func(context.Context) (string, []string, error)
+	if os.Getenv("YESMAN_PI") == "" && (a.piErr != nil || piruntime.OfficialNPM(a.pi)) {
+		managed, err := piruntime.New(h.Runtime())
+		a.piErr = err
+		if err == nil {
+			a.pi = managed.Description()
+			a.managedPi = true
+			piCommand = managed.Command
+		}
+	}
 	a.runPi = runPi(a.pi, h.Runtime())
+	if piCommand != nil {
+		a.runPi = runPiCommand(piCommand, h.Runtime())
+	}
 	a.piJobs = newPiJobs(a.runPi, func(j PiJobs) { _ = piJobsEvent.Broadcast(j) })
 	a.settings = loadSettings(h.Settings())
 	a.setTheme = mygo.Theme.SetSource
@@ -96,6 +110,7 @@ func main() {
 	}
 	a.agents = agent.New(agent.Config{
 		Pi:        a.pi,
+		Command:   piCommand,
 		Extension: extension,
 		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root},
 		Yesmen:    a.yesmen,

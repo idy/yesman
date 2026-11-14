@@ -527,7 +527,9 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     const kinds = provides([...new Set(installed.flatMap((p) => p.provides ?? []))].sort((a, b) => Object.keys(KINDS).indexOf(a) - Object.keys(KINDS).indexOf(b)));
     panel.replaceChildren(h('div', { class: 'mds-group' },
       preferenceRow(v.version ? `pi ${v.version}` : 'pi',
-        v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null, t('Every lead and worker runs this pi. Set YESMAN_PI to use another.'), ' ', h('span', { class: 'path' }, v.pi)),
+        v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null,
+          t(v.managed ? 'yesman manages this pi runtime and reuses your pi configuration and packages.' : 'Every lead and worker runs this pi. Set YESMAN_PI to use another.'), ' ', h('span', { class: 'path' }, v.pi)),
+        v.managed ? h('p', null, t('First use needs an internet connection and Node.js with npm. Set YESMAN_PI to keep using a custom runtime.')) : null,
         status),
       preferenceRow(t('Packages'), h('p', null, summary, kinds ? h('span', { class: 'pi-info-kinds' }, t('They give pi {kinds}.', { kinds })) : null),
         h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => showTab(v.packages.length || running || failed ? 'installed' : 'browse') },

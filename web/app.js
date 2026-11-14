@@ -6,6 +6,7 @@
 
 import { orderWorkers } from './sidebar.js';
 import { messageActions, messageText, receiptText } from './message-actions.js';
+import { mayRecallWithArrow, restoredImages } from './recall.js';
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
@@ -84,6 +85,7 @@ class Convo {
     this.live = null; // { message, el, blocks: Map(index -> el) }
     this.tools = new Map(); // toolCallId -> { args, status, result }
     this.deliveries = new Map(); // message ID -> server receipt (or local Sending only)
+    this.recalled = new Set(); // restored once in this client/agent generation
     this.seq = 0;
     this.eventSeqs = new Set();
     this.piQueue = { known: false };
@@ -124,12 +126,15 @@ const DELIVERY_LABELS = {
   sending: 'Sending…', accepted: 'Accepted · delivery unconfirmed',
   steering: 'Accepted for steering · delivery unconfirmed', queued: 'Accepted for follow-up · delivery unconfirmed',
   unconfirmed: 'Delivery unconfirmed', failed: 'Not sent', interrupted: 'Delivery interrupted',
-  handled: 'Handled by an extension',
+  handled: 'Handled by an extension', dispatched: 'Taken by pi', cancelled: 'Recalled',
 };
+
+const deliveryLabel = (d) => d.nativePending ? (d.state === 'queued' ? 'Queued for follow-up' : 'Queued for steering') : DELIVERY_LABELS[d.state];
 
 function pruneDeliveryRows(c, ids) {
   for (const id of ids ?? []) {
     c.deliveries.delete(id);
+    c.recalled.delete(id);
     if (keyOf(selectedAgent() ?? {}) === c.key) $('#thread')?.querySelector(`[data-delivery="${CSS.escape(id)}"]`)?.remove();
   }
 }
@@ -157,17 +162,69 @@ function updateDelivery(c, d) {
   }
 }
 
-function copyActions(text) {
-  const actions = messageActions({ text, copy: (value) => call('CopyValue', value), done: () => toast(t('Copied.')), fail });
+function copyActions(text, c = null, d = null) {
+  const eligible = (d?.canCancel || d?.canRestore) && !c?.recalled.has(d.id);
+  const actions = messageActions({ text,
+    loadText: d?.originalText ? () => call('SubmissionText', c.id, d.id, d.agentSince) : null,
+    copy: (value) => call('CopyValue', value), done: () => toast(t('Copied.')), fail,
+    recall: eligible ? () => recallMessage(c, d.id) : null, restoring: d?.canRestore });
   actions._copyText = text;
+  actions._recall = `${!!d?.canCancel}:${!!d?.canRestore}:${!!d?.originalText}`;
   return actions;
+}
+
+async function recallMessage(c, id) {
+  const a = selectedAgent();
+  if (!a || keyOf(a) !== c.key) return;
+  const key = c.key;
+  const attachments = state.attachments.get(key);
+  if (!attachments || attachments.sending || attachments.reading || attachments.recalling) return;
+  if ((state.drafts.get(key) ?? '') !== '' || attachments.items.length) return fail(t('Send or clear the current draft before recalling a message.'));
+  const receipt = c.deliveries.get(id);
+  if ((!receipt?.canCancel && !receipt?.canRestore) || c.recalled.has(id)) return;
+  // Lock only this agent's empty composer; switching agents remains available.
+  attachments.recalling = true;
+  let focusAllowed = true;
+  const movedFocus = (event) => {
+    if (!event.target.matches('.composer textarea')) focusAllowed = false;
+  };
+  document.addEventListener('focusin', movedFocus);
+  const current = () => state.attachments.get(key) === attachments && keyOf(agentById(a.id) ?? {}) === key;
+  const redraw = () => { if (current() && keyOf(selectedAgent() ?? {}) === key) renderDock(); };
+  redraw();
+  try {
+    const result = await call('CancelSubmission', a.id, id, a.since);
+    if (!current()) return;
+    updateDelivery(c, result.delivery);
+    refreshDelivery(c, c.deliveries.get(id));
+    if (result.delivery?.id !== id || result.delivery?.state !== 'cancelled' || typeof result.payload?.text !== 'string') throw new Error(t('Cancellation could not be confirmed.'));
+    const images = restoredImages(result.payload.images ?? []);
+    // A late callback must never overwrite a draft introduced by another path.
+    if ((state.drafts.get(key) ?? '') !== '' || attachments.items.length) throw new Error(t('The message was recalled. Clear the current draft to return it to the input.'));
+    state.drafts.set(key, result.payload.text);
+    c.recalled.add(id);
+    attachments.items = images;
+    attachments.submissionID = null;
+    attachments.submission = null; // explicit resend will allocate a new intent
+    const d = c.deliveries.get(id);
+    if (d) { d.canCancel = false; d.canRestore = false; d.originalText = false; refreshDelivery(c, d); }
+    // Failure to acknowledge only retains a bounded recovery copy. It never
+    // resends the old intent, and must not invalidate the restored draft.
+    call('AckRecall', a.id, id, a.since).catch(() => {});
+  } catch (error) {
+    if (current() && keyOf(selectedAgent() ?? {}) === key) fail(t(errorText(error)));
+  } finally {
+    document.removeEventListener('focusin', movedFocus);
+    attachments.recalling = false;
+    if (current() && keyOf(selectedAgent() ?? {}) === key) renderDock({ focusComposer: focusAllowed });
+  }
 }
 
 function deliveryEl(c, d) {
   const bubble = messageEl(c, { role: 'user', content: [
     { type: 'text', text: d.text ? (d.preview ? `${d.text}…` : d.text) : (d.imageCount > 0 ? t('Attached images') : '') }, ...(d.images ?? []),
   ] }, false);
-  const label = DELIVERY_LABELS[d.state];
+  const label = deliveryLabel(d);
   // An acknowledgement identifies a submission, not a transcript message.
   // Keep its original input available without duplicating a native user bubble
   // or guessing which (possibly transformed) message pi took for processing.
@@ -180,7 +237,7 @@ function deliveryEl(c, d) {
     h('div', { class: 'delivery-original' }, bubble, imageNote));
   return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(sending) }, content,
     h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite',
-      hidden: !label, title: d.error || null }, label ? t(label) : ''), copyActions(receiptText(d)));
+      hidden: !label, title: d.error || null }, label ? t(label) : ''), copyActions(receiptText(d), c, d));
 }
 
 function renderQueue(c) {
@@ -190,8 +247,9 @@ function renderQueue(c) {
   const q = c.piQueue;
   if (q.known && q.steering + q.followUp > 0) {
     const el = h('div', { class: 'pi-queue-status note note--quiet', role: 'status', 'aria-live': 'polite',
-      title: t('These counts describe pi’s whole queue, not an individual submission.') },
-      t('pi queue: {steering} steering · {followUp} follow-up', { steering: q.steering, followUp: q.followUp }));
+      title: q.recallSupported ? t('These counts describe pi’s whole queue, not an individual submission.') : t('This pi runtime does not support recalling individual queued messages.') },
+      t('pi queue: {steering} steering · {followUp} follow-up', { steering: q.steering, followUp: q.followUp }),
+      !q.recallSupported ? h('div', null, t('Individual recall is unavailable in this pi runtime.')) : null);
     const working = thread.querySelector('.working-live');
     working ? working.before(el) : thread.append(el);
   }
@@ -205,7 +263,7 @@ function refreshDelivery(c, d) {
   if (old && old.dataset.sending !== String(d.state === 'sending')) { old.replaceWith(deliveryEl(c,d)); return; }
   if (old) {
     const status = old.querySelector('.delivery-status');
-    const label = DELIVERY_LABELS[d.state];
+    const label = deliveryLabel(d);
     status.hidden = !label;
     status.textContent = label ? t(label) : '';
     status.title = d.error || '';
@@ -213,7 +271,7 @@ function refreshDelivery(c, d) {
     // its state. Keep the copy source current without closing its details.
     const actions = old.querySelector(':scope > .message-actions');
     const nextText = receiptText(d);
-    if (actions?._copyText !== nextText) actions?.replaceWith(copyActions(nextText));
+    if (actions?._copyText !== nextText || actions?._recall !== `${!!d.canCancel}:${!!d.canRestore}:${!!d.originalText}`) actions?.replaceWith(copyActions(nextText, c, d));
   } else {
     const el = deliveryEl(c, d);
     thread.querySelector('.thread-empty')?.remove();
@@ -527,7 +585,7 @@ function onAgentEvent(ev) {
   if (e.type === 'queue_update' || e.type === 'delivery_queue') {
     if (ev.seq <= c.queueSeq) return;
     c.queueSeq = ev.seq;
-    c.piQueue = e.type === 'delivery_queue' ? e.queue : { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0 };
+    c.piQueue = e.type === 'delivery_queue' ? e.queue : { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: e.pending?.capability === 1 };
     if (keyOf(selectedAgent() ?? {}) === c.key) {
       const scroller = $('#scroll');
       if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
@@ -562,7 +620,7 @@ function applyEvent(c, e, replaying,seq = 0) {
       if (visible) renderQueue(c);
       break;
     case 'queue_update':
-      c.piQueue = { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0 };
+      c.piQueue = { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: e.pending?.capability === 1 };
       if (visible) renderQueue(c);
       break;
     case 'delivery_retained':
@@ -1096,7 +1154,7 @@ function renderDock({ focusComposer = false } = {}) {
   const key = keyOf(a);
   let attachments = state.attachments.get(key);
   if (!attachments) state.attachments.set(key, (attachments = { items: [], reading: false, sending: false }));
-  const busy = attachments.reading || attachments.sending;
+  const busy = attachments.reading || attachments.sending || attachments.recalling;
   const previews = h('div', { class: 'composer-images', hidden: !attachments.items.length }, attachments.items.map((image) =>
     h('div', { class: 'composer-image' },
       h('img', { src: imageURL(image), alt: image.name, title: image.name }),
@@ -1106,7 +1164,7 @@ function renderDock({ focusComposer = false } = {}) {
       } }, icon('trash')))));
   const refresh = () => { if (keyOf(selectedAgent() ?? {}) === key) renderDock(); };
   const addImages = async (files) => {
-    if (attachments.reading || attachments.sending || !files.length) return;
+    if (attachments.reading || attachments.sending || attachments.recalling || !files.length) return;
     const error = imageFileError(files, attachments.items);
     if (error) return fail(t(error));
     attachments.reading = true;
@@ -1130,7 +1188,7 @@ function renderDock({ focusComposer = false } = {}) {
   const textarea = h('textarea', {
     // Read-only keeps the caret/focus while RPC acceptance is pending. A
     // disabled textarea would drop focus to BODY before the next render.
-    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending,
+    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending || attachments.recalling,
     title: working ? t('Enter to send after the current step; Shift+Enter for a new line') : '',
     placeholder: a.role === 'lead' ? t('Message {name}…', { name: yesmanLabel(a.yesman) }) : t('Message worker {name}…', { name: a.name }),
   });
@@ -1145,8 +1203,16 @@ function renderDock({ focusComposer = false } = {}) {
     textarea.style.height = `${textarea.scrollHeight}px`;
   };
   textarea.addEventListener('input', () => { state.drafts.set(keyOf(a), textarea.value); sync(); });
+  let composing = false;
+  textarea.addEventListener('compositionstart', () => { composing = true; });
+  textarea.addEventListener('compositionend', () => { composing = false; });
   textarea.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+    if (mayRecallWithArrow(e, textarea, attachments, composing)) {
+      const c = convo(a);
+      const latest = [...c.deliveries.values()].filter((d) => d.canCancel).sort((a, b) => b.order - a.order)[0];
+      if (latest) { e.preventDefault(); recallMessage(c, latest.id); return; }
+    }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && !composing) {
       e.preventDefault();
       form.requestSubmit();
     }
@@ -1191,7 +1257,7 @@ async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
   const text = textarea.value.trim();
-  if ((!text && !attachments?.items.length) || attachments?.reading || attachments?.sending || state.modelOptions.get(key)?.busy) return;
+  if ((!text && !attachments?.items.length) || attachments?.reading || attachments?.sending || attachments?.recalling || state.modelOptions.get(key)?.busy) return;
   const images = imagePayload(attachments?.items ?? []);
   const c = convo(a);
   // Editing after an uncertain submission is a new user intent. Retrying the

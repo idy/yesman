@@ -113,6 +113,9 @@ type Conversation struct {
 type Config struct {
 	// Pi is the pi executable.
 	Pi string
+	// Command resolves a managed runtime outside Manager locks. Nil preserves
+	// the executable supplied by callers and tests.
+	Command func(context.Context) (string, []string, error)
 	// Extension is the path of yesman's pi extension, loaded with -e.
 	Extension string
 	// Env is added to every agent's environment, after the app's own.
@@ -143,6 +146,7 @@ type Manager struct {
 	closed          bool              // StopAll permanently prevents further starts; guarded by mu
 	worktreeCleanup map[string]bool   // reservations preventing owner startup/input during final removal
 	shutdown        chan struct{}     // closed by StopAll to wake pending report retries
+	recallBytes     int               // full payload memory across all agent generations; guarded by mu
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
 }
@@ -175,6 +179,9 @@ type agent struct {
 	retiring, deliverySealed       bool
 	removing                       bool
 	queue                          QueueStatus
+	nativeQueue                    pendingQueue
+	recallPayloads                 map[string]recallPayload
+	recallBytes, recalls           int
 	deliverySettled                uint64 // sequence of last observed settled boundary
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
@@ -449,6 +456,10 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		}
 		a.proc = p
 		p.piSession.Store(state.SessionID)
+		a.nativeQueue = state.PendingQueue
+		if state.PendingQueue.Capability == 1 {
+			a.queue = pendingStatus(state.PendingQueue)
+		}
 		a.info.StartedAt = started
 		a.info.Status, a.info.Model, a.info.UpdatedAt = Idle, state.Model.ID, time.Now()
 		a.info.Provider, a.info.Effort, a.info.EffortLevels = state.Model.Provider, state.ThinkingLevel, nil
@@ -481,7 +492,19 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 		"YESMAN_ROLE="+role,
 		"YESMAN_WORKSPACE="+y.Path,
 	)
-	p, err := startProc(spec{Path: m.cfg.Pi, Args: args, Dir: y.Path, Env: env}, func(p *proc, kind string, raw json.RawMessage) {
+	path := m.cfg.Pi
+	if m.cfg.Command != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		var prefix []string
+		var err error
+		path, prefix, err = m.cfg.Command(ctx)
+		cancel()
+		if err != nil {
+			return nil, modelState{}, err
+		}
+		args = append(prefix, args...)
+	}
+	p, err := startProc(spec{Path: path, Args: args, Dir: y.Path, Env: env}, func(p *proc, kind string, raw json.RawMessage) {
 		m.record(a, p, kind, raw)
 	})
 	if err != nil {
@@ -767,6 +790,12 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		}
 		m.mu.Lock()
 		retiring := a.retiring || a.proc != p
+		if messageID != "" && a.nativeQueue.Capability == 1 {
+			cmd["submissionId"] = messageID
+		}
+		if a.nativeQueue.Capability != 1 {
+			m.forgetRecallLocked(a, messageID)
+		}
 		m.mu.Unlock()
 		var err error
 		if retiring {
@@ -813,7 +842,7 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	if !wasRunning {
 		defer func() { go m.closeIfFinished(a, p, time.Time{}) }()
 	}
-	_, _ = p.modelState(ctx, func(s modelState) { m.deliverySessionChanged(a, p, s.SessionID) })
+	_, _ = p.modelState(ctx, func(s modelState) { m.deliverySessionChanged(a, p, s.SessionID); m.syncPending(a, p, s.PendingQueue) })
 	// pi answers after emitting every earlier event, and the reader numbers
 	// those first. Capture the reply in progress and the last number on the
 	// reader as the answer arrives: events it handles next are not in the
@@ -927,7 +956,7 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
 	p := a.proc
-	idle := p != nil && a.starting == nil && a.prompts == 0 && a.reports == 0 && a.info.Status == Idle &&
+	idle := p != nil && a.starting == nil && a.prompts == 0 && a.recalls == 0 && a.reports == 0 && a.info.Status == Idle &&
 		!a.info.StartedAt.IsZero() && a.info.StartedAt.Before(startedBefore)
 	m.mu.Unlock()
 	if !idle {
@@ -1187,7 +1216,7 @@ func (m *Manager) closeIfFinished(a *agent, p *proc, finishedAt time.Time) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
-	idle := !a.retiring && a.proc == p && a.starting == nil && a.info.Status == Idle && a.prompts == 0
+	idle := !a.retiring && a.proc == p && a.starting == nil && a.info.Status == Idle && a.prompts == 0 && a.recalls == 0
 	yesman, name := a.info.Yesman, a.info.Name
 	m.mu.Unlock()
 	if !idle {

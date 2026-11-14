@@ -91,13 +91,21 @@ func newPiJobs(run func(context.Context, ...string) (string, error), changed fun
 // runPi runs a pi command in dir, a folder with no project settings, so
 // that it reads and writes only the user's.
 func runPi(pi, dir string) func(context.Context, ...string) (string, error) {
+	return runPiCommand(func(context.Context) (string, []string, error) { return pi, nil, nil }, dir)
+}
+
+func runPiCommand(command func(context.Context) (string, []string, error), dir string) func(context.Context, ...string) (string, error) {
 	return func(ctx context.Context, args ...string) (string, error) {
-		cmd := exec.CommandContext(ctx, pi, args...)
+		pi, prefix, err := command(ctx)
+		if err != nil {
+			return "", err
+		}
+		cmd := exec.CommandContext(ctx, pi, append(prefix, args...)...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "NO_COLOR=1", "FORCE_COLOR=0")
 		var out bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &out
-		err := cmd.Run()
+		err = cmd.Run()
 		text := pipkg.StripANSI(out.String())
 		if err != nil {
 			if ctx.Err() != nil {
@@ -305,6 +313,7 @@ func (j *piJobs) ChangedAt() time.Time {
 // PiView is what the pi settings page shows.
 type PiView struct {
 	Pi      string `json:"pi"`
+	Managed bool   `json:"managed,omitempty"`
 	Version string `json:"version,omitempty"`
 	PiError string `json:"piError,omitempty"`
 	// SettingsFile is pi's user settings, which list the packages.
@@ -349,7 +358,7 @@ func npmCommand(settingsFile string) []string {
 func (s *service) PiPackages(ctx context.Context) PiView {
 	a := s.app
 	settings := filepath.Join(piAgentDir(), "settings.json")
-	v := PiView{Pi: a.pi, SettingsFile: settings, NpmCommand: npmCommand(settings), Packages: []pipkg.Installed{}}
+	v := PiView{Pi: a.pi, Managed: a.managedPi, SettingsFile: settings, NpmCommand: npmCommand(settings), Packages: []pipkg.Installed{}}
 	if a.piErr != nil {
 		v.PiError = a.piErr.Error()
 		v.PiJobs = a.piJobs.List()

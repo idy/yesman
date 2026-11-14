@@ -11,19 +11,22 @@ export function receiptText(receipt) {
   return !receipt.preview && typeof receipt.text === 'string' ? receipt.text : null;
 }
 
-export function messageActions({ text, copy, done, fail }) {
-  const available = typeof text === 'string';
-  const label = !available ? t('Full message text is unavailable') : text.length ? t('Copy message text') : t('This message has no text to copy');
+export function messageActions({ text, loadText, copy, done, fail, recall, restoring = false }) {
+  const available = typeof text === 'string' || typeof loadText === 'function';
+  const hasText = !!loadText || !!text?.length;
+  const label = !available ? t('Full message text is unavailable') : hasText ? t('Copy message text') : t('This message has no text to copy');
   let pending = false;
   const button = h('button', {
     class: 'message-copy', type: 'button', title: label, 'aria-label': label,
-    disabled: !available || !text.length,
+    disabled: !available || !hasText,
     onclick: async () => {
-      if (pending || !available || !text.length) return;
+      if (pending || !available || !hasText) return;
       pending = true;
       button.setAttribute('aria-busy', 'true');
       try {
-        await copy(text);
+        const value = loadText ? await loadText() : text;
+        if (typeof value !== 'string') throw new Error(t('Full message text is unavailable'));
+        await copy(value);
         done();
       } catch (error) {
         fail(error);
@@ -33,5 +36,10 @@ export function messageActions({ text, copy, done, fail }) {
       }
     },
   }, icon('copy'));
-  return h('div', { class: 'message-actions' }, button);
+  const recallLabel = restoring ? t('Return recalled message to input') : t('Cancel and edit');
+  const recallButton = recall ? h('button', {
+    class: 'message-copy message-recall', type: 'button', title: recallLabel, 'aria-label': recallLabel,
+    onclick: recall,
+  }, icon('arrowLeft')) : null;
+  return h('div', { class: 'message-actions' }, button, recallButton);
 }

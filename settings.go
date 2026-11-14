@@ -288,11 +288,19 @@ func (s *service) About(ctx context.Context) AboutView {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, a.pi, "--version").Output()
+	var out string
+	var err error
+	if a.runPi != nil {
+		out, err = a.runPi(ctx, "--version")
+	} else {
+		var data []byte
+		data, err = exec.CommandContext(ctx, a.pi, "--version").Output()
+		out = string(data)
+	}
 	if err != nil {
 		v.PiError = "pi --version failed: " + err.Error()
 	} else {
-		v.Pi = strings.TrimSpace(string(out))
+		v.Pi = strings.TrimSpace(out)
 	}
 	return v
 }

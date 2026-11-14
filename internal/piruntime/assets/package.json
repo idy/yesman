@@ -1,0 +1,10 @@
+{
+  "name": "yesman-pi-runtime",
+  "version": "1.5.2-yesman.1",
+  "private": true,
+  "type": "module",
+  "description": "Pinned pi runtime with yesman's atomic pending-message API",
+  "engines": { "node": ">=22.19.0" },
+  "dependencies": { "@earendil-works/pi-coding-agent": "1.5.2" },
+  "overrides": { "protobufjs": "7.6.6" }
+}

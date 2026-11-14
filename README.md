@@ -37,7 +37,7 @@ yesman is a tray app for hiring yesmen. A yesman takes on one project: it gets a
 | Sessions | Each agent's pi session log in `.yesman/sessions/<agent>/`. Agents resume their latest session when they restart. |
 | Secrets and variables | Environment variables every agent's commands get, edited in Settings: secrets in `secrets/secrets.sops.yaml`, encrypted, and variables in `variables.yaml`. |
 
-Every agent runs your installed `pi` with your usual pi configuration (models, plugins, MCP servers), plus yesman's extension, [`pi/yesman.ts`](pi/yesman.ts). Before each run the extension gives the agent its yesman's context: the workspace, its worktrees, the pool, the knowledge index and the other agents. It also adds these tools, which call the app's loopback API:
+By default agents run a project-managed, pinned [pi](https://pi.dev) runtime (1.5.2 with yesman's native queue patch), with your usual pi configuration (models, plugins, MCP servers), plus yesman's extension, [`pi/yesman.ts`](pi/yesman.ts). The first start prepares it in yesman's own cache using Node.js and npm; it does not modify your global pi installation. `YESMAN_PI` and custom PATH wrappers keep their original execution behavior. See [runtime distribution and compatibility](docs/native-queue-cancellation.md). Before each run the extension gives the agent its yesman's context: the workspace, its worktrees, the pool, the knowledge index and the other agents. It also adds these tools, which call the app's loopback API:
 
 - `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`, `yesman_board`, `yesman_env`
 - for leads: `yesman_worker_start`, `yesman_worker_send`, `yesman_worker_answer`, `yesman_worker_remove`
@@ -66,7 +66,7 @@ The composer lets you choose the current agent's model and reasoning effort from
 
 The composer accepts images from its **Attach images** button, pasted screenshots or images, and files dropped onto the input. It previews each attachment and lets you remove it before sending. PNG, JPEG, GIF and WebP are supported, up to four images, 5 MB each and 10 MB in total. Images travel with the message to pi, including messages sent during a run; you can send an image with or without text. Draft text and attachments stay with their agent while switching conversations, and remain available to retry if submission fails.
 
-Messages have a **Copy message text** action. It copies their raw text, including Markdown and line breaks, without changing the composer. Image-only messages disable text copying. A submission receipt can copy its complete stored text; a truncated preview cannot stand in for the original message. Native queue cancellation is not yet supported by pi 1.5.2; see the [verified dependency boundary and proposed API](docs/native-queue-cancellation.md).
+Messages have a **Copy message text** action that preserves raw text, Markdown and line breaks without changing the composer. A reliably pending message also has **Cancel and edit**: it atomically leaves pi's queue and its complete original text and images return to that agent's input. Press **Up** in an empty composer with no attachments to recall the newest eligible message. Existing drafts are protected; edit and explicitly resend to create a new submission. Messages pi already took offer Copy only. Image-only inputs disable text copying, and a truncated historical receipt cannot stand in for original text. External pi runtimes without selective cancellation retain Copy and sending; the queue status explains that recall is unavailable. Original restore payloads are bounded in memory, so old history or a whole app restart cannot recreate lost attachments.
 
 The context meter beside these choices opens pi's estimated current context usage and model limit, with free space, cumulative input/output and cache usage, and message/tool counts. It refreshes after messages, tool results and compaction. Current context and cumulative session totals are kept separate; when pi cannot report the current context size, such as just after compaction, the viewer shows it as unknown.
 
@@ -146,7 +146,7 @@ Release builds update themselves through MyGo's updater: they check GitHub relea
 
 - Go 1.27 or later, and git
 - Optionally the [GitHub CLI](https://cli.github.com) (`gh`), signed in. yesman asks it which repository a fork came from and which repositories an owner has, private ones too, and clones `owner/repo` over the protocol it is set to use. Without it, yesman asks GitHub's public API, which sees public repositories, and clones over HTTPS.
-- [pi](https://pi.dev) 1.5.2 or later on the `PATH` (`npm install -g @earendil-works/pi-coding-agent`), with a model configured. Installing npm packages from Settings › pi also needs the command pi installs them with, npm by default.
+- Node.js 22.19 or later, with npm and network access for the first preparation of yesman's managed pi runtime. A verified cached runtime subsequently needs only Node. Configure your pi models as usual. An explicitly selected external `YESMAN_PI` remains supported for sending; per-message recall requires its compatible queue capability.
 
 The window uses [MyGo](https://github.com/egoist/mygo) v0.9.0 with a vanilla JavaScript page and the [Magpie design system](https://github.com/idy/magpie-design-system) v0.4.4, vendored in `web/mds/`. The editor is [CodeMirror 6](https://codemirror.net), bundled into `web/vendor/codemirror/` by `tools/codemirror/build.sh` from the exact versions in `tools/codemirror/package.json`. There is no frontend build step.
 
@@ -159,7 +159,7 @@ go run .
 | Variable | Effect |
 | --- | --- |
 | `YESMAN_HOME` | Override the data directory; otherwise use the folder chosen in Settings, default `~/yesman` |
-| `YESMAN_PI` | The pi executable, default `pi` from the `PATH` (the app adds your login shell's `PATH`) |
+| `YESMAN_PI` | Explicit external pi executable; preserved without managed substitution. The default official npm pi uses yesman's pinned runtime; custom PATH wrappers are also preserved. |
 | `YESMAN_WEB_DIR` | Serve the page from this directory instead of the embedded copy, to edit it without rebuilding |
 | `YESMAN_HIDDEN` | Start in the tray without opening the window |
 
@@ -182,7 +182,9 @@ With Playwright and its Chromium/WebKit browsers installed, `node scripts/check-
 
 The optional browser checks for creation and renaming use the full production page in Chromium and WebKit. Install Playwright and its browsers outside the repository, then run `YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs node scripts/hire-browser.mjs` or `node scripts/rename-browser.mjs` with the same environment variable. Creation uses the actual Go service and a temporary data directory behind a controlled bridge; neither check touches your workspaces or settings.
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) vets, builds and tests on Linux, macOS and Windows for every pull request and every push to `main`. It does not start the app's window or real pi agents.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) vets, builds and tests on Linux, macOS and Windows for every pull request and every push to `main`. It prepares the same pinned runtime as the app and exercises its native queue protocol/SDK and Go Manager using isolated configuration and a deterministic local provider. It does not start the app's window or call a paid external model.
+
+The full recall browser fixture uses the production page and actual Go service/Manager/runtime behind a controlled bridge transport. Prepare a runtime as above, set `YESMAN_TEST_RUNTIME` to the returned root and `YESMAN_TEST_PLAYWRIGHT_MODULE` if needed, then run `node scripts/check-recall-browser.mjs`. See [native recall validation](docs/native-queue-cancellation.md#validation-boundaries) for the individual checks and limits.
 
 The end-to-end test starts real pi agents and calls your configured model:
 
