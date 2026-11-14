@@ -646,7 +646,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .changes-list-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 30px; padding: 4px 10px; border: 0; border-radius: var(--mds-radius-sm); background: transparent; color: var(--mds-ink-soft); font: inherit; font-size: var(--mds-text-note); text-align: left; cursor: default; }
 .changes-list-row:hover { background: var(--mds-hover); color: var(--mds-ink-strong); }
 .changes-list-row:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: -2px; }
-.changes-list-icon { justify-self: center; width: 14px; height: 14px; color: var(--mds-muted); }
+.changes-list-icon { justify-self: center; width: 14px; height: 14px; font-size: 14px; color: var(--mds-muted); }
 .changes-list-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .changes-list-note { margin-left: 8px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
 .changes-list-more { display: flex; align-items: center; gap: 10px; padding: 4px 18px 24px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
