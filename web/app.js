@@ -6,6 +6,7 @@
 
 import { orderWorkers } from './sidebar.js';
 import { renderMarkdown } from './markdown.js';
+import { project } from './conversation.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
 import { createInfo } from './info.js';
@@ -14,10 +15,16 @@ import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
 import { createCrew } from './crew.js';
+import { createGrants } from './grants.js';
 import { createUsagePage } from './usage.js';
 import { createEnvPage } from './env.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
+import { detectPlatform } from './keys.js';
+import { createShortcuts } from './shortcuts.js';
+import { createPalette } from './palette.js';
+import { registerActions, paletteItems } from './actions.js';
+import { createShortcutsPage } from './shortcuts-page.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, formatNumber, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
@@ -25,6 +32,10 @@ const mygo = window.mygo;
 const call = (method, ...args) => mygo.call(`Yesman.${method}`, ...args);
 const errorText = (err) => (err && (err.message || err.error)) || String(err);
 const fail = (err) => toast(errorText(err), { duration: 6000 });
+
+// The window's actions and their keys: shortcuts.js, with the actions in
+// actions.js, the command palette and Settings › Shortcuts below.
+const shortcuts = createShortcuts({ platform: detectPlatform(mygo), call, fail, t, builtIn: ['Mod+S'] });
 
 const STATUS = {
   stopped: 'Asleep',
@@ -81,7 +92,8 @@ class Convo {
     this.messages = [];
     this.loaded = false;
     this.error = null;
-    this.live = null; // { message, el, blocks: Map(index -> el) }
+    this.live = null; // { message }: the reply being written
+    this.workOpen = new Set(); // keys of the work rows the user opened
     this.tools = new Map(); // toolCallId -> { args, status, result }
     this.deliveries = new Map(); // message ID -> server receipt (or local Sending only)
     this.seq = 0;
@@ -127,11 +139,14 @@ const DELIVERY_LABELS = {
   handled: 'Handled by an extension',
 };
 
+// pi cannot say whether a receipt's message was taken. A message yesman's
+// extension tied to its receipt is in the conversation, so it was.
+const BOUND_DELIVERY = 'Delivered';
+
 function pruneDeliveryRows(c, ids) {
-  for (const id of ids ?? []) {
-    c.deliveries.delete(id);
-    if (keyOf(selectedAgent() ?? {}) === c.key) $('#thread')?.querySelector(`[data-delivery="${CSS.escape(id)}"]`)?.remove();
-  }
+  let changed = false;
+  for (const id of ids ?? []) changed = c.deliveries.delete(id) || changed;
+  if (changed) schedulePatch(c, { frame: true });
 }
 
 function applyDeliveryReceipt(c,e,seq) {
@@ -157,24 +172,43 @@ function updateDelivery(c, d) {
   }
 }
 
-function deliveryEl(c, d) {
-  const bubble = messageEl(c, { role: 'user', content: [
-    { type: 'text', text: d.text ? (d.preview ? `${d.text}…` : d.text) : (d.imageCount > 0 ? t('Attached images') : '') }, ...(d.images ?? []),
-  ] });
-  const label = DELIVERY_LABELS[d.state];
-  // An acknowledgement identifies a submission, not a transcript message.
-  // Keep its original input available without duplicating a native user bubble
-  // or guessing which (possibly transformed) message pi took for processing.
-  const sending = d.state === 'sending';
-  const preview = d.text?.trim().replace(/\s+/g, ' ').slice(0, 60) || t('Attached images');
+// deliveryStatus is a receipt's state, lightly, under the message it is for.
+function deliveryStatus(d, bound) {
+  const label = bound ? BOUND_DELIVERY : DELIVERY_LABELS[d.state];
+  return h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite', 'data-state': bound ? 'delivered' : d.state,
+    hidden: !label, title: bound ? t('pi took this message into the conversation.') : d.error || (d.state === 'sending' ? null : t('pi has not reported whether this particular message was taken for processing.')) },
+  label ? t(label) : '');
+}
+
+// receiptEl shows a submission the conversation does not show: still on its
+// way, refused, or not tied to a message. It shows what the receipt keeps
+// (a preview and the number of images), never a guess at the original.
+const receiptVariant = (d) => (d.state === 'sending' ? 'sending' : d.state === 'unconfirmed' && !d.error ? 'compact' : 'bubble');
+
+function receiptEl(c, d) {
+  const el = receiptBody(d);
+  el._variant = `${receiptVariant(d)}:${d.text ?? ''}:${d.imageCount ?? 0}`;
+  return el;
+}
+
+function receiptBody(d) {
   const imageCount = d.imageCount ?? d.images?.length ?? 0;
+  const preview = d.text ? (d.preview ? `${d.text}…` : d.text) : '';
   const imageNote = imageCount ? h('div', { class: 'delivery-image-count' }, tn(imageCount, '{n} image submitted', '{n} images submitted')) : null;
-  const content = sending ? h('div', { class: 'delivery-sending' }, bubble, imageNote) : h('details', { class: 'delivery-receipt' },
-    h('summary', { title: t('pi has not reported whether this particular message was taken for processing.') }, t('Submission: {text}', { text: preview })),
-    h('div', { class: 'delivery-original' }, bubble, imageNote));
-  return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(sending) }, content,
-    h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite',
-      hidden: !label, title: d.error || null }, label ? t(label) : ''));
+  // Accepted, then nothing more known: most likely in the conversation above
+  // already, untied (an earlier version, or input another extension rewrote).
+  if (d.state === 'unconfirmed' && !d.error) {
+    const short = d.text?.trim().replace(/\s+/g, ' ').slice(0, 60) || t('Attached images');
+    return h('div', { class: 'msg-delivery msg-delivery--compact', 'data-delivery': d.id, 'data-sending': 'false' },
+      h('div', { class: 'delivery-compact', title: preview || null }, t('Submission: {text}', { text: short }),
+        imageCount ? ` · ${tn(imageCount, '{n} image submitted', '{n} images submitted')}` : ''),
+      deliveryStatus(d, false));
+  }
+  const images = (d.images ?? []).filter((image) => imageURL(image));
+  return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(d.state === 'sending') },
+    h('div', { class: 'msg-user' }, preview || (imageCount ? t('Attached images') : ''),
+      images.length ? h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null),
+    images.length ? null : imageNote, deliveryStatus(d, false));
 }
 
 function renderQueue(c) {
@@ -186,26 +220,6 @@ function renderQueue(c) {
     const el = h('div', { class: 'pi-queue-status note note--quiet', role: 'status', 'aria-live': 'polite',
       title: t('These counts describe pi’s whole queue, not an individual submission.') },
       t('pi queue: {steering} steering · {followUp} follow-up', { steering: q.steering, followUp: q.followUp }));
-    const working = thread.querySelector('.working-live');
-    working ? working.before(el) : thread.append(el);
-  }
-}
-
-function refreshDelivery(c, d) {
-  if (!d) return;
-  const thread = $('#thread');
-  if (!thread || keyOf(selectedAgent() ?? {}) !== c.key) return;
-  const old = thread.querySelector(`[data-delivery="${CSS.escape(d.id)}"]`);
-  if (old && old.dataset.sending !== String(d.state === 'sending')) { old.replaceWith(deliveryEl(c,d)); return; }
-  if (old) {
-    const status = old.querySelector('.delivery-status');
-    const label = DELIVERY_LABELS[d.state];
-    status.hidden = !label;
-    status.textContent = label ? t(label) : '';
-    status.title = d.error || '';
-  } else {
-    const el = deliveryEl(c, d);
-    thread.querySelector('.thread-empty')?.remove();
     const working = thread.querySelector('.working-live');
     working ? working.before(el) : thread.append(el);
   }
@@ -274,9 +288,12 @@ function indexMessage(c, message) {
       if (block.type === 'toolCall') indexTool(c, block);
     }
   } else if (message.role === 'toolResult') {
+    // The result message is final: an extension may have changed what the
+    // execution returned, its output and whether it failed, as it ended.
     const tool = c.tools.get(message.toolCallId) ?? {};
-    tool.status = message.isError ? 'error' : 'done';
-    tool.result = resultText(message);
+    const status = message.isError ? 'error' : 'done', result = resultText(message);
+    if (tool.status !== status || tool.result !== result) tool.revision = (tool.revision ?? 0) + 1;
+    Object.assign(tool, { status, result, final: true });
     c.tools.set(message.toolCallId, tool);
   }
 }
@@ -296,97 +313,252 @@ function resultText(result) {
   return textOf(result.content) || (result.details ? JSON.stringify(result.details, null, 2) : '');
 }
 
+const toolMark = (status) => icon(status === 'done' ? 'check' : status === 'error' ? 'alert' : 'spinner', 'mds-icon tool-mark');
+
 function toolEl(c, block) {
-  const tool = c.tools.get(block.id);
+  const tool = c.tools.get(block.id) ?? { status: 'pending' };
   const el = h('details', { class: 'tool', 'data-tool': block.id, 'data-status': tool.status });
   el.append(
     h('summary', null,
-      icon(tool.status === 'done' ? 'check' : tool.status === 'error' ? 'alert' : 'spinner', 'mds-icon tool-mark'),
+      toolMark(tool.status),
       h('span', { class: 'tool-name' }, block.name.replace(/^yesman_/, 'yesman · ')),
-      h('span', { class: 'tool-sum' }, toolSummary(tool.args)),
+      h('span', { class: 'tool-sum' }, toolSummary(tool.args ?? block.arguments)),
       h('span', { class: 'tool-state' }, tool.status === 'error' ? t('failed') : '')),
   );
   el.addEventListener('toggle', () => {
     if (!el.open) return;
-    const cur = c.tools.get(block.id);
+    const cur = c.tools.get(block.id) ?? {};
     el.querySelector('.tool-body')?.remove();
     el.append(
       h('div', { class: 'tool-body' },
-        h('pre', null, JSON.stringify(cur.args ?? {}, null, 2)),
+        h('pre', null, JSON.stringify(cur.args ?? block.arguments ?? {}, null, 2)),
         cur.result ? h('pre', null, cur.result) : null),
     );
   });
   return el;
 }
 
-function updateTool(c, id) {
+function refreshTool(c, el, id) {
   const tool = c.tools.get(id);
-  const el = document.querySelector(`#thread [data-tool="${CSS.escape(id)}"]`);
-  if (!tool || !el) return;
+  if (!tool) return;
   el.dataset.status = tool.status;
-  const mark = el.querySelector('.tool-mark');
-  mark?.replaceWith(icon(tool.status === 'done' ? 'check' : tool.status === 'error' ? 'alert' : 'spinner', 'mds-icon tool-mark'));
+  el.querySelector('.tool-mark')?.replaceWith(toolMark(tool.status));
   el.querySelector('.tool-state').textContent = tool.status === 'error' ? t('failed') : '';
   el.querySelector('.tool-sum').textContent = toolSummary(tool.args);
   if (el.open) el.dispatchEvent(new Event('toggle'));
 }
 
-function blockEl(c, block) {
-  if (block.type === 'text') return h('div', { class: 'md', html: renderMarkdown(block.text) });
-  if (block.type === 'thinking') {
-    if (!block.thinking?.trim()) return null;
-    return h('details', { class: 'thinking' }, h('summary', null, t('Thinking')), h('div', null, block.thinking));
+// ---------- Conversation rows ----------
+//
+// conversation.js projects a conversation into rows: what people and the
+// agent said, and one folded row for the work between. They are drawn and
+// patched here by key, the same from history and live, so streaming updates
+// only what changed and keeps what is open, focused and scrolled.
+
+const md = (text) => h('div', { class: 'md', html: renderMarkdown(text) });
+
+// A message from before yesman recorded who wrote what is shown as it was:
+// these are the forms yesman's own messages had then. It is never folded.
+function legacyNoteEl(text) {
+  const report = text.match(/^\[yesman\] Worker "([^"]+)" finished a run\. Its final message:\n\n([\s\S]*)$/);
+  if (report) {
+    return h('details', { class: 'note', open: true },
+      h('summary', null, t('Report from worker {name}', { name: report[1] })), md(report[2]));
   }
-  if (block.type === 'toolCall') return toolEl(c, block);
+  const fromLead = text.match(/^\[from your lead\] ([\s\S]*)$/);
+  if (fromLead) return h('div', { class: 'note' }, h('strong', null, t('From the lead')), md(fromLead[1]));
+  // What yesman tells the lead: a worker's question, how a run ended
+  // when it did not finish, or the tasks still open.
+  const notice = text.match(/^\[yesman\] ([\s\S]*)$/);
+  if (notice) return h('div', { class: 'note note--quiet' }, md(notice[1]));
   return null;
 }
 
-function messageEl(c, m) {
-  switch (m.role) {
-    case 'user': {
-      const text = textOf(m.content);
-      const report = text.match(/^\[yesman\] Worker "([^"]+)" finished a run\. Its final message:\n\n([\s\S]*)$/);
-      if (report) {
-        return h('details', { class: 'note', open: true },
-          h('summary', null, t('Report from worker {name}', { name: report[1] })),
-          h('div', { class: 'md', html: renderMarkdown(report[2]) }));
+function userBubble(m) {
+  const images = Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image' && imageURL(b)) : [];
+  return h('div', { class: 'msg-user' }, textOf(m.content),
+    images.length ? h('div', { class: 'message-images' }, images.map((image) =>
+      h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
+}
+
+function userRowEl(row) {
+  // yesman wrote its notices as text alone: a message with images is a
+  // person's whatever its text says, and is shown in full with them.
+  const images = Array.isArray(row.message.content) && row.message.content.some((b) => b?.type === 'image');
+  const legacy = !row.origin && !images && legacyNoteEl(textOf(row.message.content));
+  if (legacy) return legacy;
+  const bubble = userBubble(row.message);
+  if (!row.delivery) return bubble;
+  return h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble, deliveryStatus(row.delivery, true));
+}
+
+function leadRowEl(row) {
+  const text = textOf(row.message.content);
+  return h('div', { class: 'note note--lead' }, h('strong', null, t('From the lead')),
+    md(row.origin.kind === 'message' ? text.replace(/^\[from your lead\] /, '') : text));
+}
+
+function noteRowEl(row) {
+  if (row.stopped) return h('div', { class: 'note note--quiet' }, t('Stopped.'));
+  if (row.summary) return h('div', { class: 'note note--quiet' }, t('Earlier conversation was summarized to save context.'));
+  return h('div', { class: row.tone === 'error' ? 'note note--error' : 'note note--quiet' }, row.text);
+}
+
+// The work row: one line saying what happened, opened to read it in order.
+const WORK_STATES = {
+  done: 'Done', ended: 'Ended', stopped: 'Stopped', error: 'Ended with an error',
+  interrupted: 'Interrupted', unfinished: 'Unfinished',
+};
+const WORK_MARKS = { running: 'spinner', waiting: 'info', stopped: 'stop', error: 'alert', interrupted: 'alert', unfinished: 'alert' };
+
+function workFacts({ thinking, tools, failed, workers, reports, notices }) {
+  return [
+    thinking && tn(thinking, '{n} thought', '{n} thoughts'),
+    tools && tn(tools, '{n} tool call', '{n} tool calls'),
+    failed && tn(failed, '{n} failed', '{n} failed'),
+    workers && tn(workers, '{n} worker started', '{n} workers started'),
+    reports && tn(reports, '{n} worker report', '{n} worker reports'),
+    notices && tn(notices, '{n} notice', '{n} notices'),
+  ].filter(Boolean).join(' · ');
+}
+
+function workLabel(row, a) {
+  if (row.state === 'running') return workingLabel(a);
+  if (row.state === 'waiting') return a.role === 'worker' ? statusLabel(a) : t('Waiting for an answer');
+  return t(WORK_STATES[row.state]);
+}
+
+const reportBody = (text) => text.replace(/^\[yesman\] Worker "[^"]*" finished a run\. Its final message:\n\n/, '');
+
+function workItemEl(c, item) {
+  if (item.type === 'thinking') return h('div', { class: 'work-thinking md', html: renderMarkdown(item.text) });
+  if (item.type === 'tool') return toolEl(c, item.block);
+  const text = textOf(item.message.content);
+  const worker = item.origin.worker;
+  if (item.origin.kind === 'report') {
+    const el = h('details', { class: 'work-report' },
+      h('summary', null, icon('fileText', 'mds-icon work-report-mark'), h('span', null, t('Report from worker {name}', { name: worker }))));
+    el.addEventListener('toggle', () => { if (el.open && !el.querySelector('.md')) el.append(md(reportBody(text))); });
+    return el;
+  }
+  return h('div', { class: 'work-notice' },
+    item.origin.kind === 'question' ? h('strong', null, t('Question from worker {name}', { name: worker })) : null,
+    md(text.replace(item.origin.kind === 'question' ? /^\[yesman\] Worker "[^"]*" asks:\n\n/ : /^\[yesman\] /, '')));
+}
+
+function itemSig(c, item) {
+  if (item.type === 'thinking') return item.live ? `l:${item.text}` : 'f';
+  if (item.type === 'tool') {
+    const tool = c.tools.get(item.block.id);
+    return `${tool?.status ?? 'pending'}:${tool?.revision ?? 0}`;
+  }
+  return 'f';
+}
+
+// patchChildren keeps parent's keyed children in the order of entries,
+// reusing each element of the same kind: update brings it up to date in
+// place, or returns a replacement. Children without the key stay last.
+function patchChildren(parent, attr, entries, { make, sig, update }) {
+  const old = new Map();
+  for (const el of parent.querySelectorAll(`:scope > [${attr}]`)) old.set(el.getAttribute(attr), el);
+  let prev = null;
+  for (const entry of entries) {
+    let el = old.get(entry.key);
+    const s = sig(entry);
+    if (el && el._kind === entry.type) {
+      old.delete(entry.key);
+      if (el._sig !== s || entry.type === 'work') {
+        const fresh = update(el, entry);
+        if (fresh && fresh !== el) {
+          el.replaceWith(fresh);
+          el = fresh;
+        }
       }
-      const fromLead = text.match(/^\[from your lead\] ([\s\S]*)$/);
-      if (fromLead) {
-        return h('div', { class: 'note' }, h('strong', null, t('From the lead')), h('div', { class: 'md', html: renderMarkdown(fromLead[1]) }));
-      }
-      // What yesman tells the lead: a worker's question, how a run ended
-      // when it did not finish, or the tasks still open.
-      const notice = text.match(/^\[yesman\] ([\s\S]*)$/);
-      if (notice) return h('div', { class: 'note note--quiet' }, h('div', { class: 'md', html: renderMarkdown(notice[1]) }));
-      const images = Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image' && imageURL(b)) : [];
-      return h('div', { class: 'msg-user' }, text,
-        images.length ? h('div', { class: 'message-images' }, images.map((image) =>
-          h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
+    } else {
+      el = make(entry);
     }
-    case 'assistant': {
-      const el = h('div', { class: 'msg-assistant' });
-      for (const block of m.content ?? []) {
-        const b = blockEl(c, block);
-        if (b) el.append(b);
-      }
-      if (m.stopReason === 'error' && m.errorMessage) {
-        el.append(h('div', { class: 'note note--error' }, m.errorMessage));
-      } else if (m.stopReason === 'aborted') {
-        el.append(h('div', { class: 'note note--quiet' }, t('Stopped.')));
-      }
-      return el.childNodes.length ? el : null;
+    el.setAttribute(attr, entry.key);
+    el._kind = entry.type;
+    el._sig = s;
+    // Only keyed children move; other elements keep their places.
+    let at = prev ? prev.nextElementSibling : parent.firstElementChild;
+    while (at && at !== el && !at.hasAttribute(attr)) at = at.nextElementSibling;
+    if (at !== el) {
+      if (at) at.before(el);
+      else if (prev) prev.after(el);
+      else parent.prepend(el);
     }
-    case 'toolResult':
-      return null; // shown with its tool call
-    case 'compactionSummary':
-    case 'branchSummary':
-      return h('div', { class: 'note note--quiet' }, t('Earlier conversation was summarized to save context.'));
-    default: {
-      if (m.display === false) return null;
-      const text = textOf(m.content);
-      return text ? h('div', { class: 'note note--quiet' }, text) : null;
-    }
+    prev = el;
+  }
+  for (const el of old.values()) el.remove();
+}
+
+function patchWorkItems(c, body, items) {
+  patchChildren(body, 'data-item', items, {
+    make: (item) => workItemEl(c, item),
+    sig: (item) => itemSig(c, item),
+    update: (el, item) => {
+      if (item.type === 'tool') refreshTool(c, el, item.block.id);
+      else if (item.type === 'thinking') el.innerHTML = renderMarkdown(item.text);
+      else return workItemEl(c, item);
+    },
+  });
+}
+
+function workEl(c, row) {
+  const el = h('details', { class: 'work' });
+  el.append(
+    h('summary', null, h('span', { class: 'work-mark' }), h('span', { class: 'work-label' }), h('span', { class: 'work-facts' }), icon('chevron', 'mds-icon work-caret')),
+    h('div', { class: 'work-body' }));
+  el.open = c.workOpen.has(row.key);
+  el.addEventListener('toggle', () => {
+    if (el.open) c.workOpen.add(row.key);
+    else c.workOpen.delete(row.key);
+    if (el.open) patchWorkItems(c, el.lastElementChild, el._items ?? []);
+  });
+  updateWork(c, el, row);
+  return el;
+}
+
+function updateWork(c, el, row) {
+  const a = agentById(c.id);
+  const label = workLabel(row, a ?? {}), facts = workFacts(row.counts);
+  const failed = row.counts.failed > 0 && (row.state === 'done' || row.state === 'ended');
+  const mark = WORK_MARKS[row.state] ?? (failed ? 'alert' : 'check');
+  const summary = `${row.state}|${mark}|${label}|${facts}`;
+  if (el._summary !== summary) {
+    el._summary = summary;
+    el.dataset.state = row.state;
+    el.toggleAttribute('data-failed', failed);
+    const s = el.firstElementChild;
+    s.children[0].replaceChildren(icon(mark, 'mds-icon'));
+    s.children[1].textContent = label;
+    s.children[2].textContent = facts;
+    s.title = t('Work between replies: thinking, tool calls and notices. Open to read them in order.');
+  }
+  el._items = row.items;
+  if (el.open) patchWorkItems(c, el.lastElementChild, row.items);
+  return el;
+}
+
+function rowEl(c, row) {
+  switch (row.type) {
+    case 'user': return userRowEl(row);
+    case 'lead': return leadRowEl(row);
+    case 'text': return h('div', { class: 'msg-assistant' }, md(row.text));
+    case 'note': return noteRowEl(row);
+    case 'work': return workEl(c, row);
+    case 'receipt': return receiptEl(c, row.delivery);
+    default: return h('div');
+  }
+}
+
+function rowSig(row) {
+  switch (row.type) {
+    case 'user': return row.delivery ? `bound:${row.delivery.id}` : '';
+    case 'text': return row.live ? `l:${row.text}` : 'f';
+    case 'receipt': return `${row.delivery.state}:${row.delivery.revision}:${row.delivery.error ?? ''}:${row.delivery.images?.length ?? 0}`;
+    default: return 'f';
   }
 }
 
@@ -398,6 +570,55 @@ function scrollDown(force = false) {
   const scroller = $('#scroll');
   if (!scroller) return;
   if (force || scroller.dataset.stick !== 'false') scroller.scrollTop = scroller.scrollHeight;
+}
+
+// patchThread brings the shown thread up to date with its conversation.
+function patchThread(c) {
+  const thread = $('#thread');
+  const a = selectedAgent();
+  if (!thread || !a || keyOf(a) !== c.key || !c.loaded || c.error) return;
+  const scroller = $('#scroll');
+  if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
+  const rows = project(c, a);
+  if (rows.length) thread.querySelector('.thread-empty')?.remove();
+  patchChildren(thread, 'data-row', rows, {
+    make: (row) => rowEl(c, row),
+    sig: rowSig,
+    update: (el, row) => {
+      if (row.type === 'work') return updateWork(c, el, row);
+      if (row.type === 'text') {
+        el.firstElementChild.innerHTML = renderMarkdown(row.text);
+        return el;
+      }
+      // A receipt changing state keeps its row (and what is selected in it)
+      // unless it changes form.
+      const d = row.delivery;
+      if (row.type === 'receipt' && el._variant === `${receiptVariant(d)}:${d.text ?? ''}:${d.imageCount ?? 0}` && !d.images?.length) {
+        el.querySelector('.delivery-status').replaceWith(deliveryStatus(row.delivery, false));
+        return el;
+      }
+      return rowEl(c, row);
+    },
+  });
+  renderWorking(rows);
+  renderQueue(c);
+  scrollDown();
+}
+
+// Streaming deltas and tool output draw once per frame; other records,
+// which come one at a time, draw at once.
+let patchFrame = 0, patchConvo = null;
+function schedulePatch(c, { frame = false } = {}) {
+  if (keyOf(selectedAgent() ?? {}) !== c.key) return;
+  if (!frame) return patchThread(c);
+  patchConvo = c;
+  if (patchFrame) return;
+  patchFrame = requestAnimationFrame(() => {
+    patchFrame = 0;
+    const cv = patchConvo;
+    patchConvo = null;
+    if (cv) patchThread(cv);
+  });
 }
 
 function renderThread() {
@@ -418,42 +639,32 @@ function renderThread() {
             t('Tell {name} what you want done. It works in {path}, checks out repos from the pool, and starts workers when the job splits up.', { name: yesmanLabel(a.yesman), path: y?.path ?? t('its workspace') }))
         : h('div', { class: 'thread-empty' }, h('strong', null, a.name), t('This worker has not started yet.')),
     );
+  }
+  if (c.loaded && !c.error) {
+    patchThread(c);
   } else {
-    for (const m of c.messages) {
-      const el = messageEl(c, m);
-      if (el) thread.append(el);
-    }
-    if (c.live) {
-      // Rebuild the streaming message: deltas that arrived while another
-      // agent was shown only updated its data.
-      c.live.el.replaceChildren();
-      c.live.blocks.clear();
-      c.live.message.content.forEach((block, i) => {
-        const el = block && blockEl(c, block);
-        if (el) {
-          c.live.el.append(el);
-          c.live.blocks.set(i, el);
-        }
-      });
-      thread.append(c.live.el);
-    }
+    renderWorking([]);
+    renderQueue(c);
   }
-  if (c.loaded) {
-    for (const d of [...c.deliveries.values()].sort((a,b) => (a.order ?? 0) - (b.order ?? 0))) thread.append(deliveryEl(c,d));
-  }
-  renderWorking();
-  renderQueue(c);
   scrollDown(true);
 }
 
-function renderWorking() {
+// renderWorking shows what the agent is doing at the foot of its thread,
+// unless the work row there already says it.
+function renderWorking(rows) {
   const thread = $('#thread');
   if (!thread) return;
-  thread.querySelector('.working-live')?.remove();
   const a = selectedAgent();
-  if (a?.status === 'working') {
-    thread.append(h('div', { class: 'working working-live', 'data-status': 'working' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', { class: 'working-label' }, workingLabel(a))));
+  const last = rows?.findLast((r) => r.type !== 'receipt');
+  const show = a?.status === 'working' && last?.state !== 'running';
+  let el = thread.querySelector('.working-live');
+  if (!show) {
+    el?.remove();
+    return;
   }
+  if (!el) el = h('div', { class: 'working working-live', 'data-status': 'working' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', { class: 'working-label' }));
+  el.querySelector('.working-label').textContent = workingLabel(a);
+  if (thread.lastElementChild !== el) thread.append(el);
 }
 
 // Activity comes from the run's events in English. Translate its action,
@@ -527,12 +738,7 @@ function onAgentEvent(ev) {
   }
   if (e.type === 'delivery_update' || e.type === 'delivery_retained') {
     applyDeliveryReceipt(c,e,ev.seq);
-    if (state.view.kind === 'agent' && state.view.id === c.id) {
-      const scroller = $('#scroll');
-      if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
-      refreshDelivery(c, e.delivery && c.deliveries.get(e.delivery.id));
-      scrollDown();
-    }
+    schedulePatch(c);
     return;
   }
   applyEvent(c, e, false);
@@ -542,35 +748,26 @@ function onAgentEvent(ev) {
 // is shown, unless the record is being replayed before the thread renders.
 function applyEvent(c, e, replaying,seq = 0) {
   const visible = !replaying && state.view.kind === 'agent' && state.view.id === c.id && $('#thread');
-  const scroller = $('#scroll');
-  if (visible && scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
-
   switch (e.type) {
     case 'delivery_queue':
       c.piQueue = e.queue;
       if (visible) renderQueue(c);
-      break;
+      return;
     case 'queue_update':
       c.piQueue = { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0 };
       if (visible) renderQueue(c);
-      break;
+      return;
     case 'delivery_retained':
     case 'delivery_update':
       applyDeliveryReceipt(c,e,seq);
-      if (visible) refreshDelivery(c, e.delivery && c.deliveries.get(e.delivery.id));
       break;
     case 'message_start': {
-      if (e.message?.role !== 'assistant') break;
-      c.live = { message: { ...e.message, content: [] }, el: h('div', { class: 'msg-assistant' }), blocks: new Map() };
-      if (visible) {
-        const working = $('#thread .working-live');
-        if (working) working.before(c.live.el);
-        else $('#thread').append(c.live.el);
-      }
+      if (e.message?.role !== 'assistant') return;
+      c.live = { message: { ...e.message, content: [] } };
       break;
     }
     case 'message_update': {
-      if (!c.live) break;
+      if (!c.live) return;
       const u = e.assistantMessageEvent;
       const blocks = c.live.message.content;
       const i = u.contentIndex;
@@ -586,39 +783,29 @@ function applyEvent(c, e, replaying,seq = 0) {
         default: break;
       }
       if (blocks[i]?.type === 'toolCall') indexTool(c, blocks[i]);
-      if (visible) scheduleLive(c, i);
       break;
     }
     case 'message_end': {
       const m = e.message;
       indexMessage(c, m);
-      c.messages.push(m);
-      if (m.role === 'assistant') {
-        const old = c.live?.el;
-        c.live = null;
-        const el = messageEl(c, m);
-        if (visible) {
-          if (old?.isConnected) el ? old.replaceWith(el) : old.remove();
-          else if (el) $('#thread').append(el);
-        }
-      } else if (visible) {
-        if (m.role === 'toolResult') {
-          updateTool(c, m.toolCallId);
-        } else {
-          const el = messageEl(c, m);
-          if (el) {
-            const working = $('#thread .working-live');
-            working ? working.before(el) : $('#thread').append(el);
-            $('#thread .thread-empty')?.remove();
-          }
+      if (m.role === 'assistant' && c.live) {
+        // The final message normally keeps the streaming one's timestamp, and
+        // so its rows' keys. If not, what was open stays open.
+        const before = `w:assistant:${c.live.message.timestamp ?? ''}:`;
+        const after = `w:assistant:${m.timestamp ?? ''}:`;
+        if (before !== after) {
+          for (const key of [...c.workOpen]) if (key.startsWith(before)) { c.workOpen.delete(key); c.workOpen.add(after + key.slice(before.length)); }
         }
       }
+      c.messages.push(m);
+      if (m.role === 'assistant') c.live = null;
       break;
     }
     case 'tool_execution_start':
     case 'tool_execution_update':
     case 'tool_execution_end': {
       const tool = c.tools.get(e.toolCallId) ?? { args: e.args };
+      if (tool.final) break; // its result message came first, and is final
       tool.args = e.args ?? tool.args;
       if (e.type === 'tool_execution_end') {
         tool.status = e.isError ? 'error' : 'done';
@@ -627,48 +814,27 @@ function applyEvent(c, e, replaying,seq = 0) {
         tool.status = 'running';
         if (e.partialResult) tool.result = resultText(e.partialResult);
       }
+      tool.revision = (tool.revision ?? 0) + 1; // partial output changes a running tool
       c.tools.set(e.toolCallId, tool);
-      if (visible) updateTool(c, e.toolCallId);
       break;
     }
     case 'compaction_start':
-      if (visible) $('#thread').append(h('div', { class: 'note note--quiet' }, t('Summarizing earlier conversation to save context…')));
-      break;
+      if (visible) {
+        const scroller = $('#scroll');
+        if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
+        const note = h('div', { class: 'note note--quiet' }, t('Summarizing earlier conversation to save context…'));
+        const tail = $('#thread .pi-queue-status') ?? $('#thread .working-live');
+        tail ? tail.before(note) : $('#thread').append(note);
+        scrollDown();
+      }
+      return;
     case 'auto_retry_start':
       if (visible) toast(t('Retrying after: {error}', { error: e.errorMessage }));
-      break;
+      return;
     default:
-      break;
+      return;
   }
-  if (visible) scrollDown();
-}
-
-// Streaming deltas re-render one block per animation frame.
-let pending = null;
-function scheduleLive(c, index) {
-  pending ??= { c, indexes: new Set() };
-  pending.indexes.add(index);
-  if (pending.frame) return;
-  pending.frame = requestAnimationFrame(() => {
-    const { c: cv, indexes } = pending;
-    pending = null;
-    if (!cv.live) return;
-    for (const i of indexes) {
-      const block = cv.live.message.content[i];
-      const old = cv.live.blocks.get(i);
-      if (old && block?.type === 'toolCall' && old.dataset?.tool === block.id) {
-        updateTool(cv, block.id);
-        continue;
-      }
-      const fresh = block && blockEl(cv, block);
-      if (fresh) {
-        if (old) old.replaceWith(fresh);
-        else cv.live.el.append(fresh);
-        cv.live.blocks.set(i, fresh);
-      }
-    }
-    scrollDown();
-  });
+  if (visible) schedulePatch(c, { frame: e.type === 'message_update' || e.type === 'tool_execution_update' });
 }
 
 // ---------- Sidebar ----------
@@ -784,7 +950,8 @@ function renderSidebar() {
     for (const a of waiting) list.append(agentRow(a, '', a.role === 'lead' ? yesmanLabel(a.yesman) : a.id));
   }
   list.append(h('div', { class: 'side-group' }, h('span', null, t('Yesmen')),
-    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Hire a yesman'), 'aria-label': t('Hire a yesman'), onclick: openHire }, icon('plus'))));
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: shortcuts.hint(t('Hire a yesman'), 'yesman.hire'), 'aria-label': t('Hire a yesman'),
+      'aria-keyshortcuts': shortcuts.aria('yesman.hire'), onclick: openHire }, icon('plus'))));
   for (const y of state.snap.yesmen) {
     const agents = state.snap.agents.filter((a) => a.yesman === y.name);
     const lead = agents.find((a) => a.role === 'lead');
@@ -832,8 +999,9 @@ function renderBar() {
 function renderBarActions() {
   const actions = $('#bar-actions');
   const a = state.view.kind === 'agent' ? selectedAgent() : null;
-  const button = (iconName, label, onclick, extra = {}) =>
-    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: label, 'aria-label': label, onclick, ...extra }, icon(iconName));
+  const button = (iconName, label, onclick, extra = {}, action = null) =>
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: action ? shortcuts.hint(label, action) : label, 'aria-label': label,
+      'aria-keyshortcuts': action ? shortcuts.aria(action) : null, onclick, ...extra }, icon(iconName));
   actions.replaceChildren(...[
     a ? h('span', { class: 'mds-status', 'data-status': statusTone(a), role: 'status' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, statusLabel(a))) : null,
     updatePill(),
@@ -841,9 +1009,9 @@ function renderBarActions() {
       ? button('power', t('Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.'), () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
-    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }) : null,
-    a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }) : null,
-    a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }) : null,
+    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }, 'pane.info') : null,
+    a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }, 'pane.board') : null,
+    a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }, 'pane.files') : null,
   ].filter(Boolean));
 }
 
@@ -1034,6 +1202,8 @@ function bindHireForm(form, error, { dialog, cancel } = {}) {
 }
 
 function renderBody() {
+  if (state.view.kind !== 'settings' || state.view.page !== 'shortcuts') shortcutsPage.leave();
+  if (state.view.kind !== 'settings' || state.view.page !== 'grant') grantsPage.leave();
   const body = $('#body');
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
@@ -1125,7 +1295,8 @@ function renderDock({ focusComposer = false } = {}) {
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
   const action = working
-    ? h('button', { class: 'round round--stop composer-action', type: 'button', 'aria-label': t('Stop'), title: t('Stop the current run'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop'))
+    ? h('button', { class: 'round round--stop composer-action', type: 'button', 'aria-label': t('Stop'), title: shortcuts.hint(t('Stop the current run'), 'agent.stop'),
+      'aria-keyshortcuts': shortcuts.aria('agent.stop'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop'))
     : h('button', { class: 'round composer-action', type: 'submit', 'aria-label': t('Send'), title: t('Send') }, icon('enter'));
   const sync = () => {
     // A run can be interrupted even with an empty draft or a pending image/send.
@@ -1202,10 +1373,7 @@ async function sendMessage(a, textarea, submitter = null) {
       const excess = [...c.deliveries.keys()].slice(0,Math.max(0,c.deliveries.size-256));
       pruneDeliveryRows(c,excess);
     }
-    const scroller = $('#scroll');
-    if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
-    refreshDelivery(c, c.deliveries.get(messageID));
-    scrollDown();
+    schedulePatch(c);
   }
   // SubmitEvent retains the activated Send button even after WebKit's mouse
   // default action blurs the textarea without focusing the button. Use that
@@ -1218,7 +1386,7 @@ async function sendMessage(a, textarea, submitter = null) {
   try {
     const receipt = await call('Submit', a.id, messageID, text, images, a.since);
     updateDelivery(c, receipt);
-    refreshDelivery(c, c.deliveries.get(messageID));
+    schedulePatch(c);
     // A duplicate may find registration durable while pi's response is still
     // pending. Keep the only full draft/attachments until acceptance is known.
     if (receipt.state === 'sending') return;
@@ -1236,7 +1404,7 @@ async function sendMessage(a, textarea, submitter = null) {
     // Keep both text and images for retry if pi rejects the prompt. An
     // uncertain bridge failure keeps the same ID, so retry cannot duplicate it.
     const d = c.deliveries.get(messageID);
-    if (d?.revision === 0) { d.state = 'unconfirmed'; refreshDelivery(c,d); }
+    if (d?.revision === 0) { d.state = 'unconfirmed'; schedulePatch(c); }
     fail(err);
   } finally {
     attachments.sending = false;
@@ -1304,6 +1472,8 @@ function renderWelcome(body) {
 // The pages, labelled in English: each is said in the page's language.
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
+  { page: 'shortcuts', label: 'Shortcuts', icon: 'keyboard' },
+  { page: 'grant', label: 'Grant', icon: 'lock' },
   { page: 'yesman', label: 'yesman', icon: 'users' },
   { page: 'usage', label: 'Model usage', icon: 'chart' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
@@ -1333,6 +1503,10 @@ function renderSideFoot() {
   $('#settings-button').toggleAttribute('data-active', open);
   $('#settings-button').setAttribute('aria-expanded', String(open));
   $('#settings-nav').inert = !open;
+  $('#settings-button').title = shortcuts.hint(t('Settings'), 'settings.open');
+  const keys = shortcuts.aria('settings.open');
+  if (keys) $('#settings-button').setAttribute('aria-keyshortcuts', keys);
+  else $('#settings-button').removeAttribute('aria-keyshortcuts');
   for (const item of document.querySelectorAll('#settings-nav .mds-nav-item')) {
     if (open && item.dataset.page === state.view.page) item.setAttribute('aria-current', 'page');
     else item.removeAttribute('aria-current');
@@ -1353,6 +1527,8 @@ async function loadSettingsPage(page) {
     if (page === 'general' || page === 'storage') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
+    else if (page === 'shortcuts') { await shortcutsPage.load(); return; }
+    else if (page === 'grant') { await grantsPage.load(); return; }
     else if (page === 'pi') { await piPage.load(); return; }
     else if (page === 'yesman') { await crewPage.load(); return; }
     else if (page === 'usage') { usagePage.load(); return; }
@@ -1370,6 +1546,8 @@ function renderSettings(body) {
   body.append(h('div', { class: 'page' }, inner));
   if (state.view.page === 'repositories') renderRepositories(inner);
   else if (state.view.page === 'storage') renderStorage(inner);
+  else if (state.view.page === 'shortcuts') shortcutsPage.render(inner);
+  else if (state.view.page === 'grant') grantsPage.render(inner);
   else if (state.view.page === 'pi') piPage.render(inner);
   else if (state.view.page === 'yesman') crewPage.renderPage(inner);
   else if (state.view.page === 'usage') usagePage.render(inner);
@@ -1415,6 +1593,9 @@ function choiceSelect(v, key, method, label, choices) {
     }
   } }, choices.map(([value, text]) => h('option', { value, selected: value === v[key] }, text)));
 }
+
+// Settings › Grant keeps its requests and DOM lifecycle in grants.js.
+const grantsPage = createGrants({ call, shown: () => state.view.kind === 'settings' && state.view.page === 'grant' });
 
 // Settings › pi, in pi.js.
 const piPage = createPiPage({
@@ -1759,6 +1940,7 @@ async function importConfig() {
     c.imported = { lines: importLines(plan, result) };
     state.settings = null; // the next General or Repositories page reads them again
     refreshState();
+    shortcuts.load().catch(fail); // the file may carry shortcuts
   } catch (err) {
     fail(err);
   } finally {
@@ -1777,6 +1959,13 @@ function settingChanges(plan) {
     const now = plan.current[key];
     if (plan.merge[key] !== now) lines.push({ text: t('{setting}: {from} → {to}', { setting: label, from: show(now), to: show(plan.merge[key]) }) });
     else if (plan.replace[key] !== now) lines.push({ text: t('{setting}: {from} → {to}', { setting: label, from: show(now), to: show(plan.replace[key]) }), replaceOnly: true });
+  }
+  const keys = plan.shortcuts ?? { merge: [], replace: [] };
+  const shortcutLine = (n) => tn(n, 'Keyboard shortcuts: 1 action changes', 'Keyboard shortcuts: {n} actions change');
+  if (keys.merge.length) lines.push({ text: shortcutLine(keys.merge.length) });
+  // Replacing also gives the actions the file leaves out their defaults.
+  if (keys.replace.length !== keys.merge.length || keys.replace.some((id) => !keys.merge.includes(id))) {
+    lines.push({ text: shortcutLine(keys.replace.length), replaceOnly: true });
   }
   return lines;
 }
@@ -2332,6 +2521,7 @@ const files = createFiles({
   confirm: (title, body, ok) => confirmAction(title, body, ok),
   shown: () => info.render(),
   worktrees: (y) => info.worktrees(y),
+  keys: () => ({ 'files.find': shortcuts.primary('files.find'), 'files.tree': shortcuts.primary('files.tree') }),
 });
 
 // ---------- Info panel ----------
@@ -2521,6 +2711,89 @@ async function removeWorker(a) {
   }
 }
 
+// ---------- Shortcuts ----------
+
+// The conversations in the sidebar's order, as it shows them: each yesman's
+// lead, then the workers it lists.
+const sidebarAgents = () => [...document.querySelectorAll('#yesmen .agent-row:is([data-sidebar-entry="yesman"], [data-sidebar-entry="worker"])')]
+  .map((row) => agentById(row.dataset.agent)).filter(Boolean);
+
+// What the actions do, by the window's own functions.
+const actionHost = {
+  t,
+  selectedAgent,
+  yesmanOf: (a) => (a ? yesmanOf(a.id) : null),
+  label: yesmanLabel,
+  entries: sidebarAgents,
+  leads: () => state.snap.yesmen.map((y) => agentById(`${y.name}/lead`)).filter(Boolean),
+  needsYou: () => state.snap.agents.find((a) => a.role === 'lead' && a.status === 'waiting') ?? null,
+  step(by) {
+    const list = sidebarAgents();
+    const at = list.findIndex((a) => a.id === state.view.id);
+    const next = at < 0 ? list[by > 0 ? 0 : list.length - 1] : list[(at + by + list.length) % list.length];
+    if (next) selectAgent(next.id);
+  },
+  selectAgent,
+  composer: () => (state.view.kind === 'agent' ? $('#dock textarea') : null),
+  abort: (a) => call('Abort', a.id),
+  sleep: (a) => call('Stop', a.id),
+  // Another dialog than the palette, which closes before an action runs.
+  dialogOpen: () => !!document.querySelector('dialog[open]:not(.palette-dialog)'),
+  showSettings(page) {
+    showSettings(page ?? state.settingsPage);
+    // The page replaced what had focus: Settings › Shortcuts focuses its
+    // search, another page its own item in Settings.
+    const now = document.activeElement;
+    if (!now || now === document.body) {
+      (state.view.page === 'shortcuts' ? $('#shortcut-search') : $('#settings-nav [aria-current="page"]'))?.focus({ preventScroll: true });
+    }
+  },
+  settingsPages: () => SETTINGS,
+  openHire,
+  togglePane,
+  togglePanel,
+  files: () => files,
+  openCheckout,
+  renameYesman,
+  removeWorker,
+  dismiss,
+  addRepos() {
+    showSettings('repositories');
+    openAddRepos();
+  },
+  fetchAll: () => call('FetchAll'),
+  palette: () => palette,
+};
+registerActions(shortcuts, actionHost);
+
+// The message box is drawn again as its agent starts or stops: closing the
+// palette gives focus back to the same agent's box, never another's.
+const composerKey = () => (state.view.kind === 'agent' ? keyOf(selectedAgent() ?? {}) : null);
+const palette = createPalette({
+  shortcuts, items: () => paletteItems(actionHost), fail,
+  place: () => ({ agent: composerKey(), composer: !!document.activeElement?.matches?.('#dock textarea') }),
+  back: (where) => (where?.composer && where.agent && composerKey() === where.agent ? $('#dock textarea') : null),
+});
+
+// Settings › Shortcuts, in shortcuts-page.js.
+const shortcutsPage = createShortcutsPage({
+  shortcuts,
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  shown: () => state.view.kind === 'settings' && state.view.page === 'shortcuts',
+  rerender: () => renderBody(),
+  settingsSection,
+});
+
+// Controls that show their action's keys show the keys chosen now.
+let started = false;
+shortcuts.onChange(() => {
+  if (!started) return;
+  renderSidebar();
+  renderBarActions();
+  if (state.view.kind === 'settings' && state.view.page === 'shortcuts') shortcutsPage.renderList();
+  else if (state.view.kind === 'agent') renderDock();
+});
+
 // ---------- State ----------
 
 let refreshTimer = null;
@@ -2545,6 +2818,7 @@ async function refreshState() {
   }
   const sidebarFocus = $('#yesmen').contains(document.activeElement) ? document.activeElement : null;
   render();
+  palette.refresh();
   // The rebuilt composer can take initial focus during a full state refresh.
   // Preserve the sidebar's stable agent + semantic entry after that rebuild.
   restoreSidebarFocus(sidebarFocus);
@@ -2556,14 +2830,14 @@ function onAgents(agents) {
   state.snap.agents = agents;
   pruneCaches();
   renderSidebar();
+  palette.refresh();
   // The board links a task's owner while it is one of the agents.
   if (state.pane === 'board' && agents.map((a) => a.id).join() !== ids) board.render();
   piPage.onAgents();
   const after = selectedAgent();
-  if (after?.status === 'working' && after.activity !== before?.activity) {
-    const label = $('#thread .working-live .working-label');
-    if (label) label.textContent = workingLabel(after);
-  }
+  // The work row or the line at the foot says what the agent does now.
+  const shown = after && state.convos.get(keyOf(after));
+  if (shown?.loaded && (after.status !== before?.status || after.activity !== before?.activity || keyOf(after) !== keyOf(before ?? {}))) schedulePatch(shown);
   if (after?.status === 'idle' && before?.status === 'starting') loadModelOptions(after);
   if (state.view.kind === 'agent' && !after) {
     refreshSoon();
@@ -2572,7 +2846,6 @@ function onAgents(agents) {
   if (after && (before?.status !== after.status || before?.model !== after.model || before?.provider !== after.provider || before?.effort !== after.effort || JSON.stringify(before?.effortLevels) !== JSON.stringify(after.effortLevels) || before?.detail !== after.detail || JSON.stringify(before?.dialog) !== JSON.stringify(after.dialog))) {
     renderBar();
     renderDock();
-    renderWorking();
     if (before?.status === 'stopped' && after.status !== 'stopped' && !convo(after).loaded) selectAgent(after.id);
   }
 }
@@ -2591,6 +2864,7 @@ function onLocale(tag) {
   translatePage();
   buildSideFoot();
   if (!$('#repo-dialog').open) buildRepoDialog();
+  palette.relocalize();
   render();
 }
 
@@ -2603,6 +2877,7 @@ async function start() {
   }
   buildSideFoot();
   buildRepoDialog();
+  started = true;
   mygo.on('mygo:locale', (e) => onLocale(e.locale));
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href]');
@@ -2625,6 +2900,9 @@ async function start() {
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
   mygo.on('board', (yesman) => board.onChange(yesman));
   document.addEventListener('keydown', (e) => files.onKey(e));
+  // After the files pane's ⌘S, which keeps its key.
+  shortcuts.listen();
+  shortcuts.load().catch(fail);
   call('Update').then(onUpdate, () => {});
   mygo.on('focus-agent', (id) => {
     call('TakeFocus').catch(() => {});

@@ -333,7 +333,7 @@ func TestStopAllCancelsReportRetry(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		w := &agent{info: Info{ID: ID("alice", "w1"), Yesman: "alice", Name: "w1", Role: RoleWorker}}
-		done <- m.tellLeadWithin(ctx, w, "[yesman] Worker w1 finished a run")
+		done <- m.tellLeadWithin(ctx, w, "report", "[yesman] Worker w1 finished a run")
 	}()
 	select {
 	case <-rejected:
@@ -363,7 +363,7 @@ func TestStopAllWakesReportBackoff(t *testing.T) {
 		m := &Manager{cfg: Config{Yesmen: yesmen.New("", "")}, shutdown: make(chan struct{})}
 		w := &agent{info: Info{Yesman: "invalid name"}}
 		done := make(chan error, 1)
-		go func() { done <- m.tellLeadWithin(context.Background(), w, "report") }()
+		go func() { done <- m.tellLeadWithin(context.Background(), w, "report", "report") }()
 		synctest.Wait() // invalid name fails synchronously; the retry is asleep
 		m.StopAll()
 		synctest.Wait()
