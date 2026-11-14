@@ -82,13 +82,17 @@ A worktree opens in the files pane, as its files or as its changes. The pane's b
 
 The board, opened beside it in the titlebar, shows the same yesman's board as a list in the agents' order. Finished and dropped tasks fold into Done at the end, a blocked task shows why, a task's owner opens that agent's conversation, and a task expands to its detail and note. It follows the agents' changes; you change it by asking the lead. The board and the files share the place beside the conversation, one at a time.
 
-Settings, at the foot of the sidebar, has nine pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and the language), yesman (the crew, above, and what new yesmen run as, kept in `settings.json` too), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), Secrets and Variables (the environment variables of agents' commands, below), Storage (where yesman keeps its data, below), pi (pi's packages, below), Import and export (below), and About (the versions yesman runs with, and updates).
+Settings, at the foot of the sidebar, has ten pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and the language), Grant (the current application’s OS permissions, below), yesman (the crew, above, and what new yesmen run as, kept in `settings.json` too), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), Secrets and Variables (the environment variables of agents' commands, below), Storage (where yesman keeps its data, below), pi (pi's packages, below), Import and export (below), and About (the versions yesman runs with, and updates).
 
 yesman is written in English and translated to Simplified Chinese. General › Language chooses one, or Match the system, the default, which shows the first of them among the languages of the system's settings, else English. The window, its menus, the tray and notifications change at once; MyGo keeps the choice (`App.SetLocale`): on macOS as the app's language in System Settings, which AppKit and WebKit also say their own texts in from the next launch, elsewhere in its `locale` file. The page translates itself in [`web/i18n.js`](web/i18n.js), with each message's English as its key in [`web/locales/zh-Hans.js`](web/locales/zh-Hans.js); Go translates its menus, tray, notifications and dialogs with `tr` in [`i18n.go`](i18n.go). A message without a translation shows in English.
 
 The pi page manages [pi packages](https://pi.dev/packages): the extensions, skills, prompt templates and themes pi loads. It has three tabs. Info shows the pi every agent runs, a summary of the installed packages, pi's own settings file and what pi installs npm packages with (its `npmCommand` setting, npm unless set). Installed lists the packages pi's user settings install, with their version, source and what they provide; each can be updated, unless pinned to a version, or removed, and an npm package whose registry has a newer version says so. Browse searches the npm packages tagged `pi-package`, which is what pi's gallery lists, most popular first; a package's details show its README, links and preview, and install it. Install from source takes anything `pi install` does: `npm:name[@version]`, a git repository or URL, or a local path.
 
 Packages are installed for the user, in pi's agent directory (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`), so they load into every yesman agent and into pi wherever you run it. yesman changes them only by running `pi install`, `pi update` and `pi remove`, one at a time in the background; a change that fails stays listed with pi's or npm's error until you try it again or dismiss it. pi loads packages when it starts, so agents already running keep the packages they started with: the page says which, and puts the idle ones to sleep on request, to load the change when they next start.
+
+### Grant
+
+Settings › Grant shows the current copy of yesman’s OS permissions and offers individual Request or Open Settings actions. On macOS it covers Bluetooth, notifications, Full Disk Access, microphone, camera, Accessibility, Screen Recording, Input Monitoring and Automation. Status reads never prompt. Full Disk Access and Automation require manual settings and are not reported as automatically detectable; a successful settings launch is not a grant. Windows provides supported settings entries and Linux explains desktop/session policy limits. Independent terminals, runtimes and helper apps may need their own authorization. See [application permissions](docs/grants.md) for the platform matrix, native build requirements and safe validation.
 
 ### Secrets and variables
 
@@ -146,7 +150,7 @@ Release builds update themselves through MyGo's updater: they check GitHub relea
 
 ## Requirements
 
-- Go 1.27 or later, and git
+- Go 1.27 or later, and git; macOS 13 or later for the macOS app
 - Optionally the [GitHub CLI](https://cli.github.com) (`gh`), signed in. yesman asks it which repository a fork came from and which repositories an owner has, private ones too, and clones `owner/repo` over the protocol it is set to use. Without it, yesman asks GitHub's public API, which sees public repositories, and clones over HTTPS.
 - [pi](https://pi.dev) 1.5.2 or later on the `PATH` (`npm install -g @earendil-works/pi-coding-agent`), with a model configured. Installing npm packages from Settings › pi also needs the command pi installs them with, npm by default.
 
@@ -214,7 +218,7 @@ Automation cannot reach native file dialogs, so in such builds `YESMAN_E2E_SAVE`
 
 Updates are signed with a key whose secret half is the repository's `MYGO_UPDATER_PRIVATE_KEY` secret, with a copy kept outside the repository. Installed copies accept only updates signed with it, so it must not be lost or replaced.
 
-To build a release locally, without uploading: `go tool mygo build`, with the key in `MYGO_UPDATER_PRIVATE_KEY` for the update files.
+To build a release locally, without uploading: `go tool mygo build`, with the key in `MYGO_UPDATER_PRIVATE_KEY` for the update files. On macOS, enable the app-owned native permission bridge with `CGO_ENABLED=1 CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0' MACOSX_DEPLOYMENT_TARGET=13.0 go tool mygo build`; the release workflow sets these automatically.
 
 The builds are not yet signed for other machines: macOS apps are signed ad hoc, which Gatekeeper blocks on first open from a download, and Windows apps have no signature, so SmartScreen warns.
 
@@ -224,6 +228,7 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | --- | --- |
 | `main.go`, `app.go`, `service.go` | App startup, tray, window and notifications; the methods the page calls |
 | `settings.go`, `storage.go`, `disk_*.go`, `internal/home/` | Settings and About, the remembered data location, its usage and disk space, and directory layout |
+| `grants.go`, `internal/nativepermissions/`, `web/grants.js` | Settings › Grant: native application permissions, requests and fixed system settings destinations |
 | `crew.go`, `internal/crew`, `web/crew.js` | Settings › yesman: the crew, Artificial Analysis's scores and pi's catalog of models |
 | `pipackages.go`, `internal/pipkg`, `web/pi.js` | Settings › pi: pi's packages, installed, updated and removed through pi, and found in the npm registry |
 | `config.go` | The configuration file: export, and import by merging or replacing |

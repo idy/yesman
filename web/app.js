@@ -15,6 +15,7 @@ import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
 import { createCrew } from './crew.js';
+import { createGrants } from './grants.js';
 import { createEnvPage } from './env.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
@@ -1189,6 +1190,7 @@ function bindHireForm(form, error, { dialog, cancel } = {}) {
 }
 
 function renderBody() {
+  if (state.view.kind !== 'settings' || state.view.page !== 'grant') grantsPage.leave();
   const body = $('#body');
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
@@ -1456,6 +1458,7 @@ function renderWelcome(body) {
 // The pages, labelled in English: each is said in the page's language.
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
+  { page: 'grant', label: 'Grant', icon: 'lock' },
   { page: 'yesman', label: 'yesman', icon: 'users' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
   { page: 'secrets', label: 'Secrets', icon: 'lock' },
@@ -1504,6 +1507,7 @@ async function loadSettingsPage(page) {
     if (page === 'general' || page === 'storage') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
+    else if (page === 'grant') { await grantsPage.load(); return; }
     else if (page === 'pi') { await piPage.load(); return; }
     else if (page === 'yesman') { await crewPage.load(); return; }
     else if (page === 'secrets') { await secretsPage.load(); return; }
@@ -1520,6 +1524,7 @@ function renderSettings(body) {
   body.append(h('div', { class: 'page' }, inner));
   if (state.view.page === 'repositories') renderRepositories(inner);
   else if (state.view.page === 'storage') renderStorage(inner);
+  else if (state.view.page === 'grant') grantsPage.render(inner);
   else if (state.view.page === 'pi') piPage.render(inner);
   else if (state.view.page === 'yesman') crewPage.renderPage(inner);
   else if (state.view.page === 'secrets') secretsPage.render(inner);
@@ -1564,6 +1569,9 @@ function choiceSelect(v, key, method, label, choices) {
     }
   } }, choices.map(([value, text]) => h('option', { value, selected: value === v[key] }, text)));
 }
+
+// Settings › Grant keeps its requests and DOM lifecycle in grants.js.
+const grantsPage = createGrants({ call, shown: () => state.view.kind === 'settings' && state.view.page === 'grant' });
 
 // Settings › pi, in pi.js.
 const piPage = createPiPage({
