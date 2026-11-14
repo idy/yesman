@@ -320,8 +320,8 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
         conflict ? h('div', { class: 'shortcut-conflict', role: 'alert' },
           h('p', null, t('{keys} runs “{other}” now.', { keys: cap(conflict.binding).text, other: conflict.others.map((o) => shortcuts.label(o)).join(t(', ')) })),
           h('div', { class: 'storage-actions' },
-            h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => { rec.conflict = null; renderList(); document.getElementById('shortcut-recorder')?.focus(); } }, t('Choose other keys')),
-            h('button', { class: 'mds-button mds-button--small mds-button--primary', type: 'button', onclick: () => save(conflict.binding, conflict.others) },
+            h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-conflict': 'other', onclick: () => { rec.conflict = null; renderList(); document.getElementById('shortcut-recorder')?.focus(); } }, t('Choose other keys')),
+            h('button', { class: 'mds-button mds-button--small mds-button--primary', type: 'button', 'data-conflict': 'use', onclick: () => save(conflict.binding, conflict.others) },
               t('Use for “{action}”', { action: label })))) : null,
         error ? h('p', { class: 'danger', role: 'alert' }, error) : null),
       h('div', { class: 'mds-row-control' }, controls));
@@ -337,9 +337,21 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
     return q.split(/\s+/).every((word) => texts.some((s) => s.toLowerCase().includes(word)));
   }
 
+  // recordingFocus says which of the recording's controls has the focus:
+  // the recorder, or a button of its conflict.
+  function recordingFocus() {
+    const active = document.activeElement;
+    if (!rec || !inRecording(active)) return null;
+    return active.dataset?.conflict ? `.shortcut-conflict [data-conflict="${active.dataset.conflict}"]` : '#shortcut-recorder';
+  }
+
+  // renderList draws the list again, as a change saves or the keys load.
+  // While recording, the focus stays on the same control of the recording
+  // (else the recorder), so its keys and Esc still reach it.
   function renderList() {
     const el = document.getElementById('shortcut-list');
     if (!el) return;
+    const keep = recordingFocus();
     const groups = new Map();
     for (const action of shortcuts.actions()) {
       if (!matchesQuery(action) && rec?.id !== action.id) continue;
@@ -349,6 +361,7 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
     const sections = [...groups].map(([group, actions]) => settingsSection(t(group), null, ...actions.map(row)));
     el.replaceChildren(...(sections.length ? sections
       : [h('div', { class: 'card-empty' }, h('span', null, t('No action matches “{query}”.', { query: query.trim() })))]));
+    if (keep) (el.querySelector(keep) ?? document.getElementById('shortcut-recorder'))?.focus();
     paintRecorder();
     paintResetAll();
   }

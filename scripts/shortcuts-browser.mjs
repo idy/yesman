@@ -904,6 +904,44 @@ async function saving(x, check) {
     assert.equal(await x.infoShown(), true);
     check('a change that saves before Reset all fails stays; Reset all stays available and says why; the keys run as saved');
   });
+  // An earlier change that saves while recording draws the list again: the
+  // focus stays on the recorder, or its conflict's button, so keys record
+  // and Esc cancels.
+  await part('redraw-while-recording', async () => {
+    await restart({});
+    await openShortcuts();
+    const focused = () => page.evaluate(() => document.activeElement?.id || document.activeElement?.dataset.conflict || document.activeElement?.tagName);
+    await page.evaluate(() => { holdSaves = true; });
+    await row('pane.board').locator('.shortcut-chip button').click();
+    await page.waitForFunction(() => held.length === 1);
+    await row('pane.info').locator('.shortcut-add').click();
+    assert.equal(await focused(), 'shortcut-recorder');
+    await answer(true);
+    await page.waitForFunction(() => document.querySelectorAll('[data-action="pane.board"] .shortcut-chip').length === 0);
+    assert.equal(await focused(), 'shortcut-recorder');
+    await page.keyboard.press(`${MOD}+Shift+KeyJ`);
+    await page.waitForFunction(() => held.length === 1);
+    await answer(true);
+    await page.locator('#shortcut-recorder').waitFor({ state: 'detached' });
+    assert.deepEqual(await kept(), { 'pane.board': [], 'pane.info': ['Mod+Shift+J'] });
+    // The same on a conflict's button, then Esc from there.
+    await row('pane.files').locator('.shortcut-chip button').click();
+    await page.waitForFunction(() => held.length === 1);
+    await row('pane.info').locator('.shortcut-add').click();
+    await page.keyboard.press(`${MOD}+KeyK`);
+    await page.locator('.shortcut-conflict').waitFor();
+    assert.equal(await focused(), 'use');
+    await answer(true);
+    await page.waitForFunction(() => document.querySelectorAll('[data-action="pane.files"] .shortcut-chip').length === 0);
+    assert.equal(await focused(), 'use');
+    await page.keyboard.press('Escape');
+    await page.locator('#shortcut-recorder').waitFor({ state: 'detached' });
+    assert.equal(await heldCount(), 0);
+    assert.deepEqual(await kept(), { 'pane.board': [], 'pane.info': ['Mod+Shift+J'], 'pane.files': [] });
+    await page.evaluate(() => { holdSaves = false; });
+    check('an earlier change saving while recording keeps the focus on the recorder or its conflict’s button: keys record, Esc cancels');
+  });
+
   if (failures.length) throw new Error(`saving parts failed:\n${failures.join('\n')}`);
 }
 
