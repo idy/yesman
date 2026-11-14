@@ -605,3 +605,31 @@ func TestTopicsStayInsideTheWorkspace(t *testing.T) {
 	})
 
 }
+
+// A change says which source each source it adds became: a new ID, or the
+// ID of the equal source the topic already cites.
+func TestTopicSourcesSayWhatEachAddedSourceBecame(t *testing.T) {
+	s, y := topicStore(t)
+	created, added, err := s.CreateTopicSources("alice", y.HiredAt, TopicByUser, TopicInput{Title: "x", Sources: []TopicSource{
+		{Kind: "task", Ref: "t3"}, {Kind: "link", Ref: "https://example.com/a"}, {Kind: "TASK", Ref: "T3"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(created.Sources) != 2 || strings.Join(added, ",") != "s1,s2,s1" {
+		t.Fatalf("create: %+v %v", created.Sources, added)
+	}
+	patched, added, err := s.PatchTopicSources("alice", y.HiredAt, TopicByUser, created.ID, TopicPatch{
+		Revision: created.Revision, RemoveSources: []string{"s2"},
+		AddSources: []TopicSource{{Kind: "link", Ref: "https://example.com/b"}, {Kind: "task", Ref: "t3"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(added, ",") != "s3,s1" || len(patched.Sources) != 2 {
+		t.Fatalf("patch: %+v %v", patched.Sources, added)
+	}
+	if _, added, err := s.PatchTopicSources("alice", y.HiredAt, TopicByUser, created.ID, TopicPatch{Revision: 1, AddSources: []TopicSource{{Kind: "task", Ref: "t9"}}}); err == nil || added != nil {
+		t.Fatalf("a conflict reports no sources: %v %v", added, err)
+	}
+}

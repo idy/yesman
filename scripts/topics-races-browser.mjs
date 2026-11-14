@@ -78,8 +78,19 @@ const bridge = () => {
           const patch = structuredClone(p);
           if (hold.save) await held('save');
           for (const f of ['title', 'summary', 'questions', 'conclusions']) if (f in patch) x[f] = patch[f];
+          // As the store does: removals first, then additions, a repeat of
+          // a cited source becoming that source.
+          x.sources = x.sources.filter((src) => !(patch.removeSources ?? []).includes(src.id));
+          const sources = (patch.addSources ?? []).map((src) => {
+            if ('key' in src) throw new Error('the page sent its own key');
+            const have = x.sources.find((h) => h.kind === src.kind && h.ref === src.ref);
+            if (have) return have.id;
+            x.nextSource = (x.nextSource ?? x.sources.length) + 1;
+            x.sources.push({ id: `s${x.nextSource}`, kind: src.kind, ref: src.ref });
+            return `s${x.nextSource}`;
+          });
           x.revision++;
-          return { topic: structuredClone(x) };
+          return { topic: structuredClone(x), sources };
         }
         case 'Models': return { agent: agents.find((a) => a.id === args[0]), models: [] };
         case 'Board': return { tasks: [] };
@@ -214,6 +225,44 @@ async function run(engine, launcher) {
         assert.equal(await page.locator('#topics .topic-edit-source', { hasText: 'example.com' }).count(), 1);
         assert.equal(await page.inputValue('#topics [data-key="pick-ref"]'), '', 'cleared once added');
         await page.click('#topics [data-key="edit-cancel"]');
+      });
+      await check(engine, 'sources added and removed while saving are saved as such', async () => {
+        const addLink = async (ref) => {
+          await page.selectOption('#topics [data-key="pick-kind"]', 'link');
+          await page.fill('#topics [data-key="pick-ref"]', ref);
+          await page.click('#topics [data-key="pick-add"]');
+        };
+        const rows = () => page.locator('#topics .topic-edit-source').allInnerTexts();
+        // A cited source to start with.
+        await page.click('#topics [data-key="edit"]');
+        await addLink('https://example.com/kept');
+        await page.click('#topics [data-key="edit-save"]');
+        await page.locator('#topics [data-key="edit"]').waitFor();
+        // Send three rows: a new one removed while saving, a new one kept,
+        // and a repeat of the cited source, also removed while saving.
+        await page.click('#topics [data-key="edit"]');
+        await addLink('https://example.com/removed');
+        await addLink('https://example.com/also-sent');
+        await addLink('https://example.com/kept');
+        await page.evaluate(() => fx.hold('save'));
+        await page.click('#topics [data-key="edit-save"]');
+        await page.waitForFunction(() => fx.holding('save'));
+        await page.click('#topics [data-key="edit-newsource-2-remove"]');
+        await page.click('#topics [data-key="edit-newsource-0-remove"]');
+        await addLink('https://example.com/added-while-saving');
+        await page.evaluate(() => fx.release('save'));
+        await page.locator('#topics .topic-notice[role="status"]').waitFor();
+        const shown = (await rows()).join(' | ');
+        assert.ok(!shown.includes('/removed'), `the removed row came back: ${shown}`);
+        for (const want of ['/kept', '/also-sent', '/added-while-saving']) assert.ok(shown.includes(want), `${want} missing: ${shown}`);
+        // A redraw from elsewhere keeps the form as it is.
+        await page.evaluate((s) => fx.send('alice', 'tp2', s, '[Topic tp2: Beta]'), S('f5'));
+        await settle(page);
+        assert.equal((await rows()).join(' | '), shown);
+        await page.click('#topics [data-key="edit-save"]');
+        await page.locator('#topics [data-key="edit"]').waitFor();
+        const refs = await page.evaluate(() => fx.topics.alice[0].sources.map((src) => src.ref));
+        assert.deepEqual(refs.sort(), ['https://example.com/added-while-saving', 'https://example.com/also-sent', 'https://example.com/kept']);
       });
       await check(engine, 'a save typed over nothing ends the edit and focuses Edit', async () => {
         await page.click('#topics [data-key="edit"]');

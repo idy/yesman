@@ -572,7 +572,7 @@ export function createTopics(host) {
     messageSelect.addEventListener('change', () => {
       const m = picks[Number(messageSelect.value)];
       if (!m) return;
-      ed.form.addSources.push({ kind: 'message', agent: 'lead', since: lead?.since, role: m.role, timestamp: m.timestamp, label: excerpt(textOf(m.content), 120) });
+      ed.form.addSources.push({ key: newSourceKey(), kind: 'message', agent: 'lead', since: lead?.since, role: m.role, timestamp: m.timestamp, label: excerpt(textOf(m.content), 120) });
       render();
     });
     // What is being typed here lives in the edit, not the controls, so a
@@ -587,7 +587,7 @@ export function createTopics(host) {
     ref.addEventListener('input', () => { ed.pick.ref = ref.value; });
     const add = h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-key': 'pick-add', onclick: () => {
       if (!ed.pick.ref.trim()) return;
-      ed.form.addSources.push({ kind: ed.pick.kind, ref: ed.pick.ref.trim() });
+      ed.form.addSources.push({ key: newSourceKey(), kind: ed.pick.kind, ref: ed.pick.ref.trim() });
       ed.pick.ref = '';
       render();
     } }, t('Add'));
@@ -610,15 +610,15 @@ export function createTopics(host) {
     const f = cloneForm(ed.form);
     try {
       if (ed.id === 'new') {
-        const created = await host.call('CreateTopic', y.name, y.hiredAt, {
+        const r = await host.call('CreateTopic', y.name, y.hiredAt, {
           title: f.title, summary: f.summary,
           conclusions: f.conclusions.map((c) => c.text).filter((s) => s.trim()),
           questions: f.questions.map((c) => c.text).filter((s) => s.trim()),
-          sources: f.addSources,
+          sources: wireSources(f.addSources),
         });
-        replace(y, created);
-        if (v.editing === ed) v.selected = created.id;
-        settle(y, v, ed, f, created);
+        replace(y, r.topic);
+        if (v.editing === ed) v.selected = r.topic.id;
+        settle(y, v, ed, f, r.topic, r.sources, []);
         return;
       }
       const base = ed.base;
@@ -627,8 +627,9 @@ export function createTopics(host) {
       if (f.summary !== (base.summary ?? '')) patch.summary = f.summary;
       if (!sameItems(f.conclusions, base.conclusions)) patch.conclusions = f.conclusions;
       if (!sameItems(f.questions, base.questions)) patch.questions = f.questions;
-      if (f.addSources.length) patch.addSources = f.addSources;
+      if (f.addSources.length) patch.addSources = wireSources(f.addSources);
       if (f.removeSources.length) patch.removeSources = f.removeSources;
+      let before = base.sources;
       let r = await host.call('UpdateTopic', y.name, y.hiredAt, ed.id, patch);
       if (r.conflict) {
         const merged = merge(base, f, r.topic);
@@ -637,6 +638,7 @@ export function createTopics(host) {
           replace(y, r.topic);
           return;
         }
+        before = r.topic.sources;
         r = await host.call('UpdateTopic', y.name, y.hiredAt, ed.id, { ...merged.patch, revision: r.topic.revision });
         if (r.conflict) {
           ed.conflict = { fields: ['Another change'], current: r.topic };
@@ -646,7 +648,7 @@ export function createTopics(host) {
         v.notice = { text: t('Saved, together with a change made meanwhile.'), tone: 'quiet' };
       }
       replace(y, r.topic);
-      settle(y, v, ed, f, r.topic);
+      settle(y, v, ed, f, r.topic, r.sources, before);
     } catch (err) {
       ed.error = err?.message || String(err);
     } finally {
@@ -655,13 +657,23 @@ export function createTopics(host) {
   }
 
   const cloneForm = (f) => JSON.parse(JSON.stringify(f));
+  // Sources added in the form carry a key of the page's own, so a row stays
+  // the same row while its save is on its way; the key is not sent.
+  let sourceKeys = 0;
+  const newSourceKey = () => ++sourceKeys;
+  const wireSources = (list) => list.map(({ key, ...src }) => src);
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
   // settle ends an edit the app saved as sent. When the user changed the form
   // while it was saving, the edit goes on from the saved topic instead: the
   // fields changed meanwhile keep the user's text, the others take what was
   // saved, and nothing typed is lost.
-  function settle(y, v, ed, sent, saved) {
+  // Sources: rows added while it was saving stay to be added; a row that was
+  // sent and then removed becomes a removal of the source it was saved as,
+  // known from the IDs the save returned (ids, one per sent row), never
+  // from its text. A row that repeated a source cited before the save
+  // (before) removes nothing.
+  function settle(y, v, ed, sent, saved, ids, before) {
     if (v.editing !== ed) return;
     const now = ed.form;
     if (same(now, sent)) {
@@ -689,11 +701,20 @@ export function createTopics(host) {
       summary: now.summary === sent.summary ? saved.summary ?? '' : now.summary,
       conclusions: items(now.conclusions, sent.conclusions, saved.conclusions),
       questions: items(now.questions, sent.questions, saved.questions),
-      addSources: now.addSources.filter((s) => !sent.addSources.some((x) => same(x, s))),
-      removeSources: now.removeSources.filter((id) => !sent.removeSources.includes(id) && saved.sources.some((s) => s.id === id)),
+      addSources: now.addSources.filter((s) => !sent.addSources.some((x) => x.key === s.key)),
+      removeSources: [...now.removeSources.filter((id) => !sent.removeSources.includes(id)), ...removedWhileSaving(sent, now, ids, before)]
+        .filter((id, i, all) => all.indexOf(id) === i && saved.sources.some((s) => s.id === id)),
     };
     ed.conflict = null;
     ed.info = t('Saved. What you changed while it was saving is not saved yet.');
+  }
+
+  function removedWhileSaving(sent, now, ids, before) {
+    if (!Array.isArray(ids) || ids.length !== sent.addSources.length) return [];
+    const kept = new Set(now.addSources.map((s) => s.key));
+    const existed = new Set((before ?? []).map((s) => s.id));
+    const keep = new Set(ids.filter((id, i) => kept.has(sent.addSources[i].key)));
+    return ids.filter((id, i) => id && !kept.has(sent.addSources[i].key) && !existed.has(id) && !keep.has(id));
   }
 
   // focusAfter moves focus after a save, unless the user has moved on: to
@@ -735,7 +756,7 @@ export function createTopics(host) {
     field('summary', 'Summary', f.summary, base.summary ?? '', now.summary ?? '', eq);
     field('conclusions', 'Confirmed conclusions', f.conclusions, base.conclusions, now.conclusions, sameItems);
     field('questions', 'Open questions', f.questions, base.questions, now.questions, sameItems);
-    if (f.addSources.length) patch.addSources = f.addSources;
+    if (f.addSources.length) patch.addSources = wireSources(f.addSources);
     const still = f.removeSources.filter((id) => now.sources.some((s) => s.id === id));
     if (still.length) patch.removeSources = still;
     return { fields, patch };

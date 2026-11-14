@@ -675,10 +675,18 @@ func (s *Store) Topic(name string, since time.Time, id string) (Topic, error) {
 
 // CreateTopic adds a topic and returns it with its new ID.
 func (s *Store) CreateTopic(name string, since time.Time, by string, in TopicInput) (Topic, error) {
+	t, _, err := s.CreateTopicSources(name, since, by, in)
+	return t, err
+}
+
+// CreateTopicSources is CreateTopic that also says which source each of
+// in.Sources became: its new ID, or the ID of the equal source it repeats.
+func (s *Store) CreateTopicSources(name string, since time.Time, by string, in TopicInput) (Topic, []string, error) {
 	if err := validActor(by); err != nil {
-		return Topic{}, err
+		return Topic{}, nil, err
 	}
 	var out Topic
+	var added []string
 	err := s.useTopics(name, since, func(_ Yesman, f *topicsFile) (bool, error) {
 		if len(f.Topics) >= maxTopics {
 			return false, fmt.Errorf("a yesman keeps at most %d topics", maxTopics)
@@ -711,8 +719,9 @@ func (s *Store) CreateTopic(name string, since time.Time, by string, in TopicInp
 				return false, err
 			}
 		}
-		for _, src := range in.Sources {
-			if err := t.addSource(src); err != nil {
+		added = make([]string, len(in.Sources))
+		for i, src := range in.Sources {
+			if added[i], err = t.addSource(src); err != nil {
 				return false, err
 			}
 		}
@@ -721,20 +730,31 @@ func (s *Store) CreateTopic(name string, since time.Time, by string, in TopicInp
 		out = t.clone()
 		return true, nil
 	})
-	return out, err
+	if err != nil {
+		added = nil
+	}
+	return out, added, err
 }
 
 // PatchTopic changes a topic if it is still at the patch's revision; else
 // it returns a *TopicConflictError and changes nothing.
 func (s *Store) PatchTopic(name string, since time.Time, by, id string, p TopicPatch) (Topic, error) {
+	t, _, err := s.PatchTopicSources(name, since, by, id, p)
+	return t, err
+}
+
+// PatchTopicSources is PatchTopic that also says which source each of
+// p.AddSources became: its new ID, or the ID of the equal source it repeats.
+func (s *Store) PatchTopicSources(name string, since time.Time, by, id string, p TopicPatch) (Topic, []string, error) {
 	if err := validActor(by); err != nil {
-		return Topic{}, err
+		return Topic{}, nil, err
 	}
 	id = TopicID(id)
 	if err := ValidTopicID(id); err != nil {
-		return Topic{}, err
+		return Topic{}, nil, err
 	}
 	var out Topic
+	var added []string
 	err := s.useTopics(name, since, func(_ Yesman, f *topicsFile) (bool, error) {
 		i := f.index(id)
 		if i < 0 {
@@ -749,7 +769,8 @@ func (s *Store) PatchTopic(name string, since time.Time, by, id string, p TopicP
 			return false, nil
 		}
 		t := current.clone()
-		if err := t.apply(p); err != nil {
+		var err error
+		if added, err = t.apply(p); err != nil {
 			return false, err
 		}
 		t.Revision++
@@ -759,34 +780,39 @@ func (s *Store) PatchTopic(name string, since time.Time, by, id string, p TopicP
 		out = t.clone()
 		return true, nil
 	})
-	return out, err
+	if err != nil {
+		added = nil
+	}
+	return out, added, err
 }
 
-func (t *Topic) apply(p TopicPatch) error {
+// apply changes the topic and returns the source ID each of p.AddSources
+// became.
+func (t *Topic) apply(p TopicPatch) ([]string, error) {
 	if p.Archive && p.Restore {
-		return errors.New("archive or restore, not both")
+		return nil, errors.New("archive or restore, not both")
 	}
 	if p.Title != nil {
 		title, err := topicTitle(*p.Title)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		t.Title = title
 	}
 	if p.Summary != nil {
 		summary, err := topicText(*p.Summary, maxTopicSummary, "the summary")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		t.Summary = summary
 	}
 	if p.Status != nil {
 		st, err := topicStatus(*p.Status)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if st == TopicArchived {
-			return errors.New("archive a topic with archive, so it can be restored")
+			return nil, errors.New("archive a topic with archive, so it can be restored")
 		}
 		if t.Status == TopicArchived {
 			t.ArchivedFrom = st // stays archived; restoring returns to this
@@ -796,31 +822,34 @@ func (t *Topic) apply(p TopicPatch) error {
 	}
 	if p.Conclusions != nil {
 		if err := t.replaceItems(&t.Conclusions, 'c', *p.Conclusions); err != nil {
-			return fmt.Errorf("conclusions: %w", err)
+			return nil, fmt.Errorf("conclusions: %w", err)
 		}
 	}
 	if p.Questions != nil {
 		if err := t.replaceItems(&t.Questions, 'q', *p.Questions); err != nil {
-			return fmt.Errorf("open questions: %w", err)
+			return nil, fmt.Errorf("open questions: %w", err)
 		}
 	}
 	if err := t.editItems(&t.Conclusions, 'c', p.UpdateConclusions, p.RemoveConclusions, p.AddConclusions); err != nil {
-		return fmt.Errorf("conclusions: %w", err)
+		return nil, fmt.Errorf("conclusions: %w", err)
 	}
 	if err := t.editItems(&t.Questions, 'q', p.UpdateQuestions, p.RemoveQuestions, p.AddQuestions); err != nil {
-		return fmt.Errorf("open questions: %w", err)
+		return nil, fmt.Errorf("open questions: %w", err)
 	}
 	for _, id := range p.RemoveSources {
 		i := slices.IndexFunc(t.Sources, func(s TopicSource) bool { return s.ID == strings.TrimSpace(id) })
 		if i < 0 {
-			return fmt.Errorf("no source %q", id)
+			return nil, fmt.Errorf("no source %q", id)
 		}
 		t.Sources = slices.Delete(t.Sources, i, i+1)
 	}
-	for _, src := range p.AddSources {
-		if err := t.addSource(src); err != nil {
-			return err
+	added := make([]string, len(p.AddSources))
+	for i, src := range p.AddSources {
+		id, err := t.addSource(src)
+		if err != nil {
+			return nil, err
 		}
+		added[i] = id
 	}
 	switch {
 	case p.Archive && t.Status != TopicArchived:
@@ -832,7 +861,7 @@ func (t *Topic) apply(p TopicPatch) error {
 		}
 		t.ArchivedFrom = ""
 	}
-	return nil
+	return added, nil
 }
 
 func (t *Topic) nextID(kind byte) string {
@@ -919,22 +948,24 @@ func (t *Topic) replaceItems(list *[]TopicItem, kind byte, items []TopicItem) er
 	return nil
 }
 
-func (t *Topic) addSource(src TopicSource) error {
+// addSource cites src and returns its ID, or the ID of the equal source the
+// topic already cites.
+func (t *Topic) addSource(src TopicSource) (string, error) {
 	if len(t.Sources) >= maxTopicSources {
-		return fmt.Errorf("a topic keeps at most %d sources", maxTopicSources)
+		return "", fmt.Errorf("a topic keeps at most %d sources", maxTopicSources)
 	}
 	src, err := validSource(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, have := range t.Sources {
 		if sameSource(have, src) {
-			return nil // already cited
+			return have.ID, nil // already cited
 		}
 	}
 	src.ID = t.nextID('s')
 	t.Sources = append(t.Sources, src)
-	return nil
+	return src.ID, nil
 }
 
 func sameSource(a, b TopicSource) bool {

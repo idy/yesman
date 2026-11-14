@@ -118,10 +118,11 @@ func TestTopicsWithLocalPi(t *testing.T) {
 		}
 	}
 
-	tpA, err := svc.CreateTopic("alice", y.HiredAt, yesmen.TopicInput{Title: "Alpha storage", Summary: "SUMMARY-BODY-SECRET"})
+	createdA, err := svc.CreateTopic("alice", y.HiredAt, yesmen.TopicInput{Title: "Alpha storage", Summary: "SUMMARY-BODY-SECRET"})
 	must(t, err)
-	tpB, err := svc.CreateTopic("alice", y.HiredAt, yesmen.TopicInput{Title: "Beta images"})
+	createdB, err := svc.CreateTopic("alice", y.HiredAt, yesmen.TopicInput{Title: "Beta images"})
 	must(t, err)
+	tpA, tpB := createdA.Topic, createdB.Topic
 	png := agent.Image{Type: "image", MimeType: "image/png", Data: "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg=="}
 	id := func(tag string) string {
 		return fmt.Sprintf("%012x", time.Now().UnixMilli()) + strings.Repeat(tag, 36/len(tag))

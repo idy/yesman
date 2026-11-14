@@ -31,25 +31,29 @@ func (s *service) Topics(yesman string, since time.Time) ([]yesmen.Topic, error)
 }
 
 // CreateTopic adds a topic the user wrote.
-func (s *service) CreateTopic(yesman string, since time.Time, in yesmen.TopicInput) (yesmen.Topic, error) {
-	t, err := s.app.yesmen.CreateTopic(yesman, since, yesmen.TopicByUser, in)
-	if err == nil {
-		s.app.topicsChanged(yesman)
+func (s *service) CreateTopic(yesman string, since time.Time, in yesmen.TopicInput) (TopicUpdate, error) {
+	t, added, err := s.app.yesmen.CreateTopicSources(yesman, since, yesmen.TopicByUser, in)
+	if err != nil {
+		return TopicUpdate{}, err
 	}
-	return t, err
+	s.app.topicsChanged(yesman)
+	return TopicUpdate{Topic: t, Sources: added}, nil
 }
 
 // TopicUpdate is the result of a user's change: the topic as saved, or, on
-// Conflict, as it is now, with nothing saved.
+// Conflict, as it is now, with nothing saved. Sources holds, for each source
+// the change added, the ID it has in the topic, so a form edited while it
+// was saving knows which saved source each of its rows is.
 type TopicUpdate struct {
 	Topic    yesmen.Topic `json:"topic"`
 	Conflict bool         `json:"conflict,omitempty"`
+	Sources  []string     `json:"sources,omitempty"`
 }
 
 // UpdateTopic saves the user's change if the topic is still at the revision
 // they edited.
 func (s *service) UpdateTopic(yesman string, since time.Time, id string, p yesmen.TopicPatch) (TopicUpdate, error) {
-	t, err := s.app.yesmen.PatchTopic(yesman, since, yesmen.TopicByUser, id, p)
+	t, added, err := s.app.yesmen.PatchTopicSources(yesman, since, yesmen.TopicByUser, id, p)
 	var conflict *yesmen.TopicConflictError
 	if errors.As(err, &conflict) {
 		return TopicUpdate{Topic: conflict.Current, Conflict: true}, nil
@@ -58,7 +62,7 @@ func (s *service) UpdateTopic(yesman string, since time.Time, id string, p yesme
 		return TopicUpdate{}, err
 	}
 	s.app.topicsChanged(yesman)
-	return TopicUpdate{Topic: t}, nil
+	return TopicUpdate{Topic: t, Sources: added}, nil
 }
 
 // TopicSubmission is a message sent from a topic: its receipt from the
