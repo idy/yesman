@@ -168,7 +168,7 @@ export default {
   "Every minute": "每分钟",
   "Every {n} minutes": "每 {n} 分钟",
   "Export": "导出",
-  "Exported {repos} and the settings to {path}.": "已将 {repos}和设置导出到 {path}。",
+  "Exported {repos} and the settings to {path}": "已将 {repos}和设置导出到 {path}",
   "Export…": "导出…",
   "extensions": "扩展",
   "Extra high": "超高",
