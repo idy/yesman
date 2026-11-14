@@ -1,14 +1,18 @@
 package usage
 
 import (
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/idy/yesman/internal/yesmen"
 )
 
+// rec is a record as scan reads it from an entry pi wrote when the response
+// ended: at its start plus its duration, if recorded.
 func rec(kind, provider, model, effort string, at time.Time, durationMs int64, stop string, input, output, read, write int64) Record {
 	return Record{Kind: kind, Provider: provider, Model: model, Effort: effort, At: at, DurationMs: durationMs, Stop: stop,
+		Ended:  ended(at, at.Add(time.Duration(max(durationMs, 0))*time.Millisecond), durationMs),
 		Tokens: Tokens{Input: input, Output: output, CacheRead: read, CacheWrite: write, Total: input + output + read + write}}
 }
 
@@ -157,12 +161,17 @@ func task(id, status, owner string, updated time.Time) yesmen.Task {
 
 // Done tasks count for the model their owner used: the one it was using
 // when the task was done, when the board recorded that, else the only one
-// it used. Open, reopened and dropped tasks do not count.
+// it used, when only one worker can have held the owner's name. Open,
+// reopened and dropped tasks do not count.
 func TestSummarizeAttributesDoneTasks(t *testing.T) {
 	switched := t0.Add(time.Hour)
 	again := t0.Add(5 * time.Hour)
 	recorded := func(tk yesmen.Task, at time.Time, owner string) yesmen.Task {
 		tk.DoneAt, tk.DoneOwner = at, owner
+		return tk
+	}
+	created := func(tk yesmen.Task, at time.Time) yesmen.Task {
+		tk.CreatedAt = at
 		return tk
 	}
 	w := Workspace{Name: "y", HiredAt: t0,
@@ -184,8 +193,8 @@ func TestSummarizeAttributesDoneTasks(t *testing.T) {
 			task("t8", yesmen.TaskDone, "", t0),                                                                    // unowned
 			task("t9", yesmen.TaskDone, "nobody", t0),                                                              // unknown owner
 			task("t10", yesmen.TaskDone, "lead", t0),                                                               // a lead's
-			task("t11", yesmen.TaskDone, "re", t0.Add(2*time.Hour)),                                                // the earlier "re": a low
-			task("t12", yesmen.TaskDone, "re", again.Add(2*time.Hour)),                                             // the current "re": b low only
+			task("t11", yesmen.TaskDone, "re", again.Add(2*time.Hour)),                                             // either "re": unknown
+			created(task("t12", yesmen.TaskDone, "re", again.Add(2*time.Hour)), again.Add(time.Hour)),              // created after the new "re": b low
 			task("t13", yesmen.TaskDone, "idle", t0),                                                               // no responses
 			recorded(task("t14", yesmen.TaskDone, "solo", t0.Add(3*time.Hour)), t0.Add(30*time.Second), "solo"),    // before its first response
 		}},
@@ -197,7 +206,7 @@ func TestSummarizeAttributesDoneTasks(t *testing.T) {
 			got[r.Model+":"+r.Effort] = r.Tasks
 		}
 	}
-	want := map[string]int{"a:high": 2, "b:xhigh": 1, "a:low": 1, "b:low": 1}
+	want := map[string]int{"a:high": 2, "b:xhigh": 1, "b:low": 1}
 	if len(got) != len(want) {
 		t.Fatalf("tasks by row = %v, want %v", got, want)
 	}
@@ -207,10 +216,10 @@ func TestSummarizeAttributesDoneTasks(t *testing.T) {
 		}
 	}
 	tc := s.Tasks
-	if tc.Attributed != 5 || tc.SeveralModels != 1 || tc.Unowned != 2 || tc.UnknownOwner != 1 || tc.OtherRole != 1 || tc.NoResponses != 2 || tc.Recorded != 4 {
+	if tc.Attributed != 4 || tc.SeveralModels != 1 || tc.Unowned != 2 || tc.UnknownOwner != 1 || tc.OtherRole != 1 || tc.NoResponses != 2 || tc.ReusedName != 1 || tc.Recorded != 4 {
 		t.Errorf("task counts = %+v", tc)
 	}
-	if tc.Done != tc.Attributed+tc.SeveralModels+tc.Unowned+tc.UnknownOwner+tc.OtherRole+tc.NoResponses || tc.Done != 12 {
+	if tc.Done != unattributedSum(tc)+tc.Attributed || tc.Done != 12 {
 		t.Errorf("done = %d does not add up: %+v", tc.Done, tc)
 	}
 	if s.Total.Tasks != tc.Attributed {
@@ -252,6 +261,204 @@ func TestSummarizeLimitsToPeriod(t *testing.T) {
 	}
 }
 
+func unattributedSum(tc TaskCounts) int {
+	return tc.SeveralModels + tc.NoResponses + tc.Unowned + tc.UnknownOwner + tc.OtherRole + tc.ReusedName + tc.UnknownTiming
+}
+
+func tasksByRow(s Summary) map[string]int {
+	got := map[string]int{}
+	for _, r := range s.Rows {
+		if r.Tasks > 0 {
+			got[r.Model+":"+r.Effort] = r.Tasks
+		}
+	}
+	return got
+}
+
+// A task counts for the owner's latest response that had ended when it was
+// done: one that started before but ended after does not take it, however
+// its entry arrives, and the result is the same read fresh, in any order
+// and in any period.
+func TestSummarizeCreditsResponsesEndedByCompletion(t *testing.T) {
+	done := t0.Add(time.Hour)
+	mk := func(model, effort string, start, written time.Time, ms int64) Record {
+		r := response(model, effort, start, ms, 1)
+		r.Ended = ended(start, written, ms)
+		return r
+	}
+	cases := []struct {
+		name    string
+		records []Record
+		want    string // "model:effort", or a reason
+	}{
+		{"ended after completion", []Record{
+			mk("old", "high", done.Add(-time.Hour), done.Add(-59*time.Minute), 1000),
+			mk("new", "low", done.Add(-time.Second), done.Add(time.Second), 2000),
+		}, "old:high"},
+		{"same model, another effort", []Record{
+			mk("m", "high", done.Add(-time.Hour), done.Add(-59*time.Minute), 1000),
+			mk("m", "low", done.Add(-time.Second), done.Add(time.Second), 2000),
+		}, "m:high"},
+		{"written late, no duration", []Record{
+			mk("old", "high", done.Add(-time.Hour), done.Add(-59*time.Minute), -1),
+			mk("new", "low", done.Add(-time.Minute), done.Add(time.Second), -1),
+		}, "old:high"},
+		{"ended exactly at completion", []Record{
+			mk("old", "high", done.Add(-time.Hour), done.Add(-59*time.Minute), 1000),
+			mk("new", "low", done.Add(-time.Second), done, 1000),
+		}, "new:low"},
+		{"a long duration ends later than written", []Record{
+			mk("old", "high", done.Add(-time.Hour), done.Add(-59*time.Minute), 1000),
+			mk("new", "low", done.Add(-time.Minute), done.Add(-30*time.Second), 120_000),
+		}, "old:high"},
+		{"end not recorded, started after the last that ended", []Record{
+			mk("old", "high", done.Add(-time.Hour), done.Add(-59*time.Minute), 1000),
+			mk("new", "low", done.Add(-time.Minute), time.Time{}, -1),
+		}, "unknownTiming"},
+		{"end not recorded, started before the last that ended", []Record{
+			mk("first", "low", done.Add(-2*time.Hour), time.Time{}, -1),
+			mk("old", "high", done.Add(-time.Hour), done.Add(-59*time.Minute), 1000),
+		}, "old:high"},
+		{"end not recorded, started after completion", []Record{
+			mk("old", "high", done.Add(-time.Hour), done.Add(-59*time.Minute), 1000),
+			mk("new", "low", done.Add(time.Minute), time.Time{}, -1),
+		}, "old:high"},
+		{"only a response whose end is not recorded", []Record{
+			mk("new", "low", done.Add(-time.Minute), time.Time{}, -1),
+		}, "unknownTiming"},
+		{"none ended by completion", []Record{
+			mk("new", "low", done.Add(-time.Second), done.Add(time.Second), 2000),
+		}, "noResponses"},
+		{"a written time before the start is not believed", []Record{
+			mk("old", "high", done.Add(-time.Hour), done.Add(-59*time.Minute), 1000),
+			mk("new", "low", done.Add(-time.Second), done.Add(-time.Hour), -1),
+		}, "unknownTiming"},
+		{"an overlong duration is not believed", []Record{
+			mk("old", "high", done.Add(-time.Hour), done.Add(-59*time.Minute), 1000),
+			mk("new", "low", done.Add(-time.Second), time.Time{}, (25 * time.Hour).Milliseconds()),
+		}, "unknownTiming"},
+	}
+	for _, c := range cases {
+		for _, order := range []string{"forward", "reversed"} {
+			records := slices.Clone(c.records)
+			if order == "reversed" {
+				slices.Reverse(records)
+			}
+			tk := task("t1", yesmen.TaskDone, "w", done.Add(time.Hour))
+			tk.DoneAt, tk.DoneOwner = done, "w"
+			w := Workspace{Name: "y", Workers: []yesmen.Worker{{Name: "w", StartedAt: t0.Add(-time.Hour)}},
+				Agents: map[string][]Record{"w": records}, Board: yesmen.Board{Tasks: []yesmen.Task{tk}}}
+			for _, since := range []time.Time{{}, done.Add(-time.Minute)} {
+				s := Summarize([]Workspace{w}, Query{Workers: true, Since: since})
+				got := ""
+				for k := range tasksByRow(s) {
+					got = k
+				}
+				switch {
+				case s.Tasks.UnknownTiming == 1:
+					got = "unknownTiming"
+				case s.Tasks.NoResponses == 1:
+					got = "noResponses"
+				}
+				if got != c.want || s.Tasks.Done != 1 || unattributedSum(s.Tasks)+s.Tasks.Attributed != 1 {
+					t.Errorf("%s (%s, since %v): got %q, want %q; tasks %+v", c.name, order, since, got, c.want, s.Tasks)
+				}
+			}
+		}
+	}
+}
+
+func TestEnded(t *testing.T) {
+	start := t0
+	for _, c := range []struct {
+		written time.Time
+		ms      int64
+		want    time.Time
+	}{
+		{start.Add(2 * time.Second), 1000, start.Add(2 * time.Second)},
+		{start.Add(time.Second), 3000, start.Add(3 * time.Second)},
+		{time.Time{}, 1000, start.Add(time.Second)},
+		{start.Add(time.Second), -1, start.Add(time.Second)},
+		{start.Add(-time.Second), -1, time.Time{}},
+		{start.Add(-time.Second), 500, start.Add(500 * time.Millisecond)},
+		{time.Time{}, -1, time.Time{}},
+		{time.Time{}, -5, time.Time{}},
+		{time.Time{}, 1 << 53, time.Time{}},
+		{time.Time{}, (24 * time.Hour).Milliseconds(), start.Add(24 * time.Hour)},
+	} {
+		if got := ended(start, c.written, c.ms); !got.Equal(c.want) {
+			t.Errorf("ended(start, %v, %d) = %v, want %v", c.written, c.ms, got, c.want)
+		}
+	}
+}
+
+// A task done before completion was recorded counts only when one worker
+// alone can have held its owner's name since the task was created; edits
+// after it was done never move it. Removing and starting the name again any
+// number of times, and the period asked for, keep that.
+func TestSummarizeLegacyTasksIgnoreEdits(t *testing.T) {
+	s1, s2, s3 := t0.Add(time.Hour), t0.Add(2*time.Hour), t0.Add(3*time.Hour)
+	starts := []yesmen.WorkerStart{{Name: "w", StartedAt: s1}, {Name: "w", StartedAt: s2}, {Name: "w", StartedAt: s3}}
+	records := map[string][]Record{
+		"w":    {response("a", "high", s1.Add(time.Minute), 1000, 1), response("b", "low", s2.Add(time.Minute), 1000, 1), response("c", "low", s3.Add(time.Minute), 1000, 1)},
+		"solo": {response("s", "xhigh", t0.Add(time.Minute), 1000, 1)},
+	}
+	legacy := func(id, owner string, created time.Time) yesmen.Task {
+		return yesmen.Task{ID: id, Status: yesmen.TaskDone, Owner: owner, CreatedAt: created, UpdatedAt: created.Add(time.Minute)}
+	}
+	tasks := []yesmen.Task{
+		legacy("t1", "w", s1.Add(time.Minute)),    // the first, second or third w
+		legacy("t2", "w", s2.Add(time.Minute)),    // the second or third
+		legacy("t3", "w", s3.Add(time.Minute)),    // only the third: c low
+		legacy("t4", "solo", t0.Add(time.Minute)), // a name used once: s xhigh
+	}
+	view := func(tasks []yesmen.Task, current []yesmen.Worker, since time.Time) Summary {
+		w := Workspace{Name: "y", Workers: current, Starts: starts, Agents: records, Board: yesmen.Board{Tasks: tasks}}
+		return Summarize([]Workspace{w}, Query{Workers: true, Since: since})
+	}
+	check := func(label string, s Summary) {
+		t.Helper()
+		got := tasksByRow(s)
+		if len(got) != 2 || got["c:low"] != 1 || got["s:xhigh"] != 1 || s.Tasks.ReusedName != 2 || s.Tasks.Done != 4 {
+			t.Errorf("%s: tasks %v, counts %+v", label, got, s.Tasks)
+		}
+	}
+	solo := []yesmen.Worker{{Name: "solo", StartedAt: t0}}
+	check("as done", view(tasks, solo, time.Time{}))
+	// A note edit later, at any time, changes only UpdatedAt.
+	for _, at := range []time.Time{s1, s2.Add(time.Hour), s3.Add(time.Hour), s3.Add(48 * time.Hour)} {
+		edited := slices.Clone(tasks)
+		for i := range edited {
+			edited[i].UpdatedAt, edited[i].Note = at, "edited"
+		}
+		check("edited at "+at.Format(time.Kitchen), view(edited, solo, time.Time{}))
+	}
+	// The current w, listed or removed, does not change who can have done it.
+	check("w listed", view(tasks, append(slices.Clone(solo), yesmen.Worker{Name: "w", StartedAt: s3}), time.Time{}))
+	// A period cannot place a task done at a time not recorded.
+	if s := view(tasks, solo, s1); s.Tasks.TimeUnknown != 4 || s.Tasks.Done != 0 || len(tasksByRow(s)) != 0 {
+		t.Errorf("in a period: %+v", s.Tasks)
+	}
+	// Board order does not matter; a task recorded done before the first
+	// known start shows an earlier w existed, which may also have done t3's
+	// sibling created then.
+	early := yesmen.Task{ID: "t5", Status: yesmen.TaskDone, Owner: "w", DoneOwner: "w", CreatedAt: t0, UpdatedAt: t0, DoneAt: t0.Add(time.Minute)}
+	before := legacy("t6", "w", t0) // the earlier w or any later one
+	for _, order := range [][]yesmen.Task{append(slices.Clone(tasks), early, before), append([]yesmen.Task{before, early}, tasks...)} {
+		s := view(order, solo, time.Time{})
+		if s.Tasks.ReusedName != 3 || s.Tasks.NoResponses != 1 || tasksByRow(s)["c:low"] != 1 {
+			t.Errorf("with an earlier w: %+v %v", s.Tasks, tasksByRow(s))
+		}
+	}
+	// Reassigning a legacy task while done changes whose it is: the owner is
+	// all a legacy task records.
+	moved := slices.Clone(tasks)
+	moved[3].Owner = "w"
+	if s := view(moved, solo, time.Time{}); s.Tasks.ReusedName != 3 || tasksByRow(s)["s:xhigh"] != 0 {
+		t.Errorf("reassigned: %+v %v", s.Tasks, tasksByRow(s))
+	}
+}
+
 func TestSummarizeEmpty(t *testing.T) {
 	s := Summarize(nil, all)
 	if s.Rows == nil || len(s.Rows) != 0 || s.Coverage.Errors == nil || s.Total.Speed != nil {
@@ -272,18 +479,27 @@ func TestSummarizeKeepsStartsAfterRemoval(t *testing.T) {
 		response("b", "high", s2.Add(2*time.Minute), 1000, 1),
 		response("c", "high", s3.Add(time.Minute), 1000, 1),
 	}
+	doneAt := func(id string, at time.Time) yesmen.Task {
+		tk := task(id, yesmen.TaskDone, "w", at)
+		tk.DoneAt, tk.DoneOwner = at, "w"
+		return tk
+	}
+	legacy := task("t4", yesmen.TaskDone, "w", s3.Add(time.Hour)) // created before all: any of them
+	late := task("t5", yesmen.TaskDone, "w", s3.Add(time.Hour))
+	late.CreatedAt = s3.Add(10 * time.Minute) // created after the third start: only it
 	board := yesmen.Board{Tasks: []yesmen.Task{
-		task("t1", yesmen.TaskDone, "w", s1.Add(30*time.Minute)), // the first start: a
-		task("t2", yesmen.TaskDone, "w", s2.Add(30*time.Minute)), // the second: b
-		task("t3", yesmen.TaskDone, "w", s3.Add(30*time.Minute)), // the third: c
+		doneAt("t1", s1.Add(30*time.Minute)), // the first start: a
+		doneAt("t2", s2.Add(30*time.Minute)), // the second: b
+		doneAt("t3", s3.Add(30*time.Minute)), // the third: c
+		legacy, late,
 	}}
 	for _, current := range [][]yesmen.Worker{{{Name: "w", StartedAt: s3}}, nil} {
 		w := Workspace{Name: "y", Workers: current, Starts: starts, Board: board, Agents: map[string][]Record{"w": records}}
 		s := Summarize([]Workspace{w}, Query{Workers: true})
-		if s.Total.Workers != 4 || s.Overlap != 0 {
-			t.Fatalf("with %d listed: total = %+v, overlap %d", len(current), s.Total, s.Overlap)
+		if s.Total.Workers != 4 || s.Overlap != 0 || s.Tasks.ReusedName != 1 || s.Tasks.Attributed != 4 {
+			t.Fatalf("with %d listed: total = %+v, overlap %d, tasks %+v", len(current), s.Total, s.Overlap, s.Tasks)
 		}
-		for model, want := range map[string]Row{"a": {Workers: 1, Tasks: 1, Responses: 1}, "b": {Workers: 1, Tasks: 1, Responses: 2}, "c": {Workers: 1, Tasks: 1, Responses: 1}, "old": {Workers: 1, Responses: 1}} {
+		for model, want := range map[string]Row{"a": {Workers: 1, Tasks: 1, Responses: 1}, "b": {Workers: 1, Tasks: 1, Responses: 2}, "c": {Workers: 1, Tasks: 2, Responses: 1}, "old": {Workers: 1, Responses: 1}} {
 			r := rowOf(t, s, "p/"+model, "high")
 			if r.Workers != want.Workers || r.Tasks != want.Tasks || r.Responses != want.Responses {
 				t.Errorf("with %d listed: %s = %+v", len(current), model, r)

@@ -114,10 +114,23 @@ func appendText(t *testing.T, path, text string) {
 
 func scan(t *testing.T, d *Dir, dir string) ([]Record, DirStats) {
 	t.Helper()
-	if err := d.Scan(context.Background(), dir); err != nil {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := d.Scan(context.Background(), root); err != nil {
 		t.Fatal(err)
 	}
 	return d.Records()
+}
+
+// steady treats files as changed long enough before they are read that a
+// later change cannot keep their time, as for logs not being written now.
+func steady(t *testing.T) {
+	old := racyWindow
+	racyWindow = 0
+	t.Cleanup(func() { racyWindow = old })
 }
 
 func TestScanReadsEachKindOfUsage(t *testing.T) {
@@ -166,6 +179,7 @@ func TestScanReadsEachKindOfUsage(t *testing.T) {
 // A file read again only reads what was appended, and a line still being
 // written waits for its newline.
 func TestScanReadsOnlyWhatWasAppended(t *testing.T) {
+	steady(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "s.jsonl")
 	writeLines(t, path, header("s"), resp{id: "a1", provider: "p", model: "m", effort: "high", at: t0, duration: 1000, output: 10}.line())
@@ -186,13 +200,11 @@ func TestScanReadsOnlyWhatWasAppended(t *testing.T) {
 	if len(records) != 2 || records[1].Output != 20 {
 		t.Fatalf("after completing the line: %+v", records)
 	}
-	// Reading again without a change keeps everything once.
-	if records, _ := scan(t, d, dir); len(records) != 2 {
-		t.Fatalf("unchanged read = %d", len(records))
-	}
-	// Only the appended bytes were parsed: the first record was kept.
-	if &f.records[0] == nil || f.records[0].Output != 10 {
-		t.Fatal("first record lost")
+	// Reading again without a change keeps everything once, and only the
+	// appended bytes were parsed.
+	size := f.size
+	if records, _ := scan(t, d, dir); len(records) != 2 || f.parsed != size {
+		t.Fatalf("unchanged read = %d, parsed %d of %d bytes", len(records), f.parsed, size)
 	}
 }
 
@@ -280,8 +292,8 @@ func TestScanCountsCopiedEntriesOnce(t *testing.T) {
 	}
 }
 
-// Only regular .jsonl files are read; removed files leave with their
-// records.
+// Only regular .jsonl files are read; a link is reported, not followed.
+// Removed files leave with their records.
 func TestScanReadsRegularSessionFilesOnly(t *testing.T) {
 	dir := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "elsewhere.jsonl")
@@ -294,26 +306,31 @@ func TestScanReadsRegularSessionFilesOnly(t *testing.T) {
 	writeLines(t, keep, header("s"), resp{id: "a1", provider: "p", model: "m", at: t0, output: 2}.line())
 	d := &Dir{}
 	records, st := scan(t, d, dir)
-	if st.Files != 1 || len(records) != 1 || records[0].Output != 2 {
+	if st.Files != 2 || len(records) != 1 || records[0].Output != 2 || len(st.Errors) != 1 || !strings.HasPrefix(st.Errors[0], "link.jsonl: not a regular file") {
 		t.Fatalf("records = %+v, stats = %+v", records, st)
 	}
 	if err := os.Remove(keep); err != nil {
 		t.Fatal(err)
 	}
-	if records, st := scan(t, d, dir); st.Files != 0 || len(records) != 0 {
-		t.Fatalf("after removal: %+v %+v", records, st)
+	if err := os.Remove(filepath.Join(dir, "link.jsonl")); err != nil {
+		t.Fatal(err)
 	}
-	if records, _ := scan(t, d, filepath.Join(dir, "missing")); len(records) != 0 {
-		t.Fatal("a missing directory has records")
+	if records, st := scan(t, d, dir); st.Files != 0 || len(records) != 0 || len(st.Errors) != 0 {
+		t.Fatalf("after removal: %+v %+v", records, st)
 	}
 }
 
 func TestScanStopsWhenCancelled(t *testing.T) {
 	dir := t.TempDir()
 	writeLines(t, filepath.Join(dir, "s.jsonl"), header("s"), resp{id: "a1", provider: "p", model: "m", at: t0, output: 2}.line())
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := (&Dir{}).Scan(ctx, dir); err == nil {
+	if err := (&Dir{}).Scan(ctx, root); err == nil {
 		t.Fatal("cancelled scan succeeded")
 	}
 }

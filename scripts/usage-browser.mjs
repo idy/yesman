@@ -30,7 +30,7 @@ const full = () => ({
  ],
  total:row({provider:'',workers:4,tasks:6,responses:1216,failed:3,other:3,input:12345680136811,output:459286,cacheRead:98770432,cacheWrite:20,total:12345780565579,speed:null}),
  overlap:1,
- tasks:{done:9,attributed:6,severalModels:1,noResponses:0,unowned:1,unknownOwner:0,otherRole:1,timeUnknown:0,recorded:2},
+ tasks:{done:11,attributed:6,severalModels:1,noResponses:0,unowned:1,unknownOwner:0,otherRole:1,reusedName:1,unknownTiming:1,timeUnknown:0,recorded:2},
  coverage:{workspaces:2,files:40,records:1219,from:'2026-11-13T16:49:41Z',to:'2026-11-14T12:45:53Z',unreadable:2,oversized:0,noEffort:2,noModel:3,errors:[]},
  names:{'magpie/codex-remote/codex/gpt-6.1-sol':'GPT-6.1 Sol · Codex','magpie/auto/claude-opus-5-5':'Claude Opus 5.5 · routing group'},
  yesmen:[{name:'alma',label:'Alma 项目'},{name:'gizmoth',label:'GizMoth'}],
@@ -44,7 +44,7 @@ function usage(q){
  if (q.agents==='all') { v.rows[0].leads=1; v.total.leads=1; }
  if (q.agents==='leads') { v.rows=[row({model:'codex-remote/codex/gpt-6.1-sol',effort:'medium',leads:2,responses:9,output:90,total:90,timedOutput:90,timedMs:3000,speed:30})]; v.total=row({provider:'',leads:2,responses:9,output:90,total:90}); v.overlap=0; }
  if (q.period==='24h') { v.rows=[]; v.total=row({provider:''}); v.overlap=0; v.tasks={done:0,attributed:0,severalModels:0,noResponses:0,unowned:0,unknownOwner:0,otherRole:0,timeUnknown:7,recorded:0}; v.coverage={...v.coverage,records:0,unreadable:0,noEffort:0}; }
- if (partial) v.coverage.errors=['gizmoth: workers.json: invalid character','alma: w3/2026-11-14T10-00-00-000Z_x.jsonl: permission denied'];
+ if (partial) v.coverage.errors=['gizmoth: workers.json: invalid character','alma: w3/2026-11-14T10-00-00-000Z_x.jsonl: permission denied','alma: sessions: not a directory in the workspace (a link or a special file); not read'];
  return v;
 }
 const agents = [{id:'alma/lead',name:'lead',yesman:'alma',role:'lead',status:'idle'}];
@@ -149,7 +149,7 @@ try {
       const notes = await page.locator('.usage-notes').innerText();
       assert.match(notes, /2 log lines could not be read/);
       assert.match(notes, /1 worker used more than one model or effort/);
-      assert.match(notes, /3 done tasks are not counted for a model \(its owner used several models, and when it was done is not recorded: 1; no owner: 1; owned by a lead: 1\)/);
+      assert.match(notes, /5 done tasks are not counted for a model \(its owner used several models, and when it was done is not recorded: 1; more than one worker held its owner’s name, and when it was done is not recorded: 1; when its owner’s last response before it ended is not recorded: 1; no owner: 1; owned by a lead: 1\)/);
       assert.match(notes, /2 responses have no recorded effort/);
       assert.equal(await page.locator('.usage-method').evaluate((d) => d.open), false);
       // Only the table scrolls sideways, never the page.
@@ -223,7 +223,9 @@ try {
       await page.getByRole('button', { name: 'Try again' }).click();
       await page.locator('.usage-table').waitFor();
       const alert = page.locator('.usage-results [role="alert"]');
-      assert.match(await alert.innerText(), /Some session logs could not be read[\s\S]*gizmoth: workers.json[\s\S]*permission denied/);
+      assert.match(await alert.innerText(), /Some session logs could not be read[\s\S]*gizmoth: workers.json[\s\S]*permission denied[\s\S]*alma: sessions: not a directory in the workspace \(a link or a special file\); not read/);
+      // What could be read is still shown beside the notice.
+      assert.equal((await table(page)).rows.length, 5);
       await page.evaluate(() => { partial = false; });
       await page.locator('#usage-refresh').click();
       await page.waitForFunction(() => !document.querySelector('.usage-results [role="alert"]') && document.querySelector('.usage-table'));
@@ -278,7 +280,7 @@ try {
       assert.equal(t.rows[1]['推理强度'], '超高');
       assert.equal(t.rows[1]['完成的任务'], '5');
       assert.equal(t.rows[0]['推理强度'], '— 未记录');
-      assert.match(await zh.locator('.usage-notes').innerText(), /3 个已完成的任务没有计入任何模型（负责者使用过多个模型，且没有记录完成时间：1；没有负责者：1；由主管负责：1）/);
+      assert.match(await zh.locator('.usage-notes').innerText(), /5 个已完成的任务没有计入任何模型（负责者使用过多个模型，且没有记录完成时间：1；不止一个助手用过负责者的名字，且没有记录完成时间：1；负责者在完成前最后一个响应的结束时间没有记录：1；没有负责者：1；由主管负责：1）/);
       assert.equal((await zh.locator('#settings-nav [data-page="usage"]').textContent()).trim(), '模型用量');
       await zh.screenshot({ path: `${shots}/${engineName}-narrow-zh-dark.png`, fullPage: true });
       assert.deepEqual(errors, []);

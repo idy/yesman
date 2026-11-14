@@ -21,6 +21,21 @@
 // providers it normalizes. Reasoning tokens are part of output. Cost is
 // pi's estimate from its catalog's prices, not a provider bill, and is not
 // read.
+//
+// Logs are read from the workspace only: the workspace directory may be
+// reached through a link, but .yesman, sessions, each agent's directory and
+// each log must be a real directory or a regular file with a single link
+// inside it. Anything else is not read, and is reported.
+//
+// A log already read is read again only as far as it grew: pi appends to
+// its session files, and rewrites one whole only to migrate it (which
+// changes its first line) or to start an empty one. A log is read again
+// from the start when it is another file (an atomic replacement), did not
+// grow, or no longer starts or goes on to where it was read as it did; and
+// once more when it changed so close to when it was read that a further
+// change could keep its time. A rewrite in place that keeps the file, grows
+// it and keeps those bytes, or that sets its time back, is not noticed
+// until the cache is rebuilt.
 package usage
 
 import (
@@ -31,13 +46,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/idy/yesman/internal/yesmen"
 )
 
 // Kinds of usage record.
@@ -82,6 +99,10 @@ type Record struct {
 	// At is when the request started, for a response, else when the entry
 	// was written.
 	At time.Time
+	// Ended is when a response is known to have ended: the later of when
+	// pi wrote it, which it does once the response has ended, and its
+	// start plus its duration. Zero when neither is recorded.
+	Ended time.Time
 	// DurationMs is how long the response took, from the request's start
 	// to its end; -1 when not recorded.
 	DurationMs int64
@@ -99,11 +120,36 @@ var maxLine int64 = 64 << 20
 // kept to recognize a file that was rewritten rather than appended to.
 const headLen = 256
 
+// racyWindow is how close to when a file was read its modification time
+// may be for a later change to keep that time, on file systems that keep
+// times as coarsely as two seconds. Such a file is read again once. Tests
+// change it.
+var racyWindow = 3 * time.Second
+
+// maxDuration bounds a response's recorded duration that is believed: a
+// longer one, or a negative one, does not tell when the response ended.
+const maxDuration = 24 * time.Hour
+
+// opening, when set by tests, runs between looking at a directory or log and
+// opening it, to replace it meanwhile.
+var opening func(name string)
+
+// Why a log or directory is not read.
+var (
+	errNotDir   = errors.New("not a directory in the workspace (a link or a special file); not read")
+	errNotFile  = errors.New("not a regular file in the workspace (a link or a special file); not read")
+	errChanged  = errors.New("changed while it was being opened; not read")
+	errHardLink = errors.New("has other hard links; not read")
+)
+
 // file is what was read of one session file.
 type file struct {
+	info       os.FileInfo // the file read, to tell another one in its place
 	size       int64
 	mod        time.Time
+	racy       bool   // changed too close to when it was read
 	offset     int64  // bytes read, always at the end of a line
+	parsed     int64  // bytes parsed since the file was first read, for tests
 	head       []byte // the first bytes, to tell an append from a rewrite
 	tail       []byte // the bytes read last, before offset, likewise
 	records    []Record
@@ -118,6 +164,12 @@ type Dir struct {
 	files map[string]*file
 }
 
+// Sessions reads a workspace's session directories, one Dir per agent. It
+// is not safe for concurrent use.
+type Sessions struct {
+	dirs map[string]*Dir
+}
+
 // DirStats count what reading a session directory met.
 type DirStats struct {
 	Files      int
@@ -126,16 +178,147 @@ type DirStats struct {
 	Errors     []string
 }
 
-// Scan reads the directory's session files: new ones whole, grown ones from
-// where the last read ended, and rewritten or shorter ones again. A missing
-// directory has no records.
-func (d *Dir) Scan(ctx context.Context, dir string) error {
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		d.files = nil
-		return nil
+// Scan reads the session logs of the workspace at path: the records of each
+// agent, by name, with what reading met. The workspace itself may be
+// reached through a link; .yesman must be a directory in it, or nothing is
+// read and Scan fails. Linked or special session and agent directories and
+// logs are skipped and reported in the stats, as are unreadable ones. A
+// workspace without sessions has no records.
+func (s *Sessions) Scan(ctx context.Context, workspace string) (map[string][]Record, DirStats, error) {
+	out := map[string][]Record{}
+	var st DirStats
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return nil, st, err
+	}
+	defer root.Close()
+	meta, err := openDir(root, ".yesman")
+	if err != nil {
+		return nil, st, fmt.Errorf(".yesman: %w", err)
+	}
+	defer meta.Close()
+	sessions, err := openDir(meta, "sessions")
+	if errors.Is(err, fs.ErrNotExist) {
+		s.dirs = nil
+		return out, st, nil
 	}
 	if err != nil {
+		s.dirs = nil
+		st.Errors = append(st.Errors, "sessions: "+err.Error())
+		return out, st, nil
+	}
+	defer sessions.Close()
+	entries, err := readDir(sessions)
+	if err != nil {
+		s.dirs = nil
+		st.Errors = append(st.Errors, "sessions: "+err.Error())
+		return out, st, nil
+	}
+	if s.dirs == nil {
+		s.dirs = map[string]*Dir{}
+	}
+	seen := map[string]bool{}
+	for _, e := range entries {
+		// An agent's directory has its name; regular files there are not
+		// agents' (delivery state lives inside each agent's directory).
+		name := e.Name()
+		if yesmen.ValidName(name) != nil || e.Type().IsRegular() {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, st, err
+		}
+		sub, err := openDir(sessions, name)
+		if err != nil {
+			st.Errors = append(st.Errors, name+": "+err.Error())
+			continue
+		}
+		seen[name] = true
+		d := s.dirs[name]
+		if d == nil {
+			d = &Dir{}
+			s.dirs[name] = d
+		}
+		err = d.Scan(ctx, sub)
+		sub.Close()
+		if ctx.Err() != nil {
+			return nil, st, ctx.Err()
+		}
+		if err != nil {
+			st.Errors = append(st.Errors, name+": "+err.Error())
+		}
+		records, ds := d.Records()
+		if len(records) > 0 {
+			out[name] = records
+		}
+		st.Files += ds.Files
+		st.Unreadable += ds.Unreadable
+		st.Oversized += ds.Oversized
+		for _, msg := range ds.Errors {
+			st.Errors = append(st.Errors, name+"/"+msg)
+		}
+	}
+	for name := range s.dirs {
+		if !seen[name] {
+			delete(s.dirs, name)
+		}
+	}
+	return out, st, nil
+}
+
+// openDir opens a directory of parent that is a directory there, not a
+// link or anything else, and is still the directory looked at once open.
+// parent keeps it from leading outside, even if it is replaced meanwhile.
+func openDir(parent *os.Root, name string) (*os.Root, error) {
+	info, err := parent.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	// Windows reports junctions and other name surrogates without ModeDir.
+	if info.Mode().Type() != fs.ModeDir {
+		return nil, errNotDir
+	}
+	if opening != nil {
+		opening(name)
+	}
+	sub, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	h, err := sub.Open(".")
+	if err != nil {
+		sub.Close()
+		return nil, err
+	}
+	got, err := h.Stat()
+	h.Close()
+	if err == nil && (!got.IsDir() || !os.SameFile(info, got)) {
+		err = errChanged
+	}
+	if err != nil {
+		sub.Close()
+		return nil, err
+	}
+	return sub, nil
+}
+
+func readDir(dir *os.Root) ([]os.DirEntry, error) {
+	h, err := dir.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer h.Close()
+	return h.ReadDir(-1)
+}
+
+// Scan reads the session files of an agent's directory: new ones whole,
+// grown ones from where the last read ended, and replaced, rewritten or
+// shorter ones again. Logs that are links or special files are not read,
+// and are reported.
+func (d *Dir) Scan(ctx context.Context, dir *os.Root) error {
+	entries, err := readDir(dir)
+	if err != nil {
+		d.files = nil
 		return err
 	}
 	if d.files == nil {
@@ -143,8 +326,7 @@ func (d *Dir) Scan(ctx context.Context, dir string) error {
 	}
 	seen := map[string]bool{}
 	for _, e := range entries {
-		// Regular files only: links could lead outside the workspace.
-		if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), ".jsonl") {
+		if !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
@@ -156,7 +338,7 @@ func (d *Dir) Scan(ctx context.Context, dir string) error {
 			f = &file{}
 			d.files[e.Name()] = f
 		}
-		f.read(ctx, filepath.Join(dir, e.Name()))
+		f.read(ctx, dir, e.Name())
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -202,48 +384,72 @@ func (d *Dir) Records() ([]Record, DirStats) {
 	return out, st
 }
 
-// read brings f up to date with the file at path.
-func (f *file) read(ctx context.Context, path string) {
-	h, err := os.Open(path)
+// read brings f up to date with the file name in dir. Only a regular file
+// with a single link is read, and only the file that was looked at.
+func (f *file) read(ctx context.Context, dir *os.Root, name string) {
+	checked := time.Now()
+	look, err := dir.Lstat(name)
 	if err != nil {
-		f.reset()
-		f.err = err
+		f.fail(err)
+		return
+	}
+	if !look.Mode().IsRegular() {
+		f.fail(errNotFile)
+		return
+	}
+	if opening != nil {
+		opening(name)
+	}
+	h, err := dir.OpenFile(name, openFlags, 0)
+	if err != nil {
+		f.fail(err)
 		return
 	}
 	defer h.Close()
 	info, err := h.Stat()
 	if err != nil {
-		f.reset()
-		f.err = err
+		f.fail(err)
 		return
 	}
-	if !info.Mode().IsRegular() {
-		f.reset()
-		f.err = errors.New("not a regular file")
+	if !info.Mode().IsRegular() || !os.SameFile(look, info) {
+		f.fail(errChanged)
 		return
 	}
-	if f.err == nil && info.Size() == f.size && info.ModTime().Equal(f.mod) {
+	if n, ok := hardLinks(h, info); ok && n > 1 {
+		f.fail(errHardLink)
 		return
 	}
-	if !f.continues(h, info.Size()) {
+	same := f.err == nil && f.info != nil && os.SameFile(f.info, info)
+	if same && !f.racy && info.Size() == f.size && info.ModTime().Equal(f.mod) {
+		return
+	}
+	// Only the same file, grown, and as it was up to where it was read,
+	// goes on from there; anything else is read again.
+	if !same || info.Size() <= f.size || !f.continues(h) {
 		f.reset()
 	}
-	f.err = nil
 	if _, err := h.Seek(f.offset, io.SeekStart); err != nil {
-		f.reset()
-		f.err = err
+		f.fail(err)
 		return
 	}
-	if err := f.parse(ctx, h, path); err != nil {
-		f.err = err
+	if err := f.parse(ctx, h, name); err != nil {
+		f.fail(err)
+		return
 	}
 	// The size and time read are those before reading: a write meanwhile
 	// shows as a change next time.
-	f.size, f.mod = info.Size(), info.ModTime()
+	f.info, f.size, f.mod = info, info.Size(), info.ModTime()
+	f.racy = !info.ModTime().Before(checked.Add(-racyWindow))
 	if len(f.head) < headLen {
 		f.head = readAt(h, 0, headLen)
 	}
 	f.tail = f.tailAt(h)
+}
+
+// fail forgets what was read and records why the file is not read.
+func (f *file) fail(err error) {
+	f.reset()
+	f.err = err
 }
 
 // tailAt reads the last bytes before the offset.
@@ -253,15 +459,14 @@ func (f *file) tailAt(h *os.File) []byte {
 }
 
 func (f *file) reset() {
-	*f = file{}
+	*f = file{parsed: f.parsed}
 }
 
-// continues reports whether the file only grew since it was read: it is no
-// shorter than what was read, and starts and goes on to the offset as it
-// did. pi appends to session files, and rewrites them whole only to migrate
-// them, which changes their header.
-func (f *file) continues(h *os.File, size int64) bool {
-	if f.offset == 0 || size < f.offset {
+// continues reports whether the file, which grew, starts and goes on to the
+// offset as it did. pi appends to session files, and rewrites them whole
+// only to migrate them, which changes their header.
+func (f *file) continues(h *os.File) bool {
+	if f.offset == 0 {
 		return false
 	}
 	head := readAt(h, 0, headLen)
@@ -277,7 +482,7 @@ func readAt(h *os.File, at int64, n int) []byte {
 
 // parse reads complete lines from the current offset. A last line without
 // its newline is being written: it is read next time.
-func (f *file) parse(ctx context.Context, r io.Reader, path string) error {
+func (f *file) parse(ctx context.Context, r io.Reader, name string) error {
 	br := bufio.NewReaderSize(r, 256<<10)
 	var (
 		line []byte // a line longer than the buffer, gathered
@@ -308,14 +513,15 @@ func (f *file) parse(ctx context.Context, r io.Reader, path string) error {
 		}
 		start := f.offset
 		f.offset += size
+		f.parsed += size
 		switch {
 		case skip || size > maxLine:
 			f.oversized++
 		case len(line) > 0:
 			line = append(line, chunk...)
-			f.line(bytes.TrimSpace(line), path, start)
+			f.line(bytes.TrimSpace(line), name, start)
 		default:
-			f.line(bytes.TrimSpace(chunk), path, start)
+			f.line(bytes.TrimSpace(chunk), name, start)
 		}
 		line, size, skip = line[:0], 0, false
 	}
@@ -344,8 +550,8 @@ type entry struct {
 
 var usageKey = []byte(`"usage":`)
 
-// line reads one line, at offset start of path.
-func (f *file) line(b []byte, path string, start int64) {
+// line reads one line, at offset start of the file name.
+func (f *file) line(b []byte, name string, start int64) {
 	if len(b) == 0 {
 		return
 	}
@@ -381,6 +587,7 @@ func (f *file) line(b []byte, path string, start int64) {
 		if d, ok := wholeNumber(m.DurationMs); ok {
 			r.DurationMs = d
 		}
+		r.Ended = ended(r.At, written, r.DurationMs)
 		r.key = "m|" + e.ID + "|" + string(m.Timestamp) + "|" + e.Timestamp
 	case e.Type == "message" && e.Message != nil && e.Message.Role == "toolResult":
 		raw = e.Message.Usage
@@ -411,10 +618,26 @@ func (f *file) line(b []byte, path string, start int64) {
 	}
 	if e.ID == "" {
 		// Legacy entries have no ID: such a line counts once, where it is.
-		r.key = "l|" + filepath.Base(path) + "|" + strconv.FormatInt(start, 10)
+		r.key = "l|" + name + "|" + strconv.FormatInt(start, 10)
 	}
 	r.Tokens = t
 	f.records = append(f.records, r)
+}
+
+// ended is when a response is known to have ended: the later of when pi
+// wrote its entry and its start plus its duration, among those recorded and
+// believable. pi writes the entry once the response has ended, so the
+// entry's time is no earlier than the end; one before the start is not
+// believed. Zero when neither tells.
+func ended(start, written time.Time, durationMs int64) time.Time {
+	var end time.Time
+	if !written.IsZero() && !written.Before(start) {
+		end = written
+	}
+	if durationMs >= 0 && durationMs <= maxDuration.Milliseconds() && !start.IsZero() {
+		end = later(end, start.Add(time.Duration(durationMs)*time.Millisecond))
+	}
+	return end
 }
 
 // readTokens reads pi's Usage. Each count must be a finite whole number of

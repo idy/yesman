@@ -2,10 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -28,9 +25,9 @@ type usageIndex struct {
 // usageSpace is what was read of one hire of a yesman: a workspace
 // dismissed and hired again under its name is read anew.
 type usageSpace struct {
-	hiredAt time.Time
-	mu      sync.Mutex // one read of the workspace at a time
-	dirs    map[string]*usage.Dir
+	hiredAt  time.Time
+	mu       sync.Mutex // one read of the workspace at a time
+	sessions usage.Sessions
 }
 
 func (a *app) usageIndex() *usageIndex {
@@ -58,7 +55,7 @@ func (x *usageIndex) space(y yesmen.Yesman) *usageSpace {
 	defer x.mu.Unlock()
 	sp := x.spaces[y.Name]
 	if sp == nil || !sp.hiredAt.Equal(y.HiredAt) {
-		sp = &usageSpace{hiredAt: y.HiredAt, dirs: map[string]*usage.Dir{}}
+		sp = &usageSpace{hiredAt: y.HiredAt}
 		x.spaces[y.Name] = sp
 	}
 	return sp
@@ -69,8 +66,12 @@ func (x *usageIndex) read(ctx context.Context, store *yesmen.Store, y yesmen.Yes
 	sp := x.space(y)
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
-	w := usage.Workspace{Name: y.Name, HiredAt: y.HiredAt, Agents: map[string][]usage.Record{}}
+	w := usage.Workspace{Name: y.Name, HiredAt: y.HiredAt}
+	// The logs first: a workspace whose .yesman is not its own is not read.
 	var err error
+	if w.Agents, w.Stats, err = sp.sessions.Scan(ctx, y.Path); err != nil {
+		return w, err
+	}
 	if w.Workers, err = store.Workers(y.Name); err != nil {
 		return w, err
 	}
@@ -80,45 +81,6 @@ func (x *usageIndex) read(ctx context.Context, store *yesmen.Store, y yesmen.Yes
 	// Without the recorded starts, the current workers still tell theirs.
 	if w.Starts, err = store.WorkerStarts(y.Name); err != nil {
 		w.Stats.Errors = append(w.Stats.Errors, err.Error())
-	}
-	root := filepath.Join(y.MetaDir(), "sessions")
-	entries, err := os.ReadDir(root)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return w, err
-	}
-	seen := map[string]bool{}
-	for _, e := range entries {
-		// Agent directories only, not links that could lead elsewhere.
-		if !e.IsDir() || yesmen.ValidName(e.Name()) != nil {
-			continue
-		}
-		seen[e.Name()] = true
-		d := sp.dirs[e.Name()]
-		if d == nil {
-			d = &usage.Dir{}
-			sp.dirs[e.Name()] = d
-		}
-		if err := d.Scan(ctx, filepath.Join(root, e.Name())); err != nil {
-			if ctx.Err() != nil {
-				return w, ctx.Err()
-			}
-			w.Stats.Errors = append(w.Stats.Errors, fmt.Sprintf("%s: %v", e.Name(), err))
-		}
-		records, st := d.Records()
-		if len(records) > 0 {
-			w.Agents[e.Name()] = records
-		}
-		w.Stats.Files += st.Files
-		w.Stats.Unreadable += st.Unreadable
-		w.Stats.Oversized += st.Oversized
-		for _, msg := range st.Errors {
-			w.Stats.Errors = append(w.Stats.Errors, e.Name()+"/"+msg)
-		}
-	}
-	for name := range sp.dirs {
-		if !seen[name] {
-			delete(sp.dirs, name)
-		}
 	}
 	return w, nil
 }

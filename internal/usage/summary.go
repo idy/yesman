@@ -102,6 +102,12 @@ type TaskCounts struct {
 	Unowned       int `json:"unowned"`
 	UnknownOwner  int `json:"unknownOwner"`
 	OtherRole     int `json:"otherRole"`
+	// ReusedName counts tasks done before completion was recorded whose
+	// owner's name more than one worker held since the task was created.
+	ReusedName int `json:"reusedName"`
+	// UnknownTiming counts tasks whose owner may have last answered with
+	// a response pi did not record the end of.
+	UnknownTiming int `json:"unknownTiming"`
 	TimeUnknown   int `json:"timeUnknown"`
 	// Recorded counts those of Done whose completion time was recorded.
 	Recorded int `json:"recorded"`
@@ -148,12 +154,14 @@ func failed(stop string) bool { return stop == "error" || stop == "aborted" }
 type instance struct {
 	key, role string
 	groups    map[string]int // responses by group, at any time
-	timeline  []stamp        // responses in time order, at any time
+	ended     []stamp        // responses whose end is known, by end
+	unended   []time.Time    // starts of responses whose end is not known
 }
 
+// stamp is a response whose end is known.
 type stamp struct {
-	at    time.Time
-	group string
+	end, start time.Time
+	group      string
 }
 
 type row struct {
@@ -178,9 +186,13 @@ func recordGroup(r Record) string {
 //
 // Workers in a row are the distinct worker instances with usage in it; one
 // that used several models is in several rows, and the total counts it
-// once. A done task counts for the model its owner was using when it was
-// marked done, when the board recorded that time; otherwise for the only
-// model and effort its owner used, and for none when it used several.
+// once. A done task counts for the model and effort of its owner's latest
+// response that had ended when the task was marked done, when the board
+// recorded that time: a response ending later never changes it. A task
+// done before that was recorded counts for the only model and effort its
+// owner used, when only one worker can have held the owner's name since
+// the task was created; otherwise for none. Board edits that are not
+// completions, such as of a note, never change where a task counts.
 func Summarize(spaces []Workspace, q Query) Summary {
 	s := Summary{Rows: []Row{}, Coverage: Coverage{Errors: []string{}}}
 	rows := map[string]*row{}
@@ -245,7 +257,11 @@ func Summarize(spaces []Workspace, q Query) Summary {
 				group := recordGroup(r)
 				if r.Kind == KindResponse {
 					in.groups[group]++
-					in.timeline = append(in.timeline, stamp{r.At, group})
+					if r.Ended.IsZero() {
+						in.unended = append(in.unended, r.At)
+					} else {
+						in.ended = append(in.ended, stamp{r.Ended, r.At, group})
+					}
 				}
 				if !q.counts(in.role) || !q.Since.IsZero() && r.At.Before(q.Since) {
 					continue
@@ -269,7 +285,50 @@ func Summarize(spaces []Workspace, q Query) Summary {
 			}
 		}
 		for _, in := range instances {
-			sort.SliceStable(in.timeline, func(i, j int) bool { return in.timeline[i].at.Before(in.timeline[j].at) })
+			slices.SortStableFunc(in.ended, func(a, b stamp) int {
+				if c := a.end.Compare(b.end); c != 0 {
+					return c
+				}
+				return a.start.Compare(b.start)
+			})
+		}
+		// Instances without a recorded start are known to have existed from
+		// their records, or from owning a task when it was recorded done.
+		known := map[string]bool{}
+		for key := range instances {
+			known[key] = true
+		}
+		for _, t := range w.Board.Tasks {
+			if t.Status == yesmen.TaskDone && !t.DoneAt.IsZero() && t.DoneOwner != "" {
+				known[find(t.DoneOwner, t.DoneAt).key] = true
+			}
+		}
+		// candidates are the instances that may have done a task created
+		// at created, done at a time not recorded, under agent's name: each
+		// held the name from its start until the next one's. The task's
+		// creation time is fixed; its other times change with any edit.
+		candidates := func(agent string, created time.Time) []*instance {
+			if agent == yesmen.LeadName {
+				return []*instance{find(agent, created)}
+			}
+			ts := starts[agent]
+			var out []*instance
+			if len(ts) == 0 {
+				if key := w.Name + "/" + agent + "@unlisted"; known[key] {
+					out = append(out, instances[key])
+				}
+				return out
+			}
+			if key := w.Name + "/" + agent + "@earlier"; known[key] && (created.IsZero() || ts[0].After(created)) {
+				out = append(out, instances[key])
+			}
+			for i, start := range ts {
+				if i+1 < len(ts) && !created.IsZero() && !ts[i+1].After(created) {
+					continue // replaced before the task was created
+				}
+				out = append(out, find(agent, start))
+			}
+			return out
 		}
 		for _, t := range w.Board.Tasks {
 			if t.Status != yesmen.TaskDone {
@@ -301,15 +360,26 @@ func Summarize(spaces []Workspace, q Query) Summary {
 				s.Tasks.UnknownOwner++
 				continue
 			}
-			// The owner is the instance that held the name when the task was
-			// done: at most when it last changed, without a recorded time.
-			at := done
-			if at.IsZero() {
-				at = t.UpdatedAt
+			role := RoleWorker
+			if owner == yesmen.LeadName {
+				role = RoleLead
 			}
-			in := find(owner, at)
-			if !q.counts(in.role) {
+			if !q.counts(role) {
 				s.Tasks.OtherRole++
+				continue
+			}
+			// The owner is the instance that held the name when the task was
+			// done; without that time, the only one that can have.
+			var in *instance
+			if !done.IsZero() {
+				in = find(owner, done)
+			} else if cands := candidates(owner, t.CreatedAt); len(cands) == 1 {
+				in = cands[0]
+			} else if len(cands) > 1 {
+				s.Tasks.ReusedName++
+				continue
+			} else {
+				s.Tasks.NoResponses++
 				continue
 			}
 			switch group, why := in.attribute(done); why {
@@ -322,6 +392,8 @@ func Summarize(spaces []Workspace, q Query) Summary {
 				s.Tasks.Attributed++
 			case severalModels:
 				s.Tasks.SeveralModels++
+			case unknownTiming:
+				s.Tasks.UnknownTiming++
 			default:
 				s.Tasks.NoResponses++
 			}
@@ -391,18 +463,30 @@ const (
 	attributed = iota
 	severalModels
 	noResponses
+	unknownTiming
 )
 
 // attribute names the group of the model the instance was using when a
-// task was done: its last response by then, when that time is known; else
-// the only group it used.
+// task was done: its latest response that had ended by then, when that
+// time is known; else the only group it used. A response whose end is not
+// known that started by then, after that one, may have ended by then too:
+// then which was latest is not known.
 func (in *instance) attribute(done time.Time) (string, int) {
 	if !done.IsZero() {
-		i := sort.Search(len(in.timeline), func(i int) bool { return in.timeline[i].at.After(done) })
-		if i == 0 {
+		i := sort.Search(len(in.ended), func(i int) bool { return in.ended[i].end.After(done) })
+		var last *stamp
+		if i > 0 {
+			last = &in.ended[i-1]
+		}
+		for _, start := range in.unended {
+			if !start.After(done) && (last == nil || start.After(last.start)) {
+				return "", unknownTiming
+			}
+		}
+		if last == nil {
 			return "", noResponses
 		}
-		return in.timeline[i-1].group, attributed
+		return last.group, attributed
 	}
 	switch len(in.groups) {
 	case 0:

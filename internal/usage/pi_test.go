@@ -51,7 +51,13 @@ func TestRealPiSession(t *testing.T) {
 		if r.DurationMs < runs.MinMs || r.DurationMs > c.end-c.start || at+r.DurationMs > c.end {
 			t.Errorf("response %d took %d ms, want at least %d and within %d..%d", i, r.DurationMs, runs.MinMs, c.start, c.end)
 		}
-		t.Logf("response %d: %s at %s, %+v, %d ms (%.1f tok/s)", i, r.Model, r.Effort, r.Tokens, r.DurationMs, float64(r.Output)/(float64(r.DurationMs)/1000))
+		// pi wrote the entry once the response had ended, before the prompt
+		// settled: its end is no earlier than its start plus its duration.
+		end := r.Ended.UnixMilli()
+		if end < at+r.DurationMs || end > c.end {
+			t.Errorf("response %d ended at %d, want from %d to %d", i, end, at+r.DurationMs, c.end)
+		}
+		t.Logf("response %d: %s at %s, %+v, %d ms (%.1f tok/s), written %d ms after its start", i, r.Model, r.Effort, r.Tokens, r.DurationMs, float64(r.Output)/(float64(r.DurationMs)/1000), end-at)
 	}
 	s := Summarize([]Workspace{{Name: "fixture", Workers: []yesmen.Worker{{Name: "w1", StartedAt: time.UnixMilli(runs.First.Start - 1000)}},
 		Agents: map[string][]Record{"w1": records}}}, Query{Workers: true})

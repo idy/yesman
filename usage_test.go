@@ -254,4 +254,209 @@ func TestModelUsageKeepsRemovedWorkersApart(t *testing.T) {
 	}
 }
 
+// tasksOf counts the tasks of each row, by model and effort.
+func tasksOf(v ModelUsageView) map[string]int {
+	got := map[string]int{}
+	for _, r := range v.Rows {
+		if r.Tasks > 0 {
+			got[r.Model+":"+r.Effort] = r.Tasks
+		}
+	}
+	return got
+}
+
+func viewOf(t *testing.T, a *app, q ModelUsageQuery) ModelUsageView {
+	t.Helper()
+	v, err := a.modelUsage(context.Background(), q, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// A task marked done while its owner's next response is under way keeps the
+// model of the response that had ended: the later one, written after, does
+// not take it, in any period, read warm or after a restart.
+func TestModelUsageTaskKeepsResponseEndedByCompletion(t *testing.T) {
+	a := usageApp(t)
+	y := hireWith(t, a, "later", "w")
+	at := time.Now().Add(-time.Hour)
+	writeSession(t, y, "w", sessionLine("old", at, "m", "high", 1000, 10))
+	b, err := a.yesmen.ChangeBoard("later", yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: ptr("done while the next request runs"), Status: ptr("done"), Owner: ptr("w")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := b.Tasks[0].DoneAt
+	before := tasksOf(viewOf(t, a, ModelUsageQuery{}))
+	// Same model, another effort: started a second before, ended one after.
+	writeSession(t, y, "w", sessionLine("new", done.Add(-time.Second), "m", "low", 2000, 20))
+	for _, q := range []ModelUsageQuery{{}, {Period: "24h"}, {Agents: "all"}} {
+		for _, fresh := range []bool{false, true} {
+			if fresh {
+				a.usage = nil
+				a.usageOnce = sync.Once{}
+			}
+			got := tasksOf(viewOf(t, a, q))
+			if len(got) != 1 || got["m:high"] != 1 || before["m:high"] != 1 {
+				t.Fatalf("%+v, fresh %v: before %v, after %v", q, fresh, before, got)
+			}
+		}
+	}
+	// Done again once that response has ended, it counts.
+	time.Sleep(time.Until(done.Add(1100 * time.Millisecond)))
+	if _, err := a.yesmen.ChangeBoard("later", yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: b.Tasks[0].ID, Status: ptr("doing")}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.yesmen.ChangeBoard("later", yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: b.Tasks[0].ID, Status: ptr("done")}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := tasksOf(viewOf(t, a, ModelUsageQuery{})); len(got) != 1 || got["m:low"] != 1 {
+		t.Fatalf("done again: %v", got)
+	}
+}
+
+// A task done before completion was recorded stays put through note edits,
+// removals and three more starts of its owner's name: once the name was
+// reused it counts for no model, and says why. Tasks done after keep the
+// owner and time recorded then.
+func TestModelUsageLegacyTasksStayPut(t *testing.T) {
+	a := usageApp(t)
+	y := hireWith(t, a, "legacy")
+	base := time.Now().Add(-96 * time.Hour).UTC()
+	if err := a.yesmen.AddWorker("legacy", yesmen.Worker{Name: "w", Task: "x", StartedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	writeSession(t, y, "w", sessionLine("first", base.Add(time.Minute), "old", "high", 1000, 10))
+	// As boards were written before completion was recorded.
+	legacy := yesmen.Board{Next: 2, Tasks: []yesmen.Task{
+		{ID: "t1", Title: "old", Status: yesmen.TaskDone, Owner: "w", CreatedAt: base, UpdatedAt: base.Add(time.Hour)},
+		{ID: "t2", Title: "old too", Status: yesmen.TaskDone, Owner: "w", CreatedAt: base, UpdatedAt: base.Add(time.Hour)},
+	}}
+	raw, _ := json.Marshal(legacy)
+	if err := os.WriteFile(y.BoardFile(), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := tasksOf(viewOf(t, a, ModelUsageQuery{})); got["old:high"] != 2 {
+		t.Fatalf("before reuse: %v", got)
+	}
+	note := func(n int) {
+		t.Helper()
+		if _, err := a.yesmen.ChangeBoard("legacy", yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: "t1", Note: ptr(fmt.Sprintf("edit %d", n))}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(label string) {
+		t.Helper()
+		for _, q := range []ModelUsageQuery{{}, {Agents: "all"}} {
+			v := viewOf(t, a, q)
+			if got := tasksOf(v); len(got) != 0 || v.Tasks.ReusedName != 2 || v.Tasks.Done != 2 {
+				t.Fatalf("%s %+v: tasks %v, counts %+v", label, q, got, v.Tasks)
+			}
+		}
+		if v := viewOf(t, a, ModelUsageQuery{Period: "30d"}); v.Tasks.TimeUnknown != 2 || v.Tasks.Done != 0 {
+			t.Fatalf("%s in a period: %+v", label, v.Tasks)
+		}
+	}
+	for i, model := range []string{"two", "three", "four"} {
+		if err := a.yesmen.RemoveWorker("legacy", "w"); err != nil {
+			t.Fatal(err)
+		}
+		note(2 * i)
+		start := base.Add(time.Duration(i+1) * 24 * time.Hour)
+		if err := a.yesmen.AddWorker("legacy", yesmen.Worker{Name: "w", Task: "x", StartedAt: start}); err != nil {
+			t.Fatal(err)
+		}
+		writeSession(t, y, "w", sessionLine(model, start.Add(time.Minute), model, "low", 1000, 10))
+		note(2*i + 1)
+		check(fmt.Sprintf("after start %d", i+2))
+	}
+	// Dropped and done again: done now, by the current w, with its model.
+	if _, err := a.yesmen.ChangeBoard("legacy", yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: "t2", Status: ptr("dropped")}}}); err != nil {
+		t.Fatal(err)
+	}
+	if v := viewOf(t, a, ModelUsageQuery{}); v.Tasks.Done != 1 || v.Tasks.ReusedName != 1 {
+		t.Fatalf("dropped: %+v", v.Tasks)
+	}
+	if _, err := a.yesmen.ChangeBoard("legacy", yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: "t2", Status: ptr("done")}}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []ModelUsageQuery{{}, {Period: "24h"}} {
+		if v := viewOf(t, a, q); tasksOf(v)["four:low"] != 1 {
+			t.Fatalf("done again %+v: %v %+v", q, tasksOf(v), v.Tasks)
+		}
+	}
+	// Removing w again keeps it; a note edit after does not move it.
+	if err := a.yesmen.RemoveWorker("legacy", "w"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.yesmen.ChangeBoard("legacy", yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: "t2", Note: ptr("late note")}}}); err != nil {
+		t.Fatal(err)
+	}
+	if v := viewOf(t, a, ModelUsageQuery{}); tasksOf(v)["four:low"] != 1 || v.Tasks.ReusedName != 1 || v.Total.Workers != 4 {
+		t.Fatalf("after removal: %v %+v %+v", tasksOf(v), v.Tasks, v.Total)
+	}
+}
+
+// Session logs reached through links are not read, and the page says so:
+// sessions leading out of the workspace, or to another yesman's with the
+// same label, an agent's directory leading out, and a linked .yesman.
+func TestModelUsageReadsOnlyEachWorkspace(t *testing.T) {
+	a := usageApp(t)
+	y := hireWith(t, a, "links", "w")
+	other := hireWith(t, a, "other", "w")
+	if _, err := a.yesmen.Rename("links", "Same"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.yesmen.Rename("other", "Same"); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(-time.Hour)
+	writeSession(t, other, "w", sessionLine("o", at, "m", "high", 1000, 7))
+	outside := t.TempDir()
+	writeLines := func(dir, line string) {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "outside.jsonl"), []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeLines(filepath.Join(outside, "w"), sessionLine("x", at, "outside-model", "high", 1000, 777))
+	sessions := filepath.Join(y.MetaDir(), "sessions")
+	relink := func(target, at string) {
+		t.Helper()
+		if err := os.RemoveAll(at); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, at); err != nil {
+			t.Skip("no symbolic links here:", err)
+		}
+	}
+	for _, target := range []string{outside, filepath.Join(other.MetaDir(), "sessions")} {
+		relink(target, sessions)
+		v := viewOf(t, a, ModelUsageQuery{})
+		if v.Total.Output != 7 || v.Total.Responses != 1 || len(v.Coverage.Errors) != 1 || !strings.HasPrefix(v.Coverage.Errors[0], "links: sessions: not a directory") {
+			t.Fatalf("sessions linked to %s: %+v, errors %v", target, v.Total, v.Coverage.Errors)
+		}
+	}
+	if err := os.Remove(sessions); err != nil {
+		t.Fatal(err)
+	}
+	writeSession(t, y, "v", sessionLine("v", at, "m", "high", 1000, 5))
+	relink(filepath.Join(outside, "w"), filepath.Join(sessions, "w"))
+	if v := viewOf(t, a, ModelUsageQuery{}); v.Total.Output != 12 || len(v.Coverage.Errors) != 1 || !strings.HasPrefix(v.Coverage.Errors[0], "links: w: not a directory") {
+		t.Fatalf("agent linked: %+v, errors %v", v.Total, v.Coverage.Errors)
+	}
+	// .yesman linked: that yesman is left out, and named.
+	meta := filepath.Join(t.TempDir(), "meta")
+	if err := os.Rename(y.MetaDir(), meta); err != nil {
+		t.Fatal(err)
+	}
+	relink(meta, y.MetaDir())
+	v := viewOf(t, a, ModelUsageQuery{})
+	if v.Total.Output != 7 || v.Coverage.Workspaces != 1 || len(v.Coverage.Errors) != 1 || !strings.HasPrefix(v.Coverage.Errors[0], "links: .yesman: not a directory") {
+		t.Fatalf(".yesman linked: %+v, %+v", v.Total, v.Coverage)
+	}
+}
+
 func ptr(s string) *string { return &s }
