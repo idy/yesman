@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -117,6 +120,58 @@ func TestRetainExclusiveStagesResume(t *testing.T) {
 			}
 			if !bytes.Equal(file(t, ws, m.Retained), b) {
 				t.Fatal("retained source differs")
+			}
+		})
+	}
+}
+
+func TestWrongExpectedHashCannotRecoverRetention(t *testing.T) {
+	for _, stage := range []string{"retain-prepared", "retain-linked", "retain-unlinked"} {
+		t.Run(stage, func(t *testing.T) {
+			ws := fixture(t, []byte("# Source preserved on rejected command\n"))
+			m, _ := Run(ws, Options{Action: "dry-run"})
+			stop := errors.New("interrupt retention")
+			_, err := Run(ws, Options{Action: "apply", Offline: true, Expect: m.SHA256, Hook: func(s string) error {
+				if s == stage {
+					return stop
+				}
+				return nil
+			}})
+			if !errors.Is(err, stop) {
+				t.Fatal(err)
+			}
+			snapshot := func() map[string]string {
+				result := map[string]string{}
+				for _, p := range []string{TOC, m.Retained, Marker, retainIntentPath} {
+					b, e := os.ReadFile(filepath.Join(ws, p))
+					if errors.Is(e, os.ErrNotExist) {
+						result[p] = "absent"
+						continue
+					}
+					if e != nil {
+						t.Fatal(e)
+					}
+					f, e := os.Open(filepath.Join(ws, p))
+					if e != nil {
+						t.Fatal(e)
+					}
+					n, e := links(f)
+					_ = f.Close()
+					if e != nil {
+						t.Fatal(e)
+					}
+					result[p] = fmt.Sprintf("%d:%s", n, digest(b))
+				}
+				return result
+			}
+			before := snapshot()
+			for _, action := range []string{"apply", "rollback"} {
+				if _, err = Run(ws, Options{Action: action, Offline: true, Expect: strings.Repeat("0", 64)}); err == nil {
+					t.Fatal("wrong hash accepted")
+				}
+				if !reflect.DeepEqual(before, snapshot()) {
+					t.Fatal("wrong-hash command changed source paths or retention intent")
+				}
 			}
 		})
 	}

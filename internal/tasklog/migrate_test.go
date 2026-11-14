@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -182,8 +181,8 @@ func TestConcurrentAppenderAndFailureNeverLoseSource(t *testing.T) {
 			b := []byte("# Historical snapshot\n")
 			ws := fixture(t, b)
 			m, _ := Run(ws, Options{Action: "dry-run"})
-			// Keep an actual writer handle open through rename.
-			f, e := os.OpenFile(filepath.Join(ws, TOC), os.O_APPEND|os.O_WRONLY, 0)
+			// Keep an actual delete-sharing writer open through source unlink.
+			f, e := openLateWriter(filepath.Join(ws, TOC))
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -200,16 +199,8 @@ func TestConcurrentAppenderAndFailureNeverLoseSource(t *testing.T) {
 			if e == nil {
 				t.Fatal("concurrent append accepted")
 			}
-			if runtime.GOOS == "windows" && !hooked && strings.Contains(e.Error(), "rename") {
-				if !bytes.Equal(file(t, ws, TOC), b) {
-					t.Fatal("Windows move refusal changed source")
-				}
-				_ = f.Close()
-				if _, retry := Run(ws, Options{Action: "apply", Offline: true, Expect: m.SHA256}); retry != nil {
-					t.Fatal(retry)
-				}
-				t.Log("Windows refused rename while an external writer was open; closing it allowed safe resume")
-				return
+			if !hooked {
+				t.Fatalf("writer hook was not reached: %v", e)
 			}
 			path := TOC
 			if stage != "prepared" {

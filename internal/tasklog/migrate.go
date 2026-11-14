@@ -376,6 +376,9 @@ func Run(workspace string, o Options) (Manifest, error) {
 		return Manifest{}, markerErr
 	}
 	if hasMarker {
+		if (o.Action == "apply" || o.Action == "rollback") && o.Expect != marker.SHA256 {
+			return marker, errors.New("prepared source SHA256 differs from expected snapshot; no retention recovery performed")
+		}
 		if o.Action == "apply" || o.Action == "rollback" {
 			if err = recoverRetain(root, marker, o); err != nil {
 				return marker, err
