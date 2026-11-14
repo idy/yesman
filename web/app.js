@@ -4,6 +4,7 @@
 //   mygo.call("Yesman.<Method>", ...)  services in service.go
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
+import { orderWorkers } from './sidebar.js';
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
@@ -598,6 +599,7 @@ async function openAgentMenu(e, a) {
 
 function renderSidebar() {
   const list = $('#yesmen');
+  const focusedAgent = list.contains(document.activeElement) ? document.activeElement.dataset.agent : null;
   list.replaceChildren();
   const waiting = state.snap.agents.filter((a) => a.status === 'waiting' && a.role === 'lead');
   if (waiting.length) {
@@ -610,14 +612,15 @@ function renderSidebar() {
     const agents = state.snap.agents.filter((a) => a.yesman === y.name);
     const lead = agents.find((a) => a.role === 'lead');
     if (lead) list.append(agentRow(lead, 'agent-row--yesman', y.name));
-    // Done workers keep their place, greyed; the yesman's menu can hide them.
-    // The one you are looking at stays.
+    // Active workers come first; preserve start order within each class.
+    // The yesman's menu can hide done workers, except the one being viewed.
     const hide = state.hideDone.has(y.name);
-    for (const w of agents.filter((a) => a.role === 'worker')) {
+    for (const w of orderWorkers(agents.filter((a) => a.role === 'worker'))) {
       if (hide && w.finishedAt && !(state.view.kind === 'agent' && state.view.id === w.id)) continue;
       list.append(agentRow(w, 'agent-row--worker', w.name));
     }
   }
+  if (focusedAgent) list.querySelector(`[data-agent="${CSS.escape(focusedAgent)}"]`)?.focus({ preventScroll: true });
   renderSideFoot();
 }
 
