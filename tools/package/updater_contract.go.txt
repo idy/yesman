@@ -25,6 +25,16 @@ import (
 // synthetic old install. Main is a harmless argument recorder, not a rebuild
 // of the production GUI with a test identity. No real install/profile opens.
 func TestYesmanRenameSignedInstallAndLegacyRestart(t *testing.T) {
+	for _, useDelta := range []bool{false, true} {
+		name := "archive"
+		if useDelta {
+			name = "delta"
+		}
+		t.Run(name, func(t *testing.T) { testYesmanRenameInstall(t, useDelta) })
+	}
+}
+
+func testYesmanRenameInstall(t *testing.T, useDelta bool) {
 	root := t.TempDir()
 	target := filepath.Join(root, "Install with spaces")
 	src := filepath.Join(root, "new archive")
@@ -96,7 +106,25 @@ func TestYesmanRenameSignedInstallAndLegacyRestart(t *testing.T) {
 	}
 	sum := sha256.Sum256(archive.Bytes())
 	m := update.Manifest{Version: "1.0.1", URL: "fixture://archive", Size: int64(archive.Len()), Signature: update.Sign(key, sum[:])}
-	get := func(context.Context, string) (io.ReadCloser, error) {
+	var delta bytes.Buffer
+	if useDelta {
+		deltaEntries := entries
+		if runtime.GOOS == "darwin" {
+			deltaEntries = nil
+		}
+		if err := update.WriteDelta(&delta, "1.0.0", "1.0.1", target, src, deltaEntries); err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(delta.Bytes())
+		m.Deltas = []update.Delta{{From: "1.0.0", URL: "fixture://delta", Size: int64(delta.Len()), Signature: update.Sign(key, sum[:])}}
+	}
+	archives, deltas := 0, 0
+	get := func(_ context.Context, url string) (io.ReadCloser, error) {
+		if url == "fixture://delta" {
+			deltas++
+			return io.NopCloser(bytes.NewReader(delta.Bytes())), nil
+		}
+		archives++
 		return io.NopCloser(bytes.NewReader(archive.Bytes())), nil
 	}
 	start := startExe
@@ -104,6 +132,7 @@ func TestYesmanRenameSignedInstallAndLegacyRestart(t *testing.T) {
 	t.Cleanup(func() { startExe = start })
 	// An invalid archive never mutates the old executable or portable data.
 	bad := m
+	bad.Deltas = nil // refuse the corrupt archive itself, without a valid delta
 	bad.Signature = base64.StdEncoding.EncodeToString(make([]byte, 64))
 	if err := installUpdate(context.Background(), get, bad, base64.StdEncoding.EncodeToString(pub), "1.0.0", target, nil); err == nil {
 		t.Fatal("accepted invalid signature")
@@ -113,6 +142,7 @@ func TestYesmanRenameSignedInstallAndLegacyRestart(t *testing.T) {
 	}
 	report := filepath.Join(root, "restart result.json")
 	args := []string{report, "a b", `quote"and\`, "中文", ""}
+	archives = 0
 	quit := runningApp(t)
 	if err := installUpdate(context.Background(), get, m, base64.StdEncoding.EncodeToString(pub), "1.0.0", target, nil); err != nil {
 		t.Fatal(err)
@@ -126,6 +156,12 @@ func TestYesmanRenameSignedInstallAndLegacyRestart(t *testing.T) {
 		}
 	}
 	quit() // waits for the real install-after-exit/relaunch shell helper on macOS
+	if useDelta && (deltas != 1 || archives != 0) {
+		t.Fatalf("renamed-image delta fell back to archive: delta=%d archive=%d", deltas, archives)
+	}
+	if !useDelta && (deltas != 0 || archives != 1) {
+		t.Fatalf("archive requests: delta=%d archive=%d", deltas, archives)
+	}
 	if b, _ := os.ReadFile(sentinel); string(b) != "preserve" {
 		t.Fatal("lost user data")
 	}
@@ -164,7 +200,11 @@ func TestYesmanRenameSignedInstallAndLegacyRestart(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("relaunch arguments changed: %s", got)
 	}
-	t.Logf("signed archive -> old basename -> real main %s; portable/workspace/vault sentinel preserved", expected)
+	mode := "archive"
+	if useDelta {
+		mode = "delta"
+	}
+	t.Logf("signed %s update -> old basename -> real main %s; portable/workspace/vault sentinel preserved", mode, expected)
 }
 
 func TestYesmanRenameMacHelperRollback(t *testing.T) {

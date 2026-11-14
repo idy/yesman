@@ -83,8 +83,10 @@ Bindings generation returns before storage/vault/agent initialization.
 `go test ./...` includes a real compatibility-launcher argument transfer test and
 a subprocess proving bindings generation cannot initialize storage. Run
 `go run ./tools/package -verify-updater` for the real pinned updater with a signed
-synthetic old install, a main recorder, the compatibility launcher, restart and
-portable/workspace/vault/session sentinels. It includes upstream signature/delta,
+synthetic old install through both full archives and deltas, a main recorder,
+the compatibility launcher, restart and portable/workspace/vault/session sentinels.
+The renamed-file delta (including macOS file-to-symlink replacement) must succeed
+without silently falling back to the archive. It includes upstream signature/delta,
 file-swap rollback and restart tests plus macOS install-after-exit/relaunch and
 failed-move rollback. Fixtures never run the real application against user data.
 
