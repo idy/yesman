@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -149,13 +150,22 @@ func (a *app) modelUsage(ctx context.Context, q ModelUsageQuery, now time.Time) 
 		view.Since = query.Since
 	}
 	ys, err := a.yesmen.List()
-	if err != nil {
+	var metadataErrors yesmen.MetadataErrors
+	if err != nil && !errors.As(err, &metadataErrors) {
 		return ModelUsageView{}, err
 	}
 	idx := a.usageIndex()
 	idx.keep(ys)
 	var spaces []usage.Workspace
 	var failed []string
+	for _, issue := range metadataErrors {
+		if q.Yesman == issue.Name {
+			return ModelUsageView{}, &issue
+		}
+		if q.Yesman == "" {
+			failed = append(failed, issue.Error())
+		}
+	}
 	found := q.Yesman == ""
 	for _, y := range ys {
 		view.Yesmen = append(view.Yesmen, UsageYesman{Name: y.Name, Label: y.Label()})

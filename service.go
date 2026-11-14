@@ -22,11 +22,12 @@ type service struct{ app *app }
 
 // State is everything the sidebar shows.
 type State struct {
-	Home    string       `json:"home"`
-	Pool    string       `json:"pool"`
-	PiError string       `json:"piError,omitempty"`
-	Yesmen  []YesmanView `json:"yesmen"`
-	Agents  []agent.Info `json:"agents"`
+	Home            string                 `json:"home"`
+	Pool            string                 `json:"pool"`
+	PiError         string                 `json:"piError,omitempty"`
+	Yesmen          []YesmanView           `json:"yesmen"`
+	Agents          []agent.Info           `json:"agents"`
+	WorkspaceErrors []yesmen.MetadataError `json:"workspaceErrors,omitempty"`
 }
 
 // YesmanView is a yesman with its worktrees.
@@ -44,7 +45,11 @@ func (s *service) State(ctx context.Context) (State, error) {
 	}
 	ys, err := a.yesmen.List()
 	if err != nil {
-		return st, err
+		var metadataErrors yesmen.MetadataErrors
+		if !errors.As(err, &metadataErrors) {
+			return st, err
+		}
+		st.WorkspaceErrors = metadataErrors
 	}
 	if len(ys) > 0 {
 		snapshot, scanErr := a.pool.Snapshot(ctx)

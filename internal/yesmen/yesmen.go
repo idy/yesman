@@ -248,10 +248,14 @@ func ensureTaskLog(y Yesman) error {
 // It never rewrites Knowledge or other metadata, and repeated calls are safe.
 func (s *Store) EnsureTaskLogs() error {
 	ys, err := s.List()
-	if err != nil {
-		return err
-	}
 	var errs []error
+	if err != nil {
+		var metadataErrors MetadataErrors
+		if !errors.As(err, &metadataErrors) {
+			return err
+		}
+		errs = append(errs, err)
+	}
 	for _, y := range ys {
 		if err := s.Use(y.Name, ensureTaskLog); err != nil {
 			errs = append(errs, fmt.Errorf("%s task log: %w", y.Name, err))
@@ -280,8 +284,12 @@ func (s *Store) get(name string) (Yesman, error) {
 		DisplayName string    `json:"displayName"`
 		Model       string    `json:"model"`
 	}
-	if err := readYesmanMetadata(filepath.Join(y.MetaDir(), "yesman.json"), &meta); errors.Is(err, errYesmanMetadataTooLarge) {
-		return Yesman{}, err
+	if err := readYesmanMetadata(filepath.Join(y.MetaDir(), "yesman.json"), &meta); err != nil {
+		var issue *MetadataError
+		if errors.As(err, &issue) {
+			issue.Name = name
+			return Yesman{}, issue
+		}
 	}
 	y.HiredAt, y.Model = meta.HiredAt, meta.Model
 	y.DisplayName = meta.DisplayName
@@ -332,7 +340,9 @@ func (s *Store) Rename(name, label string) (Yesman, error) {
 	return renamed, err
 }
 
-// List returns the hired yesmen, oldest first.
+// List returns the healthy hired yesmen, oldest first. Oversized metadata is
+// reported separately as MetadataErrors alongside these results; an affected
+// workspace is never returned with a fabricated zero-metadata identity.
 func (s *Store) List() ([]Yesman, error) {
 	entries, err := os.ReadDir(s.root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -342,14 +352,18 @@ func (s *Store) List() ([]Yesman, error) {
 		return nil, err
 	}
 	var out []Yesman
+	var issues MetadataErrors
 	for _, e := range entries {
 		if !e.IsDir() || ValidName(e.Name()) != nil {
 			continue
 		}
 		if y, err := s.Get(e.Name()); err == nil {
 			out = append(out, y)
-		} else if errors.Is(err, errYesmanMetadataTooLarge) {
-			return nil, err
+		} else {
+			var issue *MetadataError
+			if errors.As(err, &issue) {
+				issues = append(issues, *issue)
+			}
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -358,6 +372,9 @@ func (s *Store) List() ([]Yesman, error) {
 		}
 		return out[i].Name < out[j].Name
 	})
+	if len(issues) > 0 {
+		return out, issues
+	}
 	return out, nil
 }
 

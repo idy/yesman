@@ -1059,5 +1059,8 @@ export default {
   "Period": "时间范围",
   "What this computer’s agents actually used, read from their session logs: for each model at each effort, the agents that used it, the tasks done with it, tokens and measured output speed.": "本机智能体的实际用量，读取自它们的会话日志：每个模型在每种推理强度下的使用者、用它完成的任务、token 用量和实测输出速度。",
   "Benchmark scores from Artificial Analysis are in {settings}; they are not measured here.": "Artificial Analysis 的基准评分在{settings}中；它们不是在这里测得的。",
+  "Workspace unavailable": "工作区暂不可用",
+  "Metadata is {size} bytes; the limit is {limit} bytes.": "元数据为 {size} 字节，上限为 {limit} 字节。",
+  "Quit yesman before editing. Back up this file, reduce its size, and preserve its hiredAt field.": "编辑前请退出 yesman。先备份此文件，再缩减其大小，并保留原有 hiredAt 字段。",
   "These are benchmark scores, not measured here: what your agents actually used is in {usage}.": "这些是基准评分，并非在本机测得；智能体的实际用量见{usage}。",
 };
