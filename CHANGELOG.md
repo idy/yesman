@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.29
+
+- Accept display names such as GizMoth, names with spaces and Chinese text when creating a yesman from the welcome page or Hire dialog, preserving their spelling and capitalization.
+- Assign each new yesman a stable internal workspace name automatically, avoiding conflicts without overwriting existing workspaces. Display names do not have to be unique.
+- Keep existing workspace identities, paths, conversations, boards and worktree data unchanged.
+
 ## 0.1.28
 
 - Let review agents reclaim their own clean, reconstructible temporary worktrees after saving the review outcome and exact commit, with cleanup delegated by the lead when needed.
