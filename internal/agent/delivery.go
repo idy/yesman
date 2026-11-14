@@ -30,6 +30,8 @@ type Delivery struct {
 	CanRestore          bool      `json:"canRestore,omitempty"`
 	OriginalText        bool      `json:"originalText,omitempty"`
 	NativePending       bool      `json:"nativePending,omitempty"`
+	CanPromote          bool      `json:"canPromote,omitempty"` // live native membership/admission only
+	queueRevision       uint64
 	queueID, queueEpoch string
 	boundSeq            uint64
 	fingerprint         string
@@ -41,10 +43,11 @@ type Delivery struct {
 // QueueStatus describes the whole native pi queue, not receipt membership.
 // Known is false after process/session replacement until pi reports a snapshot.
 type QueueStatus struct {
-	Known           bool `json:"known"`
-	Steering        int  `json:"steering"`
-	FollowUp        int  `json:"followUp"`
-	RecallSupported bool `json:"recallSupported,omitempty"`
+	Known            bool `json:"known"`
+	Steering         int  `json:"steering"`
+	FollowUp         int  `json:"followUp"`
+	RecallSupported  bool `json:"recallSupported,omitempty"`
+	PromoteSupported bool `json:"promoteSupported,omitempty"`
 }
 
 var deliveryID = regexp.MustCompile(`^[a-f0-9]{48}$`)
@@ -70,7 +73,7 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 	if !pendingDelivery(d.State) && (pendingDelivery(previous.State) || d.expires == 0) {
 		d.expires = time.Now().Add(deliveryRetention).UnixMilli()
 	}
-	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending = false, false, false, false
+	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote = false, false, false, false, false
 	if d.State == "dispatched" || d.State == "failed" || d.State == "handled" || d.State == "interrupted" || d.State == "accepted" {
 		d.queueID = ""
 		m.forgetRecallLocked(a, d.ID)
@@ -355,7 +358,7 @@ func (m *Manager) observeDelivery(a *agent, p *proc, kind string, raw json.RawMe
 		var native struct {
 			Pending pendingQueue `json:"pending"`
 		}
-		if json.Unmarshal(raw, &native) == nil && native.Pending.Capability == 1 {
+		if json.Unmarshal(raw, &native) == nil && native.Pending.supported() {
 			events := m.applyPendingLocked(a, p, native.Pending)
 			m.mu.Unlock()
 			for _, event := range events {

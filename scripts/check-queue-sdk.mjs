@@ -16,7 +16,7 @@ try {
  });
  assert.equal(p.status,0,p.stderr);
  const reply=p.stdout.trim().split('\n').map(line=>JSON.parse(line)).find(r=>r.id==='public-entry');
- assert.equal(reply?.data?.capability,1,'npm public CLI still reaches an unpatched bundle');
+ assert.equal(reply?.data?.capability,2,'npm public CLI still reaches an unpatched bundle');
 } finally {await rm(cliConfig,{recursive:true,force:true});}
 const {Agent}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-agent-core/dist/index.js')));
 const {createAssistantMessageEventStream}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-ai/dist/index.js')));
@@ -61,5 +61,25 @@ for(const mode of ['all','one-at-a-time']){
  assert.equal(agent.cancelQueuedMessage(epoch,oldest).outcome,'not_pending');
  const fresh=agent.steer(same);assert.equal(agent.getPendingQueue().items[0].queueId,fresh);assert.equal(agent.cancelQueuedMessage(epoch,oldest).outcome,'not_pending');assert.equal(agent.getPendingQueue().items[0].queueId,fresh);
  agent.cancelQueuedMessage(epoch,fresh);
- console.log(`${mode}: actual SDK occurrence identity / 100 interleaved writers / order / race / 1024 terminal bound PASS`);
+ // Same-object occurrences retain identity and byte content through promotion.
+ seen.length=0;events.length=0;requests.length=0;
+ const original=JSON.stringify(same), s1=agent.steer(same), a=agent.followUp(same), b=agent.followUp(same), c=agent.followUp(same), s2=agent.steer(same);
+ const cancelFirst=agent.followUp(same);agent.cancelQueuedMessage(epoch,cancelFirst,0);
+ assert.equal(agent.promoteQueuedMessage(epoch,cancelFirst,0).outcome,'not_pending');
+ const foreign=new Agent({initialState:{model},streamFn:()=>{throw Error('foreign fixture must not run')}}),foreignID=foreign.followUp(same),foreignQueue=foreign.getPendingQueue();
+ assert.equal(agent.promoteQueuedMessage(foreignQueue.epoch,foreignID,0).outcome,'stale');
+ assert.deepEqual(foreign.getPendingQueue(),foreignQueue);foreign.cancelQueuedMessage(foreignQueue.epoch,foreignID,0);
+ assert.equal(agent.promoteQueuedMessage('old',b,0).outcome,'stale');
+ assert.equal(agent.promoteQueuedMessage(epoch,b,0).outcome,'promoted');
+ const after=agent.getPendingQueue().revision;
+ assert.equal(agent.promoteQueuedMessage(epoch,b,0).outcome,'already_steering');
+ assert.equal(agent.getPendingQueue().revision,after,'retry reordered or remutated');
+ assert.equal(agent.cancelQueuedMessage(epoch,b,0).outcome,'stale_item');
+ agent.cancelQueuedMessage(epoch,a,0);
+ await agent.continue();
+ assert.deepEqual(events.flatMap(e=>e.changes).filter(e=>e.state==='taken').map(e=>e.queueId),[s1,s2,b,c]);
+ assert.equal(seen.length,4);assert(seen.every(m=>m===same));assert.equal(JSON.stringify(same),original);
+ assert.equal(agent.promoteQueuedMessage(epoch,b,0).outcome,'not_pending');
+ assert.equal(JSON.stringify(requests).includes('itemRevision'),false);
+ console.log(`${mode}: actual SDK occurrence identity / 100 interleaved writers / order / race / 1024 terminal bound / same-object promotion PASS`);
 }

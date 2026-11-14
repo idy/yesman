@@ -1,7 +1,7 @@
 # Managed pi and native message recall
 
 yesman's default supported runtime is **pi 1.5.2 with queue protocol patch 1**
-(`1.5.2-yesman.1`). It provides actual per-occurrence pending identity and atomic
+(`1.5.2-yesman.2`). It provides actual per-occurrence pending identity and atomic
 cancellation. Original upstream pi 1.5.2 lacks that API; external runtimes retain
 normal sending/Copy and only expose recall if they report the supported protocol.
 
@@ -88,6 +88,40 @@ Old digest directories and the shared npm download cache are retained across
 upgrades (each runtime can occupy roughly 154 MB). They may still be used by
 running processes. This feature does not automatically delete them or implement
 cache GC; an ownership-aware cache collector is optional future work.
+
+## Follow-up promotion protocol (implementation in progress)
+
+Capability 2 adds `promote_queued_message` and SDK `promoteQueuedMessage`.
+The command identifies an existing epoch/queueId plus its item revision and the
+Session control generation. Native promotion synchronously moves that same entry
+to the tail of steering, preserving other entries and the original message object.
+Repeated promotion returns `already_steering` without reordering. Cancel optionally
+compares the item revision too; the app supplies it for v2 so concurrent mutations
+based on the same snapshot cannot both change the entry. A later intentional
+cancel of the updated steering entry remains legal. New Go accepts v1 for recall,
+but never infers promotion support from counts or a v1 capability.
+
+The runtime advertises `promoteAllowed` only for an active Session with no pending
+Abort/settlement barrier. Abort increments its control generation, preventing a
+late pre-Stop request from mutating or waking the queue. Promotion does not interrupt
+the in-flight provider or any tool: native steering is polled after the assistant
+turn and its complete tool batch, subject to existing retry/compaction/hooks and
+steering FIFO/mode. The same occurrence may be taken before its promotion ACK
+arrives; receipt reconciliation preserves that later state.
+
+**Idle queued-run resume is not implemented in this checkpoint**: `idleResume`
+is false and idle follow-up promotion returns `inactive` without changing queues
+or starting a provider call. It needs a Session-owned lifecycle, not a bare
+`agent.continue()` or another loop. Desktop Send now/footer projection and native
+occurrence-to-history identity integration are also pending. This backend protocol
+does not claim those remaining parts of the 0.1.34 feature are complete.
+
+Go promotion never calls Submit or requires a retained original payload. It
+captures owner/process/session identity under a short workspace lease, releases
+it across RPC and persistence waits, and revalidates before returning a durable
+receipt. Ordered events reconcile lost ACKs; old initial submission ACKs cannot
+downgrade the changed kind. Restart invalidates live queue authority and never
+replays the original intent. No new payloads or queue authority are persisted.
 
 ## Protocol and atomicity
 

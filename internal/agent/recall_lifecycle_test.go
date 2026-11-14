@@ -15,16 +15,24 @@ import (
 )
 
 // The native primitive is tested with real pi elsewhere. This controllable RPC
-// peer holds only cancellation replies, allowing lifecycle interleavings without
+// peer holds mutation replies, allowing lifecycle interleavings without
 // stopping a real process or sleeping through the production 15-second bound.
 func fakeRecallLifecyclePi() {
-	type cmd struct{ ID, Type, Message, SubmissionID, Epoch, QueueID string }
+	type cmd struct {
+		ID, Type, Message, SubmissionID, Epoch, QueueID, StreamingBehavior string
+		ExpectedRevision                                                   uint64
+	}
+	promotion := os.Getenv("FAKE_PI_PROMOTE_LIFECYCLE") == "1"
 	var pending []pendingItem
 	var held []cmd
 	revision := uint64(0)
 	write := func(v any) { b, _ := json.Marshal(v); _, _ = os.Stdout.Write(append(b, '\n')) }
 	snapshot := func() pendingQueue {
-		return pendingQueue{Capability: 1, Epoch: "fixture-epoch", Revision: revision, Items: pending}
+		q := pendingQueue{Capability: 1, Epoch: "fixture-epoch", Revision: revision, Items: pending}
+		if promotion {
+			q.Capability, q.PromoteAllowed = 2, true
+		}
+		return q
 	}
 	reply := func(c cmd, data any) {
 		write(map[string]any{"type": "response", "id": c.ID, "command": c.Type, "success": true, "data": data})
@@ -52,24 +60,54 @@ func fakeRecallLifecyclePi() {
 			reply(c, map[string]any{"sessionId": "fixture-session", "pendingQueue": snapshot(), "model": Model{ID: "m", Provider: "p"}})
 		case "prompt":
 			revision++
-			item := pendingItem{QueueID: fmt.Sprintf("item-%d", revision), SubmissionID: c.SubmissionID, Kind: "steer"}
+			kind := c.StreamingBehavior
+			if kind == "" {
+				kind = "steer"
+			}
+			item := pendingItem{QueueID: fmt.Sprintf("item-%d", revision), SubmissionID: c.SubmissionID, Kind: kind}
 			pending = append(pending, item)
 			q := snapshot()
 			item.State = "pending"
 			q.Changes = []pendingItem{item}
 			write(map[string]any{"type": "queue_update", "pending": q})
 			reply(c, map[string]string{"disposition": "queued"})
-		case "cancel_queued_message":
+		case "cancel_queued_message", "promote_queued_message":
 			held = append(held, c)
-			write(map[string]string{"type": "test_cancel_received", "queueId": c.QueueID})
-		case "test_release_cancels":
+			event := "test_cancel_received"
+			if c.Type == "promote_queued_message" {
+				event = "test_promote_received"
+			}
+			write(map[string]string{"type": event, "queueId": c.QueueID})
+		case "test_release_cancels", "test_release_mutations":
 			for _, h := range held {
 				outcome := "not_pending"
-				if remove(h.QueueID, "cancelled") {
+				if h.Type == "promote_queued_message" {
+					for i := range pending {
+						if pending[i].QueueID == h.QueueID {
+							if pending[i].Kind == "steer" {
+								outcome = "already_steering"
+								break
+							}
+							pending[i].Kind = "steer"
+							pending[i].ItemRevision++
+							revision++
+							outcome = "promoted"
+							q := snapshot()
+							item := pending[i]
+							item.State = "pending"
+							q.Changes = []pendingItem{item}
+							write(map[string]any{"type": "queue_update", "pending": q})
+							break
+						}
+					}
+				} else if remove(h.QueueID, "cancelled") {
 					outcome = "cancelled"
 				}
-				q := snapshot()
-				reply(h, map[string]any{"outcome": outcome, "capability": 1, "epoch": q.Epoch, "revision": q.Revision, "items": q.Items})
+				b, _ := json.Marshal(snapshot())
+				data := map[string]any{}
+				_ = json.Unmarshal(b, &data)
+				data["outcome"] = outcome
+				reply(h, data)
 			}
 			held = nil
 			reply(c, nil)

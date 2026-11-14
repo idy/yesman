@@ -1,6 +1,6 @@
 {
   "upstream": "1.5.2",
-  "revision": 1,
+  "revision": 2,
   "patches": [
     {
       "path": "@earendil-works/pi-coding-agent/dist/bundle/cli.js",
@@ -16,7 +16,7 @@
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.js",
       "before": "f45ae001e2b14fced8ae151f0a00303b5fbdb5fc4b25418d45de6a5546f48a8c",
-      "after": "c2db0d09601c46ff9870b8f9c95f5db9125a12a32ce7b5a6ce312516b2d60cb9",
+      "after": "e91be4d0ccf36f53f3d0819ca7b7e61dfbff142f84ef400096ebd0cb53910cf6",
       "edits": [
         {
           "before": "class PendingMessageQueue {\n    messages = [];\n    mode;\n    constructor(mode) {\n        this.mode = mode;\n    }\n    enqueue(message) {\n        this.messages.push(message);\n    }\n    hasItems() {\n        return this.messages.length > 0;\n    }\n    peek() {\n        if (this.mode === \"all\")\n            return this.messages.slice();\n        const first = this.messages[0];\n        return first ? [first] : [];\n    }\n    drain() {\n        const drained = this.peek();\n        this.messages = this.messages.slice(drained.length);\n        return drained;\n    }\n    clear() {\n        this.messages = [];\n    }\n}\n",
@@ -44,18 +44,18 @@
         },
         {
           "before": "    /** Remove all queued steering messages. */",
-          "after": "    getPendingQueue() { return this.pendingQueue.snapshot(); }\n    subscribePendingQueue(listener) { return this.pendingQueue.subscribe(listener); }\n    cancelQueuedMessage(epoch, queueId) { return this.pendingQueue.cancel(epoch, queueId); }\n    /** Remove all queued steering messages. */"
+          "after": "    getPendingQueue() { return this.pendingQueue.snapshot(); }\n    subscribePendingQueue(listener) { return this.pendingQueue.subscribe(listener); }\n    cancelQueuedMessage(epoch, queueId, expectedRevision) { return this.pendingQueue.cancel(epoch, queueId, expectedRevision); }\n    promoteQueuedMessage(epoch, queueId, expectedRevision) { return this.pendingQueue.promote(epoch, queueId, expectedRevision); }\n    notifyPendingQueue() { this.pendingQueue.change([], \"pending\"); }\n    /** Remove all queued steering messages. */"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.d.ts",
       "before": "05968f90cf20eec86cfd352c6a87dff94f7e177d8579c3864697e8a7bb773ace",
-      "after": "38873ffc147317eeeb8c147dcb28ee117f2580b2ce49e5286d15aa013cde7ebd",
+      "after": "30c268c3ceac43473969e57c1b246c943d4da6e13f4dab2ea4f2925309449f08",
       "edits": [
         {
           "before": "export declare class Agent {",
-          "after": "export interface PendingQueueItem { queueId: string; kind: \"steer\" | \"followUp\"; submissionId?: string; }\nexport interface PendingQueueSnapshot { capability: 1; epoch: string; revision: number; items: PendingQueueItem[]; steering: string[]; followUp: string[]; }\nexport interface PendingQueueEvent extends PendingQueueSnapshot { changes: (PendingQueueItem & { state: \"pending\" | \"taken\" | \"cancelled\" | \"cleared\" })[]; }\nexport interface PendingQueueResult extends PendingQueueSnapshot { outcome: \"cancelled\" | \"not_pending\" | \"stale\"; }\nexport declare class Agent {"
+          "after": "export interface PendingQueueItem { queueId: string; kind: \"steer\" | \"followUp\"; submissionId?: string; itemRevision: number; }\nexport interface PendingQueueSnapshot { capability: 2; epoch: string; revision: number; items: PendingQueueItem[]; steering: string[]; followUp: string[]; controlGeneration?: number; promoteAllowed?: boolean; promotionBlocked?: string; idleResume?: boolean; }\nexport interface PendingQueueEvent extends PendingQueueSnapshot { changes: (PendingQueueItem & { state: \"pending\" | \"taken\" | \"cancelled\" | \"cleared\" })[]; }\nexport interface PendingQueueResult extends PendingQueueSnapshot { outcome: \"cancelled\" | \"not_pending\" | \"stale\" | \"stale_item\"; }\nexport interface PendingPromotionResult extends PendingQueueSnapshot { outcome: \"promoted\" | \"already_steering\" | \"not_pending\" | \"stale\" | \"stale_item\" | \"stale_control\" | \"inactive\"; }\nexport declare class Agent {"
         },
         {
           "before": "steer(message: AgentMessage): void;",
@@ -63,22 +63,22 @@
         },
         {
           "before": "followUp(message: AgentMessage): void;",
-          "after": "followUp(message: AgentMessage, metadata?: { submissionId?: string }): string;\n    getPendingQueue(): PendingQueueSnapshot;\n    subscribePendingQueue(listener: (event: PendingQueueEvent) => void): () => void;\n    cancelQueuedMessage(epoch: string, queueId: string): PendingQueueResult;"
+          "after": "followUp(message: AgentMessage, metadata?: { submissionId?: string }): string;\n    getPendingQueue(): PendingQueueSnapshot;\n    subscribePendingQueue(listener: (event: PendingQueueEvent) => void): () => void;\n    cancelQueuedMessage(epoch: string, queueId: string, expectedRevision?: number): PendingQueueResult;\n    promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number): PendingPromotionResult;\n    /** @internal Session lifecycle metadata changed. */\n    notifyPendingQueue(): void;"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.js",
       "before": "ee756f6f74afe9f8930ebf216c95334605d913a275a0eec2c9702f101baef3c3",
-      "after": "b119f0947b52dc77da4e80b8db207c7ae51f68f912b843b86b70824a284475d6",
+      "after": "da9ea950edcec9c8c9d7127539779bca39e1e494133d1df1365f64cd3a90c044",
       "edits": [
         {
           "before": "            followUp: [...this._followUpMessages],",
-          "after": "            followUp: [...this._followUpMessages],\n            pending: { ...this.agent.getPendingQueue(), changes: [] },"
+          "after": "            followUp: [...this._followUpMessages],\n            pending: { ...this.getPendingQueue(), changes: [] },"
         },
         {
           "before": "        this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);",
-          "after": "        this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);\n        this._unsubscribePendingQueue = this.agent.subscribePendingQueue((pending) => {\n            this._steeringMessages = pending.steering;\n            this._followUpMessages = pending.followUp;\n            this._emit({ type: \"queue_update\", steering: pending.steering, followUp: pending.followUp, pending });\n        });"
+          "after": "        this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);\n        this._unsubscribePendingQueue = this.agent.subscribePendingQueue((pending) => {\n            this._steeringMessages = pending.steering;\n            this._followUpMessages = pending.followUp;\n            this._emit({ type: \"queue_update\", steering: pending.steering, followUp: pending.followUp, pending: this._decoratePendingQueue(pending) });\n        });"
         },
         {
           "before": "            const messageText = contentText(event.message.content, \"\");\n            // Check steering queue first\n            const steeringIndex = this._steeringMessages.indexOf(messageText);\n            if (steeringIndex !== -1) {\n                this._steeringMessages.splice(steeringIndex, 1);\n                this._emitQueueUpdate();\n            }\n            else {\n                // Check follow-up queue\n                const followUpIndex = this._followUpMessages.indexOf(messageText);\n                if (followUpIndex !== -1) {\n                    this._followUpMessages.splice(followUpIndex, 1);\n                    this._emitQueueUpdate();\n                }\n            }\n",
@@ -133,15 +133,43 @@
           "after": "        return this.agent.followUp(message, { submissionId });"
         },
         {
+          "before": "    _isEmittingAgentSettled = false;",
+          "after": "    _queueControlGeneration = 0;\n    _isEmittingAgentSettled = false;"
+        },
+        {
+          "before": "        this._agentRunAbortRequested = false;",
+          "after": "        this._agentRunAbortRequested = false;\n        this.agent.notifyPendingQueue();"
+        },
+        {
+          "before": "            this._isAgentRunActive = false;\n            this._flushPendingBashMessages();",
+          "after": "            this._isAgentRunActive = false;\n            this.agent.notifyPendingQueue();\n            this._flushPendingBashMessages();"
+        },
+        {
+          "before": "        this._isEmittingAgentSettled = true;",
+          "after": "        this._isEmittingAgentSettled = true;\n        this.agent.notifyPendingQueue();"
+        },
+        {
+          "before": "            this._isEmittingAgentSettled = false;",
+          "after": "            this._isEmittingAgentSettled = false;\n            this.agent.notifyPendingQueue();"
+        },
+        {
+          "before": "    async abort() {",
+          "after": "    async abort() {\n        this._queueControlGeneration++;"
+        },
+        {
+          "before": "        this.abortRetry();\n        this.abortCompaction();",
+          "after": "        this.agent.notifyPendingQueue();\n        this.abortRetry();\n        this.abortCompaction();"
+        },
+        {
           "before": "    clearQueue() {",
-          "after": "    getPendingQueue() { return this.agent.getPendingQueue(); }\n    cancelQueuedMessage(epoch, queueId) { return this.agent.cancelQueuedMessage(epoch, queueId); }\n    clearQueue() {"
+          "after": "    _decoratePendingQueue(snapshot) {\n        const promoteAllowed = this.isStreaming && !this._agentRunAbortRequested && !this._isEmittingAgentSettled;\n        return { ...snapshot, controlGeneration: this._queueControlGeneration, promoteAllowed, idleResume: false,\n            promotionBlocked: promoteAllowed ? \"\" : this._agentRunAbortRequested ? \"stopped\" : \"idle_resume_unavailable\" };\n    }\n    getPendingQueue() { return this._decoratePendingQueue(this.agent.getPendingQueue()); }\n    cancelQueuedMessage(epoch, queueId, expectedRevision) { return this._decoratePendingQueue(this.agent.cancelQueuedMessage(epoch, queueId, expectedRevision)); }\n    promoteQueuedMessage(epoch, queueId, expectedRevision, controlGeneration) {\n        const snapshot = this.getPendingQueue();\n        if (epoch !== snapshot.epoch) return { ...snapshot, outcome: \"stale\" };\n        if (controlGeneration !== this._queueControlGeneration) return { ...snapshot, outcome: \"stale_control\" };\n        const item = snapshot.items.find(item => item.queueId === queueId);\n        if (!item) return { ...snapshot, outcome: \"not_pending\" };\n        // Reconciliation of an already-promoted occurrence never starts a run.\n        if (item.kind !== \"steer\" && !snapshot.promoteAllowed) return { ...snapshot, outcome: \"inactive\" };\n        return this._decoratePendingQueue(this.agent.promoteQueuedMessage(epoch, queueId, expectedRevision));\n    }\n    clearQueue() {"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts",
       "before": "56d24887a400d77a77b428deb1cce25576cac27e18089e722f536d600fa32c3a",
-      "after": "4124fcda0bf1184841e2894012a763689f5f656315a71bd1cb25500684ced137",
+      "after": "aacabdda778f14643cfe4909c60576fe3175420ed97516a5b5b050543637127d",
       "edits": [
         {
           "before": "export interface PromptOptions {",
@@ -157,7 +185,7 @@
         },
         {
           "before": "    clearQueue(): {",
-          "after": "    getPendingQueue(): import(\"@earendil-works/pi-agent-core\").PendingQueueSnapshot;\n    cancelQueuedMessage(epoch: string, queueId: string): import(\"@earendil-works/pi-agent-core\").PendingQueueResult;\n    clearQueue(): {"
+          "after": "    getPendingQueue(): import(\"@earendil-works/pi-agent-core\").PendingQueueSnapshot;\n    cancelQueuedMessage(epoch: string, queueId: string, expectedRevision?: number): import(\"@earendil-works/pi-agent-core\").PendingQueueResult;\n    promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number, controlGeneration: number): import(\"@earendil-works/pi-agent-core\").PendingPromotionResult;\n    clearQueue(): {"
         },
         {
           "before": "    type: \"queue_update\";",
@@ -168,7 +196,7 @@
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js",
       "before": "505297dba2df1de3003c0399b3312fd581359a4e27a5e9262b274b6cb5cb4ef3",
-      "after": "cdb39f5562eb0cfae0392c4ad3df1fde27262a49739028c80ff69f129184db54",
+      "after": "26fc1f560cef8c4e51d4b0576ed1041893aa36a8280396e10d97c1fbb1da056d",
       "edits": [
         {
           "before": "                    streamingBehavior: command.streamingBehavior,",
@@ -184,18 +212,18 @@
         },
         {
           "before": "            case \"clear_queue\": {",
-          "after": "            case \"get_pending_queue\": {\n                return success(id, \"get_pending_queue\", session.getPendingQueue());\n            }\n            case \"cancel_queued_message\": {\n                if (typeof command.epoch !== \"string\" || typeof command.queueId !== \"string\")\n                    return error(id, \"cancel_queued_message\", \"epoch and queueId are required\");\n                return success(id, \"cancel_queued_message\", session.cancelQueuedMessage(command.epoch, command.queueId));\n            }\n            case \"clear_queue\": {"
+          "after": "            case \"get_pending_queue\": {\n                return success(id, \"get_pending_queue\", session.getPendingQueue());\n            }\n            case \"cancel_queued_message\": {\n                if (typeof command.epoch !== \"string\" || typeof command.queueId !== \"string\")\n                    return error(id, \"cancel_queued_message\", \"epoch and queueId are required\");\n                return success(id, \"cancel_queued_message\", session.cancelQueuedMessage(command.epoch, command.queueId, command.expectedRevision));\n            }\n            case \"promote_queued_message\": {\n                if (typeof command.epoch !== \"string\" || typeof command.queueId !== \"string\" ||\n                    !Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0 ||\n                    !Number.isSafeInteger(command.controlGeneration) || command.controlGeneration < 0)\n                    return error(id, \"promote_queued_message\", \"epoch, queueId, expectedRevision and controlGeneration are required\");\n                return success(id, \"promote_queued_message\", session.promoteQueuedMessage(command.epoch, command.queueId, command.expectedRevision, command.controlGeneration));\n            }\n            case \"clear_queue\": {"
         },
         {
           "before": "                    pendingMessageCount: session.pendingMessageCount,",
-          "after": "                    pendingMessageCount: session.pendingMessageCount,\n                    pendingQueue: session.getPendingQueue(),\n                    runtime: \"yesman-pi/1.5.2-1\","
+          "after": "                    pendingMessageCount: session.pendingMessageCount,\n                    pendingQueue: session.getPendingQueue(),\n                    runtime: \"yesman-pi/1.5.2-2\","
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-types.d.ts",
       "before": "68b6dc2e47a3969c09c961a40d0462473407b6786f3bd02715fa035e816e2af1",
-      "after": "5658250e0c8447c10ae47c576ef5742492903855aed9f687561df02a334df6d8",
+      "after": "61c77719ad1ce30aa28659c9afd67900b96d934800f3d4e8ca2ea3d4196c85cb",
       "edits": [
         {
           "before": "    type: \"prompt\";\n    message: string;",
@@ -211,7 +239,7 @@
         },
         {
           "before": "    type: \"clear_queue\";\n} | {",
-          "after": "    type: \"clear_queue\";\n} | {\n    id?: string; type: \"get_pending_queue\";\n} | {\n    id?: string; type: \"cancel_queued_message\"; epoch: string; queueId: string;\n} | {"
+          "after": "    type: \"clear_queue\";\n} | {\n    id?: string; type: \"get_pending_queue\";\n} | {\n    id?: string; type: \"cancel_queued_message\"; epoch: string; queueId: string; expectedRevision?: number;\n} | {\n    id?: string; type: \"promote_queued_message\"; epoch: string; queueId: string; expectedRevision: number; controlGeneration: number;\n} | {"
         },
         {
           "before": "    pendingMessageCount: number;",
@@ -219,14 +247,14 @@
         },
         {
           "before": "export type RpcResponse = {",
-          "after": "export type RpcResponse = {\n    id?: string; type: \"response\"; command: \"get_pending_queue\"; success: true;\n    data: import(\"@earendil-works/pi-agent-core\").PendingQueueSnapshot;\n} | {\n    id?: string; type: \"response\"; command: \"cancel_queued_message\"; success: true;\n    data: import(\"@earendil-works/pi-agent-core\").PendingQueueResult;\n} | {"
+          "after": "export type RpcResponse = {\n    id?: string; type: \"response\"; command: \"get_pending_queue\"; success: true;\n    data: import(\"@earendil-works/pi-agent-core\").PendingQueueSnapshot;\n} | {\n    id?: string; type: \"response\"; command: \"cancel_queued_message\"; success: true;\n    data: import(\"@earendil-works/pi-agent-core\").PendingQueueResult;\n} | {\n    id?: string; type: \"response\"; command: \"promote_queued_message\"; success: true;\n    data: import(\"@earendil-works/pi-agent-core\").PendingPromotionResult;\n} | {"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-client.js",
       "before": "6cbb7d183db13468af61af733013a97ee6f5547ccd44edb1f85647f8bd6f218c",
-      "after": "56c625527f7256bab4e066bfa64a74b955204a14fe37f1c718b04c3e7405c4c9",
+      "after": "7c7ed6a50ec980f14ceeba59b39003f8e80ef712e4577fb9426a68d0b0ce54f1",
       "edits": [
         {
           "before": "async prompt(message, images, streamingBehavior)",
@@ -254,14 +282,14 @@
         },
         {
           "before": "    async clearQueue() {",
-          "after": "    async getPendingQueue() { return this.getData(await this.send({ type: \"get_pending_queue\" })); }\n    async cancelQueuedMessage(epoch, queueId) { return this.getData(await this.send({ type: \"cancel_queued_message\", epoch, queueId })); }\n    async clearQueue() {"
+          "after": "    async getPendingQueue() { return this.getData(await this.send({ type: \"get_pending_queue\" })); }\n    async cancelQueuedMessage(epoch, queueId, expectedRevision) { return this.getData(await this.send({ type: \"cancel_queued_message\", epoch, queueId, expectedRevision })); }\n    async promoteQueuedMessage(epoch, queueId, expectedRevision, controlGeneration) { return this.getData(await this.send({ type: \"promote_queued_message\", epoch, queueId, expectedRevision, controlGeneration })); }\n    async clearQueue() {"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-client.d.ts",
       "before": "85ec53b3f019e0176bdbb8f843a213d8ae8aa0bba937dce40291e1315b762b1b",
-      "after": "62ea81fd3f49c27a440d018ef8e02146b9951af6319b7ff4f15f968c80d49dac",
+      "after": "eb01a670a85f77afa6faab17630b2eab75532601902567c4f5299a3eaea89c86",
       "edits": [
         {
           "before": "streamingBehavior?: \"steer\" | \"followUp\"): Promise<PromptDisposition>;",
@@ -277,7 +305,7 @@
         },
         {
           "before": "    clearQueue(): Promise<{",
-          "after": "    getPendingQueue(): Promise<import(\"@earendil-works/pi-agent-core\").PendingQueueSnapshot>;\n    cancelQueuedMessage(epoch: string, queueId: string): Promise<import(\"@earendil-works/pi-agent-core\").PendingQueueResult>;\n    clearQueue(): Promise<{"
+          "after": "    getPendingQueue(): Promise<import(\"@earendil-works/pi-agent-core\").PendingQueueSnapshot>;\n    cancelQueuedMessage(epoch: string, queueId: string, expectedRevision?: number): Promise<import(\"@earendil-works/pi-agent-core\").PendingQueueResult>;\n    promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number, controlGeneration: number): Promise<import(\"@earendil-works/pi-agent-core\").PendingPromotionResult>;\n    clearQueue(): Promise<{"
         }
       ]
     },

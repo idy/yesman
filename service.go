@@ -255,6 +255,10 @@ func (s *service) Submit(ctx context.Context, id, messageID, text string, images
 func (s *service) CancelSubmission(ctx context.Context, id, messageID string, since time.Time) (agent.RecallResult, error) {
 	return s.app.agents.CancelSubmission(ctx, id, messageID, since)
 }
+func (s *service) PromoteSubmission(ctx context.Context, id, messageID string, since time.Time) (agent.PromotionResult, error) {
+	return s.app.agents.PromoteSubmission(ctx, id, messageID, since)
+}
+
 func (s *service) SubmissionText(id, messageID string, since time.Time) (string, error) {
 	return s.app.agents.SubmissionText(id, messageID, since)
 }

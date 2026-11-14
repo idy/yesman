@@ -465,7 +465,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		a.proc = p
 		p.piSession.Store(state.SessionID)
 		a.nativeQueue = state.PendingQueue
-		if state.PendingQueue.Capability == 1 {
+		if state.PendingQueue.supported() {
 			a.queue = pendingStatus(state.PendingQueue)
 		}
 		a.info.StartedAt = started
@@ -798,10 +798,10 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		}
 		m.mu.Lock()
 		retiring := a.retiring || a.proc != p
-		if messageID != "" && a.nativeQueue.Capability == 1 {
+		if messageID != "" && a.nativeQueue.supported() {
 			cmd["submissionId"] = messageID
 		}
-		if a.nativeQueue.Capability != 1 {
+		if !a.nativeQueue.supported() {
 			m.forgetRecallLocked(a, messageID)
 		}
 		m.mu.Unlock()

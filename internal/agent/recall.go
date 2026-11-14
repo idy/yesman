@@ -25,14 +25,22 @@ type pendingItem struct {
 	SubmissionID string `json:"submissionId"`
 	Kind         string `json:"kind"`
 	State        string `json:"state,omitempty"`
+	ItemRevision uint64 `json:"itemRevision"`
 }
 type pendingQueue struct {
-	Capability int           `json:"capability"`
-	Epoch      string        `json:"epoch"`
-	Revision   uint64        `json:"revision"`
-	Items      []pendingItem `json:"items"`
-	Changes    []pendingItem `json:"changes,omitempty"`
+	Capability        int           `json:"capability"`
+	Epoch             string        `json:"epoch"`
+	Revision          uint64        `json:"revision"`
+	Items             []pendingItem `json:"items"`
+	Changes           []pendingItem `json:"changes,omitempty"`
+	ControlGeneration uint64        `json:"controlGeneration"`
+	PromoteAllowed    bool          `json:"promoteAllowed"`
+	PromotionBlocked  string        `json:"promotionBlocked,omitempty"`
+	IdleResume        bool          `json:"idleResume"`
 }
+
+func (q pendingQueue) supported() bool { return q.Capability == 1 || q.Capability == 2 }
+
 type RecallResult struct {
 	Delivery Delivery      `json:"delivery"`
 	Payload  RecallPayload `json:"payload"`
@@ -72,7 +80,8 @@ func (m *Manager) clearRecallLocked(a *agent) {
 func (a *agent) deliveryView(d Delivery) Delivery {
 	payload, hasPayload := a.recallPayloads[d.ID]
 	d.OriginalText = hasPayload && payload.Text != ""
-	d.NativePending = d.queueID != "" && d.queueEpoch == a.nativeQueue.Epoch && a.nativeQueue.Capability == 1 && a.proc != nil && !a.retiring && !a.removing
+	d.NativePending = d.queueID != "" && d.queueEpoch == a.nativeQueue.Epoch && a.nativeQueue.supported() && a.proc != nil && !a.retiring && !a.removing && !a.deliverySealed
+	d.CanPromote = d.NativePending && d.State == "queued" && a.nativeQueue.Capability == 2 && a.nativeQueue.PromoteAllowed
 	d.CanCancel = hasPayload && d.NativePending
 	d.CanRestore = hasPayload && d.State == "cancelled" && !a.retiring && !a.removing
 	return d
@@ -81,7 +90,7 @@ func (a *agent) deliveryView(d Delivery) Delivery {
 // applyPendingLocked runs on the ordered RPC reader. This identity comes from
 // the queue owner, never from matching user text, image content or whole counts.
 func (m *Manager) applyPendingLocked(a *agent, p *proc, q pendingQueue) []Event {
-	if q.Capability != 1 || q.Epoch == "" || m.agents[a.info.ID] != a || a.proc != p || a.retiring || a.removing || a.deliverySealed {
+	if !q.supported() || q.Epoch == "" || m.agents[a.info.ID] != a || a.proc != p || a.retiring || a.removing || a.deliverySealed {
 		return nil
 	}
 	if a.nativeQueue.Epoch == q.Epoch && q.Revision <= a.nativeQueue.Revision {
@@ -97,6 +106,7 @@ func (m *Manager) applyPendingLocked(a *agent, p *proc, q pendingQueue) []Event 
 			}
 		}
 	}
+	previous := a.nativeQueue
 	a.nativeQueue = q
 	a.queue = pendingStatus(q)
 	present := map[string]pendingItem{}
@@ -123,10 +133,11 @@ func (m *Manager) applyPendingLocked(a *agent, p *proc, q pendingQueue) []Event 
 			if item.Kind == "followUp" {
 				state = "queued"
 			}
-			if d.queueID == item.QueueID && d.queueEpoch == q.Epoch && d.State == state {
+			if d.queueID == item.QueueID && d.queueEpoch == q.Epoch && d.State == state && d.queueRevision == item.ItemRevision && previous.ControlGeneration == q.ControlGeneration && previous.PromoteAllowed == q.PromoteAllowed {
 				continue
 			}
 			d.queueID, d.queueEpoch, d.State = item.QueueID, q.Epoch, state
+			d.queueRevision = item.ItemRevision
 			events = append(events, m.deliveryLocked(a, d))
 		} else if d.queueID != "" {
 			change := changes[d.queueID]
@@ -146,7 +157,7 @@ func (m *Manager) applyPendingLocked(a *agent, p *proc, q pendingQueue) []Event 
 	return events
 }
 func pendingStatus(q pendingQueue) QueueStatus {
-	status := QueueStatus{Known: q.Capability == 1, RecallSupported: q.Capability == 1}
+	status := QueueStatus{Known: q.supported(), RecallSupported: q.supported(), PromoteSupported: q.Capability == 2}
 	for _, item := range q.Items {
 		if item.Kind == "steer" {
 			status.Steering++
@@ -203,6 +214,10 @@ func (m *Manager) CancelSubmission(ctx context.Context, agentID, id string, sinc
 		return RecallResult{}, errors.New("this message is no longer pending in pi")
 	}
 	a.recalls++
+	cancelCommand := map[string]any{"type": "cancel_queued_message", "epoch": d.queueEpoch, "queueId": d.queueID}
+	if a.nativeQueue.Capability == 2 {
+		cancelCommand["expectedRevision"] = d.queueRevision
+	}
 	m.mu.Unlock()
 	// The reservation and captured generation/epoch survive without holding the
 	// workspace lease. An unresponsive RPC must not hold Archive's writer lock
@@ -213,7 +228,7 @@ func (m *Manager) CancelSubmission(ctx context.Context, agentID, id string, sinc
 		// Bound the RPC even if its client disconnects. The ordered queue event can
 		// establish cancellation independently of the reply; retry remains safe.
 		wait, cancel := context.WithTimeout(ctx, 15*time.Second)
-		response, callErr := p.callObserved(wait, map[string]any{"type": "cancel_queued_message", "epoch": d.queueEpoch, "queueId": d.queueID}, func(r response) {
+		response, callErr := p.callObserved(wait, cancelCommand, func(r response) {
 			if !r.Success {
 				return
 			}

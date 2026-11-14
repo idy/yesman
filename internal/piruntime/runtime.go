@@ -23,7 +23,7 @@ import (
 //go:embed assets/*
 var assets embed.FS
 
-const Version = "1.5.2-yesman.1"
+const Version = "1.5.2-yesman.2"
 const cli = "node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 
 type preparation struct {
