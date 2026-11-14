@@ -88,8 +88,10 @@ class Feed:
                 connection=tls_context.wrap_socket(self.connection,server_side=True)
                 try:Handler(connection,self.client_address,self.server)
                 finally:connection.close();self.close_connection=True
-            def respond(self,code,typ='application/json'):
-                self.send_response(code);self.send_header('Content-Type',typ);self.send_header('Access-Control-Allow-Origin','*');self.end_headers()
+            def respond(self,code,typ='application/json',length=None):
+                self.send_response(code);self.send_header('Content-Type',typ);self.send_header('Access-Control-Allow-Origin','*')
+                if length is not None:self.send_header('Content-Length',str(length))
+                self.send_header('Connection','close');self.end_headers()
             def do_OPTIONS(self):
                 self.send_response(204);self.send_header('Access-Control-Allow-Origin','*');self.send_header('Access-Control-Allow-Methods','GET,POST,OPTIONS');self.send_header('Access-Control-Allow-Headers','Content-Type');self.send_header('Access-Control-Allow-Private-Network','true');self.end_headers()
             def do_POST(self):
@@ -97,12 +99,12 @@ class Feed:
                 size=int(self.headers.get('Content-Length','0'));assert size<131072
                 value=json.loads(self.rfile.read(size))
                 with feed.lock:feed.latest=value
-                self.respond(200);self.wfile.write(b'{}')
+                self.respond(200,length=2);self.wfile.write(b'{}')
             def do_GET(self):
                 path=urllib.parse.urlparse(self.path).path
                 if path=='/command':
                     with feed.lock:value=feed.command
-                    self.respond(200);self.wfile.write(json.dumps(value).encode());return
+                    body=json.dumps(value).encode();self.respond(200,length=len(body));self.wfile.write(body);return
                 name=urllib.parse.unquote(path.rsplit('/',1)[-1])
                 with feed.lock:
                     target=feed.target
@@ -110,10 +112,10 @@ class Feed:
                 if name=='update-'+feed.plan['Target']+'.json':
                     m=json.loads(pathlib.Path(feed.plan['Stages'][target]['Manifest']).read_text(encoding='utf-8'))
                     if feed.mode=='archive':m['deltas']=[]
-                    self.respond(200);self.wfile.write(json.dumps(m).encode());return
+                    body=json.dumps(m).encode();self.respond(200,length=len(body));self.wfile.write(body);return
                 file=feed.files.get(name)
                 if file is None:self.send_error(404);return
-                self.respond(200,'application/octet-stream')
+                self.respond(200,'application/octet-stream',file.stat().st_size)
                 with file.open('rb') as body:shutil.copyfileobj(body,self.wfile)
         server=http.server.ThreadingHTTPServer((host,port),Handler)
         threading.Thread(target=server.serve_forever,daemon=True).start();return server
@@ -186,6 +188,10 @@ def run(stack):
                 def executable(index):
                     name=plan['Stages'][index]['mainName']
                     return install/('yesman.app/Contents/MacOS/'+name if sys.platform=='darwin' else name+('.exe' if sys.platform=='win32' else ''))
+                def progress(message):
+                    print(mode+': '+message,flush=True)
+                    proof['progress']=mode+': '+message
+                    (evidence/'production-upgrade.json').write_text(json.dumps(proof,indent=2))
                 def snapshot(index):
                     with feed.lock:value=feed.latest
                     if value and value.get('about',{}).get('version')==plan['Stages'][index]['Version']:
@@ -208,11 +214,12 @@ def run(stack):
                     for p,b in sentinels.items():assert p.read_bytes()==b,p
                     return {'stage':index,'version':value['about']['version'],'pid':ids[0],'native':info,'bridge':value,'binarySHA256':sha(executable(index))}
                 def update(index):
+                    progress('requesting update '+str(index))
                     feed.target=index;feed.send('check')
                     return wait(lambda:(feed.latest if feed.latest and feed.latest.get('update',{}).get('state') in ('ready','failed') and feed.latest['update'].get('version')==plan['Stages'][index]['Version'] else None),'Upgrade never reached a result',120)
                 def restart(index):
                     nonlocal process
-                    oldpage=feed.latest['page'];switch_web(index);feed.send('restart')
+                    oldpage=feed.latest['page'];switch_web(index);feed.send('restart');progress('restart requested for '+str(index))
                     if process is not None:
                         result=process.wait(timeout=30)
                         if not isinstance(process,Existing):assert result==0
@@ -227,12 +234,13 @@ def run(stack):
                 if ca_file and sys.platform=='linux':env['SSL_CERT_FILE']=ca_file
                 log=(evidence/(mode+'-initial.log')).open('w')
                 process=subprocess.Popen([str(executable(0))],cwd=root,env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT)
+                progress('old main launched')
                 wait(lambda:snapshot(0),'Old production source did not start')
                 feed.send('initialize');wait(lambda:snapshot(0) and snapshot(0)['localStorage']==token,'Synthetic settings initialization failed')
                 steps=[inspect(0)]
                 for index in (1,2):
                     status=update(index);assert status['update']['state']=='ready',status
-                    restart(index);steps.append(inspect(index))
+                    restart(index);steps.append(inspect(index));progress('real main/bridge/hash verified at '+str(index))
                 # Force failure in the actual production updater at its own
                 # installation. Mac fails the deferred new-bundle mv; Windows
                 # blocks a later resource rename (after earlier placements).
@@ -257,7 +265,7 @@ def run(stack):
                     if sys.platform=='win32':kernel.CloseHandle(guard);guard=None
                     else:install.chmod(0o755)
                     feed.target=2
-                rollback=inspect(2)
+                rollback=inspect(2);progress('failure recovery image/bridge verified')
                 if isinstance(process,Existing):
                     process.send_signal(signal.SIGTERM);process.wait(timeout=20)
                 else:naming.quit_process(process,rollback['native'])
