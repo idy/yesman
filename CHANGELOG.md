@@ -2,6 +2,10 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.19
+
+- Keep Secrets list value fields at a fixed width, and constrain long values and editors within the list in narrow windows.
+
 ## 0.1.18
 
 - Settings › yesman lists the crew: the models agents run as, each one of pi's models at one reasoning effort. Add and remove them there, and choose what new yesmen run as.
