@@ -35,7 +35,7 @@ type Client struct {
 	flights  map[string]*tokenFlight
 	lifetime context.Context
 	stop     context.CancelFunc
-	// Tests can adapt gh's host without changing any OS trust store. The
+	// Tests can adapt gh's transport without changing any OS trust store. The
 	// production constructor always uses the strict github.com environment.
 	ghEnv func(string, string) []string
 }
@@ -66,7 +66,7 @@ func newClient(app Registration, key *rsa.PrivateKey, repositories []string) (*C
 	lifetime, stop := context.WithCancel(context.Background())
 	c := &Client{app: app, key: key, allowed: map[string]bool{}, http: safeHTTPClient(), base: githubAPI, now: time.Now, tokens: map[string]installationToken{}, flights: map[string]*tokenFlight{}, lifetime: lifetime, stop: stop, ghEnv: ghEnvironment}
 	for _, repo := range repositories {
-		if !repoPattern.MatchString(repo) {
+		if !validRepository(repo) {
 			return nil, errors.New("App repositories must be explicit owner/repo names")
 		}
 		c.allowed[strings.ToLower(repo)] = true
@@ -81,7 +81,15 @@ func (c *Client) Close() {
 	c.mu.Unlock()
 }
 
-var repoPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$`)
+var repoPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$`)
+
+func validRepository(repo string) bool {
+	if !repoPattern.MatchString(repo) {
+		return false
+	}
+	_, name, _ := strings.Cut(repo, "/")
+	return name != "." && name != ".."
+}
 
 func (c *Client) jwt() (string, error) {
 	now := c.now()
@@ -147,7 +155,7 @@ func (c *Client) request(ctx context.Context, method, path, credential string, b
 
 func (c *Client) token(ctx context.Context, repo string) (installationToken, error) {
 	repo = strings.ToLower(repo)
-	if !repoPattern.MatchString(repo) || !c.allowed[repo] {
+	if !validRepository(repo) || !c.allowed[repo] {
 		return installationToken{}, errors.New("repository is not enabled for this GitHub App; personal credentials will not be used")
 	}
 	if err := ctx.Err(); err != nil {
@@ -327,7 +335,7 @@ type Pull struct {
 
 func (c *Client) CreatePull(ctx context.Context, in PullInput) (Pull, error) {
 	var pull Pull
-	if !repoPattern.MatchString(in.Repository) || strings.TrimSpace(in.Title) == "" || len(in.Title) > 256 || len(in.Body) > 65536 || !validRef(in.Base) || !validRef(in.Head) {
+	if !validRepository(in.Repository) || strings.TrimSpace(in.Title) == "" || len(in.Title) > 256 || len(in.Body) > 65536 || !validRef(in.Base) || !validRef(in.Head) {
 		return pull, errors.New("provide an explicit repository, branch names, a title and a bounded PR body")
 	}
 	body := map[string]any{"head": in.Head, "base": in.Base, "title": in.Title, "body": in.Body, "draft": in.Draft}

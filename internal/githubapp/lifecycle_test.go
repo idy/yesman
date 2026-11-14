@@ -85,6 +85,16 @@ func TestShimInstallReplacesOneRuntimeBinary(t *testing.T) {
 	}
 }
 func TestCanonicalPullURLCaseAndBoundary(t *testing.T) {
+	for _, repo := range []string{"idy/yesman", "GizClaw/.github", "owner/-repo", "owner/.hidden"} {
+		if !validRepository(repo) {
+			t.Fatalf("valid repository rejected: %s", repo)
+		}
+	}
+	for _, repo := range []string{"idy/.", "idy/..", "idy/../tokens", "idy/%2e%2e", "https://github.com/idy/yesman"} {
+		if validRepository(repo) {
+			t.Fatalf("unsafe repository accepted: %s", repo)
+		}
+	}
 	if number, err := pullNumber("https://github.com/SomeOwner/MixedRepo/pull/42", "someowner/mixedrepo"); err != nil || number != 42 {
 		t.Fatal("canonical repository casing rejected")
 	}

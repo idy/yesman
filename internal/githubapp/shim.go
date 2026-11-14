@@ -177,7 +177,7 @@ func ParseCreate(args []string, stdin io.Reader) (PullInput, error) {
 	if seen["--body"] && seen["--body-file"] {
 		return in, errors.New("use --body or --body-file, not both")
 	}
-	if !repoPattern.MatchString(in.Repository) || !validRef(in.Head) || !validRef(in.Base) || strings.TrimSpace(in.Title) == "" {
+	if !validRepository(in.Repository) || !validRef(in.Head) || !validRef(in.Base) || strings.TrimSpace(in.Title) == "" {
 		return in, errors.New("App PR creation requires explicit --repo owner/repo, --head, --base and --title")
 	}
 	return in, nil

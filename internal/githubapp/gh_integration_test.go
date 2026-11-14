@@ -54,7 +54,7 @@ func TestRealGHAppSubprocess(t *testing.T) {
 	var mu sync.Mutex
 	var queries []string
 	creates := 0
-	repository := map[string]any{"id": "R_fixture", "name": "yesman", "nameWithOwner": "idy/yesman", "owner": map[string]any{"login": "idy", "__typename": "User"}, "isFork": false, "isPrivate": false, "isArchived": false, "isEmpty": false, "hasIssuesEnabled": true, "hasWikiEnabled": false, "viewerPermission": "WRITE", "defaultBranchRef": map[string]any{"name": "main"}, "pullRequests": map[string]any{"nodes": []any{}}, "mergeCommitAllowed": true, "squashMergeAllowed": true, "rebaseMergeAllowed": true}
+	repository := map[string]any{"id": "R_fixture", "name": "yesman", "nameWithOwner": "idy/yesman", "owner": map[string]any{"login": "idy", "__typename": "User"}, "isFork": false, "isPrivate": false, "isArchived": false, "isEmpty": false, "hasIssuesEnabled": true, "hasWikiEnabled": false, "viewerPermission": "READ", "defaultBranchRef": map[string]any{"name": "main"}, "pullRequests": map[string]any{"nodes": []any{}}, "mergeCommitAllowed": true, "squashMergeAllowed": true, "rebaseMergeAllowed": true}
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/installation") {
 			writeJSON(w, installation())

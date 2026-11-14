@@ -96,7 +96,7 @@ func checkedConfig(cfg Config) (Config, error) {
 	cfg.Repositories = slices.Clone(cfg.Repositories)
 	cfg.Workspaces = slices.Clone(cfg.Workspaces)
 	for i, repo := range cfg.Repositories {
-		if !repoPattern.MatchString(repo) {
+		if !validRepository(repo) {
 			return Config{}, errors.New("repositories must be explicit owner/repo names")
 		}
 		cfg.Repositories[i] = strings.ToLower(repo)

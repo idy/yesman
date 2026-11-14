@@ -129,7 +129,7 @@ func (c *Client) CreateWithGH(ctx context.Context, gh string, in PullInput) (Pul
 	if !filepath.IsAbs(gh) {
 		return pull, errors.New("GitHub CLI is unavailable; install it and restart yesman")
 	}
-	if !repoPattern.MatchString(in.Repository) || strings.TrimSpace(in.Title) == "" || len(in.Title) > 256 || len(in.Body) > 65536 || !validRef(in.Head) || !validRef(in.Base) || strings.ContainsRune(in.Title, 0) || strings.ContainsRune(in.Body, 0) {
+	if !validRepository(in.Repository) || strings.TrimSpace(in.Title) == "" || len(in.Title) > 256 || len(in.Body) > 65536 || !validRef(in.Head) || !validRef(in.Base) || strings.ContainsRune(in.Title, 0) || strings.ContainsRune(in.Body, 0) {
 		return pull, errors.New("App PR creation requires an explicit repository, head, base, title and bounded body")
 	}
 	// Exercise/refresh authentication before the write, then take the actual
