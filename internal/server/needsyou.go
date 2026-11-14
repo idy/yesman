@@ -121,37 +121,14 @@ func (s *Server) changeNeedsYou(_ context.Context, c caller, r *http.Request) (a
 		if !y.HiredAt.Equal(c.yesman.HiredAt) {
 			return errors.New("this yesman was replaced")
 		}
-		switch {
-		case req.Add != nil:
-			h, created, err := s.Yesmen.AddHandoff(y.Name, yesmen.Handoff{
-				Type: req.Add.Type, Title: req.Add.Title, Detail: req.Add.Detail,
-				Task: req.Add.Task, Worker: strings.TrimSpace(req.Add.Worker),
-				ToolCall: req.ToolCall,
-			})
-			if err != nil {
-				return err
-			}
-			if created {
-				added = &h
-			}
-			out = h
-		case req.HandOver != nil:
-			name := strings.TrimSpace(req.HandOver.Worker)
-			if name == yesmen.LeadName || name == "" {
-				return errors.New("name the worker whose question to hand over")
-			}
-			if err := s.Agents.HandOver(agent.ID(y.Name, name), req.HandOver.RequestID); err != nil {
-				return err
-			}
-			out = map[string]bool{"handedOver": true}
-		default:
-			h, err := s.Yesmen.CloseHandoff(y.Name, strings.TrimSpace(req.Resolve.ID), yesmen.HandoffResolved, "lead", req.Resolve.Note)
-			if err != nil {
-				return err
-			}
-			out = h
-		}
-		return nil
+		// Nor can a lead that was stopped or restarted after its request
+		// authenticated: the change commits only while that same process
+		// still holds its credential, and Stop waits for it.
+		return s.Agents.CallerOperation(c.token, c.agent, func() error {
+			var err error
+			out, added, err = s.commitNeedsYou(y, req)
+			return err
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -160,6 +137,41 @@ func (s *Server) changeNeedsYou(_ context.Context, c caller, r *http.Request) (a
 		s.NeedsYouChanged(c.yesman.Name, added)
 	}
 	return out, nil
+}
+
+// commitNeedsYou makes one change, inside the caller's operation, and returns
+// the result and the handoff it added, if it added one.
+func (s *Server) commitNeedsYou(y yesmen.Yesman, req NeedsYouChange) (any, *yesmen.Handoff, error) {
+	switch {
+	case req.Add != nil:
+		h, created, err := s.Yesmen.AddHandoff(y.Name, yesmen.Handoff{
+			Type: req.Add.Type, Title: req.Add.Title, Detail: req.Add.Detail,
+			Task: req.Add.Task, Worker: strings.TrimSpace(req.Add.Worker),
+			ToolCall: req.ToolCall,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		if created {
+			return h, &h, nil
+		}
+		return h, nil, nil
+	case req.HandOver != nil:
+		name := strings.TrimSpace(req.HandOver.Worker)
+		if name == yesmen.LeadName || name == "" {
+			return nil, nil, errors.New("name the worker whose question to hand over")
+		}
+		if err := s.Agents.HandOver(agent.ID(y.Name, name), req.HandOver.RequestID); err != nil {
+			return nil, nil, err
+		}
+		return map[string]bool{"handedOver": true}, nil, nil
+	default:
+		h, err := s.Yesmen.CloseHandoff(y.Name, strings.TrimSpace(req.Resolve.ID), yesmen.HandoffResolved, "lead", req.Resolve.Note)
+		if err != nil {
+			return nil, nil, err
+		}
+		return h, nil, nil
+	}
 }
 
 const needsYouContextLimit = 5

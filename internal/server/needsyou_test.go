@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"io"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,32 +15,75 @@ import (
 	"github.com/idy/yesman/internal/yesmen"
 )
 
-func needsYouServer(t *testing.T) (*Server, yesmen.Yesman, *[]string) {
+type needsYouFixture struct {
+	s      *Server
+	y      yesmen.Yesman
+	told   []string
+	tokens string // where the fake pi writes each agent's credential
+}
+
+// needsYouServer serves the API for a yesman alice, with a worker w1 on record
+// and a board task t1. Agents run as the fake pi of fakepi_test.go.
+func needsYouServer(t *testing.T) *needsYouFixture {
 	t.Helper()
-	dir := t.TempDir()
-	store := yesmen.New(filepath.Join(dir, "yesmen"), filepath.Join(dir, "archive"))
-	y, err := store.Hire("alice")
+	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AddWorker(y.Name, yesmen.Worker{Name: "w1", StartedAt: time.Now().UTC()}); err != nil {
+	dir := t.TempDir()
+	f := &needsYouFixture{tokens: filepath.Join(dir, "tokens")}
+	if err := os.Mkdir(f.tokens, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := yesmen.New(filepath.Join(dir, "yesmen"), filepath.Join(dir, "archive"))
+	if f.y, err = store.Hire("alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddWorker(f.y.Name, yesmen.Worker{Name: "w1", StartedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	title := "Publish"
-	if _, err := store.ChangeBoard(y.Name, yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: &title}}}); err != nil {
+	if _, err := store.ChangeBoard(f.y.Name, yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: &title}}}); err != nil {
 		t.Fatal(err)
 	}
-	m := agent.New(agent.Config{Yesmen: store})
+	m := agent.New(agent.Config{
+		Pi: exe, Extension: filepath.Join(dir, "none.ts"), Yesmen: store,
+		Env: []string{"YESMAN_SERVER_FAKE_PI=1", "FAKE_PI_TOKENS=" + f.tokens},
+	})
 	t.Cleanup(m.StopAll)
-	var told []string
-	s := &Server{Yesmen: store, Agents: m, NeedsYouChanged: func(yesman string, added *yesmen.Handoff) {
+	var mu sync.Mutex
+	f.s = &Server{Yesmen: store, Agents: m, NeedsYouChanged: func(yesman string, added *yesmen.Handoff) {
 		id := ""
 		if added != nil {
 			id = added.ID
 		}
-		told = append(told, yesman+":"+id)
+		mu.Lock()
+		f.told = append(f.told, yesman+":"+id)
+		mu.Unlock()
 	}}
-	return s, y, &told
+	return f
+}
+
+// start starts an agent and returns it as a caller of the API, with the
+// credential its process got.
+func (f *needsYouFixture) start(t *testing.T, id string) caller {
+	t.Helper()
+	if _, err := f.s.Agents.Messages(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	token, err := os.ReadFile(filepath.Join(f.tokens, strings.ReplaceAll(id, "/", "_")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := f.s.Agents.Authenticate(string(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, err := f.s.Yesmen.Get(info.Yesman)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return caller{agent: info, yesman: y, token: string(token)}
 }
 
 func needsYouCall(s *Server, c caller, body string) (any, error) {
@@ -45,8 +91,9 @@ func needsYouCall(s *Server, c caller, body string) (any, error) {
 }
 
 func TestNeedsYouIsTheLeadsAndExplicit(t *testing.T) {
-	s, y, told := needsYouServer(t)
-	lead := caller{agent: agent.Info{ID: "alice/lead", Yesman: "alice", Name: "lead", Role: agent.RoleLead}, yesman: y}
+	f := needsYouServer(t)
+	s, y := f.s, f.y
+	lead := f.start(t, "alice/lead")
 	worker := caller{agent: agent.Info{ID: "alice/w1", Yesman: "alice", Name: "w1", Role: agent.RoleWorker}, yesman: y}
 
 	if _, err := needsYouCall(s, worker, `{"add":{"type":"login","title":"Log in"}}`); err != errLeadOnly {
@@ -72,7 +119,7 @@ func TestNeedsYouIsTheLeadsAndExplicit(t *testing.T) {
 	if out, err := needsYouCall(s, lead, body); err != nil || out.(yesmen.Handoff).ID != "n1" {
 		t.Fatalf("repeated add = %+v, %v", out, err)
 	}
-	if got := strings.Join(*told, ","); got != "alice:n1,alice:" {
+	if got := strings.Join(f.told, ","); got != "alice:n1,alice:" {
 		t.Errorf("announced %s", got)
 	}
 	text := s.needsYouContext(lead)
@@ -112,5 +159,79 @@ func TestNeedsYouIsTheLeadsAndExplicit(t *testing.T) {
 	}
 	if text := s.needsYouContext(lead); text != "" {
 		t.Errorf("context after resolving: %q", text)
+	}
+}
+
+// pausedBody holds a request at its first read, after authentication.
+type pausedBody struct {
+	io.Reader
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (b *pausedBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered); <-b.release })
+	return b.Reader.Read(p)
+}
+
+// A request authenticated before its lead was stopped and restarted, or its
+// workspace archived and hired again, changes nothing when its body arrives:
+// the commit checks the same process still holds the credential.
+func TestNeedsYouChangeFromARetiredLeadIsRefused(t *testing.T) {
+	for _, c := range []struct{ name, action, body string }{
+		{"add after restart", "restart", `{"add":{"type":"manual","title":"late write"},"toolCall":"late"}`},
+		{"resolve after restart", "restart", `{"resolve":{"id":"n1","note":"late"}}`},
+		{"add after archive and rehire", "rehire", `{"add":{"type":"manual","title":"late write"},"toolCall":"late"}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := needsYouServer(t)
+			lead := f.start(t, "alice/lead")
+			if _, err := needsYouCall(f.s, lead, `{"add":{"type":"login","title":"Log in"},"toolCall":"first"}`); err != nil {
+				t.Fatal(err)
+			}
+			body := &pausedBody{Reader: strings.NewReader(c.body), entered: make(chan struct{}), release: make(chan struct{})}
+			req := httptest.NewRequest("POST", "/v1/needs-you", body)
+			req.Header.Set("Authorization", "Bearer "+lead.token)
+			w := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() { defer close(done); f.s.Handler().ServeHTTP(w, req) }()
+			select {
+			case <-body.entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the request did not authenticate")
+			}
+			switch c.action {
+			case "restart":
+				f.s.Agents.Stop("alice/lead")
+				f.start(t, "alice/lead")
+			case "rehire":
+				if _, err := f.s.Yesmen.Archive("alice", func(yesmen.Yesman) error { return f.s.Agents.StopYesman("alice") }); err != nil {
+					t.Fatal(err)
+				}
+				f.s.Agents.ForgetYesman("alice", f.y.HiredAt)
+				if _, err := f.s.Yesmen.Hire("alice"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := f.s.Agents.Authenticate(lead.token); err == nil {
+				t.Fatal("the old credential still authenticates")
+			}
+			close(body.release)
+			<-done
+			hs, err := f.s.Yesmen.Handoffs("alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if w.Code == 200 {
+				t.Errorf("the retired request succeeded: %s", w.Body)
+			}
+			want := 1 // the first handoff, still open
+			if c.action == "rehire" {
+				want = 0 // the new yesman starts with none
+			}
+			if len(hs.Items) != want || len(hs.Open()) != want {
+				t.Errorf("handoffs after the retired request: %+v", hs.Items)
+			}
+		})
 	}
 }

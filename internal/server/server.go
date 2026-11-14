@@ -99,6 +99,9 @@ func (s *Server) Handler() http.Handler {
 type caller struct {
 	agent  agent.Info
 	yesman yesmen.Yesman
+	// token is the credential the request authenticated with, to check
+	// again, with Agents.CallerOperation, before a change commits.
+	token string
 }
 
 type handlerFunc func(ctx context.Context, c caller, r *http.Request) (any, error)
@@ -120,7 +123,7 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, err)
 			return
 		}
-		out, err := fn(r.Context(), caller{agent: info, yesman: y}, r)
+		out, err := fn(r.Context(), caller{agent: info, yesman: y, token: token}, r)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return

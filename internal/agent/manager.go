@@ -150,6 +150,9 @@ type Manager struct {
 	shutdown        chan struct{}     // closed by StopAll to wake pending report retries
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
+	// callsDone is signalled, under mu, when an agent's last caller
+	// operation ends; Stop waits for them.
+	callsDone *sync.Cond
 }
 
 type agent struct {
@@ -170,6 +173,7 @@ type agent struct {
 	dir                            string   // the workspace, to show paths in it relative to it
 	tools                          []string // the tool calls running, oldest first
 	handedOver                     string   // the dialog ID the lead handed to the user
+	calls                          int      // CallerOperations in progress; guarded by mu
 	labels                         map[string]string
 	deliveries                     map[string]Delivery // bounded receipt metadata; pi owns scheduling
 	deliveryOnce                   sync.Once
@@ -203,6 +207,7 @@ func New(cfg Config) *Manager {
 		cfg.OnChange = func([]Info) {}
 	}
 	m := &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}, shutdown: make(chan struct{}), notify: make(chan struct{}, 1)}
+	m.callsDone = sync.NewCond(&m.mu)
 	go func() {
 		for range m.notify {
 			m.cfg.OnChange(m.List())
@@ -949,6 +954,11 @@ func (m *Manager) Stop(id string) {
 		return
 	}
 	a.stopping = true
+	// Caller operations already admitted finish first; stopping admits no
+	// more, so none commits for this process after Stop returns.
+	for a.calls > 0 {
+		m.callsDone.Wait()
+	}
 	wait := a.starting
 	m.mu.Unlock()
 	if wait != nil {

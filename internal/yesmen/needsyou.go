@@ -1,9 +1,9 @@
 package yesmen
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -60,6 +60,9 @@ type Handoff struct {
 	Resolution string    `json:"resolution,omitempty"`
 	ClosedBy   string    `json:"closedBy,omitempty"`
 	Note       string    `json:"note,omitempty"`
+	// extra keeps the fields of the file this version does not know; only
+	// the file has them, never the API.
+	extra map[string]json.RawMessage
 }
 
 // Open reports whether the handoff still waits on the user.
@@ -69,6 +72,7 @@ func (h Handoff) Open() bool { return h.ClosedAt.IsZero() }
 type Handoffs struct {
 	Items []Handoff `json:"items"`
 	Next  int       `json:"next"`
+	extra map[string]json.RawMessage
 }
 
 // Open returns the handoffs still waiting on the user, oldest first.
@@ -112,18 +116,20 @@ func (s *Store) Handoffs(name string) (Handoffs, error) {
 }
 
 func (s *Store) handoffs(name string) (Handoffs, error) {
-	y, err := s.Get(name)
+	f, hs, err := s.openHandoffs(name)
 	if err != nil {
 		return Handoffs{}, err
 	}
-	var hs Handoffs
-	if err := readJSON(y.HandoffsFile(), &hs); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return Handoffs{}, fmt.Errorf("read %s: %w", y.HandoffsFile(), err)
-	}
-	if hs.Items == nil {
-		hs.Items = []Handoff{}
-	}
+	f.close()
 	return hs, nil
+}
+
+func (s *Store) openHandoffs(name string) (*handoffsFile, Handoffs, error) {
+	y, err := s.Get(name)
+	if err != nil {
+		return nil, Handoffs{}, err
+	}
+	return openHandoffs(y)
 }
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
@@ -155,10 +161,11 @@ func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	hs, err := s.handoffs(name)
+	f, hs, err := s.openHandoffs(name)
 	if err != nil {
 		return Handoff{}, false, err
 	}
+	defer f.close()
 	if h.ToolCall != "" {
 		if i := slices.IndexFunc(hs.Items, func(x Handoff) bool { return x.ToolCall == h.ToolCall }); i >= 0 {
 			return hs.Items[i], false, nil
@@ -193,7 +200,7 @@ func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 	h.CreatedAt = time.Now().UTC()
 	h.ClosedAt, h.Resolution, h.ClosedBy, h.Note = time.Time{}, "", "", ""
 	hs.Items = append(hs.Items, h)
-	if err := s.writeHandoffs(name, hs); err != nil {
+	if err := f.write(hs); err != nil {
 		return Handoff{}, false, err
 	}
 	return h, true, nil
@@ -228,10 +235,11 @@ func (s *Store) CloseHandoff(name, id, resolution, by, note string) (Handoff, er
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	hs, err := s.handoffs(name)
+	f, hs, err := s.openHandoffs(name)
 	if err != nil {
 		return Handoff{}, err
 	}
+	defer f.close()
 	i := slices.IndexFunc(hs.Items, func(h Handoff) bool { return h.ID == id })
 	if i < 0 {
 		return Handoff{}, fmt.Errorf("%s has no handoff %s", name, id)
@@ -257,16 +265,8 @@ func (s *Store) CloseHandoff(name, id, resolution, by, note string) (Handoff, er
 	}
 	slices.Reverse(keep)
 	hs.Items = keep
-	if err := s.writeHandoffs(name, hs); err != nil {
+	if err := f.write(hs); err != nil {
 		return Handoff{}, err
 	}
 	return closed, nil
-}
-
-func (s *Store) writeHandoffs(name string, hs Handoffs) error {
-	y, err := s.Get(name)
-	if err != nil {
-		return err
-	}
-	return writeJSON(y.HandoffsFile(), hs)
 }

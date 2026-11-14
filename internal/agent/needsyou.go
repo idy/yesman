@@ -53,6 +53,51 @@ func (m *Manager) HandOver(id, requestID string) error {
 	return nil
 }
 
+// errCallerGone is returned when the agent a request authenticated as is no
+// longer the one running: stopped, restarted, retired or replaced.
+var errCallerGone = errors.New("the agent that sent this request was stopped or replaced; nothing was changed")
+
+// CallerOperation runs fn as a change the agent holding token asked for, while
+// that agent is still the one the request authenticated as: the same running
+// process and credential, the same generation (want.Since), not stopping or
+// retiring. A request whose agent was stopped, restarted, removed or replaced
+// after it authenticated fails without running fn. Stop waits for an
+// operation already admitted, so nothing commits for a process after Stop
+// returns.
+//
+// Callers hold their workspace lease (Store.Use) around it, so Archive, which
+// stops agents under the exclusive lease, never waits on an admitted
+// operation that waits on it. fn must be short and must not stop agents or
+// wait on their runs.
+func (m *Manager) CallerOperation(token string, want Info, fn func() error) error {
+	m.mu.Lock()
+	a := m.agents[want.ID]
+	ok := token != "" && a != nil && m.tokens[token] == want.ID && a.token == token && a.proc != nil &&
+		!a.stopping && !a.retiring && !a.removing && !m.closed && a.info.Since.Equal(want.Since)
+	if ok {
+		select {
+		case <-a.proc.done:
+			ok = false // exited; watch has not cleared it yet
+		default:
+		}
+	}
+	if !ok {
+		m.mu.Unlock()
+		return errCallerGone
+	}
+	a.calls++
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		a.calls--
+		if a.calls == 0 {
+			m.callsDone.Broadcast()
+		}
+		m.mu.Unlock()
+	}()
+	return fn()
+}
+
 // expireDialog stops offering a dialog once pi has answered it itself, at
 // its timeout, unless it was answered or replaced meanwhile.
 func (m *Manager) expireDialog(a *agent, p *proc, requestID string) {

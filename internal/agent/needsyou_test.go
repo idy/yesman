@@ -137,3 +137,92 @@ func TestTellLeadAboutUserIsScoped(t *testing.T) {
 		}
 	}
 }
+
+// A caller operation runs only for the process that holds the credential, in
+// its generation; Stop waits for one already admitted and admits no more, and
+// a restart's new credential does not revive the old one.
+func TestCallerOperationFencesStop(t *testing.T) {
+	m, _ := newTestManager(t, 0)
+	id := ID("alice", yesmen.LeadName)
+	if _, err := m.Messages(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	info, err := m.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	token := m.agents[id].token
+	m.mu.Unlock()
+	run := func(token string, want Info) error {
+		return m.CallerOperation(token, want, func() error { return nil })
+	}
+	if err := run(token, info); err != nil {
+		t.Fatalf("current caller: %v", err)
+	}
+	for name, c := range map[string]struct {
+		token string
+		want  Info
+	}{
+		"unknown credential": {"not-a-token", info},
+		"other agent":        {token, Info{ID: ID("alice", "w1"), Since: info.Since}},
+		"older generation":   {token, Info{ID: id, Since: info.Since.Add(-time.Hour)}},
+	} {
+		if err := run(c.token, c.want); !errors.Is(err, errCallerGone) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+
+	admitted, release := make(chan struct{}), make(chan struct{})
+	opDone := make(chan error, 1)
+	go func() {
+		opDone <- m.CallerOperation(token, info, func() error {
+			close(admitted)
+			<-release
+			return nil
+		})
+	}()
+	<-admitted
+	stopped := make(chan struct{})
+	go func() { m.Stop(id); close(stopped) }()
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while an admitted operation was running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// Stopping admits nothing new, even with the still-valid credential.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := run(token, info); errors.Is(err, errCallerGone) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a stopping agent still admitted operations")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	if err := <-opDone; err != nil {
+		t.Fatalf("the admitted operation: %v", err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stop did not return after the operation ended")
+	}
+	if _, err := m.Messages(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	fresh := m.agents[id].token
+	m.mu.Unlock()
+	if fresh == "" || fresh == token {
+		t.Fatalf("restart credential %q", fresh)
+	}
+	if err := run(token, info); !errors.Is(err, errCallerGone) {
+		t.Errorf("the old credential after restart: %v", err)
+	}
+	if err := run(fresh, info); err != nil {
+		t.Errorf("the new credential: %v", err)
+	}
+}
