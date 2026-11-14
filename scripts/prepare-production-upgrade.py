@@ -2,8 +2,9 @@
 """Build controlled production-source upgrade inputs; never starts an app.
 
 These are NOT released binaries. All tracked source is exported at fixed refs;
-only temporary packaging configuration (version/public key/notes and linked feed)
-is changed. The generated private key exists only in packaging subprocess env.
+only temporary packaging configuration (version/public key/notes) is changed.
+The compiled GitHub feed is retained and reached through constrained VM TLS.
+The generated private key exists only in packaging subprocess env.
 """
 import hashlib
 import io
@@ -43,9 +44,9 @@ def main():
             env=dict(os.environ)
             env['CGO_ENABLED']='0' if i==0 or goos!='darwin' else '1'
             if goos=='darwin':env.update(MACOSX_DEPLOYMENT_TARGET='13.0',CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0')
-            # Public MyGo linker option; .go source/helper/trust algorithm is
-            # unmodified. This build's test public key remains enforced.
-            env['MYGO_LDFLAGS']='-X github.com/egoist/mygo.packageUpdateFeed='+FEED+'/update-'+target+'.json'
+            # Keep the normal compiled GitHub feed. The isolated VM transport
+            # supplies controlled signed inputs; no runtime/binary feed patch.
+            env.pop('MYGO_LDFLAGS',None)
             env['MYGO_UPDATER_PRIVATE_KEY']=keys['private']
             with (output/('build-'+version+'.log')).open('w') as log:
                 subprocess.run(['go','tool','mygo','build','-platform',goos+'/'+arch,'-skip-dmg','-skip-installer','-o',str(dest)],cwd=source,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
@@ -55,8 +56,8 @@ def main():
             web=dest/'web';shutil.copytree(source/'web',web)
             manifest=package/('update-'+target+'.json')
             artifact=package/('yesman-'+version+'-'+target+'.tar.gz')
-            stages.append({'Version':version,'Source':ref,'Archive':str(artifact),'Manifest':str(manifest),'Web':str(web),'binarySHA256':hashlib.sha256(binary.read_bytes()).hexdigest(),'mainName':'yesman' if i==0 else 'Yes Man','goBuild':subprocess.check_output(['go','version','-m',str(binary)],text=True),'sourceGoHashes':before,'packagingChanges':{'originalConfig':original,'fixtureConfig':cfg,'linkedFeed':FEED+'/update-'+target+'.json','cgo':env['CGO_ENABLED']}})
-        plan={'kind':'controlled-production-source-rebuild','PublicKey':keys['public'],'Feed':FEED,'Target':target,'Stages':stages,'runID':os.environ['GITHUB_RUN_ID'],'sourceSHA':os.environ['GITHUB_SHA'],'limits':['Not the published .29 binary; no claimed released-artifact E2E','No .go source changes; fixture config/public key/feed/versions/notes differ','Export has no Git metadata: source refs and per-Go-file hashes bind provenance','Private versions are local fixtures; no tag/release/upload']}
+            stages.append({'Version':version,'Source':ref,'Archive':str(artifact),'Manifest':str(manifest),'Web':str(web),'binarySHA256':hashlib.sha256(binary.read_bytes()).hexdigest(),'mainName':'yesman' if i==0 else 'Yes Man','goBuild':subprocess.check_output(['go','version','-m',str(binary)],text=True),'sourceGoHashes':before,'packagingChanges':{'originalConfig':original,'fixtureConfig':cfg,'compiledFeed':'original GitHub feed; constrained VM transport','cgo':env['CGO_ENABLED']}})
+        plan={'kind':'controlled-production-source-rebuild','PublicKey':keys['public'],'Feed':FEED,'Target':target,'Stages':stages,'useTLS':True,'runID':os.environ['GITHUB_RUN_ID'],'sourceSHA':os.environ['GITHUB_SHA'],'limits':['Not the published .29 binary; no claimed released-artifact E2E','No .go source changes; fixture config/public key/versions/notes differ; original compiled GitHub feed retained','Export has no Git metadata: source refs and per-Go-file hashes bind provenance','Private versions are local fixtures; no tag/release/upload']}
         path=output/'plan.json';path.write_text(json.dumps(plan,indent=2))
         signenv=dict(os.environ,MYGO_UPDATER_PRIVATE_KEY=keys['private'])
         subprocess.run(['go','run','./tools/package','-upgrade-assets',str(path)],env=signenv,check=True)

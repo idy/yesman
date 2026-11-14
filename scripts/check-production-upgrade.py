@@ -162,7 +162,7 @@ def run(stack):
     if sys.platform=='darwin':
         helper=evidence/'native-info';subprocess.run(['xcrun','swiftc',str(pathlib.Path(__file__).with_name('name-process-macos.swift')),'-o',str(helper)],check=True)
     tls_context=None;ca_file=None
-    if plan['kind']=='released-candidate-plus-private-QA':
+    if plan['kind']=='released-candidate-plus-private-QA' or plan.get('useTLS'):
         module_spec=importlib.util.spec_from_file_location('transport',pathlib.Path(__file__).with_name('upgrade-transport.py'))
         transport=importlib.util.module_from_spec(module_spec);module_spec.loader.exec_module(transport)
         tls_context,ca_file,fingerprint=stack.enter_context(transport.trusted_transport())
