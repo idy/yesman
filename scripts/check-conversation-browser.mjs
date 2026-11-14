@@ -319,8 +319,10 @@ async function unknownImages(browser, engine) {
       seen[c.name] = shown.length;
     }
     assert.deepEqual(await page.locator(`[data-row="user:${T + 6}"] .delivery-status`).allInnerTexts(), ["Delivered"]);
-    // The receipt of a submission no message is tied to stays a light line.
-    assert.match(await page.locator(`[data-delivery="${sub(7)}"]`).innerText(), /Submission: \[yesman\] Worker[\s\S]*1 image submitted/);
+    // The receipt of a submission no message is tied to is folded with the
+    // earlier ones: a light line there, its text kept as text.
+    await page.evaluate(() => (document.querySelector("#thread > .receipts").open = true));
+    assert.match(await page.locator(`#thread > .receipts [data-delivery="${sub(7)}"]`).innerText(), /Submission: \[yesman\] Worker[\s\S]*1 image submitted/);
     assert.equal(await page.locator(`[data-delivery="${sub(7)}"]`).getAttribute("data-bound"), null);
     return seen;
   };
@@ -371,17 +373,22 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert(!(await thread.innerText()).includes(MARK), "the report is shown before it is opened");
     // People and replies in full, in order; the question to the user shows.
     const order = await page.locator("#thread > *").evaluateAll((els) => els.map((el) => el.classList.contains("work") ? "work" : el.matches("[data-bound]") ? "user" : el.classList.contains("msg-assistant") ? "text" : el.className.split(" ")[0]));
-    assert.deepEqual(order, ["user", "text", "work", "text", "work", "text", "user", "work", "text", "note", "msg-delivery", "msg-delivery"]);
+    assert.deepEqual(order, ["user", "text", "work", "text", "work", "text", "user", "work", "text", "note", "receipts", "msg-delivery"]);
     assert.match(await page.locator("[data-bound]").first().innerText(), /为什么会把 thinking 分成这么多次显示/);
     assert.equal(await page.locator("[data-bound]").first().locator(".message-images img").count(), 1);
     assert.deepEqual(await page.locator("[data-bound] .delivery-status").allInnerTexts(), ["Delivered", "Delivered"]);
     assert(await page.getByText("你希望默认收起，还是只合并 Thinking？").isVisible());
     // A message from before origins were recorded is shown as it was.
     assert.equal(await page.locator("#thread > details.note[open] > summary", { hasText: "Report from worker legacy" }).count(), 1);
-    // Receipts without a message: a light line, or the message when it needs a look.
-    assert.match(await page.locator(`[data-delivery="${sub(3)}"]`).innerText(), /Submission: an older submission[\s\S]*Delivery unconfirmed/);
+    // Receipts without a message: the latest failure as the message, with its
+    // state; an earlier one with nothing more to know folded into one line,
+    // opened to read what was kept of it.
+    assert.match(await page.locator(`#thread > [data-delivery="${sub(4)}"]`).innerText(), /a rejected submission[\s\S]*Not sent/);
+    assert.equal(await page.locator(`[data-delivery="${sub(3)}"]`).count(), 0);
+    assert.equal(await page.locator("#thread > .receipts > summary").innerText().then((s) => s.trim().split(/\s*\n\s*/).join(" | ")), "1 earlier submission | Delivery unconfirmed");
+    await page.locator("#thread > .receipts > summary").click();
+    assert.match(await page.locator(`#thread > .receipts [data-delivery="${sub(3)}"]`).innerText(), /Submission: an older submission[\s\S]*Delivery unconfirmed/);
     assert.equal(await page.locator(`[data-delivery="${sub(3)}"] .msg-user`).count(), 0);
-    assert.match(await page.locator(`[data-delivery="${sub(4)}"]`).innerText(), /a rejected submission[\s\S]*Not sent/);
 
     // Keyboard: open a stretch of work and read it in order, focus kept.
     const report = page.locator("#thread > .work").nth(1);
