@@ -158,6 +158,7 @@ type agent struct {
 	info                           Info
 	proc                           *proc
 	token                          string
+	tokenProc                      *proc         // the process token was given to
 	seq                            uint64        // the last event's number
 	turn                           []Event       // the events of the assistant message in progress
 	starting                       chan struct{} // closed when a start finishes, nil otherwise
@@ -401,8 +402,16 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			p := a.proc
 			select {
 			case <-p.done:
-				// Exited, and watch has not cleared it yet.
-				m.clearLocked(a, p)
+				// Exited, and watch has not cleared it yet. Its credential's
+				// changes end first, without the lock they may wait for.
+				m.mu.Unlock()
+				p.retireChanges()
+				m.mu.Lock()
+				if a.proc == p {
+					m.clearLocked(a, p)
+				}
+				m.mu.Unlock()
+				continue
 			default:
 				m.mu.Unlock()
 				return a, p, nil
@@ -429,6 +438,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			// letting Stop return.
 			m.mu.Unlock()
 			p.stop(10 * time.Second)
+			p.retireChanges()
 			m.mu.Lock()
 			m.clearLocked(a, p)
 			err = errStopped
@@ -488,7 +498,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 		return nil, modelState{}, err
 	}
 	m.mu.Lock()
-	a.token = token
+	a.token, a.tokenProc = token, p
 	m.tokens[token] = a.info.ID
 	m.mu.Unlock()
 	// get_state answers once pi has loaded its session and extensions.
@@ -497,6 +507,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 	state, err := p.modelState(ctx)
 	if err != nil {
 		p.stop(2 * time.Second)
+		p.retireChanges()
 		m.mu.Lock()
 		m.clearLocked(a, p)
 		m.mu.Unlock()
@@ -643,6 +654,7 @@ func (m *Manager) number(a *agent, kind string, raw json.RawMessage) Event {
 // watch follows a process until it exits.
 func (m *Manager) watch(a *agent, p *proc) {
 	<-p.done
+	p.retireChanges()
 	m.mu.Lock()
 	if a.proc != p {
 		m.mu.Unlock()
@@ -938,6 +950,8 @@ func (m *Manager) Stop(id string) {
 		return
 	}
 	p.stop(10 * time.Second)
+	// Changes its requests began end before Stop does; none begins after.
+	p.retireChanges()
 	m.mu.Lock()
 	if a.proc == p {
 		m.clearLocked(a, p)
@@ -981,7 +995,8 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 }
 
 // clearLocked forgets an agent's process, its credential, and the reply
-// it was writing, which a new process will not continue.
+// it was writing, which a new process will not continue. Callers first
+// retire the changes of p's credential, outside mu.
 func (m *Manager) clearLocked(a *agent, p *proc) {
 	if a.proc == p {
 		a.proc = nil
@@ -997,7 +1012,7 @@ func (m *Manager) clearLocked(a *agent, p *proc) {
 	a.endRun()
 	if a.token != "" {
 		delete(m.tokens, a.token)
-		a.token = ""
+		a.token, a.tokenProc = "", nil
 	}
 }
 
