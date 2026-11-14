@@ -159,6 +159,14 @@ go test ./...
 node --test scripts/images.test.mjs
 ```
 
+The delivery check uses your installed pi with isolated configuration and a local deterministic provider, without calling a real model:
+
+```bash
+node scripts/check-delivery-pi.mjs
+```
+
+With Playwright and its Chromium/WebKit browsers installed, `node scripts/check-delivery-browser.mjs` checks the production page against a controlled bridge. If Playwright is installed elsewhere, set `YESMAN_TEST_PLAYWRIGHT_MODULE` to its absolute `index.mjs` path.
+
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) vets, builds and tests on Linux, macOS and Windows for every pull request and every push to `main`. It does not start the app's window or real pi agents.
 
 The end-to-end test starts real pi agents and calls your configured model:

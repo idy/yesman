@@ -113,7 +113,10 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
   line-height: 1.6; font-size: var(--mds-text-body);
 }
 .msg-delivery { align-self: flex-end; max-width: 82%; min-width: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
-.msg-delivery > .msg-user { max-width: 100%; }
+.msg-delivery > .msg-user, .delivery-original > .msg-user { max-width: 100%; }
+.delivery-receipt { color: var(--mds-muted); font-size: var(--mds-text-caption); max-width: 100%; overflow-wrap: anywhere; }
+.delivery-receipt > summary { cursor: pointer; }
+.delivery-original { margin-top: 6px; color: var(--mds-ink); }
 .delivery-status { color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; padding-inline: 4px; overflow-wrap: anywhere; }
 .msg-assistant { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 

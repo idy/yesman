@@ -90,7 +90,8 @@ type Info struct {
 
 // Event is one record an agent's pi process emitted.
 type Event struct {
-	Agent string `json:"agent"`
+	Agent      string    `json:"agent"`
+	AgentSince time.Time `json:"agentSince,omitzero"`
 	// Seq numbers an agent's events in order, across its restarts.
 	Seq  uint64          `json:"seq"`
 	Data json.RawMessage `json:"data"`
@@ -105,6 +106,7 @@ type Conversation struct {
 	Live       []Event         `json:"live"`
 	Seq        uint64          `json:"seq"`
 	Deliveries []Delivery      `json:"deliveries"`
+	Queue      QueueStatus     `json:"queue"`
 }
 
 // Config configures a Manager.
@@ -148,18 +150,20 @@ type agent struct {
 	prompts int
 	// reports counts worker handoffs being read or delivered to the lead,
 	// registered before the worker becomes idle; guarded by the manager's mu.
-	reports    int
-	info       Info
-	proc       *proc
-	token      string
-	seq        uint64        // the last event's number
-	turn       []Event       // the events of the assistant message in progress
-	starting   chan struct{} // closed when a start finishes, nil otherwise
-	stopping   bool
-	dir        string   // the workspace, to show paths in it relative to it
-	tools      []string // the tool calls running, oldest first
-	labels     map[string]string
-	deliveries map[string]Delivery // receipts only; pi owns scheduling
+	reports         int
+	info            Info
+	proc            *proc
+	token           string
+	seq             uint64        // the last event's number
+	turn            []Event       // the events of the assistant message in progress
+	starting        chan struct{} // closed when a start finishes, nil otherwise
+	stopping        bool
+	dir             string   // the workspace, to show paths in it relative to it
+	tools           []string // the tool calls running, oldest first
+	labels          map[string]string
+	deliveries      map[string]Delivery // receipts only; pi owns scheduling
+	queue           QueueStatus
+	deliverySettled uint64 // sequence of last observed settled boundary
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
 	nudged bool
@@ -327,12 +331,16 @@ func (m *Manager) ensure(id string) (*agent, *proc, error) {
 func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, error) {
 	ys := y.Name
 	role := RoleLead
+	since := y.HiredAt
 	if name != yesmen.LeadName {
 		role = RoleWorker
 		ws, _ := m.cfg.Yesmen.Workers(ys)
 		found := false
 		for _, w := range ws {
-			found = found || w.Name == name
+			if w.Name == name {
+				found = true
+				since = w.StartedAt
+			}
 		}
 		if !found {
 			return nil, nil, fmt.Errorf("%s has no worker named %s", ys, name)
@@ -351,6 +359,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			m.agents[id] = a
 		}
 		a.dir = y.Path
+		a.info.Since = since
 		a.loadDeliveries()
 		if a.proc != nil {
 			p := a.proc
@@ -403,6 +412,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			return nil, nil, err
 		}
 		a.proc = p
+		p.piSession.Store(state.SessionID)
 		a.info.StartedAt = started
 		a.info.Status, a.info.Model, a.info.UpdatedAt = Idle, state.Model.ID, time.Now()
 		a.info.Provider, a.info.Effort, a.info.EffortLevels = state.Model.Provider, state.ThinkingLevel, nil
@@ -478,8 +488,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 // record handles one record of an agent's process. It runs on the
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
-	m.deliveryCapability(a, p, kind, raw)
-	raw = m.observeDelivery(a, p, kind, raw)
+	m.observeDelivery(a, p, kind, raw)
 	m.follow(a, p, kind, raw)
 	switch kind {
 	case "agent_start":
@@ -580,7 +589,7 @@ func (m *Manager) number(a *agent, kind string, raw json.RawMessage) Event {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a.seq++
-	ev := Event{Agent: a.info.ID, Seq: a.seq, Data: raw}
+	ev := Event{Agent: a.info.ID, AgentSince: a.info.Since, Seq: a.seq, Data: raw}
 	switch {
 	case kind == "message_start" && role == "assistant":
 		a.turn = []Event{ev}
@@ -638,6 +647,10 @@ func (m *Manager) PromptImages(ctx context.Context, id, text string, images []Im
 }
 
 func (m *Manager) prompt(ctx context.Context, id, text, behavior string, images ...Image) error {
+	return m.promptDelivery(ctx, id, text, behavior, "", images...)
+}
+
+func (m *Manager) promptDelivery(ctx context.Context, id, text, behavior, messageID string, images ...Image) error {
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return errors.New("empty message")
 	}
@@ -686,12 +699,16 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string, images 
 		}
 	}
 	a.modelMu.Unlock()
-	return m.sendPrompt(ctx, a, p, text, behavior, images...)
+	return m.sendPromptDelivery(ctx, a, p, text, behavior, messageID, images...)
 }
 
 // sendPrompt dispatches a prompt already registered under modelMu and mu.
 // No manager lock is held while sending or waiting for pi's answer.
 func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behavior string, images ...Image) error {
+	return m.sendPromptDelivery(ctx, a, p, text, behavior, "", images...)
+}
+
+func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, text, behavior, messageID string, images ...Image) error {
 	done := make(chan error, 1)
 	go func() {
 		// Cancelling the caller does not cancel the RPC already sent to pi.
@@ -701,10 +718,9 @@ func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behav
 		if len(images) > 0 {
 			cmd["images"] = images
 		}
-		messageID := taggedDelivery(text)
 		err := m.bindDelivery(a, p, messageID)
 		if err == nil {
-			_, err = p.callObserved(context.Background(), cmd, func(r response) { m.deliveryResponse(a, p, messageID, r) })
+			_, err = p.callObserved(context.Background(), cmd, func(r response) { m.deliveryResponse(a, p, messageID, behavior, r) })
 		}
 		a.modelMu.Lock()
 		m.mu.Lock()
@@ -742,6 +758,7 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	if !wasRunning {
 		defer func() { go m.closeIfFinished(a, p, time.Time{}) }()
 	}
+	_, _ = p.modelState(ctx, func(s modelState) { m.deliverySessionChanged(a, p, s.SessionID) })
 	// pi answers after emitting every earlier event, and the reader numbers
 	// those first. Capture the reply in progress and the last number on the
 	// reader as the answer arrives: events it handles next are not in the
@@ -750,7 +767,7 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	r, err := p.callAt(ctx, map[string]any{"type": "get_messages"}, func() {
 		m.mu.Lock()
 		conv.Live, conv.Seq = append([]Event(nil), a.turn...), a.seq
-		conv.Deliveries = a.deliverySnapshot()
+		conv.Deliveries, conv.Queue = a.deliverySnapshot(), a.queue
 		m.mu.Unlock()
 	})
 	if err != nil {

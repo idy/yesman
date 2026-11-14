@@ -50,12 +50,11 @@ type proc struct {
 	stdin io.WriteCloser
 	wmu   sync.Mutex
 
-	mu            sync.Mutex
-	pending       map[string]waiter
-	seq           atomic.Int64
-	session       string       // opaque process incarnation; never an authentication token
-	deliveryReady atomic.Bool  // bundled extension confirmed its message transform
-	piSession     atomic.Value // string, announced by the extension on session_start
+	mu        sync.Mutex
+	pending   map[string]waiter
+	seq       atomic.Int64
+	session   string       // opaque process incarnation; never an authentication token
+	piSession atomic.Value // string, from get_state
 
 	done   chan struct{}
 	err    error // why it exited, set before done closes
