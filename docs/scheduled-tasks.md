@@ -54,3 +54,9 @@ The result is the run's **board task**, which the lead and its workers keep with
 ## Processes and lifecycle
 
 One app per data directory runs the scheduled tasks: it holds an OS lock on `.runtime/schedules.lock`, which the system drops if the app ends. Another app shows them read-only and takes over when the lock is free; it carries on runs left under way, resolving them from their receipts. Without a lock no scheduler carries another's run. Dismissing a yesman retires its schedules before its workspace moves, and every write checks the workspace generation, so nothing reaches the archive or a new yesman with the same name. Quitting stops scheduling before the agents stop.
+
+## Editing and finding a plan in Tasks
+
+The editor stays editable while a save is on its way, and what is typed meanwhile is not part of that save. When it is answered, the dialog stays open with what was typed, its caret and selection, on top of the version just saved: its revision, and the saved values in the fields not typed in. Saving again changes that plan, never a second one, and a change someone else made since is a conflict that keeps the text, not something saved over. A save answered after its dialog closed only refreshes the list; it moves neither the focus nor what Tasks shows.
+
+A plan opened from its run's board task or from the conversation's **Open in Tasks** is found by its ID, in its own yesman, never by its title. An archived plan opens the Archived section on it and stays archived and off. A plan no longer kept, forgotten among the oldest archived ones, is said to be gone.

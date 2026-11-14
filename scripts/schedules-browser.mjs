@@ -6,6 +6,8 @@
 //
 //   YESMAN_PLAYWRIGHT=/absolute/path/to/playwright/index.mjs node scripts/schedules-browser.mjs
 //   YESMAN_SCHEDULES_SHOTS=/some/dir   also saves screenshots there
+//   YESMAN_SCHEDULES_ONLY=focused      runs only the focused checks (drafts
+//                                      while saving, archived plans)
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir } from 'node:fs/promises';
@@ -350,10 +352,258 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
   }
 }
 
+// Focused checks on a fixture of their own, each from a fresh page: a draft
+// typed while a save is on its way, a save answered after its dialog closed,
+// and an archived plan opened from the board and from the conversation.
+async function focused(engineName, engine) {
+  const fx = await fixture();
+  const browser = await engine.launch({ headless: true });
+  console.log(`${engineName} focused`);
+  const errors = [];
+  const open = async (before) => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+    const page = await context.newPage();
+    page.on('pageerror', (err) => errors.push(err.message));
+    await page.addInitScript(() => localStorage.setItem('yesman.info', 'shown'));
+    await page.addInitScript(bridge);
+    if (before) await before(page);
+    await page.goto(fx.url);
+    return { context, page, pane: page.locator('#schedules'), dialog: page.locator('#schedule-dialog') };
+  };
+  const plans = async () => (await fx.post('/fixture/call', { method: 'Schedules', args: ['alice'] })).plans;
+  const plan = async (id) => (await plans()).find((p) => p.id === id);
+  // hold keeps the page's next call of method waiting until release().
+  const hold = (page, method) => page.evaluate((m) => {
+    window.hold[m] = new Promise((resolve) => { window.release = () => { delete window.hold[m]; resolve(); }; });
+  }, method);
+  const focusKey = (page) => page.evaluate(() => document.activeElement?.dataset.key ?? null);
+  const waitFocus = (page, key) => page.waitForFunction((k) => document.activeElement?.dataset.key === k, key);
+  const writes = (page) => page.evaluate(() => window.calls.filter((c) => ['SaveSchedule', 'SetScheduleEnabled', 'ArchiveSchedule', 'RunSchedule', 'RetryScheduleRun'].includes(c[0])).length);
+  const tasksEntry = (page) => page.locator('#yesman-info').getByRole('button', { name: /^Tasks/ });
+  try {
+    {
+      const { context, page, pane, dialog } = await open();
+      await tasksEntry(page).click();
+      await pane.getByText('No scheduled tasks yet').waitFor();
+
+      // Typed while a new task is being created: the task is created as it
+      // was sent, and the dialog stays with what was typed, its caret and
+      // selection; saving again changes that task, not a second one.
+      await pane.getByRole('button', { name: 'New task…' }).first().click();
+      await dialog.locator('[name=title]').fill('Draft before save');
+      const box = dialog.locator('[name=instructions]');
+      await box.fill('Original instructions');
+      await dialog.locator('[name=enabled]').uncheck();
+      await hold(page, 'SaveSchedule');
+      await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+      await dialog.locator('form[aria-busy="true"]').waitFor();
+      assert.equal(await box.isEditable(), true);
+      await box.fill('NEW DRAFT WHILE SAVING');
+      await box.evaluate((el) => el.setSelectionRange(4, 9));
+      await page.evaluate(() => window.release());
+      await dialog.locator('.sched-saved').waitFor();
+      assert.equal(await dialog.evaluate((d) => d.open), true);
+      assert.equal(await box.inputValue(), 'NEW DRAFT WHILE SAVING');
+      assert.deepEqual(await box.evaluate((el) => [document.activeElement === el, el.selectionStart, el.selectionEnd]), [true, 4, 9]);
+      assert.equal(await dialog.getByRole('heading').innerText(), 'Edit task');
+      let all = await plans();
+      assert.equal(all.length, 1);
+      assert.deepEqual([all[0].id, all[0].instructions, all[0].revision, all[0].enabled], ['s1', 'Original instructions', 1, false]);
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await dialog.waitFor({ state: 'hidden' });
+      all = await plans();
+      assert.equal(all.length, 1, 'saving again made another task');
+      assert.deepEqual([all[0].title, all[0].instructions, all[0].revision, all[0].enabled], ['Draft before save', 'NEW DRAFT WHILE SAVING', 2, false]);
+      await waitFocus(page, 'alice/s1:open');
+      step('a draft typed while creating is kept');
+
+      // Typed while an edit saves: the fields not typed in show what was
+      // saved (the title as yesman keeps it), the typed one stays, and the
+      // next save is at the saved revision.
+      const s1 = pane.locator('.sched-plan[data-plan="alice/s1"]');
+      await expand(s1);
+      await s1.getByRole('button', { name: 'Edit…' }).click();
+      await dialog.locator('[name=title]').fill('  Spaced   title  ');
+      await hold(page, 'SaveSchedule');
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await dialog.locator('form[aria-busy="true"]').waitFor();
+      await dialog.locator('[name=time]').fill('10:15');
+      await page.evaluate(() => window.release());
+      await dialog.locator('.sched-saved').waitFor();
+      assert.equal(await dialog.locator('[name=title]').inputValue(), 'Spaced title');
+      assert.equal(await dialog.locator('[name=time]').inputValue(), '10:15');
+      let p = await plan('s1');
+      assert.deepEqual([p.title, p.schedule.time, p.revision], ['Spaced title', '09:00', 3]);
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await dialog.waitFor({ state: 'hidden' });
+      p = await plan('s1');
+      assert.deepEqual([p.title, p.schedule.time, p.instructions, p.revision], ['Spaced title', '10:15', 'NEW DRAFT WHILE SAVING', 4]);
+      step('a draft typed while editing is kept at the saved revision');
+
+      // Kept open, then changed by someone else: saving again is a conflict
+      // that keeps the text, and the other change is not saved over.
+      await s1.getByRole('button', { name: 'Edit…' }).click();
+      await hold(page, 'SaveSchedule');
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await dialog.locator('form[aria-busy="true"]').waitFor();
+      await box.fill('Third draft');
+      await page.evaluate(() => window.release());
+      await dialog.locator('.sched-saved').waitFor();
+      p = await plan('s1');
+      assert.equal(p.revision, 5);
+      await fx.post('/fixture/call', { method: 'SetScheduleEnabled', args: ['alice', 's1', true, p.revision] });
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await dialog.getByText(/changed since you opened it/).waitFor();
+      assert.equal(await box.inputValue(), 'Third draft');
+      p = await plan('s1');
+      assert.deepEqual([p.instructions, p.enabled, p.revision], ['NEW DRAFT WHILE SAVING', true, 6]);
+      await dialog.getByRole('button', { name: 'Cancel' }).click();
+      await dialog.waitFor({ state: 'hidden' });
+      step('a kept draft is not saved over a newer change');
+      await context.close();
+    }
+
+    {
+      // Answered after its dialog closed (as a browser may force it) and
+      // another yesman shows: the focus stays where the user is, then and
+      // when they come back, and the task saved is listed.
+      const { context, page, pane, dialog } = await open();
+      await tasksEntry(page).click();
+      await pane.locator('.sched-plan[data-plan="alice/s1"]').waitFor();
+      await pane.getByRole('button', { name: 'New task…' }).first().click();
+      await dialog.locator('[name=title]').fill('Late save');
+      await dialog.locator('[name=instructions]').fill('Answered late');
+      await dialog.locator('[name=enabled]').uncheck();
+      await hold(page, 'SaveSchedule');
+      await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+      await dialog.locator('form[aria-busy="true"]').waitFor();
+      await dialog.evaluate((d) => d.close());
+      await dialog.waitFor({ state: 'hidden' });
+      await page.locator('#yesmen').getByText('鲍勃 Bob').click();
+      await pane.getByText('No scheduled tasks yet').waitFor();
+      await page.evaluate(() => { window.before = document.activeElement; });
+      await page.evaluate(() => window.release());
+      for (let n = 0; n < 100 && !(await plan('s2')); n++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal((await plan('s2'))?.title, 'Late save');
+      await page.waitForTimeout(300);
+      assert.equal(await page.evaluate(() => document.activeElement === window.before), true, 'a late answer moved the focus');
+      await page.locator('#yesmen').getByText('Alice').first().click();
+      await pane.locator('.sched-plan[data-plan="alice/s2"]').waitFor();
+      await page.waitForTimeout(300);
+      assert.notEqual(await focusKey(page), 'alice/s2:open', 'a late answer took the focus on coming back');
+      assert.equal(await page.evaluate(() => !!document.activeElement?.closest('#schedules')), false);
+      step('a save answered after its dialog closed moves nothing');
+      await context.close();
+    }
+
+    {
+      // An archived plan, from its run's board task and from the
+      // conversation: Archived opens on it, by its ID, and it stays
+      // archived and off.
+      const made = await fx.post('/fixture/call', { method: 'SaveSchedule', args: ['alice', { title: 'Archived plan', instructions: 'Synthetic archived', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false }] });
+      const id = made.plan.id;
+      await fx.post('/fixture/call', { method: 'RunSchedule', args: ['alice', id, 'abababababababab', ''] });
+      let run;
+      for (let n = 0; n < 100; n++) {
+        run = (await plan(id)).runs[0];
+        if (run?.board) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.ok(run?.board, 'the run has a board task');
+      await fx.post('/fixture/call', { method: 'ArchiveSchedule', args: ['alice', id, made.plan.revision] });
+      const archived = await plan(id);
+      assert.equal(archived.state, 'archived');
+
+      const { context, page, pane } = await open();
+      const board = page.locator('#board');
+      const row = pane.locator(`.sched-plan[data-plan="alice/${id}"]`);
+      const shown = async () => {
+        await waitFocus(page, `alice/${id}:open`);
+        assert.equal(await pane.locator('.board-done').evaluate((d) => d.open), true);
+        assert.equal(await row.locator('.sched-toggle').getAttribute('aria-expanded'), 'true');
+        assert.ok(await row.isVisible());
+      };
+      await page.getByRole('button', { name: 'Show the board', exact: true }).click();
+      await board.locator('.board-task', { hasText: 'Archived plan' }).getByRole('button', { name: 'Scheduled' }).click();
+      await shown();
+      assert.equal(await row.locator('.sched-next').innerText(), 'Archived');
+      assert.equal(await row.getByRole('switch').count(), 0);
+      assert.equal(await row.getByRole('button', { name: /^Run .* now$/ }).count(), 0);
+      assert.equal(await row.getByRole('button', { name: 'Edit…' }).count(), 0);
+      step('an archived plan opens from its board task');
+
+      // Keyboard: the plan's row has the focus and folds with Enter.
+      await page.keyboard.press('Enter');
+      await row.locator('.sched-toggle[aria-expanded="false"]').waitFor();
+      assert.equal(await focusKey(page), `alice/${id}:open`);
+      await page.keyboard.press('Enter');
+      await row.locator('.sched-details').waitFor();
+
+      // Back and forth: its run's board task, and from there the plan again.
+      await row.locator('.sched-run').getByRole('button', { name: run.board, exact: true }).click();
+      await board.locator(`[data-key="alice/${run.board}"][aria-expanded="true"]`).waitFor();
+      await waitFocus(page, `alice/${run.board}`);
+      await board.locator('.board-task', { hasText: 'Archived plan' }).getByRole('button', { name: 'Scheduled' }).click();
+      await shown();
+
+      // Folded by the user, Archived stays folded when the pane redraws.
+      await pane.locator('.board-done > summary').click();
+      assert.equal(await pane.locator('.board-done').evaluate((d) => d.open), false);
+      await fx.post('/fixture/board', { yesman: 'alice', id: run.board, status: 'doing', note: '' });
+      await row.locator('.sched-run .sched-chip', { hasText: 'In progress' }).waitFor({ state: 'attached' });
+      assert.equal(await pane.locator('.board-done').evaluate((d) => d.open), false);
+
+      // From the conversation's Open in Tasks.
+      await pane.getByRole('button', { name: 'Close the tasks' }).click();
+      await pane.waitFor({ state: 'hidden' });
+      await page.locator('#thread .note--scheduled', { hasText: `Scheduled task ${id}` }).first().getByRole('button', { name: 'Open in Tasks' }).click();
+      await shown();
+      step('an archived plan opens from the conversation, and back');
+
+      assert.equal(await writes(page), 0, 'opening an archived plan changed it');
+      const after = await plan(id);
+      assert.deepEqual([after.state, after.enabled, after.revision], ['archived', false, archived.revision]);
+      await context.close();
+    }
+
+    {
+      // A board task whose plan is no longer kept (forgotten among the
+      // oldest archived ones): Tasks says so, and shows no other plan for it.
+      const { context, page, pane } = await open(async (page) => {
+        await page.route('**/fixture/call', async (route) => {
+          const req = JSON.parse(route.request().postData() || '{}');
+          if (req.method !== 'Board') return route.continue();
+          const res = await route.fetch();
+          const body = await res.json();
+          if (body.value) {
+            const now = new Date().toISOString();
+            body.value.tasks = [...(body.value.tasks ?? []), { id: 't99', title: 'Run of a forgotten plan', status: 'todo', createdAt: now, updatedAt: now, schedule: { plan: 's99' } }];
+          }
+          await route.fulfill({ response: res, json: body });
+        });
+      });
+      await page.getByRole('button', { name: 'Show the board', exact: true }).click();
+      await page.locator('#board .board-task', { hasText: 'Run of a forgotten plan' }).getByRole('button', { name: 'Scheduled' }).click();
+      await pane.locator('.sched-notice[role="status"]', { hasText: 'Scheduled task s99 is no longer kept here.' }).waitFor();
+      assert.equal(await pane.locator('[data-plan="alice/s99"]').count(), 0);
+      assert.equal(await page.evaluate(() => !!document.activeElement?.closest('.sched-plan')), false);
+      step('a plan no longer kept is said to be gone');
+      await context.close();
+    }
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser.close();
+    await fx.close();
+  }
+}
+
 const built = spawnSync('go', ['test', '-c', '-o', exe, '.'], { cwd, encoding: 'utf8' });
 assert.equal(built.status, 0, built.stderr || built.stdout);
 for (const [name, engine] of [['chromium', chromium], ['webkit', webkit]]) {
-  await run(name, engine);
-  await run(name, engine, { lang: 'zh-Hans', dark: true, width: 1100 });
+  if (process.env.YESMAN_SCHEDULES_ONLY !== 'focused') {
+    await run(name, engine);
+    await run(name, engine, { lang: 'zh-Hans', dark: true, width: 1100 });
+  }
+  await focused(name, engine);
 }
 console.log(`schedules-browser: ${results.length} checks passed`);

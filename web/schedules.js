@@ -128,11 +128,22 @@ export function createSchedules(host) {
   const running = new Map(); // `${yesman}/${plan}` -> request ID of a Run now in flight
   const retryIDs = new Map(); // `${yesman}/${plan}` -> request ID to reuse after an uncertain failure
   const busy = new Set(); // keys of actions under way, such as `${yesman}/${run}:retry`
+  const loaded = new Map(); // yesman name -> how many of its loads were shown
   let archivedOpen = false;
   let pendingFocus = null; // { key, fallback } of the control an action under way started from
-  let reveal = null; // `${yesman}/${plan}` to scroll to once shown
+  // The plan to bring into view and focus once it shows: { name, plan, key,
+  // after }, after being how many loads of name were shown when it was asked
+  // for. A plan the next load does not have is said to be gone (missing),
+  // never guessed at.
+  let reveal = null;
+  let missing = null; // { name, plan }
 
   const current = () => (host.isOpen() && host.yesman()) || null;
+
+  function revealPlan(name, plan) {
+    reveal = { name, plan, key: `${name}/${plan}`, after: loaded.get(name) ?? 0 };
+    missing = null;
+  }
 
   async function load(name) {
     const running = loading.get(name);
@@ -150,6 +161,7 @@ export function createSchedules(host) {
     }
     loading.delete(name);
     if (entry.again) return load(name);
+    loaded.set(name, (loaded.get(name) ?? 0) + 1);
     host.changed();
     if (current()?.name === name) render();
   }
@@ -183,6 +195,10 @@ export function createSchedules(host) {
     aside.hidden = !y;
     aside.setAttribute('aria-label', t('Tasks'));
     document.documentElement.dataset.tasks = y ? 'open' : 'closed';
+    // What was asked for one yesman's Tasks is dropped once they no longer
+    // show, so that it never takes the focus later.
+    if (!y || missing?.name !== y.name) missing = null;
+    if (!y || reveal?.name !== y.name) reveal = null;
     if (!y) return;
     const v = views.get(y.name);
     if (!v && !loading.has(y.name)) load(y.name);
@@ -204,6 +220,12 @@ export function createSchedules(host) {
     const archived = plans.filter((p) => p.state === 'archived');
     const on = active.filter((p) => p.state === 'on').length;
     const readOnly = view && !view.owner;
+    if (reveal?.name === y.name && view && !v.error && (loaded.get(y.name) ?? 0) > reveal.after && !plans.some((p) => p.id === reveal.plan)) {
+      // Read since it was asked for, and not there: it was forgotten. Say so,
+      // rather than show another plan for it.
+      missing = { name: y.name, plan: reveal.plan };
+      reveal = null;
+    }
     const body = h('div', { class: 'sched-body' });
     if (!view) {
       body.append(v?.error ? h('p', { class: 'board-empty', 'data-tone': 'error', role: 'alert' }, v.error) : h('p', { class: 'board-empty' }, t('Loading…')));
@@ -212,6 +234,7 @@ export function createSchedules(host) {
       if (view.error) body.append(h('p', { class: 'sched-notice', 'data-tone': 'error', role: 'alert' }, icon('alert'), h('span', null, view.error)));
       if (view.notice) body.append(h('p', { class: 'sched-notice', 'data-tone': 'error', role: 'alert' }, icon('alert'), h('span', null, view.notice)));
       if (v.error) body.append(h('p', { class: 'sched-notice', 'data-tone': 'error', role: 'alert' }, icon('alert'), h('span', null, v.error)));
+      if (missing?.name === y.name) body.append(h('p', { class: 'sched-notice', role: 'status' }, icon('alert'), h('span', null, t('Scheduled task {id} is no longer kept here.', { id: missing.plan }))));
       if (!active.length) {
         body.append(h('div', { class: 'board-empty' },
           h('strong', null, t('No scheduled tasks yet')),
@@ -221,6 +244,9 @@ export function createSchedules(host) {
         body.append(h('ol', { class: 'sched-list', 'aria-label': t('Scheduled task list') }, active.map((p) => planRow(y, view, p))));
       }
       if (archived.length) {
+        // An archived plan being revealed shows: Archived opens for it. It
+        // stays archived; nothing is changed by looking at it.
+        if (reveal?.name === y.name && archived.some((p) => p.id === reveal.plan)) archivedOpen = true;
         const fold = h('details', { class: 'board-done', open: archivedOpen },
           h('summary', null, icon('chevron', 'mds-icon board-fold'), t('Archived {n}', { n: formatNumber(archived.length) })),
           h('ol', { class: 'sched-list' }, archived.map((p) => planRow(y, view, p))));
@@ -241,14 +267,17 @@ export function createSchedules(host) {
           h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Close the tasks'), 'aria-label': t('Close the tasks'), onclick: () => host.setOpen(false) }, icon('x')))),
       body);
     body.scrollTop = scroll;
-    if (reveal) {
-      const el = $(`#schedules [data-plan="${CSS.escape(reveal)}"]`);
-      if (el) {
+    if (reveal?.name === y.name) {
+      // Taken once it shows; until then (a load under way) it waits.
+      const el = $(`#schedules [data-plan="${CSS.escape(reveal.key)}"]`);
+      if (el && el.getClientRects().length) {
         el.scrollIntoView({ block: 'nearest' });
         el.querySelector('.sched-toggle')?.focus({ preventScroll: true });
         reveal = null;
+        return;
       }
-    } else if (focused) {
+    }
+    if (focused) {
       const el = $(`#schedules [data-key="${CSS.escape(focused)}"]`) ?? (fallback ? $(`#schedules [data-key="${CSS.escape(fallback)}"]`) : null);
       el?.focus({ preventScroll: true });
     }
@@ -487,9 +516,15 @@ export function createSchedules(host) {
 
   let session = 0; // the dialog open now; late answers of an older one are ignored
 
+  // openEditor edits plan p, or a new one. A save answered after the user
+  // went on typing keeps the dialog open with what they typed, on top of the
+  // version just saved; one answered after the dialog closed only refreshes
+  // the list, and moves neither focus nor anything shown.
   function openEditor(y, p) {
     const dialog = $('#schedule-dialog');
     const mine = ++session;
+    let closed = false;
+    const gone = () => closed || mine !== session || !dialog.open;
     const view = views.get(y.name)?.view;
     const limits = view?.limits ?? { title: 120, instructions: 4000, minEvery: 15, maxEvery: 10080 };
     const s = p?.schedule ?? { kind: 'daily', time: '09:00' };
@@ -536,8 +571,14 @@ export function createSchedules(host) {
     };
     kind.onchange = () => { clearError(); showKind(); };
 
+    const saved = h('p', { class: 'dialog-hint sched-saved', role: 'status', hidden: true });
+    const heading = h('h2', { class: 'mds-heading', id: 'schedule-dialog-title' }, p ? t('Edit task') : t('New scheduled task'));
+    const dayBoxes = [...days.querySelectorAll('input')];
+    const controls = [title, instructions, kind, date, time, every, unit, zone, enabled, ...dayBoxes];
+    const valueOf = (el) => (el.type === 'checkbox' ? el.checked : el.value);
+
     const form = h('form', { class: 'sched-form', novalidate: true },
-      h('h2', { class: 'mds-heading', id: 'schedule-dialog-title' }, p ? t('Edit task') : t('New scheduled task')),
+      heading,
       field(t('Title'), title, null, 'title'),
       field(t('Instructions'), instructions, t('What your yesman is asked to do each time. Its lead handles it like a message from you, with the same permissions; nothing extra is allowed.'), 'instructions'),
       field(t('Repeat'), kind, null, 'kind'),
@@ -545,9 +586,40 @@ export function createSchedules(host) {
       field(t('Time zone'), zone, t('Times are in this time zone. This computer’s is {zone}.', { zone: localZone() }), 'timezone'),
       zoneList,
       h('label', { class: 'mds-check sched-enabled' }, enabled, t('Turn it on: run it at these times')),
-      error, latest,
+      error, latest, saved,
       h('div', { class: 'mds-dialog-actions' }, cancel, save));
     showKind();
+
+    // fill shows a saved plan in the controls, except those in keep: what
+    // the user changed after saving it.
+    function fill(plan, keep) {
+      // A control already showing the value is left alone, its caret and
+      // selection with it.
+      const set = (el, v) => {
+        if (keep.has(el) || v === undefined || v === null) return;
+        if (el.type === 'checkbox') {
+          if (el.checked !== v) el.checked = v;
+        } else if (el.value !== String(v)) {
+          el.value = v;
+        }
+      };
+      const kindWas = kind.value;
+      const sp = plan.schedule ?? {};
+      set(title, plan.title);
+      set(instructions, plan.instructions);
+      set(zone, plan.timezone);
+      set(enabled, plan.enabled);
+      set(kind, sp.kind);
+      set(date, sp.date);
+      set(time, sp.time);
+      if (sp.kind === 'weekly') for (const box of dayBoxes) set(box, (sp.days ?? []).includes(Number(box.value)));
+      if (sp.kind === 'interval' && !keep.has(every) && !keep.has(unit)) {
+        const u = sp.every % 1440 === 0 ? 1440 : sp.every % 60 === 0 ? 60 : 1;
+        set(every, String(sp.every / u));
+        set(unit, String(u));
+      }
+      if (kind.value !== kindWas) showKind();
+    }
 
     function clearError() {
       error.hidden = true;
@@ -610,20 +682,43 @@ export function createSchedules(host) {
         return;
       }
       saving = true;
+      saved.hidden = true;
+      // What is sent, control by control: the fields stay editable while it
+      // saves, and what is typed meanwhile is not in this save.
+      const sent = new Map(controls.map((el) => [el, valueOf(el)]));
       for (const el of [save, cancel]) el.disabled = true;
       form.setAttribute('aria-busy', 'true');
       try {
         const res = await host.call('SaveSchedule', y.name, inp);
-        if (mine !== session) return;
+        if (gone()) {
+          // Closed meanwhile: the list shows what was saved, nothing else.
+          if (res.plan) load(y.name);
+          return;
+        }
         if (res.plan) {
+          const changed = new Set(controls.filter((el) => valueOf(el) !== sent.get(el)));
           expanded.add(`${y.name}/${res.plan.id}`);
-          reveal = `${y.name}/${res.plan.id}`;
-          close('save');
+          if (!changed.size) {
+            revealPlan(y.name, res.plan.id);
+            close('save');
+            load(y.name);
+            return;
+          }
+          // Changed while it saved: this version is saved, and the dialog
+          // goes on with it, its revision and what was typed since, which
+          // saving again keeps. A new plan is now this one, never another.
+          p = res.plan;
+          fill(res.plan, changed);
+          heading.textContent = t('Edit task');
+          save.textContent = t('Save');
+          saved.textContent = t('Saved. You changed it while it was saving; save again to keep those changes too.');
+          saved.hidden = false;
           load(y.name);
           return;
         }
         if (res.conflict) {
           await load(y.name);
+          if (gone()) return;
           latestPlan = views.get(y.name)?.view?.plans.find((x) => x.id === p?.id) ?? null;
           showError(t('This task was changed since you opened it. Your text is kept here; use the latest version to start again from it.'));
           latest.hidden = !latestPlan;
@@ -631,7 +726,7 @@ export function createSchedules(host) {
         }
         showError(translateError(res.error), res.field);
       } catch (err) {
-        if (mine !== session) return;
+        if (gone()) return;
         showError(err?.message || String(err));
       } finally {
         if (mine === session) {
@@ -651,6 +746,7 @@ export function createSchedules(host) {
     const done = openDialog(dialog);
     title.focus();
     done.then(() => {
+      closed = true;
       if (mine === session) {
         dialog.oncancel = null;
         dialog.replaceChildren();
@@ -675,11 +771,12 @@ export function createSchedules(host) {
     if (views.has(name)) load(name);
   }
 
-  // open shows the pane, and a plan when given.
+  // open shows the pane, and a plan when given: by its ID, in the yesman it
+  // belongs to, archived or not, without changing it.
   function open(name, plan) {
     if (plan) {
       expanded.add(`${name}/${plan}`);
-      reveal = `${name}/${plan}`;
+      revealPlan(name, plan);
     }
     host.setOpen(true);
     load(name);
