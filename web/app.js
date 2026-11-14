@@ -17,6 +17,11 @@ import { createCrew } from './crew.js';
 import { createEnvPage } from './env.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
+import { detectPlatform } from './keys.js';
+import { createShortcuts } from './shortcuts.js';
+import { createPalette } from './palette.js';
+import { registerActions, paletteItems } from './actions.js';
+import { createShortcutsPage } from './shortcuts-page.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, formatNumber, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
@@ -24,6 +29,10 @@ const mygo = window.mygo;
 const call = (method, ...args) => mygo.call(`Yesman.${method}`, ...args);
 const errorText = (err) => (err && (err.message || err.error)) || String(err);
 const fail = (err) => toast(errorText(err), { duration: 6000 });
+
+// The window's actions and their keys: shortcuts.js, with the actions in
+// actions.js, the command palette and Settings › Shortcuts below.
+const shortcuts = createShortcuts({ platform: detectPlatform(mygo), call, fail, t, builtIn: ['Mod+S'] });
 
 const STATUS = {
   stopped: 'Asleep',
@@ -783,7 +792,8 @@ function renderSidebar() {
     for (const a of waiting) list.append(agentRow(a, '', a.role === 'lead' ? yesmanLabel(a.yesman) : a.id));
   }
   list.append(h('div', { class: 'side-group' }, h('span', null, t('Yesmen')),
-    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Hire a yesman'), 'aria-label': t('Hire a yesman'), onclick: openHire }, icon('plus'))));
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: shortcuts.hint(t('Hire a yesman'), 'yesman.hire'), 'aria-label': t('Hire a yesman'),
+      'aria-keyshortcuts': shortcuts.aria('yesman.hire'), onclick: openHire }, icon('plus'))));
   for (const y of state.snap.yesmen) {
     const agents = state.snap.agents.filter((a) => a.yesman === y.name);
     const lead = agents.find((a) => a.role === 'lead');
@@ -831,8 +841,9 @@ function renderBar() {
 function renderBarActions() {
   const actions = $('#bar-actions');
   const a = state.view.kind === 'agent' ? selectedAgent() : null;
-  const button = (iconName, label, onclick, extra = {}) =>
-    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: label, 'aria-label': label, onclick, ...extra }, icon(iconName));
+  const button = (iconName, label, onclick, extra = {}, action = null) =>
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: action ? shortcuts.hint(label, action) : label, 'aria-label': label,
+      'aria-keyshortcuts': action ? shortcuts.aria(action) : null, onclick, ...extra }, icon(iconName));
   actions.replaceChildren(...[
     a ? h('span', { class: 'mds-status', 'data-status': statusTone(a), role: 'status' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, statusLabel(a))) : null,
     updatePill(),
@@ -840,9 +851,9 @@ function renderBarActions() {
       ? button('power', t('Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.'), () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
-    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }) : null,
-    a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }) : null,
-    a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }) : null,
+    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }, 'pane.info') : null,
+    a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }, 'pane.board') : null,
+    a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }, 'pane.files') : null,
   ].filter(Boolean));
 }
 
@@ -1033,6 +1044,7 @@ function bindHireForm(form, error, { dialog, cancel } = {}) {
 }
 
 function renderBody() {
+  if (state.view.kind !== 'settings' || state.view.page !== 'shortcuts') shortcutsPage.leave();
   const body = $('#body');
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
@@ -1124,7 +1136,8 @@ function renderDock({ focusComposer = false } = {}) {
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
   const action = working
-    ? h('button', { class: 'round round--stop composer-action', type: 'button', 'aria-label': t('Stop'), title: t('Stop the current run'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop'))
+    ? h('button', { class: 'round round--stop composer-action', type: 'button', 'aria-label': t('Stop'), title: shortcuts.hint(t('Stop the current run'), 'agent.stop'),
+      'aria-keyshortcuts': shortcuts.aria('agent.stop'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop'))
     : h('button', { class: 'round composer-action', type: 'submit', 'aria-label': t('Send'), title: t('Send') }, icon('enter'));
   const sync = () => {
     // A run can be interrupted even with an empty draft or a pending image/send.
@@ -1303,6 +1316,7 @@ function renderWelcome(body) {
 // The pages, labelled in English: each is said in the page's language.
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
+  { page: 'shortcuts', label: 'Shortcuts', icon: 'keyboard' },
   { page: 'yesman', label: 'yesman', icon: 'users' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
   { page: 'secrets', label: 'Secrets', icon: 'lock' },
@@ -1331,6 +1345,10 @@ function renderSideFoot() {
   $('#settings-button').toggleAttribute('data-active', open);
   $('#settings-button').setAttribute('aria-expanded', String(open));
   $('#settings-nav').inert = !open;
+  $('#settings-button').title = shortcuts.hint(t('Settings'), 'settings.open');
+  const keys = shortcuts.aria('settings.open');
+  if (keys) $('#settings-button').setAttribute('aria-keyshortcuts', keys);
+  else $('#settings-button').removeAttribute('aria-keyshortcuts');
   for (const item of document.querySelectorAll('#settings-nav .mds-nav-item')) {
     if (open && item.dataset.page === state.view.page) item.setAttribute('aria-current', 'page');
     else item.removeAttribute('aria-current');
@@ -1351,6 +1369,7 @@ async function loadSettingsPage(page) {
     if (page === 'general' || page === 'storage') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
+    else if (page === 'shortcuts') { await shortcutsPage.load(); return; }
     else if (page === 'pi') { await piPage.load(); return; }
     else if (page === 'yesman') { await crewPage.load(); return; }
     else if (page === 'secrets') { await secretsPage.load(); return; }
@@ -1367,6 +1386,7 @@ function renderSettings(body) {
   body.append(h('div', { class: 'page' }, inner));
   if (state.view.page === 'repositories') renderRepositories(inner);
   else if (state.view.page === 'storage') renderStorage(inner);
+  else if (state.view.page === 'shortcuts') shortcutsPage.render(inner);
   else if (state.view.page === 'pi') piPage.render(inner);
   else if (state.view.page === 'yesman') crewPage.renderPage(inner);
   else if (state.view.page === 'secrets') secretsPage.render(inner);
@@ -1767,6 +1787,9 @@ function settingChanges(plan) {
     if (plan.merge[key] !== now) lines.push({ text: t('{setting}: {from} → {to}', { setting: label, from: show(now), to: show(plan.merge[key]) }) });
     else if (plan.replace[key] !== now) lines.push({ text: t('{setting}: {from} → {to}', { setting: label, from: show(now), to: show(plan.replace[key]) }), replaceOnly: true });
   }
+  const keys = plan.shortcuts ?? { merge: [], replace: [] };
+  if (keys.merge.length) lines.push({ text: tn(keys.merge.length, 'Keyboard shortcuts: 1 action changes', 'Keyboard shortcuts: {n} actions change') });
+  else if (keys.replace.length) lines.push({ text: tn(keys.replace.length, 'Keyboard shortcuts: 1 action changes', 'Keyboard shortcuts: {n} actions change'), replaceOnly: true });
   return lines;
 }
 
@@ -2321,6 +2344,7 @@ const files = createFiles({
   confirm: (title, body, ok) => confirmAction(title, body, ok),
   shown: () => info.render(),
   worktrees: (y) => info.worktrees(y),
+  keys: () => ({ 'files.find': shortcuts.primary('files.find'), 'files.tree': shortcuts.primary('files.tree') }),
 });
 
 // ---------- Info panel ----------
@@ -2510,6 +2534,73 @@ async function removeWorker(a) {
   }
 }
 
+// ---------- Shortcuts ----------
+
+// The conversations in the sidebar's order, as it shows them: each yesman's
+// lead, then the workers it lists.
+const sidebarAgents = () => [...document.querySelectorAll('#yesmen .agent-row:is([data-sidebar-entry="yesman"], [data-sidebar-entry="worker"])')]
+  .map((row) => agentById(row.dataset.agent)).filter(Boolean);
+
+// What the actions do, by the window's own functions.
+const actionHost = {
+  t,
+  selectedAgent,
+  yesmanOf: (a) => (a ? yesmanOf(a.id) : null),
+  label: yesmanLabel,
+  entries: sidebarAgents,
+  leads: () => state.snap.yesmen.map((y) => agentById(`${y.name}/lead`)).filter(Boolean),
+  needsYou: () => state.snap.agents.find((a) => a.role === 'lead' && a.status === 'waiting') ?? null,
+  step(by) {
+    const list = sidebarAgents();
+    const at = list.findIndex((a) => a.id === state.view.id);
+    const next = at < 0 ? list[by > 0 ? 0 : list.length - 1] : list[(at + by + list.length) % list.length];
+    if (next) selectAgent(next.id);
+  },
+  selectAgent,
+  composer: () => (state.view.kind === 'agent' ? $('#dock textarea') : null),
+  abort: (a) => call('Abort', a.id),
+  sleep: (a) => call('Stop', a.id),
+  dialogOpen: () => !!document.querySelector('dialog[open]'),
+  showSettings: (page) => showSettings(page ?? state.settingsPage),
+  settingsPages: () => SETTINGS,
+  openHire,
+  togglePane,
+  togglePanel,
+  files: () => files,
+  openCheckout,
+  renameYesman,
+  removeWorker,
+  dismiss,
+  addRepos() {
+    showSettings('repositories');
+    openAddRepos();
+  },
+  fetchAll: () => call('FetchAll'),
+  palette: () => palette,
+};
+registerActions(shortcuts, actionHost);
+
+const palette = createPalette({ shortcuts, items: () => paletteItems(actionHost), fail });
+
+// Settings › Shortcuts, in shortcuts-page.js.
+const shortcutsPage = createShortcutsPage({
+  shortcuts,
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  shown: () => state.view.kind === 'settings' && state.view.page === 'shortcuts',
+  rerender: () => renderBody(),
+  settingsSection,
+});
+
+// Controls that show their action's keys show the keys chosen now.
+let started = false;
+shortcuts.onChange(() => {
+  if (!started) return;
+  renderSidebar();
+  renderBarActions();
+  if (state.view.kind === 'settings' && state.view.page === 'shortcuts') shortcutsPage.renderList();
+  else if (state.view.kind === 'agent') renderDock();
+});
+
 // ---------- State ----------
 
 let refreshTimer = null;
@@ -2534,6 +2625,7 @@ async function refreshState() {
   }
   const sidebarFocus = $('#yesmen').contains(document.activeElement) ? document.activeElement : null;
   render();
+  palette.refresh();
   // The rebuilt composer can take initial focus during a full state refresh.
   // Preserve the sidebar's stable agent + semantic entry after that rebuild.
   restoreSidebarFocus(sidebarFocus);
@@ -2545,6 +2637,7 @@ function onAgents(agents) {
   state.snap.agents = agents;
   pruneCaches();
   renderSidebar();
+  palette.refresh();
   // The board links a task's owner while it is one of the agents.
   if (state.pane === 'board' && agents.map((a) => a.id).join() !== ids) board.render();
   piPage.onAgents();
@@ -2580,6 +2673,7 @@ function onLocale(tag) {
   translatePage();
   buildSideFoot();
   if (!$('#repo-dialog').open) buildRepoDialog();
+  palette.relocalize();
   render();
 }
 
@@ -2592,6 +2686,7 @@ async function start() {
   }
   buildSideFoot();
   buildRepoDialog();
+  started = true;
   mygo.on('mygo:locale', (e) => onLocale(e.locale));
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href]');
@@ -2614,6 +2709,9 @@ async function start() {
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
   mygo.on('board', (yesman) => board.onChange(yesman));
   document.addEventListener('keydown', (e) => files.onKey(e));
+  // After the files pane's ⌘S, which keeps its key.
+  shortcuts.listen();
+  shortcuts.load().catch(fail);
   call('Update').then(onUpdate, () => {});
   mygo.on('focus-agent', (id) => {
     call('TakeFocus').catch(() => {});

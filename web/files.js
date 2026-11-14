@@ -83,6 +83,7 @@ function dragHandle(el, { widthAt, current, apply, reset }) {
 //   checkout(y), dismiss(name)
 //   confirm(title, body, ok)  asks before something is lost
 //   shown()                   after the pane draws, or what it shows changes
+//   keys()                    the shortcuts its menu's items show, by action
 export function createFiles(host) {
   const panes = new Map(); // yesman name and part shown -> that pane's state
   const scopes = new Map(); // yesman name -> the part of its workspace shown
@@ -873,7 +874,7 @@ export function createFiles(host) {
   async function more(e, p) {
     const r = e.currentTarget.getBoundingClientRect();
     try {
-      const action = await host.call('FilesMenu', Math.round(r.left), Math.round(r.bottom + 4), prefs.tree, prefs.wrap, prefs.autoSave, p.expanded.size > 0);
+      const action = await host.call('FilesMenu', Math.round(r.left), Math.round(r.bottom + 4), prefs.tree, prefs.wrap, prefs.autoSave, p.expanded.size > 0, host.keys?.() ?? {});
       const y = host.yesman();
       switch (action) {
         case 'find': focusFind(); break;
@@ -1183,25 +1184,16 @@ export function createFiles(host) {
     input?.select();
   }
 
-  // onKey takes the page's shortcuts for the pane, and reports whether it
-  // used the key.
+  // onKey saves the file shown with ⌘S or Ctrl+S, a key of its own, and
+  // reports whether it used the key. Going to a file and showing the tree
+  // are actions with keys of their own in Settings › Shortcuts (actions.js).
   function onKey(e) {
     const mod = e.metaKey || e.ctrlKey;
-    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's' && !e.defaultPrevented) {
+    if (mod && !e.shiftKey && !e.altKey && e.key?.toLowerCase() === 's' && !e.defaultPrevented) {
       const p = current();
       if (!p?.active) return false;
       e.preventDefault();
       save(p, p.active);
-      return true;
-    }
-    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
-      e.preventDefault();
-      focusFind();
-      return true;
-    }
-    if (mod && e.shiftKey && e.key.toLowerCase() === 'y' && current()) {
-      e.preventDefault();
-      toggleTree();
       return true;
     }
     return false;
@@ -1213,5 +1205,5 @@ export function createFiles(host) {
     return t('The workspace is empty. Agents check repositories out into it.');
   }
 
-  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, shown, onChange, onKey };
+  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, shown, onChange, onKey, focusFind, toggleTree, current: () => !!current() };
 }
