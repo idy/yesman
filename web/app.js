@@ -1169,9 +1169,15 @@ const backToNeedsYou = (key) => h('button', { class: 'mds-button mds-button--sub
 // folded work log of its conversation, when the loaded history has it.
 async function showToolCall(a, id) {
   const c = convo(a);
+  const find = () => project(c, a).find((r) => r.type === 'work' && r.items.some((item) => item.type === 'tool' && item.block?.id === id));
   if (c.loading) await c.loading.catch(() => {});
+  // A window can hold an older copy of the history: read it again once.
+  if (!find() && !c.loading) {
+    c.loading = loadConvo(c).finally(() => { c.loading = null; });
+    await c.loading;
+  }
   if (selectedAgent()?.id !== a.id) return;
-  const row = project(c, a).find((r) => r.type === 'work' && r.items.some((item) => item.type === 'tool' && item.block?.id === id));
+  const row = find();
   const rowEl = row && $(`#thread [data-row="${CSS.escape(row.key)}"]`);
   if (!rowEl) {
     toast(t('Where it was asked is not in the loaded conversation.'));
@@ -1471,6 +1477,10 @@ function renderDock({ focusComposer = false } = {}) {
   const caret = focused ? [keep.selectionStart, keep.selectionEnd, keep.selectionDirection] : null;
   const control = dock?.contains(document.activeElement) && document.activeElement.getAttribute('role') === 'combobox'
     ? document.activeElement.getAttribute('aria-label') : null;
+  // A request being handled keeps its focus and typed answer across redraws.
+  const held = dock?.contains(document.activeElement) ? document.activeElement.closest('[data-request]') : null;
+  const heldControls = held ? [...held.querySelectorAll('button, input, textarea')] : [];
+  const heldAt = held ? { key: held.dataset.request, index: heldControls.indexOf(document.activeElement), value: held.querySelector('input, textarea')?.value } : null;
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
   if (!dock || !a) return;
@@ -1573,6 +1583,12 @@ function renderDock({ focusComposer = false } = {}) {
   else if (focusComposer || focused || actionFocused || !keep) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
+  }
+  if (heldAt) {
+    const again = dock.querySelector(`[data-request="${CSS.escape(heldAt.key)}"]`);
+    const field = again?.querySelector('input, textarea');
+    if (field && heldAt.value !== undefined) field.value = heldAt.value;
+    again?.querySelectorAll('button, input, textarea')[heldAt.index]?.focus({ preventScroll: true });
   }
   locateRequest(dock, a);
 }

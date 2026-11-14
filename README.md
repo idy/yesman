@@ -50,6 +50,14 @@ New workspaces start with a Knowledge index explaining what belongs there and an
 
 Only a lead turns to you. A question a worker's tools ask (an extension dialog) goes to its lead as a message, which answers it with `yesman_worker_answer`; the worker shows as asking its yesman, and you can still answer it from its conversation. A worker's failure goes to the lead too. When the lead ends a run with board tasks still to do or in progress and no worker running, yesman reminds it of them once, until you or a worker write to it again. You are notified when a lead asks you something, fails, or finishes with its whole yesman settled.
 
+**Needs you**, at the top of the sidebar, gathers what waits on you across every yesman, with its count. It lists only structured requests, never anything guessed from what someone wrote, a board status or how a run ended:
+
+- a lead's own question (an extension dialog: yes or no, a choice, or text);
+- a worker's question its lead handed to you with `yesman_needs_you` `handOver`, because only you can answer it. Its other questions stay with the lead;
+- a handoff the lead registered with `yesman_needs_you` `add`: a decision, information, logging in, installing, or another step only you can take, linked to its board task. Handoffs are kept in `.yesman/needs-you.json`.
+
+Each request says what to do, where it is from, what kind it is and how long it has waited. Opening one selects its agent's conversation (a worker for a handed-over question, else the lead) and focuses the request there, keeping unsent drafts; a handoff can also find the lead's tool call that registered it in the folded work log, and **Back to Needs you** returns to it. A dialog leaves the list when it is answered, cancelled, stopped, removed, or when its timeout passes and pi answers it itself (a late answer is refused). You close a handoff with **Mark done** or **Not needed**; its lead hears which as a yesman notice, and **Mark done** on logging in, installing or a manual step is your own confirmation, which the lead checks before relying on it. The lead can resolve a handoff itself. Closed handoffs stay briefly as history and never count. Handoffs move into the archive with their yesman, and a new yesman with the same name starts without them; a window opened before cannot close the new one's. Requests never carry passwords, keys or codes: the lead points you to Settings › Secrets. The lead's context lists only how many requests wait, with their titles; `yesman_needs_you` lists them in short or reads one in full.
+
 The sidebar lists each yesman's lead with its workers under it. Active workers come first, followed by finished, stopped or failed workers; each set keeps the order they started. Right-click a yesman and choose **Rename…** to change its displayed name, including to a name with spaces or Chinese characters. The label is saved in `.yesman/yesman.json`; its original workspace name, directory and agent IDs stay the same, so its running agents, conversations and tools keep working. Displayed names do not have to be unique.
 
 Each worker has one line with its status, a number such as a1, and the subject of its work in words, its title or else its board task's title, never the commands it runs. The board uses the same numbers, and hovering a worker shows its name. A working agent shows how long its run has gone on. A done worker stays listed, greyed; right-click the yesman to hide or show its done workers. What an agent is doing now, taken from its run's events, shows at the foot of its conversation while it works, and the lead sees it in its context.
@@ -185,6 +193,8 @@ Submission receipts retain metadata only: a 512-byte text preview, image count, 
 
 With Playwright and its Chromium/WebKit browsers installed, `node scripts/check-delivery-browser.mjs` and `node scripts/check-conversation-browser.mjs` check the production page against a controlled bridge: receipts, and how a conversation folds its work, streams, steers, reloads and reads in Chinese, dark and narrow windows. If Playwright is installed elsewhere, set `YESMAN_TEST_PLAYWRIGHT_MODULE` to its absolute `index.mjs` path.
 
+`YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs node scripts/check-needs-you-browser.mjs` checks Needs you on the production page in Chromium and WebKit, against the actual Go service, Store, agent manager and lead API, with scripted pi processes in a temporary data directory: what is listed and counted, jumping to a request with focus and drafts kept, answering, closing, expiry, archive and rehire, removal, reload, Chinese, dark and narrow.
+
 The optional browser checks for creation and renaming use the full production page in Chromium and WebKit. Install Playwright and its browsers outside the repository, then run `YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs node scripts/hire-browser.mjs` or `node scripts/rename-browser.mjs` with the same environment variable. Creation uses the actual Go service and a temporary data directory behind a controlled bridge; neither check touches your workspaces or settings.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) vets, builds and tests on Linux, macOS and Windows for every pull request and every push to `main`. It does not start the app's window or real pi agents.
@@ -232,6 +242,7 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | `files.go`, `files_menu.go` | Listing, reading, finding and watching a workspace's files, and the files pane's menus |
 | `web/files.js`, `web/editor.js`, `web/code.js` | The files pane, its editor, and the language of each file |
 | `web/board.js` | The board pane |
+| `needsyou.go`, `internal/yesmen/needsyou.go`, `internal/server/needsyou.go`, `internal/agent/needsyou.go`, `web/needsyou.js` | Needs you: handoffs, handed-over questions, the lead's tool and the page |
 | `info.go`, `web/info.js` | The info panel: Knowledge, task log, worktrees with their changes and pull requests, and storage |
 | `internal/pool/changes.go`, `web/diff.js` | A worktree's changes against its base, listed a folder at a time, and each file's diff |
 | `i18n.go`, `web/i18n.js`, `web/locales/` | The languages yesman is written in, and their translations |

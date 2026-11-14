@@ -74,10 +74,11 @@ type app struct {
 	// counts everything under Needs you.
 	working, waiting int
 	handoffs         map[string]int    // open handoffs per yesman
-	handed           map[string]string // the dialog each worker's lead handed over
-	// notifier, when set, receives notifications in place of the system,
-	// in tests.
-	notifier func(id, title, body string)
+	handed           map[string]string // the handed-over dialog each worker was announced for
+	// notifier and keepAwake, when set, stand in for the system's
+	// notifications and power management, in tests.
+	notifier  func(id, title, body string)
+	keepAwake func(reason string) func()
 
 	fmu          sync.Mutex
 	pendingFocus string // the agent a notification click asked to show
@@ -243,14 +244,13 @@ func (a *app) agentsChanged(list []agent.Info) {
 			waiting++
 		}
 		// A worker's question reaches the user only when its lead hands it
-		// over; tell them once per question.
-		if handed := handedOverDialog(i); handed != a.handed[i.ID] {
-			if handed != "" {
-				notes = append(notes, note{i.ID, tr("%s needs you", a.yesmanLabel(i.Yesman)), tr("A worker's question was handed to you.")})
-				a.handed[i.ID] = handed
-			} else {
-				delete(a.handed, i.ID)
-			}
+		// over: tell them once per question, which keeps its ID until it is
+		// answered or replaced, even if an older list is seen meanwhile.
+		if handed := handedOverDialog(i); handed != "" && handed != a.handed[i.ID] {
+			notes = append(notes, note{i.ID, tr("%s needs you", a.yesmanLabel(i.Yesman)), tr("A worker's question was handed to you.")})
+			a.handed[i.ID] = handed
+		} else if a.handed[i.ID] != "" && dialogRequest(i) != a.handed[i.ID] {
+			delete(a.handed, i.ID)
 		}
 		if !lead || prev == i.Status || prev == "" && i.Status != agent.Waiting {
 			continue
@@ -263,7 +263,11 @@ func (a *app) agentsChanged(list []agent.Info) {
 		}
 	}
 	if working > 0 && a.release == nil {
-		a.release = mygo.Power.KeepRunning("yesman agents are working")
+		keep := a.keepAwake
+		if keep == nil {
+			keep = mygo.Power.KeepRunning
+		}
+		a.release = keep("yesman agents are working")
 	} else if working == 0 && a.release != nil {
 		a.release()
 		a.release = nil
@@ -299,6 +303,11 @@ func handedOverDialog(i agent.Info) string {
 	if !i.HandedOver {
 		return ""
 	}
+	return dialogRequest(i)
+}
+
+// dialogRequest is the request ID of the dialog an agent waits on, or "".
+func dialogRequest(i agent.Info) string {
 	var d struct {
 		ID string `json:"id"`
 	}
