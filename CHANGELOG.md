@@ -2,6 +2,10 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.23
+
+- Align the Model and Effort labels and dropdowns in Add a model. Keep long options within the form and stack the fields in narrow windows.
+
 ## 0.1.22
 
 - Move the attachment button to the left of the message field. Keep one action on the right: Send while idle, or Stop during a run. Enter still sends a message during a run, and Shift+Enter adds a new line.
