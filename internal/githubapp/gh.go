@@ -114,7 +114,7 @@ func ghEnvironment(dir, token string) []string {
 			env = append(env, name+"="+value)
 		}
 	}
-	return append(env, "HOME="+dir, "USERPROFILE="+dir, "XDG_CONFIG_HOME="+dir, "GH_CONFIG_DIR="+dir, "GH_HOST=github.com", "GH_TOKEN="+token, "GH_PROMPT_DISABLED=1", "GH_TELEMETRY=0", "GH_NO_UPDATE_NOTIFIER=1", "GH_NO_EXTENSION_UPDATE_NOTIFIER=1", "NO_COLOR=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
+	return append(env, "HOME="+dir, "USERPROFILE="+dir, "APPDATA="+dir, "LOCALAPPDATA="+dir, "XDG_CONFIG_HOME="+dir, "XDG_CACHE_HOME="+dir, "GH_CONFIG_DIR="+dir, "GH_HOST=github.com", "GH_TOKEN="+token, "GH_PROMPT_DISABLED=1", "GH_TELEMETRY=0", "GH_NO_UPDATE_NOTIFIER=1", "GH_NO_EXTENSION_UPDATE_NOTIFIER=1", "NO_COLOR=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0")
 }
 
 // CreateWithGH runs the installed, app-resolved gh with an installation token in
