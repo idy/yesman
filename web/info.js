@@ -20,7 +20,7 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   yesman()               the yesman whose agent is shown, or null
 //   isOpen()               whether the panel shows
 //   files()                what the files pane shows (files.shown())
-//   openKnowledge(), openWorktree(dir, show), checkout(y)
+//   openKnowledge(), openTaskLog(), openWorktree(dir, show), checkout(y)
 //   openURL(url)
 export function createInfo(host) {
   const data = new Map(); // yesman name -> what was read of it
@@ -115,6 +115,7 @@ export function createInfo(host) {
     const top = aside.scrollTop;
     aside.replaceChildren(
       knowledge(y, d),
+      taskLog(y),
       storage(y, d),
       worktrees(y, d));
     aside.scrollTop = top;
@@ -144,6 +145,16 @@ export function createInfo(host) {
       h('span', { class: 'info-link-label' }, t('Knowledge')),
       icon('chevron', 'mds-icon info-chevron'),
       h('span', { class: 'info-aside' }, aside)));
+  }
+
+  function taskLog(y) {
+    const shown = host.files();
+    const current = shown?.yesman === y.name && shown.path === '.yesman/task-log.md';
+    return h('section', { class: 'info-section info-section--link' },
+      h('button', { class: 'info-link', type: 'button', 'aria-current': current ? 'page' : null, onclick: () => host.openTaskLog(),
+        title: t('Read task and PR history in the files pane') },
+      h('span', { class: 'info-link-label' }, t('Task log')),
+      icon('chevron', 'mds-icon info-chevron')));
   }
 
   // ---------- Worktrees ----------

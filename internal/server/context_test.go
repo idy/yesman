@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,6 +62,64 @@ func TestContextBoardAndRoles(t *testing.T) {
 	empty := BuildContext(ctx, p, m, y, agent.Info{ID: "alice/lead", Name: "lead", Role: agent.RoleLead}, yesmen.Board{})
 	if !strings.Contains(empty, "The board is empty.") {
 		t.Errorf("empty board:\n%s", empty)
+	}
+}
+
+func TestContextSharedDocumentsAreReadOnDemand(t *testing.T) {
+	tmp := t.TempDir()
+	store := yesmen.New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
+	y, err := store.Hire("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := "# Knowledge\n- [Icon policy](icons.md) — when adding icons\n"
+	for path, text := range map[string]string{
+		filepath.Join(y.KnowledgeDir(), "INDEX.md"): index,
+		filepath.Join(y.KnowledgeDir(), "icons.md"): "NOTE_BODY_SENTINEL: use local fonts",
+		y.TaskLogPath(): strings.Repeat("LOG_BODY_SENTINEL: old PR/CI/release history\n", 10000),
+	} {
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := pool.New(filepath.Join(tmp, "repos"))
+	m := agent.New(agent.Config{Yesmen: store})
+	defer m.StopAll()
+	for _, role := range []string{agent.RoleLead, agent.RoleWorker} {
+		t.Run(role, func(t *testing.T) {
+			text := BuildContext(context.Background(), p, m, y, agent.Info{ID: "alice/" + role, Name: role, Role: role}, yesmen.Board{})
+			for _, want := range []string{
+				".yesman/knowledge/", ".yesman/task-log.md", "Icon policy",
+				"Phosphor icon helper and local font assets", "head abc123 passed CI",
+				"Finishing a task alone is not a reason to add Knowledge",
+				"historical facts, not current instructions", "Read relevant entries on demand",
+				"release timelines", "temporary blockers", "Use the board for current status",
+			} {
+				if !strings.Contains(text, want) {
+					t.Errorf("%s context lacks %q", role, want)
+				}
+			}
+			for _, unwanted := range []string{"LOG_BODY_SENTINEL", "NOTE_BODY_SENTINEL", "the only files you may write are knowledge notes"} {
+				if strings.Contains(text, unwanted) {
+					t.Errorf("%s context contains %q", role, unwanted)
+				}
+			}
+			if len(text) > 20000 {
+				t.Fatalf("history inflated context: %d bytes", len(text))
+			}
+			if role == agent.RoleLead {
+				for _, want := range []string{"only files you may write are Knowledge notes", "coordinate and append task-log entries from worker reports", "never do the work yourself", "does not permit doing code work yourself"} {
+					if !strings.Contains(text, want) {
+						t.Errorf("lead context lacks %q", want)
+					}
+				}
+			} else if !strings.Contains(text, "Report task results, PR/commit links") || !strings.Contains(text, "do not rewrite the shared task log") || !strings.Contains(text, "Report reusable discoveries to your lead") {
+				t.Error("worker has incorrect document responsibilities")
+			}
+		})
+	}
+	if got, err := os.ReadFile(filepath.Join(y.KnowledgeDir(), "INDEX.md")); err != nil || string(got) != index {
+		t.Fatalf("context changed existing index: %q, %v", got, err)
 	}
 }
 

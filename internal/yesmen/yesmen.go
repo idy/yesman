@@ -8,7 +8,8 @@
 //	    yesman.json        when it was hired, and the model its lead starts as
 //	    workers.json       the workers its lead started
 //	    board.json         the task board its agents keep
-//	    knowledge/         notes every agent reads and writes; INDEX.md lists them
+//	    knowledge/         durable guidance shared by every agent; INDEX.md lists it
+//	    task-log.md        task and PR history, maintained by the lead
 //	    sessions/<agent>/  each agent's pi session log
 //	  <repo>--<topic>/     worktrees
 package yesmen
@@ -57,6 +58,9 @@ func (y Yesman) MetaDir() string { return filepath.Join(y.Path, ".yesman") }
 
 // KnowledgeDir holds the notes all of the yesman's agents share.
 func (y Yesman) KnowledgeDir() string { return filepath.Join(y.MetaDir(), "knowledge") }
+
+// TaskLogPath holds the task and PR history, read by agents on demand.
+func (y Yesman) TaskLogPath() string { return filepath.Join(y.MetaDir(), "task-log.md") }
 
 // SessionDir holds one agent's pi sessions.
 func (y Yesman) SessionDir(agent string) string {
@@ -148,9 +152,71 @@ func (s *Store) Use(name string, fn func(Yesman) error) error {
 
 const indexTemplate = `# Knowledge
 
-Notes shared by every agent of this yesman. One note per file in this
-directory; list each here as ` + "`- [Title](file.md) — when it matters`" + `.
+Durable guidance shared by every agent of this yesman: reusable development
+conventions, user preferences, architecture decisions and known pitfalls.
+One note per file; list each here as ` + "`- [Title](file.md) — when it matters`" + `.
+Update an existing note rather than duplicating it. Finishing a task alone
+is not a reason to add a note.
+
+Good notes: "Use the project's Phosphor icon helper and local font assets";
+"Keep stable internal IDs when display names change."
+Task and PR history, commit/head hashes, CI and validation results, release
+timelines and temporary blockers belong in the task log or board, not here.
+The task log is separate from this index at ` + "`.yesman/task-log.md`" + `.
 `
+
+const taskLogTemplate = `# Task log
+
+Entries are appended below; a new workspace starts without task history.
+
+The lead appends dated entries here from worker reports; workers keep their
+board tasks current and report results to the lead instead of rewriting this
+shared file. Record historical facts, not current instructions. Consult the
+board for current status and Knowledge for reusable rules. Keep secrets out.
+
+Entry template (copy for each task; omit fields that do not apply):
+
+` + "```markdown" + `
+## YYYY-MM-DD — Task title (board ID)
+
+- Task: goal and relevant task/issue links.
+- Changes: what changed and why.
+- PR: repository, branch, PR link and commit/head, when applicable.
+- Validation: checks run and their results.
+- Outcome: result, including release date/version when applicable.
+- Follow-up: remaining work or blockers at the time, or none.
+` + "```" + `
+`
+
+// ensureTaskLog creates only a missing log. Exclusive creation also leaves
+// user-owned files, directories and symbolic links at this path untouched.
+func ensureTaskLog(y Yesman) error {
+	f, err := os.OpenFile(y.TaskLogPath(), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(taskLogTemplate)
+	return errors.Join(err, f.Close())
+}
+
+// EnsureTaskLogs adds the task log to existing workspaces on app startup.
+// It never rewrites Knowledge or other metadata, and repeated calls are safe.
+func (s *Store) EnsureTaskLogs() error {
+	ys, err := s.List()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, y := range ys {
+		if err := s.Use(y.Name, ensureTaskLog); err != nil {
+			errs = append(errs, fmt.Errorf("%s task log: %w", y.Name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
 
 // Hire creates a yesman's workspace.
 func (s *Store) Hire(name string) (Yesman, error) { return s.HireAs(name, "") }
@@ -172,6 +238,9 @@ func (s *Store) HireAs(name, model string) (Yesman, error) {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(y.KnowledgeDir(), "INDEX.md"), []byte(indexTemplate), 0o644); err != nil {
+		return Yesman{}, err
+	}
+	if err := ensureTaskLog(y); err != nil {
 		return Yesman{}, err
 	}
 	meta := map[string]any{"hiredAt": y.HiredAt}
