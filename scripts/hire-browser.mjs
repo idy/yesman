@@ -87,7 +87,7 @@ try {
               case 'Update': return { enabled: false };
               case 'Messages': return { messages: [] };
               case 'Models': return { models: [], agent: fixtureState.agents.find((a) => a.id === args[0]) };
-              case 'Crew': return { members: [{ key: 'synthetic/model', name: 'Synthetic model' }], yesman: 'synthetic/model', models: [] };
+              case 'Crew': return { members: [{ key: 'magpie/auto/claude-opus-5-5:xhigh', modelName: 'Claude Opus 5.5', model: 'auto/claude-opus-5-5', effort: 'xhigh' }], yesman: 'magpie/auto/claude-opus-5-5:xhigh', models: [] };
               case 'Info': return { knowledge: [], worktrees: [] };
               case 'Board': return { tasks: [] };
               case 'WatchFiles': return;

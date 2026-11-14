@@ -170,13 +170,13 @@ func TestHireNamedValidationAndFailureLeaveNoPartialWorkspace(t *testing.T) {
 	if _, err := os.Stat(s.root); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalid input touched disk: %v", err)
 	}
-	// Model a failed final publication after the exclusive reservation. A file
-	// at .yesman blocks rename on every OS, even when tests run as root.
+	// Model a failed final publication after the exclusive reservation. A
+	// nonempty directory blocks replacement on every OS, including Windows.
 	y := Yesman{Name: "gizmoth", DisplayName: "GizMoth", Path: filepath.Join(s.root, "gizmoth")}
-	if err := os.MkdirAll(y.Path, 0o755); err != nil {
+	if err := os.MkdirAll(y.MetaDir(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(y.MetaDir(), []byte("block publication"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(y.MetaDir(), "block"), []byte("block publication"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := initializeHire(y); err == nil {
