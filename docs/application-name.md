@@ -11,7 +11,7 @@ archive names, data directories, and existing workspace display names stay intac
 | Main executable | `yesman.app/Contents/MacOS/Yes Man` | `Yes Man.exe` | `Yes Man` |
 | Native application name | localized bundle name `Yes Man` | PE ProductName/FileDescription `Yes Man` | desktop Name and window title `Yes Man` |
 | Stable installation | `yesman.app` at the existing location | existing registry InstallLocation; new installs still `Programs/yesman` | `~/.local/yesman.app` or package manager's `/opt/yesman` |
-| Legacy entry | `Contents/MacOS/yesman` symlink to main | tiny `yesman.exe` launcher; starts main and exits | tiny `yesman` launcher; exec replaces it with main |
+| Legacy entry | `Contents/MacOS/yesman` symlink to main | tiny `yesman.exe` entry: GUI handoff or synchronous CLI | tiny `yesman` launcher; exec replaces it with main |
 | Page profile | same bundle ID / MyGo `yesman` paths | same `%LOCALAPPDATA%/yesman/WebView2` | same GLib `yesman` program ID and WebKitGTK profile |
 
 On macOS, the unlocalized CFBundleName/CFBundleDisplayName remain `yesman`, matching
@@ -22,6 +22,15 @@ image. This follows Apple's [bundle naming rules](https://developer.apple.com/li
 The hosted check records both NSRunningApplication.localizedName and
 FileManager.displayName, alongside the kernel's `proc_name` and executable path.
 It does not infer kernel process naming from the plist or a screenshot.
+
+Windows calls with inherited console, pipe, or disk standard handles preserve
+those streams and wait for the main process, returning its exact exit code.
+When a GUI-subsystem terminal invocation has no handles, the entry can attach to
+an existing parent console with the public AttachConsole API; it never allocates
+a new console. Explorer/shortcut launches and MyGo's restart helper have no
+console and use absent/NUL streams: they start main and release the forwarding
+process. Callers redirecting diagnostics are CLI callers even if the main app
+opens a window. No special application/test flag selects this behavior.
 
 Windows' [ProcessName](https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.process.processname)
 comes from the executable; PE descriptions are separate fields. The main image

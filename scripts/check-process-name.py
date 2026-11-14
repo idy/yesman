@@ -207,7 +207,12 @@ window.addEventListener('DOMContentLoaded', async () => {
                 with (evidence / (phase + '.log')).open('w') as log:
                     entry = executable
                     if phase == 'legacy-cli': entry = executable.with_name('yesman.exe' if sys.platform == 'win32' else 'yesman')
-                    process = subprocess.Popen([str(entry)], cwd=temp, env=env, stdout=log, stderr=subprocess.STDOUT)
+                    legacy_gui = sys.platform == 'win32' and phase == 'legacy-cli'
+                    process = subprocess.Popen([str(entry)], cwd=temp, env=env,
+                        stdin=subprocess.DEVNULL if legacy_gui else None,
+                        stdout=subprocess.DEVNULL if legacy_gui else log,
+                        stderr=subprocess.DEVNULL if legacy_gui else subprocess.STDOUT,
+                        creationflags=subprocess.DETACHED_PROCESS if legacy_gui else 0)
                     if phase == 'legacy-cli' and sys.platform == 'win32':
                         assert process.wait(timeout=20) == 0, 'Compatibility launcher failed'
                         deadline = time.monotonic() + 30
@@ -240,7 +245,12 @@ window.addEventListener('DOMContentLoaded', async () => {
                         # A second launch through the legacy entry must forward
                         # to this PID under the same stable single-instance key.
                         legacy = executable.with_name('yesman.exe' if sys.platform == 'win32' else 'yesman')
-                        second = subprocess.Popen([str(legacy)], cwd=temp, env=env, stdout=log, stderr=subprocess.STDOUT)
+                        gui = sys.platform == 'win32'
+                        second = subprocess.Popen([str(legacy)], cwd=temp, env=env,
+                            stdin=subprocess.DEVNULL if gui else None,
+                            stdout=subprocess.DEVNULL if gui else log,
+                            stderr=subprocess.DEVNULL if gui else subprocess.STDOUT,
+                            creationflags=subprocess.DETACHED_PROCESS if gui else 0)
                         assert second.wait(timeout=20) == 0
                         assert process.poll() is None, 'Second launch replaced the running instance'
                         if sys.platform == 'win32':
@@ -272,7 +282,7 @@ window.addEventListener('DOMContentLoaded', async () => {
                                 proof['customInstalledLabelPreserved'] = True
                             else:
                                 assert label == 'Yes Man'
-                    proof['phases'].append({'phase': phase, 'pid': process.pid, 'native': info, 'exitCode': process.returncode})
+                    proof['phases'].append({'phase': phase, 'invocation': 'detached GUI with NUL handles' if legacy_gui else 'direct main/Unix exec', 'pid': process.pid, 'native': info, 'exitCode': process.returncode})
                     process = None
             assert hashlib.sha256(executable.read_bytes()).hexdigest() == proof['binarySHA256']
             # The display name must not silently select a second empty profile.
