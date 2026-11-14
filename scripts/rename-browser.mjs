@@ -12,6 +12,8 @@ const handlers = {};
 window.calls = [];
 window.menuAction = 'rename';
 window.failRename = false;
+window.repoFixture = false;
+const sharedRepo = {name:'github.com/synthetic/shared',url:'https://github.com/synthetic/shared'};
 const agents = [
  {id:'alice/lead',name:'lead',yesman:'alice',role:'lead',status:'idle'},
  {id:'alice/worker-one',name:'worker-one',yesman:'alice',role:'worker',number:1,title:'Synthetic worker',status:'idle'}
@@ -19,8 +21,11 @@ const agents = [
 window.mygo = {locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...args)=>{
  const m=method.replace('Yesman.','');calls.push([m,...args]);
  switch(m){
- case 'State': return {home:'/synthetic',pool:'/synthetic/repos',yesmen:[{name:'alice',displayName:localStorage.getItem('synthetic.label')||'',path:'/synthetic/yesmen/alice',worktrees:[]}],agents};
- case 'Repos':case 'Clones':case 'Pulls':case 'ListFiles':return [];
+ case 'State': return {home:'/synthetic',pool:'/synthetic/repos',yesmen:[{name:'alice',displayName:localStorage.getItem('synthetic.label')||'',path:'/synthetic/yesmen/alice',worktrees:repoFixture?[{repo:sharedRepo.name,dir:'one'},{repo:sharedRepo.name,dir:'two'}]:[]},...(repoFixture?[{name:'bob',displayName:'项目 Alpha 团队',path:'/synthetic/yesmen/bob',worktrees:[{repo:sharedRepo.name,dir:'three'}]}]:[])],agents};
+ case 'Repos':return repoFixture?[sharedRepo]:[];
+ case 'Settings':return {appearance:'system',autoFetch:0};
+ case 'Fetches':return {fetching:[],errors:{}};
+ case 'Clones':case 'Pulls':case 'ListFiles':return [];
  case 'Messages':return {messages:[]};
  case 'TakeFocus':return '';
  case 'Update':return {enabled:false};
@@ -94,8 +99,25 @@ try {
    assert.equal(await lead.locator('.name').innerText(),'项目 Alpha 团队');
    await worker.click();assert.match(await page.locator('#crumbs').innerText(),/项目 Alpha 团队/);
    await page.screenshot({path:'/tmp/yesman-rename-'+engineName+'.png'});
+   // Repo users are unique by stable ID, even when two IDs share a label.
+   // Alice has two worktrees and must appear once; Bob adds a second user.
+   await page.evaluate(()=>{repoFixture=true;emitChanged();});
+   await page.waitForTimeout(250);
+   await page.locator('#settings-button').click();
+   await page.locator('#settings-nav [data-page="repositories"]').click();
+   const usage=page.locator('#repo-list .card-row-aside');
+   await usage.waitFor();
+   assert.equal(await usage.innerText(),'3 worktrees · 项目 Alpha 团队, 项目 Alpha 团队');
+   assert.equal(await usage.getAttribute('title'),'项目 Alpha 团队: one\n项目 Alpha 团队: two\n项目 Alpha 团队: three');
+   await lead.click();await lead.click({button:'right'});
+   await input.fill('新名字 Beta');await save.click();
+   await page.waitForFunction(()=>!document.querySelector('#rename-dialog').open);
+   await page.evaluate(()=>emitChanged());await page.waitForTimeout(250);
+   await page.locator('#settings-button').click();await usage.waitFor();
+   assert.equal(await usage.innerText(),'3 worktrees · 新名字 Beta, 项目 Alpha 团队');
+   assert.equal(await usage.getAttribute('title'),'新名字 Beta: one\n新名字 Beta: two\n项目 Alpha 团队: three');
    assert.deepEqual(errors,[]);
-   console.log(engineName+': rename, cancel, invalid, write failure/retry, refresh/reload, worker routing passed');
+   console.log(engineName+': rename/cancel/failure/reload/routing plus same-label repo users, single-ID dedup and rename refresh passed');
   } finally {await browser.close();}
  }
 } finally {server.close();}

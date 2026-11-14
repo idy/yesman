@@ -1622,7 +1622,8 @@ const cloneStatus = (c) => (c.state === 'queued' ? t('waiting to clone') : t('cl
 // A pool repository; clone is set while it is being added again, as an
 // agent may.
 function repoRow(r, clone) {
-  const worktrees = state.snap.yesmen.flatMap((y) => y.worktrees.filter((w) => w.repo === r.name).map((w) => ({ yesman: y.displayName || y.name, dir: w.dir || w.path })));
+  const worktrees = state.snap.yesmen.flatMap((y) => y.worktrees.filter((w) => w.repo === r.name).map((w) => ({ yesman: y.name, dir: w.dir || w.path })));
+  // Labels may be shared; deduplicate users by workspace identity first.
   const users = [...new Set(worktrees.map((w) => w.yesman))];
   const fetching = state.fetches.fetching.includes(r.name);
   const busy = fetching || !!clone;
@@ -1637,8 +1638,8 @@ function repoRow(r, clone) {
     h('div', { class: 'card-row-text' }, h('strong', { title: r.name }, name || r.name),
       h('span', { title: error || null }, meta, error ? [meta ? ' · ' : null, h('span', { class: 'danger' }, t('last fetch failed: {error}', { error }))] : null)),
     users.length
-      ? h('span', { class: 'card-row-aside', title: worktrees.map((w) => `${w.yesman}: ${w.dir}`).join('\n') },
-          `${tn(worktrees.length, '1 worktree', '{n} worktrees')} · ${users.join(', ')}`)
+      ? h('span', { class: 'card-row-aside', title: worktrees.map((w) => `${yesmanLabel(w.yesman)}: ${w.dir}`).join('\n') },
+          `${tn(worktrees.length, '1 worktree', '{n} worktrees')} · ${users.map(yesmanLabel).join(', ')}`)
       : null,
     h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Fetch {name}', { name: r.name }), 'aria-label': t('Fetch {name}', { name: r.name }), disabled: busy, onclick: () => fetchRepo(r.name) },
       busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload')));

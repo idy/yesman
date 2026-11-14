@@ -152,7 +152,7 @@ go run .
 
 ```bash
 go test ./...
-node --test scripts/images.test.mjs
+node --test scripts/*.test.mjs
 ```
 
 The optional browser checks for renaming use synthetic data with the full page in Chromium and WebKit. Install Playwright and its browsers outside the repository, then run `YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs node scripts/rename-browser.mjs`.
