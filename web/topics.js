@@ -86,7 +86,9 @@ export function createTopics(host) {
     if (!e) data.set(key, (e = { topics: null, error: null, loading: false, again: false }));
     e.loading = true;
     try {
-      e.topics = (await host.call('Topics', y.name, y.hiredAt)) ?? [];
+      const list = await host.call('Topics', y.name, y.hiredAt);
+      if (list != null && !Array.isArray(list)) throw new Error(t('Topics cannot be read now.'));
+      e.topics = list ?? [];
       e.error = null;
     } catch (err) {
       e.error = err?.message || String(err);
@@ -751,7 +753,7 @@ export function createTopics(host) {
     if (!e) { load(y); return null; }
     if (e.indexed !== e.topics) {
       e.index = new Map();
-      for (const x of e.topics ?? []) for (const send of x.sends ?? []) e.index.set(send.id, { id: x.id, title: x.title, context: send.context ?? '' });
+      for (const x of Array.isArray(e.topics) ? e.topics : []) for (const send of Array.isArray(x.sends) ? x.sends : []) e.index.set(send.id, { id: x.id, title: x.title, context: send.context ?? '' });
       e.indexed = e.topics;
     }
     return e.index.get(id) ?? null;

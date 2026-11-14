@@ -918,6 +918,8 @@ export default {
   "Knowledge note": "知识笔记",
   "Task ID, link or note": "任务 ID、链接或笔记",
   "Saved, together with a change made meanwhile.": "已保存，并合并了期间的其他修改。",
+  "Saved. What you changed while it was saving is not saved yet.": "已保存。保存期间你做的修改尚未保存。",
+  "Topics cannot be read now.": "暂时无法读取话题。",
   "Unreadable": "无法读取",
   "Nothing open": "没有未完成的",
   "The tasks of the plan and who has each, beside the conversation": "计划中的任务及各自负责人，显示在对话旁",
