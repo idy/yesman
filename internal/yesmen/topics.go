@@ -949,11 +949,9 @@ func (t *Topic) replaceItems(list *[]TopicItem, kind byte, items []TopicItem) er
 }
 
 // addSource cites src and returns its ID, or the ID of the equal source the
-// topic already cites.
+// topic already cites. Citing a source again adds nothing, so only a new,
+// distinct source counts against the limit.
 func (t *Topic) addSource(src TopicSource) (string, error) {
-	if len(t.Sources) >= maxTopicSources {
-		return "", fmt.Errorf("a topic keeps at most %d sources", maxTopicSources)
-	}
 	src, err := validSource(src)
 	if err != nil {
 		return "", err
@@ -962,6 +960,9 @@ func (t *Topic) addSource(src TopicSource) (string, error) {
 		if sameSource(have, src) {
 			return have.ID, nil // already cited
 		}
+	}
+	if len(t.Sources) >= maxTopicSources {
+		return "", fmt.Errorf("a topic keeps at most %d sources", maxTopicSources)
 	}
 	src.ID = t.nextID('s')
 	t.Sources = append(t.Sources, src)

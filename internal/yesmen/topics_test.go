@@ -3,8 +3,10 @@ package yesmen
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -631,5 +633,47 @@ func TestTopicSourcesSayWhatEachAddedSourceBecame(t *testing.T) {
 	}
 	if _, added, err := s.PatchTopicSources("alice", y.HiredAt, TopicByUser, created.ID, TopicPatch{Revision: 1, AddSources: []TopicSource{{Kind: "task", Ref: "t9"}}}); err == nil || added != nil {
 		t.Fatalf("a conflict reports no sources: %v %v", added, err)
+	}
+}
+
+// A full topic (30 sources) takes citations of sources it already has, with
+// the rest of the change, and still refuses a 31st distinct source, leaving
+// the file as it was.
+func TestTopicSourceLimitCountsDistinctSources(t *testing.T) {
+	s, y := topicStore(t)
+	link := func(i int) TopicSource {
+		return TopicSource{Kind: "link", Ref: fmt.Sprintf("https://example.com/%d", i)}
+	}
+	var full []TopicSource
+	for i := 1; i <= maxTopicSources; i++ {
+		full = append(full, link(i))
+	}
+	// Creation: 30 distinct plus repeats of them.
+	tp, added, err := s.CreateTopicSources("alice", y.HiredAt, TopicByUser, TopicInput{Title: "full", Sources: append(slices.Clone(full), link(1), TopicSource{Kind: "LINK", Ref: " https://example.com/2 "})})
+	if err != nil || len(tp.Sources) != maxTopicSources || added[maxTopicSources] != "s1" || added[maxTopicSources+1] != "s2" {
+		t.Fatalf("create full with repeats: %d %v %v", len(tp.Sources), added, err)
+	}
+	// A repeated citation with a summary: saved, no new source.
+	summary := "edited while full"
+	got, added, err := s.PatchTopicSources("alice", y.HiredAt, TopicByUser, tp.ID, TopicPatch{Revision: tp.Revision, Summary: &summary, AddSources: []TopicSource{link(1), link(1)}})
+	if err != nil || got.Summary != summary || len(got.Sources) != maxTopicSources || strings.Join(added, ",") != "s1,s1" || got.Revision != tp.Revision+1 {
+		t.Fatalf("repeat on a full topic: %+v %v %v", got.Summary, added, err)
+	}
+	// Removing one makes room for exactly one new distinct source.
+	got, added, err = s.PatchTopicSources("alice", y.HiredAt, TopicByUser, tp.ID, TopicPatch{Revision: got.Revision, RemoveSources: []string{"s3"}, AddSources: []TopicSource{link(40), link(40), link(2)}})
+	if err != nil || len(got.Sources) != maxTopicSources || strings.Join(added, ",") != "s31,s31,s2" {
+		t.Fatalf("remove then add: %d %v %v", len(got.Sources), added, err)
+	}
+	// A 31st distinct source is refused with everything else in the change.
+	before, _ := os.ReadFile(y.TopicsFile())
+	other := "not saved"
+	if _, added, err := s.PatchTopicSources("alice", y.HiredAt, TopicByUser, tp.ID, TopicPatch{Revision: got.Revision, Summary: &other, AddSources: []TopicSource{link(1), link(41)}}); err == nil || !strings.Contains(err.Error(), "at most 30") || added != nil {
+		t.Fatalf("31st distinct: %v %v", added, err)
+	}
+	if after, _ := os.ReadFile(y.TopicsFile()); string(after) != string(before) {
+		t.Fatal("a refused change rewrote the file")
+	}
+	if _, _, err := s.CreateTopicSources("alice", y.HiredAt, TopicByUser, TopicInput{Title: "over", Sources: append(slices.Clone(full), link(99))}); err == nil {
+		t.Fatal("created a topic with 31 distinct sources")
 	}
 }
