@@ -53,7 +53,7 @@ def main():
             results[name]=run(exe,env,cwd,args)
             deadline=time.monotonic()+10
             while not record.exists() and time.monotonic()<deadline:time.sleep(.05)
-            data=json.loads(record.read_text());assert data['Args']==args and data['Env']=='preserved 中文'
+            data=json.loads(record.read_text(encoding='utf-8'));assert data['Args']==args and data['Env']=='preserved 中文',(name,data)
             assert os.path.samefile(data['Cwd'],cwd)
             kernel=ctypes.WinDLL('kernel32',use_last_error=True)
             kernel.OpenProcess.restype=ctypes.c_void_p

@@ -16,6 +16,9 @@ import (
 //go:embed updater_contract.go.txt
 var updaterContract []byte
 
+//go:embed upgrade_assets.go.txt
+var upgradeAssets []byte
+
 type replacement struct{ Old, New string }
 type patch struct {
 	File         string
@@ -124,6 +127,16 @@ func run() error {
 			return err
 		}
 		cmd = exec.Command("go", "test", "github.com/egoist/mygo", "-run", "^Test(YesmanRename|Updater|SwapFiles|Relaunch)", "-count=1", "-v", "-timeout=5m")
+	}
+	if len(os.Args) == 3 && os.Args[1] == "-upgrade-assets" {
+		dir := filepath.Join(staged, "cmd", "yesman-upgrade-assets")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "main.go"), upgradeAssets, 0o600); err != nil {
+			return err
+		}
+		cmd = exec.Command("go", "run", "github.com/egoist/mygo/cmd/yesman-upgrade-assets", os.Args[2])
 	}
 	// GOFLAGS propagates the same staged module to the CLI and app build.
 	if strings.ContainsAny(modfile, "\"'\n\r") {
