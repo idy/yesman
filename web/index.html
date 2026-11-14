@@ -34,19 +34,20 @@
   </div>
 
   <dialog class="mds-dialog" id="hire-dialog">
-    <form method="dialog" id="hire-form">
+    <form id="hire-form">
       <h2 class="mds-heading" data-i18n>Hire a yesman</h2>
       <p class="dialog-hint" data-i18n>A yesman gets a workspace of its own and a lead you talk to. Name it after the project or the job.</p>
       <label class="field">
         <span data-i18n>Name</span>
         <input class="mds-input" name="name" required autocomplete="off" spellcheck="false"
-               pattern="[a-z0-9][a-z0-9\-]{0,31}" placeholder="checkout-v2">
+               placeholder="GizMoth" aria-describedby="hire-name-hint hire-error">
       </label>
-      <p class="dialog-hint" data-i18n>Lowercase letters, digits and dashes.</p>
+      <p class="dialog-hint" id="hire-name-hint" data-i18n>A display name. Uppercase letters, spaces and Chinese characters are welcome.</p>
+      <p class="dialog-hint" id="hire-error" role="alert" hidden></p>
       <p class="dialog-hint" id="hire-model-hint"></p>
       <div class="mds-dialog-actions">
-        <button class="mds-button" value="cancel" formnovalidate data-i18n>Cancel</button>
-        <button class="mds-button mds-button--primary" value="hire" data-i18n>Hire</button>
+        <button class="mds-button" type="button" id="hire-cancel" data-i18n>Cancel</button>
+        <button class="mds-button mds-button--primary" type="submit" data-i18n>Hire</button>
       </div>
     </form>
   </dialog>
