@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 20
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
-      CGO_CFLAGS: ${{ runner.os == 'macOS' && '-O2 -g -mmacosx-version-min=13.0' || '-O2 -g' }}
+      CGO_CFLAGS: ${{ matrix.os == 'macos-latest' && '-O2 -g -mmacosx-version-min=13.0' || '-O2 -g' }}
     defaults:
       run:
         shell: bash
