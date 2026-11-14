@@ -83,7 +83,7 @@ export function registerActions(shortcuts, host) {
       run: () => host.selectAgent(`${agent().yesman}/lead`),
     },
     {
-      id: 'agent.needsYou', label: 'Go to the yesman that needs you', group: 'Go to', keywords: ['waiting', 'question', 'answer'],
+      id: 'agent.needs-you', label: 'Go to the yesman that needs you', group: 'Go to', keywords: ['waiting', 'question', 'answer'],
       when: () => (host.needsYou() ? true : 'No yesman needs you now.'),
       run: () => host.selectAgent(host.needsYou().id),
     },
@@ -120,7 +120,7 @@ export function registerActions(shortcuts, host) {
       when: needAgent, run: () => host.files().openKnowledge(),
     },
     {
-      id: 'files.taskLog', label: 'Open the task log', group: 'Panels', keywords: ['history'],
+      id: 'files.task-log', label: 'Open the task log', group: 'Panels', keywords: ['history'],
       when: needAgent, run: () => host.files().openTaskLog(),
     },
 
@@ -156,7 +156,7 @@ export function registerActions(shortcuts, host) {
       run: () => host.addRepos(),
     },
     {
-      id: 'repos.fetchAll', label: 'Fetch all repositories', group: 'Settings', keywords: ['pool', 'update', 'pull'],
+      id: 'repos.fetch-all', label: 'Fetch all repositories', group: 'Settings', keywords: ['pool', 'update', 'pull'],
       run: () => host.fetchAll(),
     },
   ]);
