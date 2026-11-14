@@ -43,8 +43,16 @@ try {
         $shortcuts += @{ path=$path; target=$link.TargetPath; arguments=$link.Arguments }
     }
     @{location=$location;displayName='Yes Man';shortcuts=$shortcuts} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $Evidence 'installer.json')
+    # Archive auto-updates do not run NSIS. Recreate the old standard
+    # registration label and let the real new main process refresh it.
+    Set-ItemProperty -Path $key -Name DisplayName -Value 'yesman'
+    Set-ItemProperty -Path $key -Name DisplayIcon -Value (Join-Path $install 'yesman.exe')
+    $env:YESMAN_NATIVE_INSTALL_CONTRACT = '1'
     python scripts/check-process-name.py $install $Web $Evidence
     if ($LASTEXITCODE -ne 0) { throw 'Native process smoke failed' }
+    $updated = Get-ItemProperty -Path $key
+    if ($updated.DisplayName -ne 'Yes Man' -or $updated.DisplayIcon -ne ('"' + (Join-Path $install 'Yes Man.exe') + '"')) { throw 'Automatic-update registration kept the old name/icon' }
+    @{displayName=$updated.DisplayName;displayIcon=$updated.DisplayIcon;location=$updated.InstallLocation;passed=$true} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Evidence 'automatic-update-name.json')
     # /S and _?= keep the uninstaller in this synthetic install, so waiting
     # tracks completion rather than its temporary-copy launcher.
     $uninstall = Join-Path $install 'Uninstall.exe'
@@ -59,4 +67,5 @@ try {
     # This runner is disposable. Failures preserve logs/artifacts; never run
     # the fixture or its cleanup against a workstation installation.
     [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
+    Remove-Item Env:YESMAN_NATIVE_INSTALL_CONTRACT -ErrorAction SilentlyContinue
 }

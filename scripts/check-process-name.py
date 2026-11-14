@@ -257,6 +257,21 @@ window.addEventListener('DOMContentLoaded', async () => {
                         assert result['brand'] == result['title'] == 'Yes Man' and not result['errors'] and result['visibility'] == 'visible', result
                         (evidence / 'page.json').write_text(json.dumps(result, indent=2))
                     quit_process(process, info)
+                    if sys.platform == 'win32' and os.environ.get('YESMAN_NATIVE_INSTALL_CONTRACT') == '1':
+                        import winreg
+                        # Only the parent hosted NSIS fixture sets this marker;
+                        # the production app receives no test environment flag.
+                        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Uninstall\dev.idy.yesman', 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+                            label = winreg.QueryValueEx(key, 'DisplayName')[0]
+                            if phase == 'embedded':
+                                assert label == 'Yes Man'
+                                winreg.SetValueEx(key, 'DisplayName', 0, winreg.REG_SZ, 'Custom installation label')
+                            elif phase == 'legacy-cli':
+                                assert label == 'Custom installation label', 'App overwrote a custom registration label'
+                                winreg.SetValueEx(key, 'DisplayName', 0, winreg.REG_SZ, 'yesman')
+                                proof['customInstalledLabelPreserved'] = True
+                            else:
+                                assert label == 'Yes Man'
                     proof['phases'].append({'phase': phase, 'pid': process.pid, 'native': info, 'exitCode': process.returncode})
                     process = None
             assert hashlib.sha256(executable.read_bytes()).hexdigest() == proof['binarySHA256']

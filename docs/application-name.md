@@ -29,8 +29,12 @@ and both descriptions are changed. Existing shortcuts/pins pointing at
 `yesman.exe` remain functional and keep their existing labels after an automatic
 update. Running the new installer replaces its standard `yesman.lnk` shortcuts
 with `Yes Man.lnk`, retaining whether the user had a desktop shortcut. The stable
-uninstall registry key recognizes the original folder. User-created shortcuts
-and pins need no path migration; no second application folder is created.
+uninstall registry key recognizes the original folder. After an automatic archive
+update, the main process refreshes the old standard Apps display name and icon
+only when that stable registration points to its exact installation directory;
+portable copies, other installs and custom registry labels are preserved.
+User-created shortcuts and pins need no path migration; no second application
+folder is created.
 
 Linux's kernel comm uses the actual main image. Its desktop entry still targets
 the stable compatibility entry, quoted with an absolute path by the installer.

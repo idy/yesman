@@ -1,6 +1,10 @@
 package main
 
-import "github.com/egoist/mygo"
+import (
+	"log"
+
+	"github.com/egoist/mygo"
+)
 
 const appDisplayName = "Yes Man"
 
@@ -20,5 +24,8 @@ func setAppDisplayName() error {
 		mygo.App.SetPath(name, path)
 	}
 	mygo.App.SetName(appDisplayName)
+	if err := refreshInstalledAppName(); err != nil {
+		log.Print("installed app name: ", err)
+	}
 	return nil
 }
