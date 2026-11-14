@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/idy/yesman/internal/agent"
@@ -46,7 +47,11 @@ type Server struct {
 	Secrets   *secrets.Vault
 	Variables *secrets.Variables
 
-	url string
+	url           string
+	worktreeMu    sync.Mutex
+	worktreeLocks map[string]*sync.Mutex // serialize lifecycle operations per workspace
+	// ReadPullMerge overrides GitHub only in isolated workflow tests.
+	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
 }
 
 // Start listens on a loopback port and serves in the background.
@@ -148,7 +153,11 @@ func (s *Server) repos(ctx context.Context, c caller, _ *http.Request) (any, err
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"repos": snapshot.Repos, "worktrees": snapshot.Under(c.yesman.Path)}, nil
+	records, err := s.Yesmen.WorktreeRecords(c.yesman.Name)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"repos": snapshot.Repos, "worktrees": snapshot.Under(c.yesman.Path), "lifecycle": records}, nil
 }
 
 func (s *Server) addRepo(_ context.Context, _ caller, r *http.Request) (any, error) {
@@ -182,11 +191,13 @@ var dirRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,79}$`)
 
 // CheckoutRequest asks for a worktree in the caller's workspace.
 type CheckoutRequest struct {
-	Repo   string `json:"repo"`
-	Branch string `json:"branch,omitempty"`
-	Base   string `json:"base,omitempty"`
-	Ref    string `json:"ref,omitempty"`
-	Dir    string `json:"dir,omitempty"`
+	Repo    string `json:"repo"`
+	Branch  string `json:"branch,omitempty"`
+	Base    string `json:"base,omitempty"`
+	Ref     string `json:"ref,omitempty"`
+	Dir     string `json:"dir,omitempty"`
+	Purpose string `json:"purpose,omitempty"`
+	Task    string `json:"task,omitempty"`
 }
 
 // Checkout resolves a request's defaults and checks the worktree out.
@@ -195,21 +206,9 @@ func Checkout(ctx context.Context, p *pool.Pool, y yesmen.Yesman, req CheckoutRe
 	if err != nil {
 		return pool.Worktree{}, err
 	}
-	short := repo.Name[strings.LastIndex(repo.Name, "/")+1:]
-	dir := req.Dir
-	switch {
-	case dir != "":
-	case req.Ref != "":
-		dir = short + "@" + sanitize(req.Ref)
-	case req.Branch != "":
-		b := req.Branch
-		b = b[strings.LastIndex(b, "/")+1:]
-		dir = short + "--" + sanitize(b)
-	default:
-		dir = short
-	}
-	if !dirRE.MatchString(dir) {
-		return pool.Worktree{}, fmt.Errorf("%q is not a usable directory name", dir)
+	dir, err := checkoutDir(repo, req)
+	if err != nil {
+		return pool.Worktree{}, err
 	}
 	branch := req.Branch
 	if branch == "" && req.Ref == "" {
@@ -221,6 +220,25 @@ func Checkout(ctx context.Context, p *pool.Pool, y yesmen.Yesman, req CheckoutRe
 		Base:   req.Base,
 		Ref:    req.Ref,
 	})
+}
+
+func checkoutDir(repo pool.Repo, req CheckoutRequest) (string, error) {
+	short := repo.Name[strings.LastIndex(repo.Name, "/")+1:]
+	dir := req.Dir
+	switch {
+	case dir != "":
+	case req.Ref != "":
+		dir = short + "@" + sanitize(req.Ref)
+	case req.Branch != "":
+		b := req.Branch[strings.LastIndex(req.Branch, "/")+1:]
+		dir = short + "--" + sanitize(b)
+	default:
+		dir = short
+	}
+	if !dirRE.MatchString(dir) {
+		return "", fmt.Errorf("%q is not a usable directory name", dir)
+	}
+	return dir, nil
 }
 
 func sanitize(s string) string {
@@ -241,12 +259,15 @@ func (s *Server) checkout(_ context.Context, c caller, r *http.Request) (any, er
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
+	l := s.worktreeLock(c.yesman.Name)
+	l.Lock()
+	defer l.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	var wt pool.Worktree
 	err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
 		var err error
-		wt, err = Checkout(ctx, s.Pool, y, req)
+		wt, err = s.checkoutOwned(ctx, c, y, req)
 		return err
 	})
 	if err == nil {
@@ -256,23 +277,26 @@ func (s *Server) checkout(_ context.Context, c caller, r *http.Request) (any, er
 }
 
 func (s *Server) removeWorktree(ctx context.Context, c caller, r *http.Request) (any, error) {
-	var req struct {
-		Dir   string `json:"dir"`
-		Force bool   `json:"force"`
-	}
+	var req removeWorktreeRequest
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
 	if !dirRE.MatchString(req.Dir) {
 		return nil, fmt.Errorf("%q is not a worktree directory of this workspace", req.Dir)
 	}
+	l := s.worktreeLock(c.yesman.Name)
+	l.Lock()
+	defer l.Unlock()
+	var out cleanupResult
 	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
-		return s.Pool.RemoveWorktree(ctx, filepath.Join(y.Path, req.Dir), req.Force)
+		var err error
+		out, err = s.cleanupWorktree(ctx, c, y, req)
+		return err
 	}); err != nil {
 		return nil, err
 	}
 	s.changed()
-	return map[string]bool{"removed": true}, nil
+	return out, nil
 }
 
 func (s *Server) agents(_ context.Context, c caller, _ *http.Request) (any, error) {
@@ -574,6 +598,8 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 			w(". Add another GitHub repository with yesman_repo_add.\n")
 		}
 	}
+
+	writeWorktreeCleanupContext(&b, y, me)
 
 	rel := ".yesman/knowledge"
 	w("\n## Knowledge\n\n")

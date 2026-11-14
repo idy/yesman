@@ -300,7 +300,8 @@ export default function yesman(pi: ExtensionAPI) {
 			const r = await call("GET", "/v1/repos", undefined, signal);
 			const repos = (r.repos ?? []).map((x: any) => `- ${x.name} (${x.url}${x.upstream ? `, upstream ${x.upstream}` : ""}${x.defaultBranch ? `, default ${x.defaultBranch}` : ""})`);
 			const wts = (r.worktrees ?? []).map((w: any) => `- ${w.path}: ${w.repo}, ${w.detached ? `detached at ${w.head}` : `branch ${w.branch}`}`);
-			return result(`Pool:\n${repos.join("\n") || "(empty)"}\n\nWorktrees in this workspace:\n${wts.join("\n") || "(none)"}`, r);
+			const saved = (r.lifecycle ?? []).slice(-20).map((w: any) => `- ${w.dir}: checkout ${w.id}, owner ${w.owner}, purpose ${w.purpose}, task ${w.task ?? "none"}, HEAD ${w.completion?.head ?? w.head}, outcome ${w.completion?.outcome ?? "unfinished"}, removed=${!!w.removed}`);
+			return result(`Pool:\n${repos.join("\n") || "(empty)"}\n\nWorktrees in this workspace:\n${wts.join("\n") || "(none)"}\n\nRecent lifecycle records (full evidence: .yesman/worktrees.json):\n${saved.join("\n") || "(none)"}`, r);
 		},
 	});
 
@@ -329,11 +330,13 @@ export default function yesman(pi: ExtensionAPI) {
 			base: Type.Optional(Type.String({ description: "Start point of a new branch, such as origin/main or upstream/main" })),
 			ref: Type.Optional(Type.String({ description: "Check out this ref detached, for reading" })),
 			dir: Type.Optional(Type.String({ description: "Directory name in the workspace; default <repo>--<branch> or <repo>@<ref>" })),
+			purpose: Type.Optional(Type.String({ description: "review (read-only detached), author, release, or primary (keep); omit for work of unknown lifecycle" })),
+			task: Type.Optional(Type.String({ description: "Your open board task ID; required with review/author/release" })),
 		}),
 		async execute(_id, params, signal) {
 			const wt = await call("POST", "/v1/checkout", params, signal);
 			const where = wt.detached ? `detached at ${wt.head}` : `on branch ${wt.branch}`;
-			return result(`Checked out ${wt.repo} at ${wt.path}, ${where}.${wt.warning ? `\nWarning: ${wt.warning}` : ""}`, wt);
+			return result(`Checked out ${wt.repo} at ${wt.path}, ${where}. Cleanup ID: ${wt.cleanupId}.${wt.warning ? `\nWarning: ${wt.warning}` : ""}`, wt);
 		},
 	});
 
@@ -341,14 +344,23 @@ export default function yesman(pi: ExtensionAPI) {
 		name: "yesman_worktree_remove",
 		label: "yesman: remove worktree",
 		description:
-			"Remove a worktree from this workspace once its work is merged or abandoned. Its branch stays in the pool. Refuses when it has uncommitted changes, unless force.",
+			"Save completion evidence, then reclaim your registered, unused clean temporary worktree. Reviews can finish with an open PR; author/release branches require the exact merged PR source HEAD and a finished task. Keeps branches/refs/history, refuses unknown ownership, dirty/ignored files and active owners; never force. A lead can hand off verified cleanup without removing it. Repeat without completion to retry or use a saved handoff.",
+		executionMode: "sequential",
 		parameters: Type.Object({
-			dir: Type.String({ description: "The worktree's directory name in the workspace" }),
-			force: Type.Optional(Type.Boolean({ description: "Discard uncommitted changes" })),
+			dir: Type.String({ description: "The worktree's directory name in this workspace" }),
+			checkout: Type.String({ description: "cleanupId from this exact checkout; prevents replay against a restored/new tree at the same dir" }),
+			completion: Type.Optional(Type.Object({
+				head: Type.String({ description: "Exact full HEAD; review must match the original checkout" }),
+				outcome: Type.String({ description: "pass, findings-handed-off, waiting-release, audit-complete; or done for a finished author/release task" }),
+				ref: Type.String({ description: "Reviewed PR/ref; author/release cleanup requires the merged https://github.com/owner/repo/pull/number URL" }),
+				evidence: Type.String({ description: "Saved conclusion/handoff and evidence outside this tree (board/session/task log), including reconstruction details" }),
+				unused: Type.Boolean({ description: "True after stopping tree processes and confirming no other agent/task uses it" }),
+			})),
+			handoff: Type.Optional(Type.String({ description: "Lead only: name of the cleanup worker to delegate this verified resource to; saves permission without removal" })),
 		}),
 		async execute(_id, params, signal) {
-			await call("POST", "/v1/worktrees/remove", params, signal);
-			return result(`Removed ${params.dir}.`);
+			const out = await call("POST", "/v1/worktrees/remove", params, signal);
+			return result(out.removed ? `Removed ${params.dir}; refs and recovery evidence retained.` : `${params.dir}: ${out.reason}`, out);
 		},
 	});
 

@@ -135,6 +135,10 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 		m.mu.Unlock()
 		return Delivery{}, errStopped
 	}
+	if m.worktreeCleanup[id] {
+		m.mu.Unlock()
+		return Delivery{}, errWorktreeCleanup
+	}
 	a, err := m.workspaceAgentLocked(y, info)
 	if err != nil {
 		m.mu.Unlock()
@@ -145,6 +149,10 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 		return Delivery{}, err
 	}
 	m.mu.Lock()
+	if m.worktreeCleanup[id] {
+		m.mu.Unlock()
+		return Delivery{}, errWorktreeCleanup
+	}
 	if m.agents[id] != a || a.retiring {
 		m.mu.Unlock()
 		return Delivery{}, errors.New("the agent was replaced; reopen its conversation before sending")

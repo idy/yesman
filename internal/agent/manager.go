@@ -137,11 +137,12 @@ type Config struct {
 type Manager struct {
 	cfg Config
 
-	mu       sync.Mutex
-	agents   map[string]*agent
-	tokens   map[string]string // credential -> agent ID, while its process runs
-	closed   bool              // StopAll permanently prevents further starts; guarded by mu
-	shutdown chan struct{}     // closed by StopAll to wake pending report retries
+	mu              sync.Mutex
+	agents          map[string]*agent
+	tokens          map[string]string // credential -> agent ID, while its process runs
+	closed          bool              // StopAll permanently prevents further starts; guarded by mu
+	worktreeCleanup map[string]bool   // reservations preventing owner startup/input during final removal
+	shutdown        chan struct{}     // closed by StopAll to wake pending report retries
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
 }
@@ -379,6 +380,10 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		if m.closed {
 			m.mu.Unlock()
 			return nil, nil, errStopped
+		}
+		if m.worktreeCleanup[id] {
+			m.mu.Unlock()
+			return nil, nil, errWorktreeCleanup
 		}
 		a, err := m.workspaceAgentLocked(y, Info{ID: id, Yesman: ys, Name: name, Role: role, Status: Stopped, Since: since})
 		if err != nil {
@@ -724,6 +729,11 @@ func (m *Manager) promptDelivery(ctx context.Context, id, text, behavior, messag
 		}
 	}
 	m.mu.Lock()
+	if m.worktreeCleanup[id] {
+		m.mu.Unlock()
+		a.modelMu.Unlock()
+		return errWorktreeCleanup
+	}
 	a.prompts++
 	a.inbox++
 	m.mu.Unlock()

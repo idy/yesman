@@ -42,6 +42,8 @@ Every agent runs your installed `pi` with your usual pi configuration (models, p
 - `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`, `yesman_board`, `yesman_env`
 - for leads: `yesman_worker_start`, `yesman_worker_send`, `yesman_worker_answer`, `yesman_worker_remove`
 
+Agents register temporary checkouts with their purpose and board task. After saving completion and exact-head recovery evidence, reviewers reclaim their clean, unused detached trees; authors and release workers reclaim branch trees after the exact source PR is merged and their associated task finishes. The lead arranges a verified batch fallback for missed cleanup. Primary, active, dirty and unknown resources stay protected, while branches, refs and session history remain available. See [worktree completion and recovery](docs/worktree-cleanup.md) for the tool contract and safety boundaries.
+
 For a lead, the extension also takes away pi's `bash` and adds the read-only `grep`, `find` and `ls`, and allows `edit` and `write` only under `.yesman/knowledge/` or for the single `.yesman/task-log.md` file. The task-log exception checks the actual file and parent: linked targets or metadata directories are preserved but not writable through it. Code work still belongs to workers. Tools from your own pi configuration stay.
 
 New workspaces start with a Knowledge index explaining what belongs there and an empty task log with an entry template. On startup, existing workspaces gain a task log only when that path is missing; existing logs, notes, indexes and other metadata are preserved. No automatic rewriting or migration of old notes takes place. For the document policy and an example entry, see [workspace documents](docs/workspace-documents.md).
