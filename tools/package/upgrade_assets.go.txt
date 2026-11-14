@@ -106,5 +106,9 @@ func main() {
 		must(err)
 		must(os.WriteFile(s.Manifest, append(out, '\n'), 0600))
 	}
-	fmt.Println("PASS: verified normal production archives; signed renamed-image/multi-hop deltas; no private key in output")
+	if verifyOnly {
+		fmt.Println("PASS: verified production archives and deltas using the public key only")
+	} else {
+		fmt.Println("PASS: verified normal production archives; signed renamed-image/multi-hop deltas; no private key in output")
+	}
 }

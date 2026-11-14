@@ -32,7 +32,7 @@ def wait_image(executable):
     quoted=str(executable).replace("'","''")
     deadline=time.monotonic()+15
     while time.monotonic()<deadline:
-        ids=json.loads(subprocess.check_output(['powershell.exe','-NoProfile','-NonInteractive','-Command',"ConvertTo-Json -Compress -InputObject @((Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq '"+quoted+"'}).ProcessId)"],text=True))
+        ids=json.loads(subprocess.check_output(['powershell.exe','-NoProfile','-NonInteractive','-Command',"ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq '"+quoted+"'} | Select-Object -ExpandProperty ProcessId)"],text=True))
         if not ids:return
         time.sleep(.1)
     raise AssertionError('Old counterexample child remained alive: '+str(executable))

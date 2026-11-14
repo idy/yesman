@@ -42,7 +42,7 @@ def windows_pids(executable):
     quoted = str(executable).replace("'", "''")
     # -InputObject keeps [] and [pid] arrays intact; piping would enumerate
     # a singleton to a scalar (or produce no JSON at all for zero matches).
-    return powershell("ConvertTo-Json -Compress -InputObject @((Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq '" + quoted + "'}).ProcessId)")
+    return powershell("ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq '" + quoted + "'} | Select-Object -ExpandProperty ProcessId)")
 
 
 def windows(pid):
