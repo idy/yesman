@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.27
+
+- Show message submission and Steering or Follow-up receipt states, with an unknown state when pi's acknowledgment cannot be confirmed.
+- Reuse a stable submission ID for retries, keeping the complete text and image draft available after an interrupted or failed send.
+- Restore saved receipt states after refresh. Receipts describe submission or queue acknowledgments; pi does not confirm consumption of individual queued messages.
+
 ## 0.1.26
 
 - Keep reusable development rules, preferences and architecture guidance in Knowledge, with dated task and PR history in a separate `.yesman/task-log.md` maintained by the lead from worker reports.
