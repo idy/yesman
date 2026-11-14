@@ -53,7 +53,7 @@ func TestWorkerReportWaitsForModelConfiguration(t *testing.T) {
 	// Start the report while configuration is waiting for its idle check.
 	waitModelEvent(t, events, "test_model_check")
 	reported := make(chan error, 1)
-	go func() { reported <- m.prompt(ctx, id, "[yesman] Worker finished", "followUp") }()
+	go func() { reported <- m.prompt(ctx, id, "[yesman] Worker finished", "followUp", Origin{Source: OriginYesman, Kind: "report"}) }()
 	if err := <-configured; err != nil {
 		t.Fatal(err)
 	}

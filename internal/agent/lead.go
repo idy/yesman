@@ -47,7 +47,7 @@ func (m *Manager) askLead(a *agent, raw json.RawMessage) {
 	m.mu.Lock()
 	name := a.info.Name
 	m.mu.Unlock()
-	m.tellLead(a, describeQuestion(name, d))
+	m.tellLead(a, "question", describeQuestion(name, d))
 }
 
 func describeQuestion(worker string, d dialog) string {
@@ -266,7 +266,7 @@ func (m *Manager) remindOfBoard(lead *agent, p *proc, inbox uint64, board yesmen
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := m.sendPrompt(ctx, lead, p, b.String(), "followUp"); err != nil {
+	if err := m.sendPrompt(ctx, lead, p, b.String(), "followUp", Origin{Source: OriginYesman, Kind: "tasks"}); err != nil {
 		log.Printf("yesman: remind the lead of %s: %v", yesman, err)
 	}
 }

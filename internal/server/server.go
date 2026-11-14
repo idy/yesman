@@ -84,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/env", s.handle(s.env))
 	mux.HandleFunc("GET /v1/env/describe", s.handle(s.describeEnv))
 	mux.HandleFunc("POST /v1/workers/answer", s.handle(s.answerWorker))
+	mux.HandleFunc("POST /v1/origin", s.origin)
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
 	return mux
@@ -127,6 +128,35 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	}
+}
+
+// origin tells yesman's extension who wrote the input pi is handling: the
+// prompt in flight to that agent whose text and images have this fingerprint.
+// The extension asks before pi answers the prompt, on every input, so this
+// reads only the credential and memory, never the workspace.
+func (s *Server) origin(w http.ResponseWriter, r *http.Request) {
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		writeError(w, http.StatusUnauthorized, errors.New("no agent credential"))
+		return
+	}
+	if _, err := s.Agents.Authenticate(token); err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+	var req struct {
+		Fingerprint string `json:"fingerprint"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
+		return
+	}
+	out := map[string]any{}
+	if o, ok := s.Agents.PromptOrigin(token, req.Fingerprint); ok {
+		out["origin"] = o
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func writeError(w http.ResponseWriter, code int, err error) {
@@ -384,7 +414,7 @@ func (s *Server) sendWorker(_ context.Context, c caller, r *http.Request) (any, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := s.Agents.Prompt(ctx, id, "[from your lead] "+req.Message); err != nil {
+	if err := s.Agents.PromptFromLead(ctx, id, "[from your lead] "+req.Message); err != nil {
 		return nil, err
 	}
 	return map[string]bool{"sent": true}, nil
