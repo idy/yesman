@@ -157,13 +157,15 @@ func possibleCreate(args []string) ([]string, bool) {
 }
 
 func optionParts(arg string) (name, value string, inline bool) {
-	name, value, inline = strings.Cut(arg, "=")
 	short := map[string]string{"-R": "--repo", "-H": "--head", "-B": "--base", "-t": "--title", "-b": "--body", "-F": "--body-file", "-d": "--draft", "-h": "--help"}
-	if len(name) > 2 && !strings.HasPrefix(name, "--") {
-		if full, ok := short[name[:2]]; ok && full != "--draft" && full != "--help" {
-			return full, name[2:], true
+	if len(arg) > 2 && !strings.HasPrefix(arg, "--") {
+		if full, ok := short[arg[:2]]; ok && full != "--draft" && full != "--help" {
+			// Only a leading equals is a separator; embedded equals signs
+			// belong to the value (body/title/branch/path).
+			return full, strings.TrimPrefix(arg[2:], "="), true
 		}
 	}
+	name, value, inline = strings.Cut(arg, "=")
 	if full, ok := short[name]; ok {
 		name = full
 	}

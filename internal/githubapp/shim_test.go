@@ -37,6 +37,25 @@ func TestParseCreatePreservesBodyAndRejectsAmbiguity(t *testing.T) {
 	}
 }
 
+func TestAttachedShortValuesPreserveEquals(t *testing.T) {
+	body := "Checks=passed\nparameter=a=b\n"
+	path := filepath.Join(t.TempDir(), "body=with spaces.md")
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, bodyArgs := range [][]string{{"-b" + body}, {"-b=" + body}, {"--body=" + body}, {"-F" + path}, {"-F=" + path}} {
+		args := append([]string{"pr", "-Ridy/yesman", "create", "-Hfix/a=b", "-Bbase=x", "-tfix: Handle a=b"}, bodyArgs...)
+		in, err := ParseCreate(args, strings.NewReader(""))
+		if err != nil || in.Body != body || in.Title != "fix: Handle a=b" || in.Head != "fix/a=b" || in.Base != "base=x" {
+			t.Fatalf("attached value changed for %v: %v", bodyArgs, err)
+		}
+	}
+	in, err := ParseCreate([]string{"pr", "create", "-Ridy/yesman", "-Htest", "-Bmain", "-t=title=x", "-b==literal"}, strings.NewReader(""))
+	if err != nil || in.Title != "title=x" || in.Body != "=literal" {
+		t.Fatal("leading delimiter consumed content")
+	}
+}
+
 func fixtureGHExecutable(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
