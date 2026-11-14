@@ -55,7 +55,7 @@ func (m *Manager) ForgetYesman(name string, since time.Time) {
 		if a.info.Yesman == name && a.workspaceSince.Equal(since) && a.retiring && a.proc == nil && a.starting == nil && (a.deliveryWriter == nil || a.deliveryWriter.finished()) {
 			if a.token != "" {
 				delete(m.tokens, a.token)
-				a.token = ""
+				a.token, a.tokenProc = "", nil
 			}
 			delete(m.agents, id)
 		}
