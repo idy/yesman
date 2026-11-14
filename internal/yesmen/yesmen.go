@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -188,11 +189,26 @@ Entry template (copy for each task; omit fields that do not apply):
 ` + "```" + `
 `
 
+// taskLogPathOccupied recognizes an exclusive-create collision. Go on Windows
+// reports EISDIR for a write open of an existing directory, even with O_EXCL.
+// Verify that path without following links; permission and I/O errors must
+// still reach the caller, even when something occupies the path.
+func taskLogPathOccupied(path string, err error) bool {
+	if errors.Is(err, os.ErrExist) {
+		return true
+	}
+	if !errors.Is(err, syscall.EISDIR) {
+		return false
+	}
+	info, statErr := os.Lstat(path)
+	return statErr == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0)
+}
+
 // ensureTaskLog creates only a missing log. Exclusive creation also leaves
 // user-owned files, directories and symbolic links at this path untouched.
 func ensureTaskLog(y Yesman) error {
 	f, err := os.OpenFile(y.TaskLogPath(), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if errors.Is(err, os.ErrExist) {
+	if taskLogPathOccupied(y.TaskLogPath(), err) {
 		return nil
 	}
 	if err != nil {
