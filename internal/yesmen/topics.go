@@ -420,7 +420,7 @@ func openTopicsDir(y Yesman, create bool) (*os.Root, error) {
 }
 
 func readTopics(meta *os.Root) (*topicsFile, error) {
-	fh, err := meta.Open(topicsFileName)
+	fh, err := meta.OpenFile(topicsFileName, os.O_RDONLY|topicsOpenFlags, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return &topicsFile{Version: topicsFileVersion, Topics: []Topic{}}, nil
 	}
