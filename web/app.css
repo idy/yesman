@@ -928,7 +928,12 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 .needs-you-history ul { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
 .needs-you-history li { display: grid; gap: 2px; }
 .needs-you-history-meta { color: var(--mds-muted); font-size: var(--mds-text-caption); }
+/* Requests above the composer take at most part of the window and scroll;
+   a long detail scrolls within its request, so its actions stay near. */
+.dock-requests { display: grid; gap: 10px; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; padding: 3px; margin: -3px; }
 .ask.handoff .md { color: var(--mds-warn-detail); font-size: var(--mds-text-note); }
+.ask.handoff .handoff-detail { max-height: 12em; overflow-y: auto; overscroll-behavior: contain; }
+.ask.handoff .handoff-detail:focus-visible { outline: 2px solid var(--app-focus); outline-offset: 2px; }
 .ask.handoff .md > :first-child { margin-top: 0; }
 .ask.handoff .md > :last-child { margin-bottom: 0; }
 /* The request opened from Needs you, found where it was asked. */

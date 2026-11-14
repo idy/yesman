@@ -842,6 +842,7 @@ export default {
   "Show where it was asked": "查看提出位置",
   "This request is no longer open: it was answered, cancelled or timed out.": "这项请求已不再待处理：已被回答、取消或已超时。",
   "Back to Needs you": "返回“需要你”",
+  "Details": "详细说明",
   "Where it was asked is not in the loaded conversation.": "已加载的对话中找不到提出它的位置。",
   "{name} handed this question to you.": "{name} 把这个问题交给了你。",
 };

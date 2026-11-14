@@ -712,10 +712,11 @@ function onAgentEvent(ev) {
   if (contextEvents.has(e.type)) contextViewer.refresh(agent);
   const c = agent && state.convos.get(keyOf(agent));
   if (!c) return;
-  if (!c.loaded) {
-    c.queue?.push(ev);
-    return;
-  }
+  // While the history is read, every record is kept to replay over it:
+  // before the first read, and when a loaded conversation is read again,
+  // whose records also show at once.
+  c.queue?.push(ev);
+  if (!c.loaded) return;
   if (ev.seq <= c.seq || c.eventSeqs.has(ev.seq)) return;
   c.eventSeqs.add(ev.seq);
   if (e.type === 'queue_update' || e.type === 'delivery_queue') {
@@ -1128,7 +1129,7 @@ function handoffEl(a, y, item) {
   return h('div', { class: 'ask handoff', role: 'group', 'aria-label': `${t(typeLabel(item))}: ${ho.title}`, 'data-request': item.key, 'data-type': ho.type },
     h('span', { class: 'needs-you-type' }, requestIcon(item), t(typeLabel(item))),
     h('strong', null, ho.title),
-    ho.detail ? md(ho.detail) : null,
+    ho.detail ? h('div', { class: 'md handoff-detail', html: renderMarkdown(ho.detail) }) : null,
     facts ? h('p', { class: 'ask-hint' }, facts) : null,
     h('p', { class: 'ask-hint' }, confirmedByUser
       ? t('Mark it done once you have done it yourself; {name} checks it before relying on it.', { name: yesmanLabel(y.name) })
@@ -1437,6 +1438,9 @@ function renderBody() {
   const body = $('#body');
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
+  const held = requestFocus($('#dock'));
+  const cards = [...body.querySelectorAll('.needs-you-card')];
+  const cardAt = cards.indexOf(active?.closest?.('.needs-you-card'));
   contextViewer.close();
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
@@ -1452,10 +1456,15 @@ function renderBody() {
   }
   if (state.view.kind === 'needs-you') {
     renderNeedsYou(body);
-    // A refresh keeps focus on the request it was on.
+    // A refresh keeps focus on the request it was on, or, when that one is
+    // gone, on the one now in its place, or the page's heading.
     const key = active?.closest?.('[data-request]')?.dataset.request;
     const again = key && body.querySelector(`[data-request="${CSS.escape(key)}"]`);
     if (again) again.focus();
+    else if (cardAt >= 0) {
+      const now = body.querySelectorAll('.needs-you-card');
+      (now[Math.min(cardAt, now.length - 1)] ?? body.querySelector('.needs-you-page h1'))?.focus();
+    }
     return;
   }
   const a = selectedAgent();
@@ -1464,11 +1473,26 @@ function renderBody() {
   const scroller = h('div', { class: 'scroll', id: 'scroll' }, h('div', { class: 'thread', id: 'thread' }));
   scroller.addEventListener('scroll', () => { scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false'; });
   body.append(scroller, h('div', { class: 'dock' }, h('div', { class: 'dock-inner', id: 'dock' })));
-  renderDock();
+  renderDock({ held });
   renderThread();
 }
 
-function renderDock({ focusComposer = false } = {}) {
+// requestFocus is where focus is in a request of the dock, to keep across a
+// redraw: the request, which of its controls, what was typed in it, and its
+// place among the requests.
+function requestFocus(dock) {
+  const el = dock?.contains(document.activeElement) ? document.activeElement : null;
+  const request = el?.closest('[data-request]');
+  if (!request) return null;
+  return {
+    key: request.dataset.request,
+    index: [...request.querySelectorAll('button, input, textarea')].indexOf(el),
+    value: request.querySelector('input, textarea')?.value,
+    at: [...dock.querySelectorAll('[data-request]')].indexOf(request),
+  };
+}
+
+function renderDock({ focusComposer = false, held = null } = {}) {
   const dock = $('#dock');
   const a = selectedAgent();
   const keep = dock?.querySelector('textarea');
@@ -1477,22 +1501,25 @@ function renderDock({ focusComposer = false } = {}) {
   const caret = focused ? [keep.selectionStart, keep.selectionEnd, keep.selectionDirection] : null;
   const control = dock?.contains(document.activeElement) && document.activeElement.getAttribute('role') === 'combobox'
     ? document.activeElement.getAttribute('aria-label') : null;
-  // A request being handled keeps its focus and typed answer across redraws.
-  const held = dock?.contains(document.activeElement) ? document.activeElement.closest('[data-request]') : null;
-  const heldControls = held ? [...held.querySelectorAll('button, input, textarea')] : [];
-  const heldAt = held ? { key: held.dataset.request, index: heldControls.indexOf(document.activeElement), value: held.querySelector('input, textarea')?.value } : null;
+  // A request being handled keeps its focus and typed answer across redraws,
+  // also when the whole body was drawn again (held).
+  const heldAt = held ?? requestFocus(dock);
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
   if (!dock || !a) return;
   dock.replaceChildren();
 
+  // What waits above the composer takes at most part of the window, and
+  // scrolls, so that the conversation and the composer stay in view.
+  const requests = [];
   if (a.status === 'failed' && a.detail) {
-    dock.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('This agent stopped')), h('p', null, a.detail))));
+    requests.push(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('This agent stopped')), h('p', null, a.detail))));
   } else if (a.detail) {
-    dock.append(h('div', { class: 'mds-notice', role: 'status' }, h('div', null, h('strong', null, t('Needs a look')), h('p', null, a.detail))));
+    requests.push(h('div', { class: 'mds-notice', role: 'status' }, h('div', null, h('strong', null, t('Needs a look')), h('p', null, a.detail))));
   }
-  if (a.status === 'waiting' && a.dialog) dock.append(askEl(a));
-  dock.append(...handoffEls(a));
+  if (a.status === 'waiting' && a.dialog) requests.push(askEl(a));
+  requests.push(...handoffEls(a));
+  if (requests.length) dock.append(h('div', { class: 'dock-requests' }, ...requests));
 
   const working = a.status === 'working' || a.status === 'waiting';
   const key = keyOf(a);
@@ -1584,11 +1611,27 @@ function renderDock({ focusComposer = false } = {}) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
   }
+  // A long detail scrolls in its request; then it can be reached and
+  // scrolled with the keyboard too.
+  for (const detail of dock.querySelectorAll('.handoff-detail')) {
+    if (detail.scrollHeight <= detail.clientHeight + 1) continue;
+    Object.assign(detail, { tabIndex: 0 });
+    detail.setAttribute('role', 'region');
+    detail.setAttribute('aria-label', t('Details'));
+  }
   if (heldAt) {
     const again = dock.querySelector(`[data-request="${CSS.escape(heldAt.key)}"]`);
     const field = again?.querySelector('input, textarea');
     if (field && heldAt.value !== undefined) field.value = heldAt.value;
-    again?.querySelectorAll('button, input, textarea')[heldAt.index]?.focus({ preventScroll: true });
+    const control = again?.querySelectorAll('button, input, textarea')[heldAt.index];
+    if (control && !control.disabled) control.focus({ preventScroll: true });
+    else if (!again) {
+      // It was answered or closed elsewhere: the request now in its place,
+      // or the composer.
+      const rest = dock.querySelectorAll('[data-request]');
+      const next = rest[Math.min(heldAt.at, rest.length - 1)]?.querySelector('button:not(:disabled), input, textarea');
+      (next ?? textarea).focus({ preventScroll: true });
+    }
   }
   locateRequest(dock, a);
 }
