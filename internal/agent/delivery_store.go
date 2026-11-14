@@ -61,15 +61,15 @@ type deliveryWriter struct {
 	err                  error
 	changed              chan struct{}
 	wake                 chan struct{}
-	stop                 chan struct{}
-	closed               bool
+	closed               bool // sealed: no new snapshots; the worker drains latest before done
+	done                 chan struct{}
 }
 
 func newDeliveryWriter(path string, write func(string, []byte) error) *deliveryWriter {
 	if write == nil {
 		write = writeDeliveryFile
 	}
-	w := &deliveryWriter{path: path, write: write, changed: make(chan struct{}), wake: make(chan struct{}, 1), stop: make(chan struct{})}
+	w := &deliveryWriter{path: path, write: write, changed: make(chan struct{}), wake: make(chan struct{}, 1), done: make(chan struct{})}
 	go w.run()
 	return w
 }
@@ -86,22 +86,19 @@ func (w *deliveryWriter) request(revision uint64, state deliveryDisk) {
 	}
 }
 func (w *deliveryWriter) run() {
+	defer close(w.done)
 	for {
-		select {
-		case <-w.wake:
-		case <-w.stop:
-			return
-		}
+		<-w.wake
 		for {
 			w.mu.Lock()
 			next := w.latest
 			w.latest = nil
 			closed := w.closed
 			w.mu.Unlock()
-			if closed {
-				return
-			}
 			if next == nil {
+				if closed {
+					return
+				}
 				break
 			}
 			data, err := json.Marshal(next.state)
@@ -134,10 +131,18 @@ func (w *deliveryWriter) wait(ctx context.Context, revision uint64, quit <-chan 
 			return err
 		}
 		if closed {
-			return errStopped
+			select {
+			case <-w.done:
+				if err != nil {
+					return err
+				}
+				return errStopped
+			default:
+			}
 		}
 		select {
 		case <-changed:
+		case <-w.done:
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-quit:
@@ -145,19 +150,29 @@ func (w *deliveryWriter) wait(ctx context.Context, revision uint64, quit <-chan 
 		}
 	}
 }
-func (w *deliveryWriter) close(ctx context.Context) {
+func (w *deliveryWriter) close(ctx context.Context) error {
 	w.mu.Lock()
-	revision := w.requested
+	w.closed = true
 	w.mu.Unlock()
-	_ = w.wait(ctx, revision, nil)
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
+	select {
+	case <-w.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.closed {
-		w.closed = true
-		w.latest = nil
-		close(w.stop)
-		close(w.changed)
-		w.changed = make(chan struct{})
+	return w.err
+}
+func (w *deliveryWriter) finished() bool {
+	select {
+	case <-w.done:
+		return true
+	default:
+		return false
 	}
 }
 func writeDeliveryFile(path string, data []byte) error {
@@ -207,7 +222,11 @@ func deliveryTimestamp(id string) int64 {
 
 func (m *Manager) ensureDeliveries(a *agent, path string) error {
 	a.deliveryOnce.Do(func() {
-		records, floor, err := readDeliveries(path, time.Now())
+		read := m.cfg.deliveryRead
+		if read == nil {
+			read = readDeliveries
+		}
+		records, floor, err := read(path, time.Now())
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		a.deliveryErr = err
@@ -332,6 +351,9 @@ func pruneDeliveryRecords(records map[string]Delivery, floor *int64, now time.Ti
 	return removed
 }
 func (m *Manager) pruneDeliveryEventLocked(a *agent) *Event {
+	if a.retiring {
+		return nil
+	}
 	removed := m.pruneDeliveriesLocked(a)
 	if len(removed) == 0 {
 		return nil
@@ -351,6 +373,9 @@ func (m *Manager) pruneDeliveryEventLocked(a *agent) *Event {
 }
 
 func (m *Manager) persistDeliveriesLocked(a *agent) uint64 {
+	if a.deliverySealed {
+		return a.deliveryVersion
+	}
 	state := deliveryDisk{Version: 2, Floor: a.deliveryFloor, Records: make([]storedDelivery, 0, len(a.deliveries))}
 	for _, d := range a.deliveries {
 		state.Records = append(state.Records, storedDelivery{d, d.fingerprint, d.created, d.expires})

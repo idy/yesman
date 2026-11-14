@@ -95,7 +95,9 @@ func (s *service) Dismiss(name string) (string, error) {
 	// checkout can run, so the worktrees listed here are all it has.
 	var wts []pool.Worktree
 	dest, err := a.yesmen.Archive(name, func(y yesmen.Yesman) error {
-		a.agents.StopYesman(name)
+		if err := a.agents.StopYesmanContext(ctx, name); err != nil {
+			return err
+		}
 		var err error
 		wts, err = a.pool.Worktrees(ctx, y.Path)
 		return err

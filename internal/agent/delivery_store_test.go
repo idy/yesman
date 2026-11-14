@@ -385,9 +385,14 @@ func TestDeliveryInterruptedAfterNativeUserKeepsID(t *testing.T) {
 		d, _ := m.Submit(ctx, "alice/lead", id, "may have been processed", []Image{testImage()})
 		done <- d
 	}()
-	waitStatus(t, m, "alice/lead", Idle)
+	waitDeliveryNativeQueue(t, m, "alice/lead")
 	_, _ = m.running("alice/lead").call(ctx, map[string]any{"type": "test_consume"})
-	d := <-done
+	var d Delivery
+	select {
+	case d = <-done:
+	case <-ctx.Done():
+		t.Fatal("native user/exit did not release the prompt call")
+	}
 	if d.State != "interrupted" && d.State != "unconfirmed" {
 		t.Fatalf("unknown outcome became definite rejection: %+v", d)
 	}

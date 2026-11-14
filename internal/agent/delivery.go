@@ -57,6 +57,9 @@ func (a *agent) deliverySnapshot() []Delivery {
 // Revisions and snapshot sequence numbers protect the page from bridge
 // notifications delivered late or out of order. State changes never resubmit.
 func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
+	if a.deliverySealed {
+		return Event{}
+	}
 	previous := a.deliveries[d.ID]
 	if !pendingDelivery(d.State) && (pendingDelivery(previous.State) || d.expires == 0) {
 		d.expires = time.Now().Add(deliveryRetention).UnixMilli()
@@ -111,18 +114,38 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 		return Delivery{}, err
 	}
 	fingerprint := deliveryFingerprint(text, images)
+	active, release, err := m.cfg.Yesmen.BeginUse(info.Yesman)
+	if err != nil {
+		return Delivery{}, err
+	}
+	defer release()
+	if !active.HiredAt.Equal(y.HiredAt) {
+		return Delivery{}, errStopped
+	}
+	y = active
+	currentInfo, err := m.Get(id)
+	if err != nil {
+		return Delivery{}, err
+	}
+	if !currentInfo.Since.Equal(info.Since) {
+		return Delivery{}, errStopped
+	}
 	m.mu.Lock()
-	a := m.agents[id]
-	if a == nil {
-		a = &agent{info: info, dir: y.Path}
-		m.agents[id] = a
+	if m.closed {
+		m.mu.Unlock()
+		return Delivery{}, errStopped
+	}
+	a, err := m.workspaceAgentLocked(y, info)
+	if err != nil {
+		m.mu.Unlock()
+		return Delivery{}, err
 	}
 	m.mu.Unlock()
 	if err = m.ensureDeliveries(a, filepath.Join(y.Path, ".yesman", "sessions", info.Name, "delivery.json")); err != nil {
 		return Delivery{}, err
 	}
 	m.mu.Lock()
-	if m.agents[id] != a {
+	if m.agents[id] != a || a.retiring {
 		m.mu.Unlock()
 		return Delivery{}, errors.New("the agent was replaced; reopen its conversation before sending")
 	}
@@ -179,13 +202,19 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	if err = a.deliveryWriter.wait(context.Background(), registered, m.shutdown); err != nil {
 		return m.failInitialDelivery(a, messageID, err), nil
 	}
-	m.unnudge(id)
+	release()
+	m.mu.Lock()
+	if m.agents[id] == a && !a.retiring {
+		a.nudged = false
+		a.inbox++
+	}
+	m.mu.Unlock()
 	// Only the private receipt ID crosses this Go call. The pi command and
 	// user text remain byte-for-byte the same as the original submission path.
-	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, images...)
+	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, images...)
 	m.mu.Lock()
 	current := a.deliveries[messageID]
-	if err != nil && (current.State == "sending" || current.State == "interrupted" && current.Session == "") {
+	if !a.deliverySealed && err != nil && (current.State == "sending" || current.State == "interrupted" && current.Session == "") {
 		current.State, current.Error = "unconfirmed", err.Error()
 		// Before binding a process there was no opportunity to dispatch RPC.
 		if current.Session == "" {
@@ -207,7 +236,7 @@ func (m *Manager) failInitialDelivery(a *agent, id string, err error) Delivery {
 	m.mu.Lock()
 	d := a.deliveries[id]
 	var ev Event
-	if d.State == "sending" && d.Session == "" {
+	if !a.deliverySealed && d.State == "sending" && d.Session == "" {
 		d.State, d.Error = "failed", err.Error()
 		ev = m.deliveryLocked(a, d)
 		d = a.deliveries[id]
@@ -233,7 +262,7 @@ func (m *Manager) bindDelivery(a *agent, p *proc, id string) error {
 	if !ok || !d.AgentSince.Equal(info.Since) {
 		return errors.New("the agent was replaced; reopen its conversation before sending")
 	}
-	if a.proc != p || d.State != "sending" {
+	if a.proc != p || a.retiring || d.State != "sending" {
 		return errStopped
 	}
 	d.Session, d.boundSeq = p.deliverySession(), a.seq
@@ -250,7 +279,7 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 	}
 	m.mu.Lock()
 	d, ok := a.deliveries[id]
-	if !ok || a.proc != p || d.Session != p.deliverySession() || d.State != "sending" {
+	if !ok || a.retiring || a.proc != p || d.Session != p.deliverySession() || d.State != "sending" {
 		m.mu.Unlock()
 		return
 	}
@@ -289,7 +318,7 @@ func (m *Manager) observeDelivery(a *agent, p *proc, kind string, raw json.RawMe
 		return
 	}
 	m.mu.Lock()
-	if a.proc != p {
+	if a.proc != p || a.retiring {
 		m.mu.Unlock()
 		return
 	}
@@ -321,6 +350,9 @@ func (m *Manager) observeDelivery(a *agent, p *proc, kind string, raw json.RawMe
 	}
 }
 func (m *Manager) interruptDeliveriesLocked(a *agent) []Event {
+	if a.deliverySealed {
+		return nil
+	}
 	a.queue = QueueStatus{}
 	a.seq++
 	raw, _ := json.Marshal(struct {
@@ -341,7 +373,7 @@ func (m *Manager) interruptDeliveriesLocked(a *agent) []Event {
 // extension cannot leave old native queue counts attached to its replacement.
 func (m *Manager) deliverySessionChanged(a *agent, p *proc, session string) {
 	m.mu.Lock()
-	if a.proc != p {
+	if a.proc != p || a.retiring {
 		m.mu.Unlock()
 		return
 	}

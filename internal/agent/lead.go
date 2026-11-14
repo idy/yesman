@@ -164,7 +164,7 @@ func (m *Manager) unnudge(id string) {
 // canRemindLocked checks the lead and all its workers under mu. A settled
 // worker still has work under way while its report is read or delivered.
 func (m *Manager) canRemindLocked(lead *agent, p *proc, inbox uint64) bool {
-	if p == nil || lead.proc != p || lead.nudged || lead.stopping || lead.info.Status != Idle ||
+	if p == nil || lead.proc != p || lead.nudged || lead.stopping || lead.retiring || lead.info.Status != Idle ||
 		lead.prompts != 0 || lead.inbox != inbox || lead.settledInbox != inbox {
 		return false
 	}

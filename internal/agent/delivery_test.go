@@ -121,6 +121,27 @@ func fakeDeliveryPi() {
 
 func deliveryTestID(n int) string { return fmt.Sprintf("%012x%036x", time.Now().UnixMilli(), n) }
 
+// Synchronize against pi's actual queue_update, never Idle or a receipt's
+// Sending state: both can precede dispatch while modelMu/input work is pending.
+func waitDeliveryNativeQueue(t *testing.T, m *Manager, id string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		a := m.agents[id]
+		q := QueueStatus{}
+		if a != nil {
+			q = a.queue
+		}
+		m.mu.Unlock()
+		if q.Known && q.Steering+q.FollowUp > 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("pi did not report a queued prompt before the native consumption step")
+}
+
 func deliveryState(t *testing.T, m *Manager, id, messageID, want string) Delivery {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -258,25 +279,59 @@ func TestDeliveryLateAckExitRefreshAndIsolation(t *testing.T) {
 	defer cancel()
 	m, store := newTestManager(t, 0, "FAKE_PI_DELIVERIES=1", "FAKE_PI_DELIVERY_MODE=steer", "FAKE_PI_DELIVERY_LATE_ACK=1")
 	id, messageID := "alice/lead", deliveryTestID(10)
+	a, p, err := m.ensure(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.modelMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			a.modelMu.Unlock()
+		}
+	}()
 	done := make(chan Delivery, 1)
 	go func() { d, _ := m.Submit(ctx, id, messageID, "same", nil); done <- d }()
 	waitStatus(t, m, id, Idle)
 	deliveryState(t, m, id, messageID, "sending")
-	p := m.running(id)
+	m.mu.Lock()
+	queuedEarly := a.queue.Known && a.queue.Steering+a.queue.FollowUp > 0
+	m.mu.Unlock()
+	if queuedEarly {
+		t.Fatal("model gate unexpectedly allowed native dispatch")
+	}
+	a.modelMu.Unlock()
+	locked = false
+	waitDeliveryNativeQueue(t, m, id)
 	if _, err := p.call(ctx, map[string]any{"type": "test_consume"}); err != nil {
 		t.Fatal(err)
 	}
-	if d := <-done; d.State != "unconfirmed" {
-		t.Fatalf("late ack guessed consumption: %+v", d)
+	select {
+	case d := <-done:
+		if d.State != "unconfirmed" || d.Error != "" {
+			t.Fatalf("native late ack did not confirm acceptance: %+v", d)
+		}
+	case <-ctx.Done():
+		t.Fatal("prompt acceptance did not finish after native consume")
 	}
 	if _, err := store.Hire("bob"); err != nil {
 		t.Fatal(err)
 	}
-	go func() { _, _ = m.Submit(ctx, "bob/lead", messageID, "same", nil) }()
-	waitStatus(t, m, "bob/lead", Idle)
-	deliveryState(t, m, "bob/lead", messageID, "sending")
+	bobDone := make(chan Delivery, 1)
+	go func() { d, _ := m.Submit(ctx, "bob/lead", messageID, "same", nil); bobDone <- d }()
+	waitDeliveryNativeQueue(t, m, "bob/lead")
 	m.Stop("bob/lead")
-	deliveryState(t, m, "bob/lead", messageID, "interrupted")
+	bobState := ""
+	select {
+	case d := <-bobDone:
+		if d.State != "interrupted" && !(d.State == "unconfirmed" && d.Error != "") {
+			t.Fatalf("stopped unacknowledged prompt got definite outcome: %+v", d)
+		}
+		bobState = d.State
+	case <-ctx.Done():
+		t.Fatal("stopped prompt did not return")
+	}
+	deliveryState(t, m, "bob/lead", messageID, bobState)
 	deliveryState(t, m, id, messageID, "unconfirmed")
 	// Restore a pending receipt from disk as interrupted, never processed.
 	m.StopAll()
@@ -285,7 +340,7 @@ func TestDeliveryLateAckExitRefreshAndIsolation(t *testing.T) {
 	if _, err := restored.Messages(ctx, "bob/lead"); err != nil {
 		t.Fatal(err)
 	}
-	deliveryState(t, restored, "bob/lead", messageID, "interrupted")
+	deliveryState(t, restored, "bob/lead", messageID, bobState)
 }
 
 func TestDeliveryRejectedHandledSessionAndStaleAgent(t *testing.T) {
