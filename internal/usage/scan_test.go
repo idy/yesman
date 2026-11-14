@@ -127,9 +127,11 @@ func scan(t *testing.T, d *Dir, dir string) ([]Record, DirStats) {
 
 // steady treats files as changed long enough before they are read that a
 // later change cannot keep their time, as for logs not being written now.
+// A file time may be up to a second after the clock read just before it:
+// Windows reads the clock more coarsely than it stamps files.
 func steady(t *testing.T) {
 	old := racyWindow
-	racyWindow = 0
+	racyWindow = -time.Second
 	t.Cleanup(func() { racyWindow = old })
 }
 
