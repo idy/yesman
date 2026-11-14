@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.26
+
+- Keep reusable development rules, preferences and architecture guidance in Knowledge, with dated task and PR history in a separate `.yesman/task-log.md` maintained by the lead from worker reports.
+- Include the Knowledge index in agent context automatically, and read task-log entries only when needed.
+- Open the task log as a rendered, read-only page from the info panel and file menus, within the workspace's All files view.
+- Initialize missing task logs for new and existing workspaces without replacing existing documents. Preserve occupied paths on Windows too, report filesystem errors, and restrict the lead's task-log writes to the workspace's regular, unlinked log file.
+
 ## 0.1.25
 
 - Unify app-owned navigation, action and status icons with locally bundled Phosphor icon fonts, available offline.
