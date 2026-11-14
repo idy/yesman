@@ -116,12 +116,14 @@ ${block.replace('            await this.agent.prompt(messages);','            aw
                         return prepared;
                     }, result => {
                         admitted = true;
+                        // Admission/auth is complete. Context hooks and normal
+                        // pre-run compaction have their own lifecycle, not this deadline.
+                        clearTimeout(admissionTimer);
                         resolveAdmission(this._decoratePendingQueue(result));
                     }, () => !reservation.abort.signal.aborted && !this._agentRunAbortRequested &&
                         this._queuedResume === reservation && controlGeneration === this._queueControlGeneration,
                     () => {
                         started = true;
-                        clearTimeout(admissionTimer);
                         this._queuedResume = undefined;
                         this.agent.notifyPendingQueue();
                     });

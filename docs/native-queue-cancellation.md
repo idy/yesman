@@ -111,7 +111,10 @@ steering FIFO/mode. The same occurrence may be taken before its promotion ACK
 arrives; receipt reconciliation preserves that later state.
 
 An idle Session reserves its existing lifecycle before asynchronous model/auth
-checks (bounded and cancellable). Promotion changes priority first, but **does not
+checks (bounded and cancellable). The 15-second admission/auth timer is cleared
+when priority admission succeeds; it never times out normal context hooks or
+pre-run compaction after the request was accepted. Stop and cancellation remain
+bound to the live reservation throughout that preparation. Promotion changes priority first, but **does not
 take the occurrence**. Preparation uses an isolated copy of a captured steering
 prefix while every original stays native-pending and cancellable. After the
 production context request, compaction and hooks finish, the core validates the
