@@ -6,7 +6,7 @@ import { openDialog } from './mds/js/magpie.js';
 import { t, tNodes, locale, formatNumber } from './i18n.js';
 
 const EFFORTS = { off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' };
-const effortName = (e) => (e ? t(EFFORTS[e] ?? e) : t('Default effort'));
+export const effortName = (e) => (e ? t(EFFORTS[e] ?? e) : t('Default effort'));
 // pi names a model with where it is served: "Kimi K3.1 Pro · China Magpie".
 const shortName = (name, id) => (name ?? '').split(' · ')[0] || id;
 const optionName = (m) => `${shortName(m.modelName, m.model)} · ${effortName(m.effort)}`;
@@ -22,7 +22,7 @@ const FIELDS = [
   { key: 'minutesPerTask', label: 'Time per task', unit: 'min' },
 ];
 
-export function createCrew({ call, fail, shown, rerender, openPage, preferenceRow }) {
+export function createCrew({ call, fail, shown, rerender, openPage, openUsage, preferenceRow }) {
   let view = null; // Yesman.Crew
   let loading = null; // the load under way
   let refreshing = false;
@@ -257,7 +257,10 @@ export function createCrew({ call, fail, shown, rerender, openPage, preferenceRo
         h('div', { class: 'card-list', 'aria-busy': String(busy) }, view.members.length ? view.members.map(memberRow)
           : h('div', { class: 'card-empty' }, h('strong', null, t('No models yet')), h('span', null, t('Add the models agents may run as. Until there is one, no yesman can be hired and no worker started.'))))),
       h('p', { class: 'crew-source' }, tNodes('Scores from {source}, {date}, found by each model’s name.', { source, date }), ' ',
-        t('Intelligence is Artificial Analysis’s Intelligence Index; coding is the mean of its coding evaluations. Cost and time are per task of that index. Missing figures are shown as —.')),
+        t('Intelligence is Artificial Analysis’s Intelligence Index; coding is the mean of its coding evaluations. Cost and time are per task of that index. Missing figures are shown as —.'), ' ',
+        tNodes('These are benchmark scores, not measured here: what your agents actually used is in {usage}.', {
+          usage: h('button', { class: 'mds-link-button inline-link', type: 'button', onclick: openUsage }, t('Model usage')),
+        })),
     ));
   }
 

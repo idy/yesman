@@ -88,6 +88,7 @@ export const ICONS = Object.freeze({
   undo: '\ue038', // arrow-counter-clockwise
   question: '\ue3e8', // question
   keyboard: '\ue2d8', // keyboard
+  chart: '\ue150', // chart-bar
 });
 
 export function icon(name, cls = 'mds-icon') {

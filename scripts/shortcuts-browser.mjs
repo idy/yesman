@@ -233,6 +233,8 @@ async function palette(x, check) {
   assert.deepEqual(options.filter((o) => o.key.startsWith('action:settings.page.')).map((o) => o.key.slice(21)),
     await page.locator('#settings-nav [data-page]').evaluateAll((els) => els.map((el) => el.dataset.page)));
   assert.deepEqual(option('action:settings.page.grant'), { ...option('action:settings.page.grant'), label: 'Settings: Grant', disabled: false });
+  // Model usage too, from 0.1.33, with no key of its own.
+  assert.deepEqual(option('action:settings.page.usage'), { ...option('action:settings.page.usage'), label: 'Settings: Model usage', disabled: false, keys: [] });
   assert.deepEqual(option('action:agent.stop'), { ...option('action:agent.stop'), disabled: true, reason: 'This agent is not running.' });
   assert.equal(option('action:worker.remove').disabled, true);
   assert.equal(option('action:agent.needs-you').disabled, false);
@@ -249,7 +251,7 @@ async function palette(x, check) {
   await x.palette.waitFor({ state: 'hidden' });
   assert.equal(await x.boardShown(), true);
   assert.equal(await x.active(), 'Message');
-  check('37 entries, each disabled one with its reason, and an entry for every Settings page; search ranks, shows the platform keycap, runs once and gives focus back');
+  check('38 entries, each disabled one with its reason, and an entry for every Settings page; search ranks, shows the platform keycap, runs once and gives focus back');
 
   // A held key repeats nothing, but stays taken.
   await page.keyboard.press(`${MOD}+Shift+KeyB`);
