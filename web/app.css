@@ -925,7 +925,8 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 .topic-source-picker { display: grid; gap: 6px; }
 .topic-source-ref { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px; }
 .topic-edit-actions { margin-top: 4px; }
-@media (max-width: 720px) { .topics { width: min(var(--topics-width, 380px), calc(100vw - 48px)); } .topic-source-ref { grid-template-columns: minmax(0, 1fr); } }
+/* Below this, as wide as the board, so either fits the same windows. */
+@media (max-width: 1000px) { .topics { width: var(--board-width, 340px); } .topic-source-ref { grid-template-columns: minmax(0, 1fr); } }
 
 /* A message sent from a topic names it in a chip that opens it. */
 .msg-user--topic { display: grid; gap: 6px; justify-items: start; }
