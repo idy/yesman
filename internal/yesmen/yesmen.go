@@ -7,6 +7,7 @@
 //	  .yesman/
 //	    yesman.json        when it was hired, and the model its lead starts as
 //	    workers.json       the workers its lead started
+//	    worker-starts.json when each worker started, removed ones too
 //	    board.json         the task board its agents keep
 //	    knowledge/         durable guidance shared by every agent; INDEX.md lists it
 //	    task-log.md        task and PR history, maintained by the lead
@@ -450,7 +451,12 @@ func (s *Store) AddWorker(name string, w Worker) error {
 		w.Number = max(w.Number, x.Number+1)
 	}
 	y, _ := s.Get(name)
-	return writeJSON(filepath.Join(y.MetaDir(), "workers.json"), append(ws, w))
+	ws = append(ws, w)
+	if err := writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws); err != nil {
+		return err
+	}
+	s.noteStarts(y, ws)
+	return nil
 }
 
 // FinishWorker records that a worker finished: its report reached its lead.
@@ -491,7 +497,8 @@ func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, 
 	return true, writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws)
 }
 
-// RemoveWorker forgets a worker. Its session log stays.
+// RemoveWorker forgets a worker. Its session log stays, and so does when
+// it started (see WorkerStarts).
 func (s *Store) RemoveWorker(name, worker string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -500,6 +507,7 @@ func (s *Store) RemoveWorker(name, worker string) error {
 		return err
 	}
 	y, _ := s.Get(name)
+	s.noteStarts(y, ws)
 	ws = slices.DeleteFunc(ws, func(x Worker) bool { return x.Name == worker })
 	return writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws)
 }

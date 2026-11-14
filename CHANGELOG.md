@@ -2,6 +2,24 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.33
+
+- Add Settings › Model usage to compare actual usage by provider, full model ID and recorded effort: worker participation, current done board-task attribution, responses, and input, output, cache and total tokens. Filter by yesman, agent role and period.
+- Show measured output tokens per second across timed completed responses, weighted by their response durations and including first-token latency. Keep these measurements separate from Artificial Analysis benchmarks; missing effort or timing stays unknown.
+- Explain coverage and attribution: only current workspaces and retained logs are included, and tasks follow the owner's latest response that ended by completion. A done board task does not establish independent verification or a model's causal contribution; these totals are not a billing statement or a reconstruction of all past usage.
+
+## 0.1.32
+
+- Add application shortcuts with Command on macOS and Ctrl on Windows and Linux. Open the searchable command palette with Cmd/Ctrl+K or Cmd/Ctrl+Shift+P to find actions, yesmen and workers, see their keys and availability, and run the same actions as their buttons and menus.
+- Customize bindings in Settings › Shortcuts: search actions, record keys, resolve conflicts, remove bindings or restore defaults. Changes persist across restarts and travel with configuration imports and exports; titlebar buttons and the existing files menu show the current keys.
+- Keep dialogs, menus, text editing, the file editor and input-method composition in control of their keys. Shortcuts act on the conversation shown and retain existing confirmations. These shortcuts work inside yesman's focused window; they are not global OS hotkeys and need no Accessibility or Input Monitoring permission.
+
+## 0.1.31
+
+- Add Settings › Grant to view this copy of yesman's OS permission status, refresh it without prompting, and choose individual Request or Open Settings actions.
+- On macOS, cover Bluetooth, notifications, Full Disk Access, microphone, camera, Accessibility, Screen Recording, Input Monitoring and Automation. Full Disk Access and Automation use manual settings guidance; opening settings does not mean access was granted.
+- On Windows, provide fixed settings entries for Bluetooth, notifications, microphone and camera. On Linux, explain desktop, device, session and portal policy limits. Independently launched terminals, runtimes and helpers may need their own authorization.
+
 ## 0.1.30
 
 - Keep your messages and images, ordinary replies and questions visible in full, while folding thinking, tool activity and recorded background collaboration into expandable work lines in their original order.
