@@ -71,7 +71,8 @@ type Worktree struct {
 	// Warning reports a problem that did not stop the checkout, such as a
 	// failed fetch that left the pool's copy of the remote stale.
 	Warning string `json:"warning,omitempty"`
-	// CleanupID identifies an agent checkout generation; absent for UI/user trees.
+	// CleanupID identifies the actual Git instance, including UI/user trees.
+	// A nonce alone grants no agent ownership or cleanup authorization.
 	CleanupID string `json:"cleanupId,omitempty"`
 }
 
@@ -522,6 +523,10 @@ func (p *Pool) AddWorktree(ctx context.Context, r Repo, opts WorktreeOptions) (W
 	if _, err := git(ctx, r.Path, args...); err != nil {
 		return Worktree{}, err
 	}
+	id, err := newWorktreeInstance(r.Path, opts.Dest)
+	if err != nil {
+		return Worktree{}, fmt.Errorf("checkout exists but instance registration failed; retain it: %w", err)
+	}
 	wts, err := p.worktrees(ctx, r)
 	if err != nil {
 		return Worktree{}, err
@@ -529,12 +534,15 @@ func (p *Pool) AddWorktree(ctx context.Context, r Repo, opts WorktreeOptions) (W
 	dest := realPath(opts.Dest)
 	for _, wt := range wts {
 		if realPath(wt.Path) == dest {
+			if wt.CleanupID != id {
+				return Worktree{}, errors.New("checkout instance changed during creation; retain it")
+			}
 			wt.Dir = filepath.Base(opts.Dest)
 			wt.Warning = warning
 			return wt, nil
 		}
 	}
-	return Worktree{Repo: r.Name, Path: opts.Dest, Dir: filepath.Base(opts.Dest), Branch: opts.Branch, Warning: warning}, nil
+	return Worktree{}, errors.New("checkout exists but its registration is unreadable; retain it")
 }
 
 // Snapshot is one scan of the pool's repositories and worktrees. Callers
@@ -595,6 +603,7 @@ func (p *Pool) worktrees(ctx context.Context, r Repo) ([]Worktree, error) {
 	skip := false
 	flush := func() {
 		if cur != nil && !skip {
+			cur.CleanupID, _ = readWorktreeInstance(r.Path, cur.Path)
 			out = append(out, *cur)
 		}
 		cur, skip = nil, false
@@ -636,6 +645,13 @@ func (p *Pool) RemoveWorktree(ctx context.Context, path string, force bool) erro
 	if err != nil {
 		return err
 	}
+	rel, err := filepath.Rel(realPath(p.root), realPath(repoDir))
+	if err != nil {
+		return err
+	}
+	l := p.lock(filepath.ToSlash(strings.TrimSuffix(rel, ".git")))
+	l.Lock()
+	defer l.Unlock()
 	args := []string{"worktree", "remove", path}
 	if force {
 		args = []string{"worktree", "remove", "--force", path}

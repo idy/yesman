@@ -206,21 +206,9 @@ func Checkout(ctx context.Context, p *pool.Pool, y yesmen.Yesman, req CheckoutRe
 	if err != nil {
 		return pool.Worktree{}, err
 	}
-	short := repo.Name[strings.LastIndex(repo.Name, "/")+1:]
-	dir := req.Dir
-	switch {
-	case dir != "":
-	case req.Ref != "":
-		dir = short + "@" + sanitize(req.Ref)
-	case req.Branch != "":
-		b := req.Branch
-		b = b[strings.LastIndex(b, "/")+1:]
-		dir = short + "--" + sanitize(b)
-	default:
-		dir = short
-	}
-	if !dirRE.MatchString(dir) {
-		return pool.Worktree{}, fmt.Errorf("%q is not a usable directory name", dir)
+	dir, err := checkoutDir(repo, req)
+	if err != nil {
+		return pool.Worktree{}, err
 	}
 	branch := req.Branch
 	if branch == "" && req.Ref == "" {
@@ -232,6 +220,25 @@ func Checkout(ctx context.Context, p *pool.Pool, y yesmen.Yesman, req CheckoutRe
 		Base:   req.Base,
 		Ref:    req.Ref,
 	})
+}
+
+func checkoutDir(repo pool.Repo, req CheckoutRequest) (string, error) {
+	short := repo.Name[strings.LastIndex(repo.Name, "/")+1:]
+	dir := req.Dir
+	switch {
+	case dir != "":
+	case req.Ref != "":
+		dir = short + "@" + sanitize(req.Ref)
+	case req.Branch != "":
+		b := req.Branch[strings.LastIndex(req.Branch, "/")+1:]
+		dir = short + "--" + sanitize(b)
+	default:
+		dir = short
+	}
+	if !dirRE.MatchString(dir) {
+		return "", fmt.Errorf("%q is not a usable directory name", dir)
+	}
+	return dir, nil
 }
 
 func sanitize(s string) string {

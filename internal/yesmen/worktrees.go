@@ -11,19 +11,28 @@ import (
 // worker sessions and board status. Removed records remain as recovery evidence.
 // UI/user checkouts and older worktrees without a record are never adopted.
 type WorktreeRecord struct {
-	ID           string              `json:"id"`
-	Dir          string              `json:"dir"`
-	Repo         string              `json:"repo"`
-	Owner        string              `json:"owner"`
-	OwnerSince   time.Time           `json:"ownerSince"`
-	Purpose      string              `json:"purpose"`
-	Task         string              `json:"task,omitempty"`
-	Branch       string              `json:"branch,omitempty"`
-	Head         string              `json:"head"`
-	CleanupOwner string              `json:"cleanupOwner,omitempty"`
-	CleanupSince time.Time           `json:"cleanupSince,omitzero"`
-	Completion   *WorktreeCompletion `json:"completion,omitempty"`
-	Removed      bool                `json:"removed,omitempty"`
+	ID            string              `json:"id"`
+	Dir           string              `json:"dir"`
+	Repo          string              `json:"repo"`
+	Owner         string              `json:"owner"`
+	OwnerSince    time.Time           `json:"ownerSince"`
+	Purpose       string              `json:"purpose"`
+	Task          string              `json:"task,omitempty"`
+	Branch        string              `json:"branch,omitempty"`
+	Head          string              `json:"head"`
+	CleanupOwner  string              `json:"cleanupOwner,omitempty"`
+	CleanupSince  time.Time           `json:"cleanupSince,omitzero"`
+	Completion    *WorktreeCompletion `json:"completion,omitempty"`
+	Attempts      []WorktreeAttempt   `json:"attempts,omitempty"`
+	Removed       bool                `json:"removed,omitempty"`
+	RetiredReason string              `json:"retiredReason,omitempty"`
+}
+
+// WorktreeAttempt keeps rejected author/release evidence without granting
+// removal authority or freezing the owner/lead's ability to correct it.
+type WorktreeAttempt struct {
+	Completion WorktreeCompletion `json:"completion"`
+	Reason     string             `json:"reason"`
 }
 
 // WorktreeCompletion is saved before removal is attempted. Ref identifies the

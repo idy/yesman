@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -78,31 +76,27 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 	default:
 		return pool.Worktree{}, errors.New("purpose must be review, author, release or primary")
 	}
+	repo, err := s.Pool.Get(req.Repo)
+	if err != nil {
+		return pool.Worktree{}, err
+	}
+	req.Dir, err = checkoutDir(repo, req)
+	if err != nil {
+		return pool.Worktree{}, err
+	}
 	records, err := s.Yesmen.WorktreeRecords(y.Name)
 	if err != nil {
 		return pool.Worktree{}, err
 	}
 	if i := latestWorktree(records, req.Dir); i >= 0 && !records[i].Removed {
-		// A successful remove followed by a crash before its final metadata
-		// write is recoverable too. Never adopt a missing unfinished checkout.
-		old := &records[i]
-		if old.Completion == nil || old.Owner != c.agent.Name || !old.OwnerSince.Equal(c.agent.Since) || req.Ref != old.Completion.Head || purpose != "review" {
-			return pool.Worktree{}, errors.New("checkout already has an unfinished lifecycle record; retain it or finish cleanup first")
+		if err := s.retireMissingWorktree(ctx, c, y, records, i); err != nil {
+			return pool.Worktree{}, err
 		}
-		if _, err := os.Lstat(filepath.Join(y.Path, old.Dir)); !errors.Is(err, os.ErrNotExist) {
-			return pool.Worktree{}, errors.New("recorded checkout still exists")
-		}
-		old.Removed = true
-	}
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err != nil {
-		return pool.Worktree{}, err
 	}
 	wt, err := Checkout(ctx, s.Pool, y, req)
 	if err != nil {
 		return wt, err
 	}
-	wt.CleanupID = hex.EncodeToString(id[:])
 	records = append(records, yesmen.WorktreeRecord{ID: wt.CleanupID, Dir: wt.Dir, Repo: wt.Repo, Owner: c.agent.Name, OwnerSince: c.agent.Since, Purpose: purpose, Task: req.Task, Branch: wt.Branch, Head: wt.Head})
 	if err := s.Yesmen.SaveWorktreeRecords(y.Name, records); err != nil {
 		// Do not delete the checkout on a failed metadata write. Unknown
@@ -110,6 +104,32 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 		return wt, fmt.Errorf("checkout exists but lifecycle registration failed; retain it: %w", err)
 	}
 	return wt, nil
+}
+
+// An explicit checkout by the same owner may retire a record for an instance
+// already removed manually. This changes only history, not any directory or Git
+// registration, and never treats a missing unfinished task as completed.
+func (s *Server) retireMissingWorktree(ctx context.Context, c caller, y yesmen.Yesman, records []yesmen.WorktreeRecord, i int) error {
+	rec := &records[i]
+	if rec.Owner != c.agent.Name || !rec.OwnerSince.Equal(c.agent.Since) {
+		return errors.New("recorded checkout belongs to another owner; retain it")
+	}
+	return s.withWorktreeUsers(y.Name, *rec, c.agent.ID, func() error {
+		path := filepath.Join(y.Path, rec.Dir)
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("recorded checkout still exists or cannot be inspected; retain it")
+		}
+		registered, err := s.Pool.HasWorktreeRegistration(ctx, "", path)
+		if err != nil {
+			return err
+		}
+		if registered {
+			return errors.New("missing checkout still has a Git registration; retain it")
+		}
+		rec.Removed = true
+		rec.RetiredReason = "directory and Git registration already absent; explicit owner checkout starts a new instance"
+		return s.Yesmen.SaveWorktreeRecords(y.Name, records)
+	})
 }
 
 type removeWorktreeRequest struct {
@@ -153,6 +173,7 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	if rec.Purpose != "review" && rec.Purpose != "author" && rec.Purpose != "release" {
 		return retain("primary or unknown purpose")
 	}
+	branchVerified := false
 	if req.Completion != nil {
 		if !owner && !lead {
 			return retain("only the owner or lead may certify completion")
@@ -168,11 +189,29 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 		if !valid || rec.Purpose == "review" && v.Head != rec.Head {
 			return retain("outcome or reviewed HEAD does not match this checkout")
 		}
-		if rec.Completion != nil && (rec.Completion.Head != v.Head || rec.Completion.Outcome != v.Outcome || rec.Completion.Ref != v.Ref || rec.Completion.Evidence != v.Evidence) {
+		if rec.Completion != nil && !sameWorktreeCompletion(*rec.Completion, v) {
 			return retain("completion already saved; reconstruct a new checkout for another round")
 		}
 		if rec.Completion == nil {
 			v.SavedAt = time.Now().UTC()
+			if rec.Purpose != "review" {
+				candidate := *rec
+				candidate.Completion = &v
+				err := s.verifyBranchCompletion(ctx, y, candidate)
+				if err == nil {
+					err = s.Pool.CheckTemporaryWorktree(ctx, y.Path, expectedWorktree(candidate))
+				}
+				if err != nil {
+					if len(rec.Attempts) == 0 || !sameWorktreeCompletion(rec.Attempts[len(rec.Attempts)-1].Completion, v) || rec.Attempts[len(rec.Attempts)-1].Reason != err.Error() {
+						rec.Attempts = append(rec.Attempts, yesmen.WorktreeAttempt{Completion: v, Reason: err.Error()})
+						if saveErr := s.Yesmen.SaveWorktreeRecords(y.Name, records); saveErr != nil {
+							return out, saveErr
+						}
+					}
+					return retain(err.Error())
+				}
+				branchVerified = true
+			}
 			rec.Completion = &v
 			if err := s.Yesmen.SaveWorktreeRecords(y.Name, records); err != nil {
 				return out, err
@@ -210,23 +249,8 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	}
 	// Fresh merge evidence is required for branches, including squash merges.
 	// Release tasks stay open through publication/verification, after PR merge.
-	if rec.Purpose != "review" {
-		b, err := s.Yesmen.Board(y.Name)
-		if err != nil {
-			return out, err
-		}
-		finished := false
-		for _, t := range b.Tasks {
-			terminal := !t.Open()
-			if rec.Purpose == "release" {
-				terminal = t.Status == yesmen.TaskDone
-			}
-			finished = finished || t.ID == rec.Task && t.Owner == rec.Owner && terminal
-		}
-		if !finished {
-			return retain("associated author/release task is unfinished")
-		}
-		if err := s.verifyMerged(ctx, *rec); err != nil {
+	if rec.Purpose != "review" && !branchVerified {
+		if err := s.verifyBranchCompletion(ctx, y, *rec); err != nil {
 			return retain(err.Error())
 		}
 	}
@@ -243,7 +267,7 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 		// Idempotent recovery after git removed the tree but the app exited
 		// before the final metadata save. A replacement path is never touched.
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-			registered, err := s.Pool.HasWorktreeRegistration(ctx, rec.Repo, path)
+			registered, err := s.Pool.HasWorktreeRegistration(ctx, "", path)
 			if err != nil {
 				return err
 			}
@@ -251,7 +275,7 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 				return errors.New("missing path is still registered; retain for recovery")
 			}
 		} else {
-			if err := s.Pool.RemoveTemporaryWorktree(ctx, y.Path, pool.Worktree{Repo: rec.Repo, Dir: rec.Dir, Head: rec.Completion.Head, Branch: rec.Branch, Detached: rec.Purpose == "review", CleanupID: rec.ID}); err != nil {
+			if err := s.Pool.RemoveTemporaryWorktree(ctx, y.Path, expectedWorktree(*rec)); err != nil {
 				return err
 			}
 		}
@@ -263,6 +287,33 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	}
 	out.Removed = true
 	return out, nil
+}
+
+func sameWorktreeCompletion(a, b yesmen.WorktreeCompletion) bool {
+	return a.Head == b.Head && a.Outcome == b.Outcome && a.Ref == b.Ref && a.Evidence == b.Evidence && a.Unused == b.Unused
+}
+
+func expectedWorktree(rec yesmen.WorktreeRecord) pool.Worktree {
+	return pool.Worktree{Repo: rec.Repo, Dir: rec.Dir, Head: rec.Completion.Head, Branch: rec.Branch, Detached: rec.Purpose == "review", CleanupID: rec.ID}
+}
+
+func (s *Server) verifyBranchCompletion(ctx context.Context, y yesmen.Yesman, rec yesmen.WorktreeRecord) error {
+	b, err := s.Yesmen.Board(y.Name)
+	if err != nil {
+		return err
+	}
+	finished := false
+	for _, t := range b.Tasks {
+		terminal := !t.Open()
+		if rec.Purpose == "release" {
+			terminal = t.Status == yesmen.TaskDone
+		}
+		finished = finished || t.ID == rec.Task && t.Owner == rec.Owner && terminal
+	}
+	if !finished {
+		return errors.New("associated author/release task is unfinished")
+	}
+	return s.verifyMerged(ctx, rec)
 }
 
 // Reserve every recorded user, including a prior cleanup delegate, so a lead
