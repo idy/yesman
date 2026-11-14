@@ -2,6 +2,23 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.20
+
+- Show active workers above completed, stopped and failed workers in the sidebar, keeping the existing order within each group. Reactivated workers return to the active group.
+- Keep keyboard focus on the same sidebar entry during updates and after closing its menu, including yesmen also shown under Needs you.
+- Keep Secrets descriptions readable at medium widths and names and values together in narrow windows, with actions moving to their own row when needed.
+
+## 0.1.19
+
+- Keep Secrets list value fields at a fixed width, and constrain long values and editors within the list in narrow windows.
+
+## 0.1.18
+
+- Settings › yesman lists the crew: the models agents run as, each one of pi's models at one reasoning effort. Add and remove them there, and choose what new yesmen run as.
+- Hiring a yesman asks only for its name: its lead runs as the model chosen for new yesmen.
+- The lead chooses a member of the crew for each worker, weighing how smart, fast and costly each is for the task, from Artificial Analysis's scores. Without a choice, a worker runs as its lead's model.
+- yesman finds each model's scores by its name. For a model Artificial Analysis has no record of, you give your own estimate when you add it.
+- You can still run any agent as any of pi's models from the composer.
 ## 0.1.17
 
 - This release retains the image submission support shipped in 0.1.16. There are no additional application changes.

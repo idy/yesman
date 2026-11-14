@@ -116,6 +116,50 @@ try {
    await page.locator('#settings-button').click();await usage.waitFor();
    assert.equal(await usage.innerText(),'3 worktrees · 新名字 Beta, 项目 Alpha 团队');
    assert.equal(await usage.getAttribute('title'),'新名字 Beta: one\n新名字 Beta: two\n项目 Alpha 团队: three');
+   // Rename a nonselected lead while a worker draft is open. Both drafts and
+   // the selected stable ID survive the merged renderer/state refresh.
+   await lead.click();
+   await page.locator('.composer textarea').fill('synthetic lead draft');
+   await worker.click();
+   await page.locator('.composer textarea').fill('synthetic worker draft');
+   await lead.click({button:'right'});await input.fill('组合测试 名称');await save.click();
+   await page.waitForFunction(()=>!document.querySelector('#rename-dialog').open);
+   assert.equal(await page.locator('.composer textarea').inputValue(),'synthetic worker draft');
+   assert.match(await page.locator('#crumbs').innerText(),/worker-one/);
+   await lead.click();assert.equal(await page.locator('.composer textarea').inputValue(),'synthetic lead draft');
+   await worker.click();assert.equal(await page.locator('.composer textarea').inputValue(),'synthetic worker draft');
+   // Combine .20's ordering and semantic focus slots with renamed labels.
+   await page.evaluate(()=>{
+     agents[0].status='waiting';
+     agents.splice(1,0,{id:'alice/ended',name:'ended',yesman:'alice',role:'worker',number:2,status:'stopped',finishedAt:'2026-11-14T00:00:00Z'});
+     agents.push({id:'alice/active',name:'active',yesman:'alice',role:'worker',number:3,status:'working'});
+     emitChanged();
+   });
+   await page.waitForFunction(()=>document.querySelectorAll('[data-agent="alice/lead"]').length===2);
+   const workerIDs=()=>page.locator('#yesmen [data-sidebar-entry="worker"]').evaluateAll(rows=>rows.map(r=>r.dataset.agent));
+   assert.deepEqual(await workerIDs(),['alice/worker-one','alice/active','alice/ended']);
+   for(const entry of ['yesman','needs-you']) {
+     const row=page.locator(`[data-agent="alice/lead"][data-sidebar-entry="${entry}"]`);
+     await row.focus();
+     await page.evaluate(entry=>{localStorage.setItem('synthetic.label','刷新名称 '+entry);emitChanged();},entry);
+     await page.waitForFunction(label=>[...document.querySelectorAll('[data-agent="alice/lead"] .name')].every(e=>e.textContent===label),'刷新名称 '+entry);
+     assert.equal(await page.evaluate(()=>document.activeElement.dataset.sidebarEntry),entry);
+     await page.evaluate(()=>{menuAction='';calls.length=0;});
+     await page.keyboard.press('Shift+F10');
+     await page.waitForFunction(()=>calls.some(c=>c[0]==='AgentMenu'));
+     assert.equal(await page.evaluate(()=>document.activeElement.dataset.sidebarEntry),entry);
+     assert.equal(await page.evaluate(()=>calls.find(c=>c[0]==='AgentMenu')[1]),'alice/lead');
+     const anchor=await page.evaluate(()=>({y:calls.find(c=>c[0]==='AgentMenu')[3],bottom:Math.round(document.activeElement.getBoundingClientRect().bottom)}));
+     assert.equal(anchor.y,anchor.bottom);
+   }
+   await page.evaluate(()=>{agents[0].status='idle';emitChanged();});
+   await page.waitForFunction(()=>document.querySelectorAll('[data-agent="alice/lead"]').length===1);
+   assert.equal(await page.evaluate(()=>document.activeElement.dataset.sidebarEntry),'yesman');
+   await page.evaluate(()=>{agents[0].status='waiting';const ended=agents.find(a=>a.name==='ended');ended.status='starting';delete ended.finishedAt;emitChanged();});
+   await page.waitForFunction(()=>document.querySelectorAll('[data-agent="alice/lead"]').length===2);
+   assert.deepEqual(await workerIDs(),['alice/ended','alice/worker-one','alice/active']);
+   assert.equal(await page.evaluate(()=>document.activeElement.dataset.sidebarEntry),'yesman');
+   assert.equal(await page.locator('.composer textarea').inputValue(),'synthetic worker draft');
    assert.deepEqual(errors,[]);
    console.log(engineName+': rename/cancel/failure/reload/routing plus same-label repo users, single-ID dedup and rename refresh passed');
   } finally {await browser.close();}

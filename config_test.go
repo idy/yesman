@@ -14,6 +14,7 @@ import (
 
 	"github.com/egoist/mygo"
 
+	"github.com/idy/yesman/internal/crew"
 	"github.com/idy/yesman/internal/home"
 	"github.com/idy/yesman/internal/pool"
 )
@@ -86,15 +87,20 @@ func TestConfigSettings(t *testing.T) {
 	dark := mygo.ThemeDark
 	c := config{appearance: &dark}
 	current := Settings{Appearance: mygo.ThemeLight, AutoFetch: 5}
-	if got := c.settings(current, importMerge); got != (Settings{Appearance: mygo.ThemeDark, AutoFetch: 5}) {
+	if got := c.settings(current, importMerge); !reflect.DeepEqual(got, Settings{Appearance: mygo.ThemeDark, AutoFetch: 5}) {
 		t.Errorf("merging = %+v", got)
 	}
-	if got := c.settings(current, importReplace); got != (Settings{Appearance: mygo.ThemeDark}) {
+	if got := c.settings(current, importReplace); !reflect.DeepEqual(got, Settings{Appearance: mygo.ThemeDark}) {
 		t.Errorf("replacing = %+v", got)
 	}
 	// Replacing with a file that sets no appearance follows the system.
-	if got := (config{}).settings(current, importReplace); got != (Settings{Appearance: mygo.ThemeSystem}) {
+	if got := (config{}).settings(current, importReplace); !reflect.DeepEqual(got, Settings{Appearance: mygo.ThemeSystem}) {
 		t.Errorf("replacing without an appearance = %+v", got)
+	}
+	// The file does not carry the crew: replacing keeps it.
+	current.Crew = crew.Config{Options: []crew.Option{{Provider: "magpie", Model: "fast", Effort: "low"}}, Yesman: "magpie/fast:low"}
+	if got := c.settings(current, importReplace); !reflect.DeepEqual(got.Crew, current.Crew) {
+		t.Errorf("replacing changed the crew to %+v", got.Crew)
 	}
 }
 
@@ -251,10 +257,10 @@ func TestImportConfig(t *testing.T) {
 	if len(got.Kept) != 1 || got.Kept[0].Label != "acme/busy" || !strings.Contains(got.Kept[0].InUse, "worktree") {
 		t.Errorf("kept %+v", got.Kept)
 	}
-	if a.settings != (Settings{Appearance: mygo.ThemeDark}) {
+	if !reflect.DeepEqual(a.settings, Settings{Appearance: mygo.ThemeDark}) {
 		t.Errorf("settings after replacing = %+v", a.settings)
 	}
-	if loadSettings(h.Settings()) != a.settings {
+	if !reflect.DeepEqual(loadSettings(h.Settings()), a.settings) {
 		t.Errorf("settings were not saved")
 	}
 	select {

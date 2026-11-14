@@ -5,7 +5,7 @@
 //
 //	<workspace>/
 //	  .yesman/
-//	    yesman.json        when it was hired
+//	    yesman.json        when it was hired, and the model its lead starts as
 //	    workers.json       the workers its lead started
 //	    board.json         the task board its agents keep
 //	    knowledge/         notes every agent reads and writes; INDEX.md lists them
@@ -49,6 +49,10 @@ type Yesman struct {
 	DisplayName string    `json:"displayName,omitempty"`
 	Path        string    `json:"path"`
 	HiredAt     time.Time `json:"hiredAt,omitzero"`
+	// Model is what its lead starts its first session as, chosen when it
+	// was hired: provider/model:effort, or provider/model at pi's default
+	// effort. Empty for yesmen hired before there was a choice.
+	Model string `json:"model,omitempty"`
 }
 
 // Label is the user-visible name, including for workspaces hired before renaming.
@@ -161,13 +165,16 @@ directory; list each here as ` + "`- [Title](file.md) — when it matters`" + `.
 `
 
 // Hire creates a yesman's workspace.
-func (s *Store) Hire(name string) (Yesman, error) {
+func (s *Store) Hire(name string) (Yesman, error) { return s.HireAs(name, "") }
+
+// HireAs creates a yesman's workspace, with the model its lead starts as.
+func (s *Store) HireAs(name, model string) (Yesman, error) {
 	if err := ValidName(name); err != nil {
 		return Yesman{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	y := Yesman{Name: name, Path: filepath.Join(s.root, name), HiredAt: time.Now().UTC()}
+	y := Yesman{Name: name, Path: filepath.Join(s.root, name), HiredAt: time.Now().UTC(), Model: model}
 	if _, err := os.Stat(y.Path); err == nil {
 		return Yesman{}, fmt.Errorf("a yesman named %s already exists", name)
 	}
@@ -179,7 +186,11 @@ func (s *Store) Hire(name string) (Yesman, error) {
 	if err := os.WriteFile(filepath.Join(y.KnowledgeDir(), "INDEX.md"), []byte(indexTemplate), 0o644); err != nil {
 		return Yesman{}, err
 	}
-	if err := writeJSON(filepath.Join(y.MetaDir(), "yesman.json"), map[string]any{"hiredAt": y.HiredAt}); err != nil {
+	meta := map[string]any{"hiredAt": y.HiredAt}
+	if model != "" {
+		meta["model"] = model
+	}
+	if err := writeJSON(filepath.Join(y.MetaDir(), "yesman.json"), meta); err != nil {
 		return Yesman{}, err
 	}
 	return y, nil
@@ -203,9 +214,10 @@ func (s *Store) get(name string) (Yesman, error) {
 	var meta struct {
 		HiredAt     time.Time `json:"hiredAt"`
 		DisplayName string    `json:"displayName"`
+		Model       string    `json:"model"`
 	}
 	_ = readJSON(filepath.Join(y.MetaDir(), "yesman.json"), &meta)
-	y.HiredAt = meta.HiredAt
+	y.HiredAt, y.Model = meta.HiredAt, meta.Model
 	y.DisplayName = meta.DisplayName
 	return y, nil
 }

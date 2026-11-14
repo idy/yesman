@@ -52,6 +52,8 @@ type app struct {
 	// runPi runs a pi command for the user, outside any workspace.
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs
+	// catalog is pi's catalog of models, for the crew.
+	catalog *catalog
 	// vault and variables are what agents' commands get as environment
 	// variables, in Settings › Secrets and Settings › Variables.
 	vault     *secrets.Vault

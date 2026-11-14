@@ -4,6 +4,7 @@
 //   mygo.call("Yesman.<Method>", ...)  services in service.go
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
+import { orderWorkers } from './sidebar.js';
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
@@ -12,6 +13,7 @@ import { createBoard } from './board.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
+import { createCrew } from './crew.js';
 import { createEnvPage } from './env.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
@@ -536,6 +538,7 @@ function agentRow(a, cls, label) {
   if (worker && a.status === 'failed') status = t('{status}; {name} was told', { status, name: yesmanLabel(a.yesman) });
   return h('button', {
     class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': statusTone(a), 'data-done': done ? 'true' : null,
+    'data-sidebar-entry': worker ? 'worker' : cls.includes('agent-row--yesman') ? 'yesman' : 'needs-you',
     'aria-current': current ? 'page' : null, 'aria-haspopup': 'menu',
     title: `${a.id}: ${status}${a.title ? `\n${a.title}` : ''}${a.detail ? `\n${a.detail}` : ''}`,
     onclick: () => selectAgent(a.id),
@@ -591,15 +594,30 @@ async function openAgentMenu(e, a) {
       case 'hide-done':
       case 'show-done': setHideDone(a.yesman, action === 'hide-done'); break;
       default:
-        document.querySelector(`.agent-row[data-agent="${CSS.escape(a.id)}"]`)?.focus({ preventScroll: true });
+        restoreSidebarFocus(row);
     }
   } catch (err) {
     fail(err);
   }
 }
 
+// A waiting lead has two entries. Preserve the entry as well as the agent;
+// if it disappears, use the other entry, then the workspace's lead for a
+// hidden/removed worker. Keep focus unchanged when the workspace is gone.
+function restoreSidebarFocus(row) {
+  if (!row?.dataset.agent) return;
+  const list = $('#yesmen');
+  const agent = `[data-agent="${CSS.escape(row.dataset.agent)}"]`;
+  const entry = `[data-sidebar-entry="${CSS.escape(row.dataset.sidebarEntry)}"]`;
+  const lead = `${row.dataset.agent.split('/')[0]}/lead`;
+  const target = list.querySelector(agent + entry) ?? list.querySelector(agent)
+    ?? list.querySelector(`[data-agent="${CSS.escape(lead)}"][data-sidebar-entry="yesman"]`);
+  target?.focus({ preventScroll: true });
+}
+
 function renderSidebar() {
   const list = $('#yesmen');
+  const focusedRow = list.contains(document.activeElement) ? document.activeElement : null;
   list.replaceChildren();
   const waiting = state.snap.agents.filter((a) => a.status === 'waiting' && a.role === 'lead');
   if (waiting.length) {
@@ -612,14 +630,15 @@ function renderSidebar() {
     const agents = state.snap.agents.filter((a) => a.yesman === y.name);
     const lead = agents.find((a) => a.role === 'lead');
     if (lead) list.append(agentRow(lead, 'agent-row--yesman', y.displayName || y.name));
-    // Done workers keep their place, greyed; the yesman's menu can hide them.
-    // The one you are looking at stays.
+    // Active workers come first; preserve start order within each class.
+    // The yesman's menu can hide done workers, except the one being viewed.
     const hide = state.hideDone.has(y.name);
-    for (const w of agents.filter((a) => a.role === 'worker')) {
+    for (const w of orderWorkers(agents.filter((a) => a.role === 'worker'))) {
       if (hide && w.finishedAt && !(state.view.kind === 'agent' && state.view.id === w.id)) continue;
       list.append(agentRow(w, 'agent-row--worker', w.name));
     }
   }
+  restoreSidebarFocus(focusedRow);
   renderSideFoot();
 }
 
@@ -785,6 +804,10 @@ const effortLabel = (level) => (EFFORT[level] ? t(EFFORT[level]) : level[0].toUp
 async function openHire() {
   const form = $('#hire-form');
   form.reset();
+  // Its lead runs as the model Settings › yesman chooses for new yesmen.
+  const hint = $('#hire-model-hint');
+  crewPage.describe(hint);
+  crewPage.load().then(() => { if ($('#hire-dialog').open) crewPage.describe(hint); });
   if ((await openDialog($('#hire-dialog'))) === 'hire') hire(form.elements.name.value.trim());
 }
 
@@ -982,6 +1005,9 @@ function askEl(a) {
 
 function renderWelcome(body) {
   const input = h('input', { class: 'mds-input', placeholder: t('name, e.g. checkout-v2'), pattern: '[a-z0-9][a-z0-9\\-]{0,31}', required: true, spellcheck: 'false', 'aria-label': t('Name') });
+  const hint = h('p', { class: 'welcome-hint' });
+  crewPage.describe(hint);
+  crewPage.load().then(() => { if (hint.isConnected) crewPage.describe(hint); });
   body.append(
     h('div', { class: 'page' },
       h('div', { class: 'welcome' },
@@ -990,6 +1016,7 @@ function renderWelcome(body) {
         state.snap.piError ? h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('pi was not found')), h('p', null, state.snap.piError))) : null,
         h('form', { onsubmit: (e) => { e.preventDefault(); hire(input.value.trim()); } },
           input, h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, t('Hire'))),
+        hint,
       )),
   );
   input.focus();
@@ -1000,6 +1027,7 @@ function renderWelcome(body) {
 // The pages, labelled in English: each is said in the page's language.
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
+  { page: 'yesman', label: 'yesman', icon: 'users' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
   { page: 'secrets', label: 'Secrets', icon: 'lock' },
   { page: 'variables', label: 'Variables', icon: 'code' },
@@ -1048,6 +1076,7 @@ async function loadSettingsPage(page) {
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
     else if (page === 'pi') { await piPage.load(); return; }
+    else if (page === 'yesman') { await crewPage.load(); return; }
     else if (page === 'secrets') { await secretsPage.load(); return; }
     else if (page === 'variables') { await variablesPage.load(); return; }
   } catch (err) {
@@ -1063,6 +1092,7 @@ function renderSettings(body) {
   if (state.view.page === 'repositories') renderRepositories(inner);
   else if (state.view.page === 'storage') renderStorage(inner);
   else if (state.view.page === 'pi') piPage.render(inner);
+  else if (state.view.page === 'yesman') crewPage.renderPage(inner);
   else if (state.view.page === 'secrets') secretsPage.render(inner);
   else if (state.view.page === 'variables') variablesPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
@@ -1119,6 +1149,15 @@ const piPage = createPiPage({
   revealButton,
 });
 
+// Settings › yesman: the crew, and what new yesmen run as, in crew.js.
+const crewPage = createCrew({
+  call,
+  fail,
+  shown: () => state.view.kind === 'settings' && state.view.page === 'yesman',
+  rerender: () => renderBody(),
+  openPage: () => showSettings('yesman'),
+  preferenceRow,
+});
 // Settings › Secrets and Settings › Variables, in env.js.
 const envPage = (kind) => createEnvPage(kind, {
   call,
@@ -2224,7 +2263,11 @@ async function refreshState() {
     selectAgent(state.view.id);
     return;
   }
+  const sidebarFocus = $('#yesmen').contains(document.activeElement) ? document.activeElement : null;
   render();
+  // The rebuilt composer can take initial focus during a full state refresh.
+  // Preserve the sidebar's stable agent + semantic entry after that rebuild.
+  restoreSidebarFocus(sidebarFocus);
 }
 
 function onAgents(agents) {

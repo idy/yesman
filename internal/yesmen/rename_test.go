@@ -12,11 +12,11 @@ import (
 func TestRenamePersistsWithoutChangingIdentity(t *testing.T) {
 	base := t.TempDir()
 	s := New(filepath.Join(base, "yesmen"), filepath.Join(base, "archive"))
-	original, err := s.Hire("alice")
+	original, err := s.HireAs("alice", "synthetic/model-alpha:high")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if original.Label() != "alice" {
+	if original.Label() != "alice" || original.Model != "synthetic/model-alpha:high" {
 		t.Fatal(original)
 	}
 	if err := s.AddWorker("alice", Worker{Name: "worker-one", Task: "synthetic task"}); err != nil {
@@ -49,6 +49,9 @@ func TestRenamePersistsWithoutChangingIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if renamed.Model != original.Model {
+		t.Fatalf("rename lost the lead's configured model: %q", renamed.Model)
+	}
 	if renamed.Name != original.Name || renamed.Path != original.Path || !renamed.HiredAt.Equal(original.HiredAt) || renamed.Label() != "项目 Alpha 团队" {
 		t.Fatalf("identity or label changed incorrectly: %+v", renamed)
 	}
@@ -69,7 +72,7 @@ func TestRenamePersistsWithoutChangingIdentity(t *testing.T) {
 	if data, err := os.ReadFile(log); err != nil || string(data) != "synthetic session" {
 		t.Fatalf("session lost: %v", err)
 	}
-	if err := readJSON(metadata, &meta); err != nil || meta["futureField"] != "preserved" {
+	if err := readJSON(metadata, &meta); err != nil || meta["futureField"] != "preserved" || meta["model"] != original.Model {
 		t.Fatalf("metadata lost: %v", err)
 	}
 	if _, err := restarted.Hire("bob"); err != nil {
