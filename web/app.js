@@ -5,6 +5,7 @@
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
 import { orderWorkers } from './sidebar.js';
+import { messageActions, messageText, receiptText } from './message-actions.js';
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
@@ -156,10 +157,16 @@ function updateDelivery(c, d) {
   }
 }
 
+function copyActions(text) {
+  const actions = messageActions({ text, copy: (value) => call('CopyValue', value), done: () => toast(t('Copied.')), fail });
+  actions._copyText = text;
+  return actions;
+}
+
 function deliveryEl(c, d) {
   const bubble = messageEl(c, { role: 'user', content: [
     { type: 'text', text: d.text ? (d.preview ? `${d.text}…` : d.text) : (d.imageCount > 0 ? t('Attached images') : '') }, ...(d.images ?? []),
-  ] });
+  ] }, false);
   const label = DELIVERY_LABELS[d.state];
   // An acknowledgement identifies a submission, not a transcript message.
   // Keep its original input available without duplicating a native user bubble
@@ -173,7 +180,7 @@ function deliveryEl(c, d) {
     h('div', { class: 'delivery-original' }, bubble, imageNote));
   return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(sending) }, content,
     h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite',
-      hidden: !label, title: d.error || null }, label ? t(label) : ''));
+      hidden: !label, title: d.error || null }, label ? t(label) : ''), copyActions(receiptText(d)));
 }
 
 function renderQueue(c) {
@@ -202,6 +209,11 @@ function refreshDelivery(c, d) {
     status.hidden = !label;
     status.textContent = label ? t(label) : '';
     status.title = d.error || '';
+    // A server receipt may replace a shorter local preview without changing
+    // its state. Keep the copy source current without closing its details.
+    const actions = old.querySelector(':scope > .message-actions');
+    const nextText = receiptText(d);
+    if (actions?._copyText !== nextText) actions?.replaceWith(copyActions(nextText));
   } else {
     const el = deliveryEl(c, d);
     thread.querySelector('.thread-empty')?.remove();
@@ -257,8 +269,7 @@ async function loadConvo(c) {
   if (a && keyOf(a) === c.key) renderThread();
 }
 
-const textOf = (content) =>
-  typeof content === 'string' ? content : (content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+const textOf = messageText;
 
 // Tool state is built from history and live events; rendering only reads it.
 function indexTool(c, block) {
@@ -340,7 +351,7 @@ function blockEl(c, block) {
   return null;
 }
 
-function messageEl(c, m) {
+function messageEl(c, m, actions = true) {
   switch (m.role) {
     case 'user': {
       const text = textOf(m.content);
@@ -361,7 +372,8 @@ function messageEl(c, m) {
       const images = Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image' && imageURL(b)) : [];
       return h('div', { class: 'msg-user' }, text,
         images.length ? h('div', { class: 'message-images' }, images.map((image) =>
-          h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
+          h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null,
+        actions ? copyActions(text) : null);
     }
     case 'assistant': {
       const el = h('div', { class: 'msg-assistant' });

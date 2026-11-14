@@ -66,6 +66,8 @@ The composer lets you choose the current agent's model and reasoning effort from
 
 The composer accepts images from its **Attach images** button, pasted screenshots or images, and files dropped onto the input. It previews each attachment and lets you remove it before sending. PNG, JPEG, GIF and WebP are supported, up to four images, 5 MB each and 10 MB in total. Images travel with the message to pi, including messages sent during a run; you can send an image with or without text. Draft text and attachments stay with their agent while switching conversations, and remain available to retry if submission fails.
 
+Messages have a **Copy message text** action. It copies their raw text, including Markdown and line breaks, without changing the composer. Image-only messages disable text copying. A submission receipt can copy its complete stored text; a truncated preview cannot stand in for the original message. Native queue cancellation is not yet supported by pi 1.5.2; see the [verified dependency boundary and proposed API](docs/native-queue-cancellation.md).
+
 The context meter beside these choices opens pi's estimated current context usage and model limit, with free space, cumulative input/output and cache usage, and message/tool counts. It refreshes after messages, tool results and compaction. Current context and cumulative session totals are kept separate; when pi cannot report the current context size, such as just after compaction, the viewer shows it as unknown.
 
 The app keeps running in the tray with its window closed. Agents are child processes of the app, so quitting it stops them; they resume from their sessions next time.
