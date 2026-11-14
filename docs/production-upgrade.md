@@ -71,7 +71,7 @@ An untouched released main has a compiled GitHub feed and cannot use the
 controlled rebuild's linker override. Runtime therefore uses a tightly scoped
 loopback CONNECT/TLS cache serving only the downloaded/signed inputs for known
 GitHub hosts. A one-day transport-test CA is installed only in the disposable
-hosted VM (Linux process CA file, Windows test-user Root store, macOS VM admin
+hosted VM (Linux process CA file, Windows VM machine Root store, macOS VM admin
 trust domain), and that exact CA is removed in `finally`. This is separate from
 the updater Ed25519 key: original archive/delta signature checks remain enabled.
 No TCC/Grant permission, existing user profile, binary patch or process injection
