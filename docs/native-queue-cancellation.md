@@ -128,7 +128,10 @@ their private data. Live `get_messages` returns a parallel `inputRefs` array; id
 history uses the canonical session projection/entry IDs. `recordedInputs` also
 reconciles known receipts after compaction removes their messages from context.
 Legacy history remains unknown rather than being matched by body or assistant
-answers. Only Go's window DTO gets the existing `yesman` projection field.
+answers. Explicitly selected v2 runtimes can still perform their supported queue
+operations, but lack this input/history envelope: source association degrades to
+unknown, and queue transfers never feed the legacy text/count provenance tracker.
+Only Go's window DTO gets the existing `yesman` projection field.
 
 Go promotion never calls Submit or requires a retained original payload. It
 captures owner/process/session identity under a short workspace lease, releases

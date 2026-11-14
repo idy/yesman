@@ -465,7 +465,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		a.proc = p
 		p.piSession.Store(state.SessionID)
 		a.nativeQueue = state.PendingQueue
-		p.origins.native = state.PendingQueue.Capability == 3
+		p.origins.native = state.PendingQueue.Capability >= 2 && state.PendingQueue.supported()
 		if state.PendingQueue.supported() {
 			a.queue = pendingStatus(state.PendingQueue)
 		}
@@ -932,6 +932,10 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	}
 	if p.origins.native && data.HostSession == p.piSession.Load().(string) {
 		conv.Messages = projectNativeMessages(data.Messages, data.InputRefs)
+	} else if p.origins.native {
+		// v2 can move queues but cannot bind user events/history. Do not feed
+		// transfers into the legacy text/count provenance heuristic.
+		conv.Messages = projectNativeMessages(data.Messages, nil)
 	} else {
 		conv.Messages = p.origins.project(data.Messages)
 	}
