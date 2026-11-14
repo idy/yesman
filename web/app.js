@@ -1085,7 +1085,7 @@ function renderNeedsYou(body) {
   } else {
     inner.append(h('ul', { class: 'needs-you-list', 'aria-label': t('Waiting for you') }, items.map((item) => h('li', null, requestCard(item)))));
   }
-  const closed = closedHandoffs(state.snap).filter(({ yesman }) => inScope(yesman));
+  const closed = closedHandoffs(state.snap, 20, scope?.name);
   if (closed.length) {
     inner.append(h('details', { class: 'needs-you-history' },
       h('summary', null, t('Recently handled ({n})', { n: formatNumber(closed.length) })),

@@ -56,6 +56,17 @@ test('history is newest first and never pending', () => {
   assert.deepEqual(needsYouItems(s).map((i) => i.handoff.id), ['n3']);
 });
 
+test('one yesman\'s history is chosen before the limit', () => {
+  const closed = (name, n, at) => ({ id: `n${n}`, type: 'manual', title: `${name} ${n}`, createdAt: at, closedAt: at, resolution: 'done', closedBy: 'user' });
+  const s = { agents: [], yesmen: [
+    { name: 'alice', hiredAt: 'h', handoffs: [closed('alice', 1, '2026-01-01T00:00:00Z')] },
+    { name: 'bob', hiredAt: 'h', handoffs: Array.from({ length: 25 }, (_, i) => closed('bob', i + 1, `2026-01-02T00:00:${String(i).padStart(2, '0')}Z`)) },
+  ] };
+  assert.equal(closedHandoffs(s).length, 20);
+  assert.ok(closedHandoffs(s).every((x) => x.yesman === 'bob'));
+  assert.deepEqual(closedHandoffs(s, 20, 'alice').map((x) => x.handoff.title), ['alice 1']);
+});
+
 test('summaries are short plain lines', () => {
   assert.equal(summary('Run `npm login`\n\nthen **retry**'), 'Run npm login then retry');
   assert.equal(summary('x'.repeat(200)).length, 160);

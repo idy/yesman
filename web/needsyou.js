@@ -55,10 +55,12 @@ export function needsYouItems(snap) {
 }
 
 // closedHandoffs is the handoffs recently closed, newest first: history,
-// which never counts as waiting.
-export function closedHandoffs(snap, limit = 20) {
+// which never counts as waiting. With a yesman named, only its own, chosen
+// before the limit.
+export function closedHandoffs(snap, limit = 20, yesman = null) {
   const out = [];
   for (const y of snap?.yesmen ?? []) {
+    if (yesman && y.name !== yesman) continue;
     for (const h of y.handoffs ?? []) if (h.closedAt) out.push({ yesman: y.name, handoff: h });
   }
   return out.sort((a, b) => time(b.handoff.closedAt) - time(a.handoff.closedAt)).slice(0, limit);

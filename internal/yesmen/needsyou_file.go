@@ -147,6 +147,10 @@ func (f *handoffsFile) replace(hs Handoffs) error {
 	if err != nil {
 		return err
 	}
+	// Never write what could not be read again.
+	if len(data) > maxHandoffsBytes {
+		return fmt.Errorf("it would grow past %d bytes", maxHandoffsBytes)
+	}
 	if err := f.unchanged(); err != nil {
 		return err
 	}

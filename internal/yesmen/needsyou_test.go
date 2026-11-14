@@ -559,3 +559,34 @@ func TestHandoffsSlowFileHoldsUpOnlyItsYesman(t *testing.T) {
 		t.Errorf("alice has %d open", len(hs.Open()))
 	}
 }
+
+// A change that would make the file too large to read is refused, and the
+// file, still readable, is kept.
+func TestHandoffsNeverGrowPastTheReadLimit(t *testing.T) {
+	s := handoffStore(t)
+	y, _ := s.Get("alice")
+	head := `{"items":[{"id":"n1","type":"manual","title":"old","createdAt":"2026-01-01T00:00:00Z"}],"next":1,"futureTop":"`
+	tail := `"}`
+	pad := maxHandoffsBytes - len(head) - len(tail) - 2000
+	raw := head + strings.Repeat("x", pad) + tail
+	if err := os.WriteFile(y.HandoffsFile(), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Handoffs("alice"); err != nil {
+		t.Fatalf("the file near the limit is not readable: %v", err)
+	}
+	_, _, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "big", Detail: strings.Repeat("y", maxHandoffDetail)})
+	if err == nil || !strings.Contains(err.Error(), "grow past") {
+		t.Fatalf("added past the limit: %v", err)
+	}
+	if data, _ := os.ReadFile(y.HandoffsFile()); string(data) != raw {
+		t.Error("the file changed")
+	}
+	if hs, err := s.Handoffs("alice"); err != nil || len(hs.Items) != 1 {
+		t.Fatalf("read after the refusal: %d items, %v", len(hs.Items), err)
+	}
+	// A small change still fits.
+	if _, err := s.CloseHandoff("alice", "n1", HandoffDone, "user", ""); err != nil {
+		t.Fatal(err)
+	}
+}
