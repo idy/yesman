@@ -59,6 +59,20 @@ func run() error {
 	if mod.Version != "v0.9.0" || mod.Replace != nil {
 		return fmt.Errorf("adapter requires unmodified MyGo v0.9.0")
 	}
+	if mod.Dir == "" {
+		// A clean hosted runner may know the module version before its
+		// source has been downloaded. Download only this pinned module.
+		data, err = exec.Command("go", "mod", "download", "-json", "github.com/egoist/mygo").Output()
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &mod); err != nil {
+			return err
+		}
+		if mod.Dir == "" || mod.Version != "v0.9.0" || mod.Replace != nil {
+			return fmt.Errorf("could not resolve pinned MyGo source")
+		}
+	}
 	work, err := os.MkdirTemp("", "yesman-package-")
 	if err != nil {
 		return err

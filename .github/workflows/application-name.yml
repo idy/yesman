@@ -42,6 +42,8 @@ jobs:
         run: |
           test "$RUNNER_ENVIRONMENT" = github-hosted
           echo "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/name-evidence"
+          echo "Hosted naming contract for $GITHUB_SHA on $RUNNER_OS" > "$RUNNER_TEMP/name-evidence/admission.txt"
       - name: Install Linux desktop runtime
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 xvfb dbus-x11 x11-utils desktop-file-utils
