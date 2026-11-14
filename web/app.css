@@ -112,6 +112,9 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
   background: var(--mds-raised); border: 1px solid var(--mds-line); white-space: pre-wrap; overflow-wrap: anywhere;
   line-height: 1.6; font-size: var(--mds-text-body);
 }
+.msg-delivery { align-self: flex-end; max-width: 82%; min-width: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.msg-delivery > .msg-user { max-width: 100%; }
+.delivery-status { color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; padding-inline: 4px; overflow-wrap: anywhere; }
 .msg-assistant { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 
 .md { font-size: var(--mds-text-body); line-height: 1.7; color: var(--mds-ink); overflow-wrap: anywhere; }

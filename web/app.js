@@ -80,6 +80,8 @@ class Convo {
     this.error = null;
     this.live = null; // { message, el, blocks: Map(index -> el) }
     this.tools = new Map(); // toolCallId -> { args, status, result }
+    this.deliveries = new Map(); // message ID -> server receipt (or local Sending only)
+    this.seq = 0;
   }
 }
 
@@ -108,13 +110,61 @@ function pruneCaches() {
 // Records that arrive while the history loads are queued, then replayed on
 // top of it, skipping messages the history already has, so a turn in
 // progress keeps streaming and none shows twice.
-const messageKey = (m) => `${m?.role}:${m?.timestamp}`;
+const messageKey = (m) => m?.yesmanDeliveryId ? `delivery:${m.yesmanDeliveryId}` : `${m?.role}:${m?.timestamp}`;
+
+const DELIVERY_LABELS = {
+  sending: 'Sending…', accepted: 'Accepted · waiting for pi',
+  steering: 'Steering · after the current step', queued: 'Queued · after the current run',
+  unconfirmed: 'Delivery unconfirmed', failed: 'Not sent', interrupted: 'Delivery interrupted',
+  handled: 'Handled by an extension',
+};
+
+function updateDelivery(c, d) {
+  if (d?.agentSince && `${c.id}@${d.agentSince}` !== c.key) return;
+  if (!d?.id || (c.deliveries.get(d.id)?.revision ?? -1) >= d.revision) return;
+  c.deliveries.set(d.id, d);
+}
+
+function deliveryEl(c, d) {
+  const bubble = messageEl(c, { role: 'user', content: [
+    { type: 'text', text: d.text }, ...(d.images ?? []),
+  ] });
+  const label = DELIVERY_LABELS[d.state];
+  return h('div', { class: 'msg-delivery', 'data-delivery': d.id }, bubble,
+    h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite',
+      hidden: !label, title: d.error || null }, label ? t(label) : ''));
+}
+
+function refreshDelivery(c, d) {
+  if (!d) return;
+  const thread = $('#thread');
+  if (!thread || state.view.kind !== 'agent' || state.view.id !== c.id) return;
+  const old = thread.querySelector(`[data-delivery="${CSS.escape(d.id)}"]`);
+  if (c.messages.some((m) => m.yesmanDeliveryId === d.id)) { old?.remove(); return; }
+  if (old) {
+    const status = old.querySelector('.delivery-status');
+    const label = DELIVERY_LABELS[d.state];
+    status.hidden = !label;
+    status.textContent = label ? t(label) : '';
+    status.title = d.error || '';
+  } else {
+    const el = deliveryEl(c, d);
+    thread.querySelector('.thread-empty')?.remove();
+    const working = thread.querySelector('.working-live');
+    working ? working.before(el) : thread.append(el);
+  }
+}
 
 async function loadConvo(c) {
   c.queue = [];
   try {
     const data = await call('Messages', c.id);
     c.messages = data?.messages ?? [];
+    const local = [...c.deliveries.values()].filter((d) => d.revision === 0);
+    c.deliveries = new Map();
+    for (const d of data?.deliveries ?? []) updateDelivery(c,d);
+    for (const d of local) if (!c.deliveries.has(d.id)) c.deliveries.set(d.id, { ...d, state: 'unconfirmed' });
+    c.seq = data?.seq ?? 0;
     c.tools.clear();
     for (const message of c.messages) indexMessage(c, message);
     c.live = null;
@@ -320,6 +370,12 @@ function renderThread() {
       thread.append(c.live.el);
     }
   }
+  if (c.loaded) {
+    const delivered = new Set(c.messages.map((m) => m.yesmanDeliveryId).filter(Boolean));
+    for (const d of [...c.deliveries.values()].sort((a,b) => (a.order ?? a.createdAt ?? 0) - (b.order ?? b.createdAt ?? 0))) {
+      if (!delivered.has(d.id) && !(d.state === 'consumed' && !d.text && !d.images?.length)) thread.append(deliveryEl(c,d));
+    }
+  }
   renderWorking();
   scrollDown(true);
 }
@@ -388,6 +444,17 @@ function onAgentEvent(ev) {
     c.queue?.push(ev);
     return;
   }
+  if (ev.seq <= c.seq) return;
+  if (e.type === 'delivery_update') {
+    updateDelivery(c, e.delivery);
+    if (state.view.kind === 'agent' && state.view.id === c.id) {
+      const scroller = $('#scroll');
+      if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
+      refreshDelivery(c, c.deliveries.get(e.delivery.id));
+      scrollDown();
+    }
+    return;
+  }
   applyEvent(c, e, false);
 }
 
@@ -399,6 +466,10 @@ function applyEvent(c, e, replaying) {
   if (visible && scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
 
   switch (e.type) {
+    case 'delivery_update':
+      updateDelivery(c, e.delivery);
+      if (visible) refreshDelivery(c, c.deliveries.get(e.delivery.id));
+      break;
     case 'message_start': {
       if (e.message?.role !== 'assistant') break;
       c.live = { message: { ...e.message, content: [] }, el: h('div', { class: 'msg-assistant' }), blocks: new Map() };
@@ -431,6 +502,8 @@ function applyEvent(c, e, replaying) {
     }
     case 'message_end': {
       const m = e.message;
+      if (c.messages.some((seen) => messageKey(seen) === messageKey(m))) break;
+      if (visible && m.yesmanDeliveryId) $('#thread').querySelector(`[data-delivery="${CSS.escape(m.yesmanDeliveryId)}"]`)?.remove();
       indexMessage(c, m);
       c.messages.push(m);
       if (m.role === 'assistant') {
@@ -930,6 +1003,23 @@ async function sendMessage(a, textarea) {
   const text = textarea.value.trim();
   if ((!text && !attachments?.items.length) || attachments?.reading || attachments?.sending || state.modelOptions.get(key)?.busy) return;
   const images = imagePayload(attachments?.items ?? []);
+  const c = convo(a);
+  const command = text.startsWith('/');
+  // Editing after an uncertain submission is a new user intent. Retrying the
+  // unchanged draft reuses its receipt, even when the bridge response was lost.
+  if (attachments.submissionID) {
+    const previous = c.deliveries.get(attachments.submissionID);
+    if (previous && (previous.text !== text || JSON.stringify(previous.images ?? []) !== JSON.stringify(images))) attachments.submissionID = null;
+  }
+  const messageID = attachments.submissionID ?? [...crypto.getRandomValues(new Uint8Array(24))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  if (!command) {
+    attachments.submissionID = messageID;
+    if (!c.deliveries.has(messageID)) c.deliveries.set(messageID, { id: messageID, revision: 0, state: 'sending', text, images, createdAt: Date.now() });
+    const scroller = $('#scroll');
+    if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
+    refreshDelivery(c, c.deliveries.get(messageID));
+    scrollDown();
+  }
   // A keyboard submit or a click on Send intends to continue composing.
   // Keep that focus through pending renders; subsequent renders follow the
   // actual focus, so moving to another control or agent cancels restoration.
@@ -938,12 +1028,26 @@ async function sendMessage(a, textarea) {
   attachments.sending = true;
   renderDock({ focusComposer });
   try {
-    if (images.length) await call('SendImages', a.id, text, images);
-    else await call('Send', a.id, text);
+    if (command) {
+      if (images.length) await call('SendImages', a.id, text, images);
+      else await call('Send', a.id, text);
+    } else {
+      const receipt = await call('Submit', a.id, messageID, text, images, a.since);
+      updateDelivery(c, receipt);
+      refreshDelivery(c, c.deliveries.get(messageID));
+      if (receipt.state === 'failed' || receipt.state === 'interrupted') {
+        attachments.submissionID = null;
+        throw new Error(receipt.error || t(DELIVERY_LABELS[receipt.state]));
+      }
+    }
+    attachments.submissionID = null;
     state.drafts.delete(key);
     attachments.items = [];
   } catch (err) {
-    // Keep both text and images for retry if pi rejects the prompt.
+    // Keep both text and images for retry if pi rejects the prompt. An
+    // uncertain bridge failure keeps the same ID, so retry cannot duplicate it.
+    const d = c.deliveries.get(messageID);
+    if (d?.revision === 0) { d.state = 'unconfirmed'; refreshDelivery(c,d); }
     fail(err);
   } finally {
     attachments.sending = false;

@@ -151,6 +151,30 @@ function boardText(board: any): string {
 export default function yesman(pi: ExtensionAPI) {
 	if (!API || !TOKEN || !AGENT) return; // not started by yesman
 
+	// RPC has no per-message correlation field. Preserve an opaque receipt tag
+	// through input expansion and pi's own queues, then remove it using the
+	// supported message_end transform before persistence and model context.
+	// Commands use their original prompt path and never receive a tag.
+	// DRAFT BLOCKER: third-party input hooks see the tag before this transform.
+	// Reproduce with node scripts/check-delivery-pi.mjs --input-hooks.
+	pi.on("session_start", (_event, ctx) => { ctx.ui.setStatus("yesman.delivery", JSON.stringify({ version: 1, session: ctx.sessionManager.getSessionId() })); });
+	pi.on("message_end", (event) => {
+		if (event.message.role !== "user") return;
+		let id: string | undefined;
+		const clean = (text: string) => {
+			// Greedy first group selects only the final transport tag, keeping
+			// literal examples in the user's text intact. pi may append image hints.
+			const match = text.match(/^([\s\S]*)\n\n<!--yesman-delivery:([a-f0-9]{48})-->([\s\S]*)$/);
+			if (!match) return text;
+			id = match[2];
+			return match[1] + match[3];
+		};
+		const original = event.message.content;
+		const content = typeof original === "string" ? clean(original) : original.map((block) =>
+			block.type === "text" ? { ...block, text: clean(block.text) } : block);
+		if (id) return { message: { ...event.message, content, yesmanDeliveryId: id } };
+	});
+
 	if (ROLE === "lead") {
 		// Narrow the lead's tools before every run, in case something
 		// enabled a denied one since.

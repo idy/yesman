@@ -214,6 +214,14 @@ func (s *service) SendImages(ctx context.Context, id, text string, images []agen
 	return s.app.agents.PromptImages(ctx, id, text, images)
 }
 
+// Submit gives the page an idempotent, server-owned delivery receipt.
+func (s *service) Submit(ctx context.Context, id, messageID, text string, images []agent.Image, since time.Time) (agent.Delivery, error) {
+	if s.app.piErr != nil {
+		return agent.Delivery{}, s.app.piErr
+	}
+	return s.app.agents.Submit(ctx, id, messageID, text, images, since)
+}
+
 // Models lists pi's available models and this agent's effective selection.
 // The user may run an agent as any of them; the crew is what yesman starts
 // agents as.

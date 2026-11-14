@@ -101,9 +101,10 @@ type Event struct {
 // hold yet. Seq is the last event it reflects: a client that queued
 // events while loading it replays only later ones.
 type Conversation struct {
-	Messages json.RawMessage `json:"messages"`
-	Live     []Event         `json:"live"`
-	Seq      uint64          `json:"seq"`
+	Messages   json.RawMessage `json:"messages"`
+	Live       []Event         `json:"live"`
+	Seq        uint64          `json:"seq"`
+	Deliveries []Delivery      `json:"deliveries"`
 }
 
 // Config configures a Manager.
@@ -147,17 +148,18 @@ type agent struct {
 	prompts int
 	// reports counts worker handoffs being read or delivered to the lead,
 	// registered before the worker becomes idle; guarded by the manager's mu.
-	reports  int
-	info     Info
-	proc     *proc
-	token    string
-	seq      uint64        // the last event's number
-	turn     []Event       // the events of the assistant message in progress
-	starting chan struct{} // closed when a start finishes, nil otherwise
-	stopping bool
-	dir      string   // the workspace, to show paths in it relative to it
-	tools    []string // the tool calls running, oldest first
-	labels   map[string]string
+	reports    int
+	info       Info
+	proc       *proc
+	token      string
+	seq        uint64        // the last event's number
+	turn       []Event       // the events of the assistant message in progress
+	starting   chan struct{} // closed when a start finishes, nil otherwise
+	stopping   bool
+	dir        string   // the workspace, to show paths in it relative to it
+	tools      []string // the tool calls running, oldest first
+	labels     map[string]string
+	deliveries map[string]Delivery // receipts only; pi owns scheduling
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
 	nudged bool
@@ -349,6 +351,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			m.agents[id] = a
 		}
 		a.dir = y.Path
+		a.loadDeliveries()
 		if a.proc != nil {
 			p := a.proc
 			select {
@@ -475,6 +478,8 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 // record handles one record of an agent's process. It runs on the
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
+	m.deliveryCapability(a, p, kind, raw)
+	raw = m.observeDelivery(a, p, kind, raw)
 	m.follow(a, p, kind, raw)
 	switch kind {
 	case "agent_start":
@@ -696,7 +701,11 @@ func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behav
 		if len(images) > 0 {
 			cmd["images"] = images
 		}
-		_, err := p.call(context.Background(), cmd)
+		messageID := taggedDelivery(text)
+		err := m.bindDelivery(a, p, messageID)
+		if err == nil {
+			_, err = p.callObserved(context.Background(), cmd, func(r response) { m.deliveryResponse(a, p, messageID, r) })
+		}
 		a.modelMu.Lock()
 		m.mu.Lock()
 		a.prompts--
@@ -741,6 +750,7 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	r, err := p.callAt(ctx, map[string]any{"type": "get_messages"}, func() {
 		m.mu.Lock()
 		conv.Live, conv.Seq = append([]Event(nil), a.turn...), a.seq
+		conv.Deliveries = a.deliverySnapshot()
 		m.mu.Unlock()
 	})
 	if err != nil {
@@ -864,6 +874,13 @@ func (m *Manager) clearLocked(a *agent, p *proc) {
 		a.proc = nil
 	}
 	a.turn = nil
+	if events := m.interruptDeliveriesLocked(a); len(events) > 0 {
+		go func() {
+			for _, ev := range events {
+				m.cfg.OnEvent(ev)
+			}
+		}()
+	}
 	a.endRun()
 	if a.token != "" {
 		delete(m.tokens, a.token)
