@@ -536,6 +536,7 @@ function agentRow(a, cls, label) {
   if (worker && a.status === 'failed') status = t('{status}; {name} was told', { status, name: a.yesman });
   return h('button', {
     class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': statusTone(a), 'data-done': done ? 'true' : null,
+    'data-sidebar-entry': worker ? 'worker' : cls.includes('agent-row--yesman') ? 'yesman' : 'needs-you',
     'aria-current': current ? 'page' : null, 'aria-haspopup': 'menu',
     title: `${a.id}: ${status}${a.title ? `\n${a.title}` : ''}${a.detail ? `\n${a.detail}` : ''}`,
     onclick: () => selectAgent(a.id),
@@ -590,16 +591,30 @@ async function openAgentMenu(e, a) {
       case 'hide-done':
       case 'show-done': setHideDone(a.yesman, action === 'hide-done'); break;
       default:
-        document.querySelector(`.agent-row[data-agent="${CSS.escape(a.id)}"]`)?.focus({ preventScroll: true });
+        restoreSidebarFocus(row);
     }
   } catch (err) {
     fail(err);
   }
 }
 
+// A waiting lead has two entries. Preserve the entry as well as the agent;
+// if it disappears, use the other entry, then the workspace's lead for a
+// hidden/removed worker. Keep focus unchanged when the workspace is gone.
+function restoreSidebarFocus(row) {
+  if (!row?.dataset.agent) return;
+  const list = $('#yesmen');
+  const agent = `[data-agent="${CSS.escape(row.dataset.agent)}"]`;
+  const entry = `[data-sidebar-entry="${CSS.escape(row.dataset.sidebarEntry)}"]`;
+  const lead = `${row.dataset.agent.split('/')[0]}/lead`;
+  const target = list.querySelector(agent + entry) ?? list.querySelector(agent)
+    ?? list.querySelector(`[data-agent="${CSS.escape(lead)}"][data-sidebar-entry="yesman"]`);
+  target?.focus({ preventScroll: true });
+}
+
 function renderSidebar() {
   const list = $('#yesmen');
-  const focusedAgent = list.contains(document.activeElement) ? document.activeElement.dataset.agent : null;
+  const focusedRow = list.contains(document.activeElement) ? document.activeElement : null;
   list.replaceChildren();
   const waiting = state.snap.agents.filter((a) => a.status === 'waiting' && a.role === 'lead');
   if (waiting.length) {
@@ -620,7 +635,7 @@ function renderSidebar() {
       list.append(agentRow(w, 'agent-row--worker', w.name));
     }
   }
-  if (focusedAgent) list.querySelector(`[data-agent="${CSS.escape(focusedAgent)}"]`)?.focus({ preventScroll: true });
+  restoreSidebarFocus(focusedRow);
   renderSideFoot();
 }
 
