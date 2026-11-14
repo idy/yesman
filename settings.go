@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+
+	"github.com/idy/yesman/internal/crew"
 )
 
 // Settings are the user's choices in the Settings pages, kept in
@@ -26,6 +28,9 @@ type Settings struct {
 	// AutoFetch is how many minutes apart the pool's repositories are all
 	// fetched; 0 fetches them only when asked or checked out.
 	AutoFetch int `json:"autoFetch,omitempty"`
+	// Crew matches pi's models to Artificial Analysis's, and chooses the
+	// crew and what new agents start as.
+	Crew crew.Config `json:"crew,omitzero"`
 }
 
 // autoFetchChoices are the intervals the Repositories page offers, in

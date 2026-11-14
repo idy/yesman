@@ -11,6 +11,7 @@ import { createBoard } from './board.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
+import { createCrew } from './crew.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, formatNumber, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
@@ -769,6 +770,10 @@ const effortLabel = (level) => (EFFORT[level] ? t(EFFORT[level]) : level[0].toUp
 async function openHire() {
   const form = $('#hire-form');
   form.reset();
+  // Its lead runs as the model Settings › yesman chooses for new yesmen.
+  const hint = $('#hire-model-hint');
+  crewPage.describe(hint);
+  crewPage.load().then(() => { if ($('#hire-dialog').open) crewPage.describe(hint); });
   if ((await openDialog($('#hire-dialog'))) === 'hire') hire(form.elements.name.value.trim());
 }
 
@@ -908,6 +913,9 @@ function askEl(a) {
 
 function renderWelcome(body) {
   const input = h('input', { class: 'mds-input', placeholder: t('name, e.g. checkout-v2'), pattern: '[a-z0-9][a-z0-9\\-]{0,31}', required: true, spellcheck: 'false', 'aria-label': t('Name') });
+  const hint = h('p', { class: 'welcome-hint' });
+  crewPage.describe(hint);
+  crewPage.load().then(() => { if (hint.isConnected) crewPage.describe(hint); });
   body.append(
     h('div', { class: 'page' },
       h('div', { class: 'welcome' },
@@ -916,6 +924,7 @@ function renderWelcome(body) {
         state.snap.piError ? h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('pi was not found')), h('p', null, state.snap.piError))) : null,
         h('form', { onsubmit: (e) => { e.preventDefault(); hire(input.value.trim()); } },
           input, h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, t('Hire'))),
+        hint,
       )),
   );
   input.focus();
@@ -926,6 +935,7 @@ function renderWelcome(body) {
 // The pages, labelled in English: each is said in the page's language.
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
+  { page: 'yesman', label: 'yesman', icon: 'users' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
   { page: 'storage', label: 'Storage', icon: 'folder' },
   { page: 'pi', label: 'pi', icon: 'package' },
@@ -971,6 +981,7 @@ async function loadSettingsPage(page) {
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
     else if (page === 'pi') { await piPage.load(); return; }
+    else if (page === 'yesman') { await crewPage.load(); return; }
   } catch (err) {
     fail(err);
     return;
@@ -984,6 +995,7 @@ function renderSettings(body) {
   if (state.view.page === 'repositories') renderRepositories(inner);
   else if (state.view.page === 'storage') renderStorage(inner);
   else if (state.view.page === 'pi') piPage.render(inner);
+  else if (state.view.page === 'yesman') crewPage.renderPage(inner);
   else if (state.view.page === 'config') renderConfig(inner);
   else if (state.view.page === 'about') renderAbout(inner);
   else renderGeneral(inner);
@@ -1036,6 +1048,16 @@ const piPage = createPiPage({
   ago: (iso, verb) => ago(iso, verb),
   preferenceRow,
   revealButton,
+});
+
+// Settings › yesman: the crew, and what new yesmen run as, in crew.js.
+const crewPage = createCrew({
+  call,
+  fail,
+  shown: () => state.view.kind === 'settings' && state.view.page === 'yesman',
+  rerender: () => renderBody(),
+  openPage: () => showSettings('yesman'),
+  preferenceRow,
 });
 
 function renderGeneral(inner) {

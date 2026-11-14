@@ -410,7 +410,8 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 		return nil, modelState{}, err
 	}
 	args := []string{"--mode", "rpc", "--session-dir", sessions, "-e", m.cfg.Extension}
-	if hasSession(sessions) {
+	resumed := hasSession(sessions)
+	if resumed {
 		args = append(args, "--continue")
 	} else {
 		args = append(args, "--name", ID(y.Name, name))
@@ -448,6 +449,19 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 			return nil, modelState{}, fmt.Errorf("pi did not start: %v: %s", err, lastLines(msg, 6))
 		}
 		return nil, modelState{}, fmt.Errorf("pi did not start: %w", err)
+	}
+	// A lead's new session starts as the model chosen when its yesman was
+	// hired; a resumed one keeps the model it was using. Workers are given
+	// theirs by StartWorkerAs.
+	if c, ok := ParseChoice(y.Model); ok && role == RoleLead && !resumed {
+		// A model pi no longer has must not keep the lead from starting:
+		// it runs as pi's own default instead.
+		if err := applyChoice(ctx, p, c); err != nil {
+			log.Printf("%s: start as %s: %v", ID(y.Name, name), c, err)
+		}
+		if s, err := p.modelState(ctx); err == nil {
+			state = s
+		}
 	}
 	return p, state, nil
 }
@@ -883,6 +897,12 @@ func (m *Manager) running(id string) *proc {
 // StartWorker records a worker of a yesman and gives it its task. title is
 // the subject of its work in a few words, for the user.
 func (m *Manager) StartWorker(ctx context.Context, yesman, name, title, task string) (Info, error) {
+	return m.StartWorkerAs(ctx, yesman, name, title, task, Choice{})
+}
+
+// StartWorkerAs is StartWorker with the model and effort the worker runs
+// as, in place of the workers' default; a zero Choice keeps the default.
+func (m *Manager) StartWorkerAs(ctx context.Context, yesman, name, title, task string, as Choice) (Info, error) {
 	if strings.TrimSpace(task) == "" {
 		return Info{}, errors.New("a worker needs a task")
 	}
@@ -894,6 +914,11 @@ func (m *Manager) StartWorker(ctx context.Context, yesman, name, title, task str
 		return Info{}, err
 	}
 	id := ID(yesman, name)
+	if !as.IsZero() {
+		if _, err := m.RunAs(ctx, id, as); err != nil {
+			return Info{}, errors.Join(fmt.Errorf("run as %s: %w", as, err), m.RemoveWorker(yesman, name))
+		}
+	}
 	if err := m.prompt(ctx, id, task, "followUp"); err != nil {
 		// Leave no worker that never got its task, so the name can be
 		// used again.
