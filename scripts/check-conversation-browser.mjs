@@ -1,0 +1,534 @@
+// Optional browser check of how a conversation reads, in the production page
+// against a controlled bridge, in Chromium and WebKit:
+//
+//   YESMAN_TEST_PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node scripts/check-conversation-browser.mjs
+//
+// The history is synthetic, shaped like a lead's real one: a person's question
+// with an image, replies, thinking, tools, a long worker report, receipts. It
+// checks the work between replies folds into one line each time, people and
+// replies stay in full, and live streaming, steering, keyboard, scrolling,
+// switching agents, reloading, Chinese, dark and narrow windows behave. Set
+// YESMAN_CONVERSATION_BEFORE to another page's web directory (such as an
+// earlier release's) to draw the same history there for comparison, and
+// YESMAN_CONVERSATION_WEB to check another page instead of this one.
+// YESMAN_TOOL_EVENTS replays a recording of pi's events for tools whose
+// results an extension replaces (TestOriginCollisionWithPiFixture writes one);
+// without it, the same events as recorded from pi 1.5.2 are used.
+// A browser bridge is not the native window, pi or a real provider.
+const { chromium, webkit } = await import(process.env.YESMAN_TEST_PLAYWRIGHT_MODULE || "playwright");
+import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import assert from "node:assert/strict";
+
+const serve = (root) =>
+  createServer(async (req, res) => {
+    try {
+      const p = new URL(req.url, "http://localhost").pathname;
+      const type = p.endsWith(".js") ? "application/javascript" : p.endsWith(".css") ? "text/css" : p.endsWith(".woff2") ? "font/woff2" : p.endsWith(".png") ? "image/png" : p.endsWith(".svg") ? "image/svg+xml" : "text/html";
+      res.setHeader("Content-Type", type);
+      res.end(await readFile(root + (p === "/" ? "/index.html" : p)));
+    } catch {
+      res.writeHead(404).end();
+    }
+  }).listen(0, "127.0.0.1");
+const after = serve(process.env.YESMAN_CONVERSATION_WEB || fileURLToPath(new URL("../web", import.meta.url)));
+const before = process.env.YESMAN_CONVERSATION_BEFORE ? serve(process.env.YESMAN_CONVERSATION_BEFORE) : null;
+await Promise.all([after, before].filter(Boolean).map((s) => new Promise((r) => (s.listening ? r() : s.on("listening", r)))));
+
+const png = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg==";
+const sub = (n) => n.toString(16).padStart(48, "0");
+const MARK = "REPORT-BODY-MARKER";
+
+function history() {
+  let ts = 1_794_652_000_000;
+  const at = () => (ts += 1000);
+  const user = (text, yesman, images = 0) => ({ role: "user", timestamp: at(), ...(yesman ? { yesman } : {}), content: [{ type: "text", text }, ...Array.from({ length: images }, () => ({ type: "image", mimeType: "image/png", data: png }))] });
+  const assistant = (content, stopReason = "stop") => ({ role: "assistant", timestamp: at(), stopReason, content, api: "x", provider: "p", model: "m", usage: {} });
+  const th = (thinking) => ({ type: "thinking", thinking, thinkingSignature: "opaque" });
+  const tx = (text) => ({ type: "text", text });
+  const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
+  const result = (id, name, text = "ok") => ({ role: "toolResult", timestamp: at(), toolCallId: id, toolName: name, isError: false, content: [{ type: "text", text }] });
+  const longReport = `已完成 t58。**主要原因**：每个非空 thinking 块单独成框。\n\n${MARK}\n\n` + Array.from({ length: 60 }, (_, i) => `- 证据 ${i + 1}：app.js 第 ${300 + i} 行`).join("\n");
+  return [
+    user("yesman 这里为什么会把 thinking 分成这么多次显示？", { source: "user", submission: sub(1) }, 1),
+    assistant([tx("我会核对 thinking 的消息数据和渲染方式。"), call("c1", "yesman_board", { add: [{ title: "核实 Thinking" }] })], "toolUse"),
+    result("c1", "yesman_board"),
+    assistant([th("**Planning the audit**\n\nI need a worker to read the renderer."), th("**Choosing the crew**"), call("c2", "yesman_worker_start", { name: "thinking-display-audit", title: "核实 Thinking 显示" })], "toolUse"),
+    result("c2", "yesman_worker_start"),
+    assistant([th(""), tx("**多个 Thinking 框不一定对应多次模型调用。** 我已安排核实。")]),
+    user(`[yesman] Worker "thinking-display-audit" finished a run. Its final message:\n\n${longReport}`, { source: "yesman", kind: "report", worker: "thinking-display-audit" }),
+    assistant([th("**Reading the report**"), th("**Checking against the board**"), th("**Summarizing for the user**"), tx("原因查清了：**yesman 目前给每个独立的 `thinking` 内容块都画一个框。**")]),
+    user("我希望把背后的工作合并起来，对话保留。", { source: "user", submission: sub(2) }),
+    assistant([th("a"), th("b"), th("c"), th("d"), tx("可以这样组织。**你希望默认收起，还是只合并 Thinking？**")]),
+    user('[yesman] Worker "legacy" finished a run. Its final message:\n\nAn old report from before origins were recorded.'),
+  ];
+}
+const deliveries = () => [
+  { id: sub(1), revision: 2, state: "accepted", text: "yesman 这里为什么会把 thinking 分成这么多次显示？", imageCount: 1, order: 1 },
+  { id: sub(2), revision: 2, state: "unconfirmed", text: "我希望把背后的工作合并起来，对话保留。", imageCount: 0, order: 2 },
+  { id: sub(3), revision: 3, state: "unconfirmed", text: "an older submission with no message tied to it", imageCount: 0, order: 3 },
+  { id: sub(4), revision: 3, state: "failed", text: "a rejected submission", imageCount: 0, order: 4, error: "rejected" },
+];
+const workerHistory = () => [
+  { role: "user", timestamp: 1_794_652_100_000, yesman: { source: "lead", kind: "task" }, content: [{ type: "text", text: "Read app.js and report why Thinking shows several boxes." }] },
+  { role: "assistant", timestamp: 1_794_652_101_000, stopReason: "toolUse", content: [{ type: "thinking", thinking: "**Reading**" }, { type: "toolCall", id: "w1", name: "read", arguments: { path: "web/app.js" } }] },
+  { role: "toolResult", timestamp: 1_794_652_102_000, toolCallId: "w1", toolName: "read", isError: false, content: [{ type: "text", text: "..." }] },
+  { role: "assistant", timestamp: 1_794_652_103_000, stopReason: "stop", content: [{ type: "text", text: "Done: each thinking block gets its own box." }] },
+];
+
+async function open(browser, server, { colorScheme = "light", width = 900, height = 900, locale = "en" } = {}) {
+  const page = await browser.newPage({ viewport: { width, height }, colorScheme });
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.addInitScript(({ history, deliveries, workerHistory, locale }) => {
+    localStorage.setItem("yesman.info", "hidden");
+    const saved = JSON.parse(sessionStorage.getItem("fixture") ?? "null") ?? {
+      seq: 0,
+      messages: { "alice/lead": history, "alice/w1": workerHistory },
+      deliveries: { "alice/lead": deliveries },
+    };
+    const agents = [
+      { id: "alice/lead", yesman: "alice", name: "lead", role: "lead", since: "1", status: "idle", model: "m", provider: "p", effort: "high", effortLevels: ["high"] },
+      { id: "alice/w1", yesman: "alice", name: "w1", role: "worker", number: 1, title: "核实 Thinking 显示", since: "1", status: "idle", model: "m", provider: "p", effort: "high", effortLevels: ["high"] },
+    ];
+    window.events = {};
+    const save = () => sessionStorage.setItem("fixture", JSON.stringify(saved));
+    window.fixture = {
+      saved,
+      agents,
+      emit(agent, data, extra = {}) {
+        // pi's history holds what the agent's current instance recorded.
+        if (data.type === "message_end" && !extra.agentSince) (saved.messages[agent] ??= []).push(data.message);
+        if (data.type === "delivery_update") {
+          const list = (saved.deliveries[agent] ??= []);
+          const i = list.findIndex((d) => d.id === data.delivery.id);
+          i < 0 ? list.push(data.delivery) : (list[i] = data.delivery);
+          data.retained = list.map((d) => d.id);
+        }
+        save();
+        window.events["agent-event"]?.({ agent, seq: ++saved.seq, data, ...extra });
+      },
+      status(name, status, activity = "") {
+        for (const a of agents) if (a.name === name) Object.assign(a, { status, activity, runStartedAt: status === "working" ? new Date().toISOString() : undefined });
+        window.events.agents?.(structuredClone(agents));
+      },
+    };
+    window.mygo = {
+      locale,
+      on: (n, f) => (window.events[n] = f),
+      call: async (method, ...args) => {
+        switch (method.replace("Yesman.", "")) {
+          case "State": return { yesmen: [{ name: "alice", displayName: "Alice" }], agents: structuredClone(agents) };
+          case "Repos": case "Clones": return [];
+          case "Messages": return structuredClone({ messages: saved.messages[args[0]] ?? [], live: [], seq: saved.seq, deliveries: saved.deliveries[args[0]] ?? [], queue: { known: false } });
+          case "Models": return { agent: agents.find((a) => a.id === args[0]), models: [{ id: "m", provider: "p", name: "Model" }] };
+          case "TakeFocus": return "";
+          default: return {};
+        }
+      },
+    };
+  }, { history: history(), deliveries: deliveries(), workerHistory: workerHistory(), locale });
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await page.locator('[data-agent="alice/lead"]').first().click();
+  await page.locator("#thread .msg-user").first().waitFor();
+  await page.waitForTimeout(150);
+  return { page, errors };
+}
+
+// geometry is what a reader sees: how tall the thread is, and what it shows.
+const geometry = (page) =>
+  page.evaluate(() => {
+    const thread = document.querySelector("#thread");
+    const shown = [...thread.children].filter((el) => el.getBoundingClientRect().height > 0);
+    return {
+      threadHeight: Math.round(thread.getBoundingClientRect().height),
+      rows: shown.length,
+      thinkingBoxes: thread.querySelectorAll("details.thinking").length,
+      toolRows: [...thread.querySelectorAll(".tool")].filter((el) => el.getBoundingClientRect().height > 0).length,
+      workRows: thread.querySelectorAll(":scope > .work").length,
+      submissionRows: thread.querySelectorAll(".delivery-receipt").length,
+    };
+  });
+const shot = (page, name, engine) => page.screenshot({ path: `${tmpdir()}/yesman-conversation-${name}-${engine}.png`, fullPage: false });
+const summaries = async (page) => (await page.locator("#thread > .work > summary").allInnerTexts()).map((s) => s.trim().split(/\s*\n\s*/).join(" | "));
+
+
+// pi's events for two tool calls whose results an extension's message_end
+// hook replaces: the first keeps its outcome, the second is failed. Recorded
+// from pi 1.5.2 by TestOriginCollisionWithPiFixture (parallel tools); only the
+// timestamps differ.
+const recordedTools = () => {
+  const call = (id) => ({ type: "toolCall", id, name: "fixture_tool", arguments: {} });
+  const text = (t) => [{ type: "text", text: t }];
+  const result = (id, t, isError) => ({ role: "toolResult", toolCallId: id, toolName: "fixture_tool", content: text(t), details: {}, isError, durationMs: 0, timestamp: 1_794_655_000_001 });
+  return [
+    { type: "message_end", message: { role: "assistant", content: [call("fixture-call"), call("fixture-fail")], api: "pi-messages", provider: "fixture", model: "m", stopReason: "toolUse", timestamp: 1_794_655_000_000 } },
+    { type: "tool_execution_start", toolCallId: "fixture-call", toolName: "fixture_tool", args: {} },
+    { type: "tool_execution_start", toolCallId: "fixture-fail", toolName: "fixture_tool", args: {} },
+    { type: "tool_execution_update", toolCallId: "fixture-call", toolName: "fixture_tool", args: {}, partialResult: { content: text("partial output"), details: {} } },
+    { type: "tool_execution_update", toolCallId: "fixture-fail", toolName: "fixture_tool", args: {}, partialResult: { content: text("partial output"), details: {} } },
+    { type: "tool_execution_end", toolCallId: "fixture-call", toolName: "fixture_tool", result: { content: text("before message_end"), details: {} }, isError: false, durationMs: 0 },
+    { type: "tool_execution_end", toolCallId: "fixture-fail", toolName: "fixture_tool", result: { content: text("before message_end"), details: {} }, isError: false, durationMs: 0 },
+    { type: "message_start", message: result("fixture-call", "before message_end", false) },
+    { type: "message_end", message: result("fixture-call", "FINAL canonical result", false) },
+    { type: "message_start", message: result("fixture-fail", "before message_end", false) },
+    { type: "message_end", message: result("fixture-fail", "FINAL refused by a hook", true) },
+  ];
+};
+const toolEvents = process.env.YESMAN_TOOL_EVENTS
+  ? JSON.parse(await readFile(process.env.YESMAN_TOOL_EVENTS, "utf8")).events.filter((e) =>
+      e.type.startsWith("tool_execution") || (e.type === "message_start" || e.type === "message_end") && (e.message.role === "toolResult" || e.message.role === "assistant" && e.message.content.some((b) => b.type === "toolCall")))
+  : recordedTools();
+
+// A tool's result message is final: an extension may replace what its
+// execution returned, and fail it. An open tool shows the final output in
+// place, keeping focus; its state and the work line's counts follow, a late
+// execution record does not undo it, and history reads the same.
+async function hookedTools(browser, engine) {
+  const { page, errors } = await open(browser, after);
+  const emit = (data) => page.evaluate((d) => window.fixture.emit("alice/lead", d), data);
+  const frame = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const at = (type, pred) => toolEvents.findIndex((e) => e.type === type && pred(e));
+  const run = async (from, to) => { for (const e of toolEvents.slice(from, to)) await emit(e); await frame(); };
+  await page.evaluate(() => window.fixture.status("lead", "working", "Running fixture_tool"));
+  await emit({ type: "agent_start" });
+  const firstUpdate = at("tool_execution_update", () => true);
+  await run(0, firstUpdate);
+  const work = page.locator("#thread > .work").last();
+  await work.locator(":scope > summary").focus();
+  await page.keyboard.press("Enter");
+  const tool = work.locator('[data-tool="fixture-call"]');
+  await tool.waitFor();
+  await tool.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await tool.evaluate((el) => (el.dataset.kept = "1"));
+  // Running output shows as it comes.
+  const firstEnd = at("tool_execution_end", () => true);
+  await run(firstUpdate, firstEnd);
+  assert.match(await tool.locator(".tool-body").innerText(), /partial output/);
+  assert.equal(await tool.getAttribute("data-status"), "running");
+  // The execution's result, then the final message replacing it.
+  await run(firstEnd, toolEvents.length);
+  const body = await tool.locator(".tool-body").innerText();
+  const shown = { engine, body: body.split("\n").at(-1), status: await tool.getAttribute("data-status"), facts: await work.locator(".work-facts").innerText() };
+  assert.match(body, /FINAL canonical result/, `the open tool shows its execution's result, not the final one: ${body}`);
+  assert(!body.includes("before message_end"));
+  assert.equal(shown.status, "done");
+  assert.equal(await work.locator('[data-tool="fixture-fail"]').getAttribute("data-status"), "error");
+  assert.equal(await work.locator('[data-tool="fixture-fail"] .tool-state').innerText(), "failed");
+  assert.equal(shown.facts, "2 tool calls · 1 failed");
+  assert.equal(await tool.getAttribute("data-kept"), "1", "the open tool was redrawn");
+  assert.equal(await tool.evaluate((el) => el.open), true);
+  assert.equal(await tool.locator("summary").evaluate((el) => document.activeElement === el), true, "focus left the tool");
+  // A worker start an extension fails did not start a worker.
+  await emit({ type: "message_end", message: { role: "assistant", timestamp: 1_794_655_000_010, stopReason: "toolUse", content: [{ type: "toolCall", id: "start", name: "yesman_worker_start", arguments: { name: "w2" } }] } });
+  await emit({ type: "tool_execution_start", toolCallId: "start", toolName: "yesman_worker_start", args: { name: "w2" } });
+  await emit({ type: "tool_execution_end", toolCallId: "start", toolName: "yesman_worker_start", result: { content: [{ type: "text", text: "started" }] }, isError: false });
+  await frame();
+  assert.equal(await work.locator(".work-facts").innerText(), "3 tool calls · 1 failed · 1 worker started");
+  await emit({ type: "message_end", message: { role: "toolResult", timestamp: 1_794_655_000_011, toolCallId: "start", toolName: "yesman_worker_start", isError: true, content: [{ type: "text", text: "refused by a hook" }] } });
+  await frame();
+  assert.equal(await work.locator(".work-facts").innerText(), "3 tool calls · 2 failed");
+  // A late execution record does not undo the final result.
+  await emit({ type: "tool_execution_end", toolCallId: "fixture-call", toolName: "fixture_tool", result: { content: [{ type: "text", text: "before message_end" }] }, isError: false });
+  await frame();
+  assert.match(await tool.locator(".tool-body").innerText(), /FINAL canonical result/);
+  await emit({ type: "message_end", message: { role: "assistant", timestamp: 1_794_655_000_020, stopReason: "stop", content: [{ type: "text", text: "Fixture complete" }] } });
+  await emit({ type: "agent_settled" });
+  await page.evaluate(() => window.fixture.status("lead", "idle"));
+  const live = await summaries(page);
+  // History reads the same.
+  await page.reload();
+  await page.locator('[data-agent="alice/lead"]').first().click();
+  await page.locator("#thread > .work").first().waitFor();
+  await page.waitForTimeout(100);
+  assert.deepEqual(await summaries(page), live);
+  const again = page.locator("#thread > .work").last();
+  await again.locator(":scope > summary").click();
+  await again.locator('[data-tool="fixture-call"] > summary').click();
+  assert.match(await again.locator('[data-tool="fixture-call"] .tool-body').innerText(), /FINAL canonical result/);
+  assert.deepEqual(errors, []);
+  await page.close();
+  return shown;
+}
+
+
+// A message nobody is known to have written is a person's: its images show,
+// in order, whatever its text says, including text in the form of yesman's
+// old notices (an input hook can rewrite a person's steering into a queued
+// report's text: pi's records then cannot tell the two apart). Only text alone
+// in that form, as yesman wrote its notices, keeps their old look.
+const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+async function unknownImages(browser, engine) {
+  const { page, errors } = await open(browser, after);
+  const emit = (data) => page.evaluate((d) => window.fixture.emit("alice/lead", d), data);
+  const frame = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const T = 1_794_656_000_000;
+  const text = (t) => ({ type: "text", text: t });
+  // As pi 1.5.2 recorded it: the image block's fields in pi's order.
+  const image = (data) => ({ type: "image", data, mimeType: "image/png" });
+  const report = '[yesman] Worker "2nd-pass" finished a run. Its final message:\n\nfixture reply';
+  const cases = [
+    { name: "report text and an image", message: { role: "user", timestamp: T + 1, content: [text(report), image(png)] }, images: [png] },
+    { name: "the report itself", message: { role: "user", timestamp: T + 2, content: [text(report)] }, images: [], note: "Report from worker 2nd-pass" },
+    { name: "lead text and two images", message: { role: "user", timestamp: T + 3, content: [text("[from your lead] see these"), image(png1x1), image(png)] }, images: [png1x1, png] },
+    { name: "notice text and an image", message: { role: "user", timestamp: T + 4, content: [text('[yesman] Worker "w1" has a question.'), image(png1x1)] }, images: [png1x1] },
+    { name: "images alone", message: { role: "user", timestamp: T + 5, content: [image(png), image(png1x1)] }, images: [png, png1x1] },
+    { name: "a person's message with its receipt", message: { role: "user", timestamp: T + 6, yesman: { source: "user", submission: sub(8) }, content: [text("and this one"), image(png)] }, images: [png], bound: sub(8) },
+  ];
+  // An open line of work stays open, kept and focused while rows arrive.
+  const work = page.locator("#thread > .work").first();
+  await work.locator(":scope > summary").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelector("#thread > .work")?.open);
+  await work.evaluate((el) => (el.dataset.kept = "1"));
+  await emit({ type: "delivery_update", delivery: { id: sub(7), revision: 2, state: "unconfirmed", text: report, imageCount: 1, order: 7 } });
+  await emit({ type: "delivery_update", delivery: { id: sub(8), revision: 2, state: "accepted", text: "and this one", imageCount: 1, order: 8 } });
+  for (const c of cases) await emit({ type: "message_end", message: c.message });
+  await frame();
+  const check = async (when) => {
+    const seen = {};
+    for (const c of cases) {
+      const row = page.locator(`[data-row="user:${c.message.timestamp}"]`);
+      await row.waitFor();
+      await row.scrollIntoViewIfNeeded();
+      const imgs = row.locator("img");
+      await page.waitForFunction((n) => [...document.querySelectorAll(`[data-row="user:${n}"] img`)].every((el) => el.complete && el.naturalWidth > 0), c.message.timestamp);
+      const shown = await imgs.evaluateAll((els) => els.map((el) => ({ src: el.getAttribute("src"), alt: el.alt, width: el.naturalWidth, height: el.naturalHeight })));
+      const label = `${when}: ${c.name}`;
+      assert.deepEqual(shown.map((i) => i.src), c.images.map((d) => `data:image/png;base64,${d}`), `${label}: the images shown`);
+      for (const i of shown) {
+        assert.equal(i.alt, "Attached image", label);
+        assert.deepEqual([i.width, i.height], i.src.endsWith(png1x1) ? [1, 1] : [16, 16], `${label}: image size`);
+      }
+      if (c.note) {
+        assert.equal(await row.evaluate((el) => el.matches("details.note[open]")), true, `${label}: not the old note`);
+        assert.equal(await row.locator(":scope > summary").innerText(), c.note);
+      } else {
+        // The row is the person's bubble, or holds it with its receipt.
+        const bubble = await row.evaluate((el) => {
+          const b = el.matches(".msg-user") ? el : el.querySelector(":scope > .msg-user");
+          return b && !el.matches(".note") && !el.querySelector(".note") ? (b.firstChild?.nodeType === 3 ? b.firstChild.textContent : "") : null;
+        });
+        const words = c.message.content.find((b) => b.type === "text")?.text ?? "";
+        assert.equal(bubble, words, `${label}: not a person's message with its text in full`);
+      }
+      assert.equal(await row.getAttribute("data-bound"), c.bound ? "true" : null, `${label}: bound to a receipt`);
+      seen[c.name] = shown.length;
+    }
+    assert.deepEqual(await page.locator(`[data-row="user:${T + 6}"] .delivery-status`).allInnerTexts(), ["Delivered"]);
+    // The receipt of a submission no message is tied to stays a light line.
+    assert.match(await page.locator(`[data-delivery="${sub(7)}"]`).innerText(), /Submission: \[yesman\] Worker[\s\S]*1 image submitted/);
+    assert.equal(await page.locator(`[data-delivery="${sub(7)}"]`).getAttribute("data-bound"), null);
+    return seen;
+  };
+  const live = await check("live");
+  assert.equal(await work.getAttribute("data-kept"), "1", "the open work was redrawn");
+  assert.equal(await work.evaluate((el) => el.open), true);
+  assert.equal(await work.locator(":scope > summary").evaluate((el) => document.activeElement === el), true, "focus left the open work");
+  await page.reload();
+  await page.locator('[data-agent="alice/lead"]').first().click();
+  await page.locator("#thread > .work").first().waitFor();
+  assert.deepEqual(await check("history"), live);
+  assert.deepEqual(errors, []);
+  await page.close();
+  return live;
+}
+
+const results = {};
+const engines = process.env.YESMAN_TEST_ENGINES?.split(",") ?? ["chromium", "webkit"];
+for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) => engines.includes(e))) {
+  const browser = await type.launch({ headless: true });
+  try {
+    if (before) {
+      const { page } = await open(browser, before);
+      results[`${engine}-before`] = await geometry(page);
+      await page.locator("#scroll").evaluate((el) => (el.scrollTop = 0));
+      await shot(page, "before", engine);
+      await page.close();
+    }
+    const { page, errors } = await open(browser, after);
+    const thread = page.locator("#thread");
+    const g = await geometry(page);
+    results[`${engine}-after`] = g;
+    await page.locator("#scroll").evaluate((el) => (el.scrollTop = 0));
+    await shot(page, "after", engine);
+
+    // Folded by default: one line for each stretch of work, nothing inside.
+    assert.equal(g.workRows, 3);
+    assert.equal(g.thinkingBoxes, 0);
+    assert.equal(g.submissionRows, 0);
+    assert.equal(await page.locator("#thread > .work[open]").count(), 0);
+    assert.equal(await page.locator("#thread > .work .work-body > *").count(), 0);
+    assert.deepEqual(await summaries(page), [
+      "Done | 2 thoughts · 2 tool calls · 1 worker started",
+      "Done | 3 thoughts · 1 worker report",
+      "Done | 4 thoughts",
+    ]);
+    for (const h of await page.locator("#thread > .work > summary").evaluateAll((els) => els.map((el) => el.getBoundingClientRect().height))) assert(h <= 32, `a work row is ${h}px tall`);
+    assert(!(await thread.innerText()).includes(MARK), "the report is shown before it is opened");
+    // People and replies in full, in order; the question to the user shows.
+    const order = await page.locator("#thread > *").evaluateAll((els) => els.map((el) => el.classList.contains("work") ? "work" : el.matches("[data-bound]") ? "user" : el.classList.contains("msg-assistant") ? "text" : el.className.split(" ")[0]));
+    assert.deepEqual(order, ["user", "text", "work", "text", "work", "text", "user", "work", "text", "note", "msg-delivery", "msg-delivery"]);
+    assert.match(await page.locator("[data-bound]").first().innerText(), /为什么会把 thinking 分成这么多次显示/);
+    assert.equal(await page.locator("[data-bound]").first().locator(".message-images img").count(), 1);
+    assert.deepEqual(await page.locator("[data-bound] .delivery-status").allInnerTexts(), ["Delivered", "Delivered"]);
+    assert(await page.getByText("你希望默认收起，还是只合并 Thinking？").isVisible());
+    // A message from before origins were recorded is shown as it was.
+    assert.equal(await page.locator("#thread > details.note[open] > summary", { hasText: "Report from worker legacy" }).count(), 1);
+    // Receipts without a message: a light line, or the message when it needs a look.
+    assert.match(await page.locator(`[data-delivery="${sub(3)}"]`).innerText(), /Submission: an older submission[\s\S]*Delivery unconfirmed/);
+    assert.equal(await page.locator(`[data-delivery="${sub(3)}"] .msg-user`).count(), 0);
+    assert.match(await page.locator(`[data-delivery="${sub(4)}"]`).innerText(), /a rejected submission[\s\S]*Not sent/);
+
+    // Keyboard: open a stretch of work and read it in order, focus kept.
+    const report = page.locator("#thread > .work").nth(1);
+    await report.locator("summary").first().focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.querySelectorAll("#thread > .work")[1].querySelector(".work-body > *"));
+    assert.equal(await report.locator(".work-body > *").evaluateAll((els) => els.map((el) => el.className.split(" ")[0])).then((x) => x.join()), "work-report,work-thinking,work-thinking,work-thinking");
+    assert.equal(await report.locator(".work-thinking strong").first().innerText(), "Reading the report");
+    assert.equal(await report.locator("summary").first().evaluate((el) => document.activeElement === el), true);
+    assert(!(await thread.innerText()).includes(MARK), "the report body opened with its work");
+    await report.locator(".work-report > summary").click();
+    await page.waitForFunction((mark) => document.querySelector("#thread").innerText.includes(mark), MARK);
+    await shot(page, "opened", engine);
+    await report.locator("summary").first().focus();
+    await page.keyboard.press("Space");
+    await page.waitForFunction(() => !document.querySelectorAll("#thread > .work")[1].open);
+    assert.equal(await report.locator("summary").first().evaluate((el) => document.activeElement === el), true);
+    await page.keyboard.press("Enter"); // leave it open for the checks below
+    await page.waitForFunction(() => document.querySelectorAll("#thread > .work")[1].open);
+
+    // Live: work streams into one line that says what is happening.
+    const T = 1_794_653_000_000;
+    const emit = (data, extra) => page.evaluate(([d, x]) => window.fixture.emit("alice/lead", d, x), [data, extra]);
+    const update = (u, message = { role: "assistant", timestamp: T }) => emit({ type: "message_update", message, assistantMessageEvent: u });
+    const frame = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    await page.locator("#scroll").evaluate((el) => (el.scrollTop = 0)); // reading earlier conversation
+    await page.evaluate(() => window.fixture.status("lead", "working", "Thinking"));
+    await emit({ type: "agent_start" });
+    await emit({ type: "message_start", message: { role: "assistant", timestamp: T, content: [] } });
+    await update({ type: "thinking_start", contentIndex: 0 });
+    for (const piece of ["**Looking", " at the", " renderer**\n\nfirst"]) await update({ type: "thinking_delta", contentIndex: 0, delta: piece });
+    await frame();
+    const live = page.locator("#thread > .work").nth(3);
+    assert.equal(await live.getAttribute("data-state"), "running");
+    assert.equal(await live.locator(".work-label").innerText(), "Thinking…");
+    assert.equal(await page.locator(".working-live").count(), 0, "the foot line repeats the running work");
+    assert.equal(await page.locator("#scroll").evaluate((el) => el.scrollTop), 0, "streaming moved a reader");
+    await live.locator(":scope > summary").focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.querySelectorAll("#thread > .work")[3]?.querySelector(".work-body > *"));
+    await live.evaluate((el) => (el.dataset.kept = "1"));
+    await update({ type: "thinking_end", contentIndex: 0, content: "**Looking at the renderer**\n\nfirst pass" });
+    await update({ type: "toolcall_start", contentIndex: 1, id: "c9", toolName: "read" });
+    await update({ type: "toolcall_end", contentIndex: 1, toolCall: { type: "toolCall", id: "c9", name: "read", arguments: { path: "web/app.js" } } });
+    await emit({ type: "message_end", message: { role: "assistant", timestamp: T, stopReason: "toolUse", content: [{ type: "thinking", thinking: "**Looking at the renderer**\n\nfirst pass" }, { type: "toolCall", id: "c9", name: "read", arguments: { path: "web/app.js" } }] } });
+    await page.evaluate(() => window.fixture.status("lead", "working", "Reading web/app.js"));
+    await emit({ type: "tool_execution_start", toolCallId: "c9", toolName: "read", args: { path: "web/app.js" } });
+    await emit({ type: "tool_execution_update", toolCallId: "c9", toolName: "read", args: { path: "web/app.js" }, partialResult: { content: [{ type: "text", text: "partial" }] } });
+    await frame();
+    assert.equal(await live.locator(".work-label").innerText(), "Reading web/app.js…");
+    assert.equal(await live.getAttribute("data-kept"), "1", "the open work was redrawn");
+    assert.equal(await live.evaluate((el) => el.open), true);
+    assert.equal(await live.locator(":scope > summary").evaluate((el) => document.activeElement === el), true);
+    assert.equal(await live.locator(".tool").getAttribute("data-status"), "running");
+    // A running tool opened shows its output as it comes.
+    await live.locator(".tool > summary").click();
+    await page.waitForFunction(() => document.querySelector("#thread .work .tool .tool-body")?.textContent.includes("partial"));
+    await emit({ type: "tool_execution_update", toolCallId: "c9", toolName: "read", args: { path: "web/app.js" }, partialResult: { content: [{ type: "text", text: "partial, then more" }] } });
+    await frame();
+    assert.match(await live.locator(".tool .tool-body").innerText(), /partial, then more/);
+    await live.locator(":scope > summary").focus();
+    // A message sent meanwhile shows as sent, then where pi took it.
+    await emit({ type: "delivery_update", delivery: { id: sub(5), revision: 1, state: "steering", text: "also check the CSS", imageCount: 0, order: 5 } });
+    assert.match(await page.locator(`[data-delivery="${sub(5)}"]`).innerText(), /also check the CSS[\s\S]*Accepted for steering/);
+    await emit({ type: "tool_execution_end", toolCallId: "c9", toolName: "read", result: { content: [{ type: "text", text: "file" }] }, isError: false });
+    await emit({ type: "message_end", message: { role: "toolResult", timestamp: T + 1, toolCallId: "c9", toolName: "read", isError: false, content: [{ type: "text", text: "file" }] } });
+    await emit({ type: "message_end", message: { role: "user", timestamp: T + 2, yesman: { source: "user", submission: sub(5) }, content: [{ type: "text", text: "also check the CSS" }] } });
+    assert.equal(await page.locator(`[data-delivery="${sub(5)}"]`).getAttribute("data-bound"), "true");
+    assert.equal(await live.getAttribute("data-state"), "done", "work before a person's message is done, not running");
+    assert.equal(await live.getAttribute("data-kept"), "1");
+    // Late records of a replaced agent never reach this conversation.
+    await emit({ type: "message_end", message: { role: "user", timestamp: T + 3, content: [{ type: "text", text: "from an old instance" }] } }, { agentSince: "0" });
+    await emit({ type: "message_start", message: { role: "assistant", timestamp: T + 4, content: [] } });
+    await update({ type: "thinking_start", contentIndex: 0 }, { role: "assistant", timestamp: T + 4 });
+    await update({ type: "thinking_delta", contentIndex: 0, delta: "**Checking the CSS**" }, { role: "assistant", timestamp: T + 4 });
+    await frame();
+    assert.equal(await page.locator("#thread > .work").last().getAttribute("data-state"), "running");
+    assert.equal(await page.locator("#thread > .work").count(), 5);
+    await shot(page, "live", engine);
+    // Reading at the bottom follows the reply.
+    await page.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
+    await page.evaluate(() => document.querySelector("#scroll").dispatchEvent(new Event("scroll")));
+    await update({ type: "text_start", contentIndex: 1 }, { role: "assistant", timestamp: T + 4 });
+    for (let i = 0; i < 30; i++) await update({ type: "text_delta", contentIndex: 1, delta: `line ${i}\n\n` }, { role: "assistant", timestamp: T + 4 });
+    await frame();
+    assert(await page.locator("#scroll").evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 80), "a reader at the bottom was left behind");
+    assert.equal(await page.locator("#thread > .work").last().getAttribute("data-state"), "done");
+    assert.equal(await page.locator(".working-live").count(), 1, "a reply being written still shows the agent working");
+    const final = { role: "assistant", timestamp: T + 4, stopReason: "stop", content: [{ type: "thinking", thinking: "**Checking the CSS**" }, { type: "text", text: Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n\n") }] };
+    await emit({ type: "message_end", message: final });
+    await emit({ type: "agent_settled" });
+    await page.evaluate(() => window.fixture.status("lead", "idle"));
+    assert.equal(await page.locator(".working-live").count(), 0);
+    assert.equal(await page.locator("#thread > .work[data-state=running]").count(), 0);
+    assert.equal(await page.locator("#thread").getByText("from an old instance").count(), 0);
+    const liveShape = await summaries(page);
+
+    // Another agent's conversation is its own; coming back keeps what was open.
+    await page.locator('[data-agent="alice/w1"]').click();
+    await page.locator("#thread .note--lead").waitFor();
+    assert.match(await page.locator("#thread > .note--lead").innerText(), /From the lead[\s\S]*Read app.js/);
+    assert.deepEqual(await summaries(page), ["Done | 1 thought · 1 tool call"]);
+    await emit({ type: "message_end", message: { role: "assistant", timestamp: T + 9, stopReason: "stop", content: [{ type: "text", text: "lead reply while hidden" }] } });
+    assert.equal(await page.locator("#thread").getByText("lead reply while hidden").count(), 0);
+    await page.locator('[data-agent="alice/lead"]').first().click();
+    await page.locator("#thread > .work").first().waitFor();
+    assert.equal(await page.locator("#thread > .work").nth(1).evaluate((el) => el.open), true);
+    assert.equal(await page.locator("#thread").getByText("lead reply while hidden").count(), 1);
+
+    // History reads the same as the live run did.
+    await page.reload();
+    await page.locator('[data-agent="alice/lead"]').first().click();
+    await page.locator("#thread > .work").first().waitFor();
+    await page.waitForTimeout(100);
+    assert.deepEqual(await summaries(page), liveShape);
+    assert.equal(await page.locator(`[data-delivery="${sub(5)}"]`).getAttribute("data-bound"), "true");
+
+    // Chinese, then dark and narrow.
+    await page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
+    await page.waitForTimeout(50);
+    assert.equal((await summaries(page))[0], "已完成 | 思考 2 次 · 工具调用 2 次 · 启动 1 个助手");
+    assert.deepEqual(await page.locator("[data-bound] .delivery-status").allInnerTexts(), ["已送达", "已送达", "已送达"]);
+    await page.locator("#scroll").evaluate((el) => (el.scrollTop = 0));
+    await shot(page, "zh", engine);
+    assert.deepEqual(errors, []);
+    await page.close();
+
+    const dark = await open(browser, after, { colorScheme: "dark", width: 640, height: 800 });
+    await dark.page.locator("#thread > .work").first().locator("summary").click();
+    const overflow = await dark.page.evaluate(() => {
+      const scroll = document.querySelector("#scroll");
+      const edge = scroll.getBoundingClientRect().right;
+      const wide = [...scroll.querySelectorAll("*")].filter((el) => el.getBoundingClientRect().right > edge + 0.5);
+      return { scroll: scroll.scrollWidth - scroll.clientWidth, wide: wide.map((el) => `${el.tagName.toLowerCase()}.${el.className}`).slice(0, 8) };
+    });
+    assert.deepEqual(overflow, { scroll: 0, wide: [] });
+    await dark.page.locator("#scroll").evaluate((el) => (el.scrollTop = 0));
+    await shot(dark.page, "dark-narrow", engine);
+    assert.deepEqual(dark.errors, []);
+    results[`${engine}-hooked-tools`] = await hookedTools(browser, engine);
+    results[`${engine}-unknown-images`] = await unknownImages(browser, engine);
+    console.log(engine, "folded work/people and replies in full/receipts/keyboard/live/steering/scroll/agents/reload/i18n/dark/narrow/final tool results/unknown writers' images PASS");
+  } finally {
+    await browser.close();
+  }
+}
+console.log(JSON.stringify(results));
+console.log(`screenshots: ${tmpdir()}/yesman-conversation-*.png`);
+after.close();
+before?.close();
