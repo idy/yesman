@@ -35,7 +35,11 @@ func privateWorktreeDir(repo, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if realPath(strings.TrimSpace(string(back))) != realPath(filepath.Join(path, ".git")) {
+	backPath := strings.TrimSpace(string(back))
+	if !filepath.IsAbs(backPath) {
+		backPath = filepath.Join(dir, backPath)
+	}
+	if realPath(backPath) != realPath(filepath.Join(path, ".git")) {
 		return "", errors.New("private Git directory belongs to another worktree")
 	}
 	return dir, nil
