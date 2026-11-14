@@ -960,13 +960,76 @@ const effortLabel = (level) => (EFFORT[level] ? t(EFFORT[level]) : level[0].toUp
 // ---------- Composer ----------
 
 async function openHire() {
+  const dialog = $('#hire-dialog');
+  if (dialog.open) return;
   const form = $('#hire-form');
   form.reset();
+  const cleanup = bindHireForm(form, $('#hire-error'), { dialog, cancel: $('#hire-cancel') });
   // Its lead runs as the model Settings › yesman chooses for new yesmen.
   const hint = $('#hire-model-hint');
   crewPage.describe(hint);
-  crewPage.load().then(() => { if ($('#hire-dialog').open) crewPage.describe(hint); });
-  if ((await openDialog($('#hire-dialog'))) === 'hire') hire(form.elements.name.value.trim());
+  crewPage.load().then(() => { if (dialog.open) crewPage.describe(hint); });
+  await openDialog(dialog);
+  cleanup();
+}
+
+// Both production creation forms submit a display name. Keep failures inline
+// with the input intact, and prevent cancellation/double submission during IO.
+function bindHireForm(form, error, { dialog, cancel } = {}) {
+  const input = form.elements.name;
+  const save = form.querySelector('[type="submit"]');
+  const hint = form.querySelector('#hire-model-hint');
+  let busy = false;
+  error.hidden = true;
+  input.oninput = () => { error.hidden = true; };
+  if (cancel) cancel.onclick = () => dialog.close('cancel');
+  if (dialog) dialog.oncancel = (e) => { if (busy) e.preventDefault(); };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    const label = input.value.trim();
+    if (!validDisplayName(label)) {
+      error.textContent = t('Enter a name without control characters.');
+      error.hidden = false;
+      input.focus();
+      return;
+    }
+    busy = true;
+    save.disabled = input.disabled = true;
+    if (cancel) cancel.disabled = true;
+    if (hint) hint.inert = true;
+    let hired;
+    try {
+      hired = await call('HireNamed', label);
+    } catch (err) {
+      error.textContent = errorText(err);
+      error.hidden = false;
+    } finally {
+      busy = false;
+      save.disabled = input.disabled = false;
+      if (cancel) cancel.disabled = false;
+      if (hint) hint.inert = false;
+    }
+    if (!hired) {
+      input.focus();
+      return;
+    }
+    if (dialog) dialog.close('hire');
+    else form.reset();
+    // A refresh failure happens after creation has committed. Close/reset the
+    // form first so retrying a State read cannot hire a second workspace.
+    try {
+      await refreshState();
+      selectAgent(`${hired.name}/lead`);
+    } catch (err) {
+      fail(err);
+    }
+  };
+  return () => {
+    form.onsubmit = input.oninput = null;
+    if (dialog) dialog.oncancel = null;
+    if (cancel) cancel.onclick = null;
+  };
 }
 
 function renderBody() {
@@ -1213,7 +1276,10 @@ function askEl(a) {
 }
 
 function renderWelcome(body) {
-  const input = h('input', { class: 'mds-input', placeholder: t('name, e.g. checkout-v2'), pattern: '[a-z0-9][a-z0-9\\-]{0,31}', required: true, spellcheck: 'false', 'aria-label': t('Name') });
+  const input = h('input', { class: 'mds-input', name: 'name', placeholder: t('name, e.g. GizMoth'), required: true, spellcheck: 'false', 'aria-label': t('Name'), 'aria-describedby': 'welcome-name-hint welcome-hire-error' });
+  const error = h('p', { class: 'welcome-hint', id: 'welcome-hire-error', role: 'alert', hidden: true });
+  const form = h('form', null, input, h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, t('Hire')));
+  bindHireForm(form, error);
   const hint = h('p', { class: 'welcome-hint' });
   crewPage.describe(hint);
   crewPage.load().then(() => { if (hint.isConnected) crewPage.describe(hint); });
@@ -1223,8 +1289,9 @@ function renderWelcome(body) {
         h('h1', { class: 'mds-title' }, t('Hire a yesman')),
         h('p', null, t('A yesman takes on a project. It gets a workspace of its own, checks out the repositories it needs from the shared pool, remembers what it learns, and starts workers when the job splits up.')),
         state.snap.piError ? h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('pi was not found')), h('p', null, state.snap.piError))) : null,
-        h('form', { onsubmit: (e) => { e.preventDefault(); hire(input.value.trim()); } },
-          input, h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, t('Hire'))),
+        form,
+        h('p', { class: 'welcome-hint', id: 'welcome-name-hint' }, t('A display name. Uppercase letters, spaces and Chinese characters are welcome.')),
+        error,
         hint,
       )),
   );
@@ -2355,18 +2422,10 @@ function selectAgent(id) {
   render();
 }
 
-async function hire(name) {
-  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) {
-    toast(t('Use 1-32 lowercase letters, digits and dashes.'));
-    return;
-  }
-  try {
-    const y = await call('Hire', name);
-    await refreshState();
-    selectAgent(`${y.name}/lead`);
-  } catch (err) {
-    fail(err);
-  }
+// The same display-name rules apply to creation and rename; the backend also
+// checks UTF-8. Only internal workspace IDs have a 32-character slug limit.
+function validDisplayName(label) {
+  return !!label && !/[\u0000-\u001f\u007f-\u009f]/u.test(label);
 }
 
 async function renameYesman(y) {
@@ -2387,7 +2446,7 @@ async function renameYesman(y) {
     e.preventDefault();
     if (busy) return;
     const label = input.value.trim();
-    if (!label || /[\u0000-\u001f\u007f-\u009f]/u.test(label)) {
+    if (!validDisplayName(label)) {
       error.textContent = t('Enter a name without control characters.');
       error.hidden = false;
       input.focus();

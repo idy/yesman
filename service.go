@@ -60,12 +60,26 @@ func (s *service) State(ctx context.Context) (State, error) {
 
 // Hire creates a yesman. Its lead starts when you first talk to it.
 func (s *service) Hire(ctx context.Context, name string) (yesmen.Yesman, error) {
+	return s.hire(ctx, func(model string) (yesmen.Yesman, error) {
+		return s.app.yesmen.HireAs(name, model)
+	})
+}
+
+// HireNamed accepts the user's display name and allocates a stable workspace ID.
+// Hire keeps its original exact internal-name contract for existing callers.
+func (s *service) HireNamed(ctx context.Context, displayName string) (yesmen.Yesman, error) {
+	return s.hire(ctx, func(model string) (yesmen.Yesman, error) {
+		return s.app.yesmen.HireNamed(displayName, model)
+	})
+}
+
+func (s *service) hire(ctx context.Context, create func(string) (yesmen.Yesman, error)) (yesmen.Yesman, error) {
 	// Its lead runs as the model Settings › yesman chooses for new yesmen.
 	model, err := s.app.yesmanModel(ctx)
 	if err != nil {
 		return yesmen.Yesman{}, err
 	}
-	y, err := s.app.yesmen.HireAs(name, model)
+	y, err := create(model)
 	if err != nil {
 		return y, err
 	}

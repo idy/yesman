@@ -259,41 +259,6 @@ func (s *Store) EnsureTaskLogs() error {
 	return errors.Join(errs...)
 }
 
-// Hire creates a yesman's workspace.
-func (s *Store) Hire(name string) (Yesman, error) { return s.HireAs(name, "") }
-
-// HireAs creates a yesman's workspace, with the model its lead starts as.
-func (s *Store) HireAs(name, model string) (Yesman, error) {
-	if err := ValidName(name); err != nil {
-		return Yesman{}, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	y := Yesman{Name: name, Path: filepath.Join(s.root, name), HiredAt: time.Now().UTC(), Model: model}
-	if _, err := os.Stat(y.Path); err == nil {
-		return Yesman{}, fmt.Errorf("a yesman named %s already exists", name)
-	}
-	for _, dir := range []string{y.KnowledgeDir(), filepath.Join(y.MetaDir(), "sessions")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return Yesman{}, err
-		}
-	}
-	if err := os.WriteFile(filepath.Join(y.KnowledgeDir(), "INDEX.md"), []byte(indexTemplate), 0o644); err != nil {
-		return Yesman{}, err
-	}
-	if err := ensureTaskLog(y); err != nil {
-		return Yesman{}, err
-	}
-	meta := map[string]any{"hiredAt": y.HiredAt}
-	if model != "" {
-		meta["model"] = model
-	}
-	if err := writeJSON(filepath.Join(y.MetaDir(), "yesman.json"), meta); err != nil {
-		return Yesman{}, err
-	}
-	return y, nil
-}
-
 // Get returns a hired yesman.
 func (s *Store) Get(name string) (Yesman, error) {
 	s.metaMu.Lock()
@@ -320,15 +285,25 @@ func (s *Store) get(name string) (Yesman, error) {
 	return y, nil
 }
 
+// normalizeDisplayName is shared by creation and rename. Labels have no slug
+// length limit; only stable internal names are limited to 32 ASCII characters.
+func normalizeDisplayName(label string) (string, error) {
+	label = strings.TrimSpace(label)
+	if label == "" || !utf8.ValidString(label) || strings.IndexFunc(label, unicode.IsControl) >= 0 {
+		return "", errors.New("enter a name without control characters")
+	}
+	return label, nil
+}
+
 // Rename changes only the visible label. Workspace paths, agent IDs and all
 // agent state keep their original identity. Duplicate labels are allowed.
 func (s *Store) Rename(name, label string) (Yesman, error) {
-	label = strings.TrimSpace(label)
-	if label == "" || !utf8.ValidString(label) || strings.IndexFunc(label, unicode.IsControl) >= 0 {
-		return Yesman{}, errors.New("enter a name without control characters")
+	label, err := normalizeDisplayName(label)
+	if err != nil {
+		return Yesman{}, err
 	}
 	var renamed Yesman
-	err := s.Use(name, func(Yesman) error {
+	err = s.Use(name, func(Yesman) error {
 		s.metaMu.Lock()
 		defer s.metaMu.Unlock()
 		y, err := s.get(name)
