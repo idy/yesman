@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.32
+
+- Add application shortcuts with Command on macOS and Ctrl on Windows and Linux. Open the searchable command palette with Cmd/Ctrl+K or Cmd/Ctrl+Shift+P to find actions, yesmen and workers, see their keys and availability, and run the same actions as their buttons and menus.
+- Customize bindings in Settings › Shortcuts: search actions, record keys, resolve conflicts, remove bindings or restore defaults. Changes persist across restarts and travel with configuration imports and exports; titlebar buttons and the existing files menu show the current keys.
+- Keep dialogs, menus, text editing, the file editor and input-method composition in control of their keys. Shortcuts act on the conversation shown and retain existing confirmations. These shortcuts work inside yesman's focused window; they are not global OS hotkeys and need no Accessibility or Input Monitoring permission.
+
 ## 0.1.31
 
 - Add Settings › Grant to view this copy of yesman's OS permission status, refresh it without prompting, and choose individual Request or Open Settings actions.
