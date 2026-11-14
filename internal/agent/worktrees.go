@@ -19,7 +19,16 @@ func (m *Manager) WithWorktreeOwner(owner, caller string, remove func() error) e
 		return errWorktreeCleanup
 	}
 	if a := m.agents[owner]; a != nil {
-		if a.prompts != 0 || owner != caller && (a.starting != nil || a.proc != nil || a.reports != 0 || a.info.Status == Starting || a.info.Status == Working || a.info.Status == Waiting || a.info.Status == Idle) {
+		// Submit can be using the workspace before it has a process or a
+		// registered prompt. Retirement can also still be draining its writer
+		// after Stop has cleared the process. Neither boundary is idle yet.
+		busy := a.dir != "" && a.deliveries == nil && a.deliveryErr == nil || a.removing ||
+			a.retiring && a.deliveryWriter != nil && !a.deliveryWriter.finished() ||
+			a.queue.Known && a.queue.Steering+a.queue.FollowUp > 0
+		for _, d := range a.deliveries {
+			busy = busy || d.State == "sending" && d.Session == ""
+		}
+		if busy || a.prompts != 0 || owner != caller && (a.starting != nil || a.proc != nil || a.reports != 0 || a.info.Status == Starting || a.info.Status == Working || a.info.Status == Waiting || a.info.Status == Idle) {
 			m.mu.Unlock()
 			return fmt.Errorf("retain worktree: owner %s is active", owner)
 		}

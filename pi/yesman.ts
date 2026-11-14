@@ -2,7 +2,8 @@
 // (`pi -e`), with the address of its local API in the environment.
 //
 // It gives the agent its yesman's context before every run (workspace,
-// worktrees, the repo pool, shared knowledge, the board, the other agents)
+// worktrees, the repo pool, Knowledge, the task-log path, the board and other
+// agents)
 // and tools to check repositories out of the pool, keep the board and, for
 // a lead, to run workers. Its shell tool sets the user's secrets and
 // variables in every command, asking the app for them each time, and what
@@ -10,8 +11,9 @@
 // done by the yesman app; this file only forwards.
 //
 // A lead delegates, so that it is always free to talk: it has no shell and
-// writes only knowledge notes. Its tools are narrowed when its session
-// starts, and any call outside them is refused.
+// writes only Knowledge notes and the task log. Its tools are narrowed when
+// its session starts, and any call outside them is refused.
+import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createBashToolDefinition, createPowerShellToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -25,14 +27,44 @@ const WORKSPACE = process.env.YESMAN_WORKSPACE;
 
 // Tools a lead does not get, and read-only ones it gets in their place.
 const LEAD_DENIED = ["bash"];
-const LEAD_WRITES = ["edit", "write"]; // allowed only for knowledge notes
+const LEAD_WRITES = ["edit", "write"]; // allowed only for shared documents
 const LEAD_ADDED = ["grep", "find", "ls"];
 
-// knowledgePath reports whether a path a tool was given is a knowledge note.
-function knowledgePath(path: unknown): boolean {
+// writableTaskLog checks the new exception's actual file boundary. A linked
+// .yesman directory or task-log file could otherwise write code or another
+// workspace. Resolve the workspace itself (for paths such as /tmp on macOS),
+// then accept only ordinary directories and an unaliased regular file, or a
+// missing path that write may create. Existing user links stay untouched.
+function writableTaskLog(): boolean {
+	if (!WORKSPACE) return false;
+	try {
+		const workspace = realpathSync(WORKSPACE);
+		const meta = resolve(workspace, ".yesman");
+		let parent;
+		try {
+			parent = lstatSync(meta);
+		} catch (err) {
+			return (err as NodeJS.ErrnoException).code === "ENOENT";
+		}
+		if (!parent.isDirectory() || parent.isSymbolicLink()) return false;
+		try {
+			const file = lstatSync(resolve(meta, "task-log.md"));
+			return file.isFile() && !file.isSymbolicLink() && file.nlink === 1;
+		} catch (err) {
+			return (err as NodeJS.ErrnoException).code === "ENOENT";
+		}
+	} catch {
+		return false;
+	}
+}
+
+// sharedDocumentPath allows Knowledge notes and the single task-log file.
+function sharedDocumentPath(path: unknown): boolean {
 	if (typeof path !== "string" || !path || !WORKSPACE) return false;
+	const target = resolve(WORKSPACE, path.replace(/^@/, ""));
+	if (target === resolve(WORKSPACE, ".yesman", "task-log.md")) return writableTaskLog();
 	const dir = resolve(WORKSPACE, ".yesman", "knowledge");
-	const rel = relative(dir, resolve(WORKSPACE, path.replace(/^@/, "")));
+	const rel = relative(dir, target);
 	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
@@ -165,8 +197,8 @@ export default function yesman(pi: ExtensionAPI) {
 			if (LEAD_DENIED.includes(event.toolName)) {
 				return { block: true, reason: "The lead has no shell, to stay free for the user. Hand this to a worker with yesman_worker_start." };
 			}
-			if (LEAD_WRITES.includes(event.toolName) && !knowledgePath((event.input as { path?: unknown } | undefined)?.path)) {
-				return { block: true, reason: "The lead writes only knowledge notes under .yesman/knowledge/. Hand other changes to a worker with yesman_worker_start." };
+			if (LEAD_WRITES.includes(event.toolName) && !sharedDocumentPath((event.input as { path?: unknown } | undefined)?.path)) {
+				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/ and a regular task log at .yesman/task-log.md in this workspace; task-log aliases are not writable. Hand code and other changes to a worker with yesman_worker_start." };
 			}
 		});
 	}

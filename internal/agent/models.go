@@ -121,22 +121,31 @@ type modelState struct {
 	ThinkingLevel string `json:"thinkingLevel"`
 	IsStreaming   bool   `json:"isStreaming"`
 	IsCompacting  bool   `json:"isCompacting"`
+	SessionID     string `json:"sessionId"`
 }
 
-func (p *proc) modelState(ctx context.Context) (modelState, error) {
-	r, err := p.call(ctx, map[string]any{"type": "get_state"})
+func (p *proc) modelState(ctx context.Context, at ...func(modelState)) (modelState, error) {
+	var state modelState
+	var decodeErr error
+	_, err := p.callObserved(ctx, map[string]any{"type": "get_state"}, func(r response) {
+		if !r.Success {
+			return
+		}
+		decodeErr = json.Unmarshal(r.Data, &state)
+		if decodeErr == nil && len(at) > 0 {
+			at[0](state)
+		}
+	})
 	if err != nil {
 		return modelState{}, err
 	}
-	var state modelState
-	err = json.Unmarshal(r.Data, &state)
-	return state, err
+	return state, decodeErr
 }
 
 // syncModel reads back the effective selection: changing models may also clamp
 // the effort. Its caller serializes configuration with the agent's modelMu.
 func (m *Manager) syncModel(ctx context.Context, a *agent, p *proc) (Info, error) {
-	state, err := p.modelState(ctx)
+	state, err := p.modelState(ctx, func(s modelState) { m.deliverySessionChanged(a, p, s.SessionID) })
 	if err != nil {
 		return Info{}, err
 	}

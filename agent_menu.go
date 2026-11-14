@@ -54,6 +54,7 @@ func (s *service) AgentMenu(ctx context.Context, id string, x, y int, doneHidden
 		mygo.Separator(),
 		item("reveal", tr("Reveal Workspace"), false),
 		item("knowledge", tr("Reveal Knowledge"), false),
+		item("task-log", tr("Reveal Task Log"), false),
 		item("logs", tr("Reveal Session Logs"), false),
 		mygo.Separator(),
 		item("abort", tr("Stop Current Run"), !working),

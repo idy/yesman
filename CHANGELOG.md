@@ -2,6 +2,42 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.27
+
+- Show message submission and Steering or Follow-up receipt states, with an unknown state when pi's acknowledgment cannot be confirmed.
+- Reuse a stable submission ID for retries, keeping the complete text and image draft available after an interrupted or failed send.
+- Restore saved receipt states after refresh. Receipts describe submission or queue acknowledgments; pi does not confirm consumption of individual queued messages.
+
+## 0.1.26
+
+- Keep reusable development rules, preferences and architecture guidance in Knowledge, with dated task and PR history in a separate `.yesman/task-log.md` maintained by the lead from worker reports.
+- Include the Knowledge index in agent context automatically, and read task-log entries only when needed.
+- Open the task log as a rendered, read-only page from the info panel and file menus, within the workspace's All files view.
+- Initialize missing task logs for new and existing workspaces without replacing existing documents. Preserve occupied paths on Windows too, report filesystem errors, and restrict the lead's task-log writes to the workspace's regular, unlinked log file.
+
+## 0.1.25
+
+- Unify app-owned navigation, action and status icons with locally bundled Phosphor icon fonts, available offline.
+- Use a solid Stop icon, with consistent sizes for Send, Stop, folder and compact status icons.
+- Keep one caret on the Model and Effort menus while preserving local icon fallbacks for native selectors.
+
+## 0.1.24
+
+- Show each configured model's Intelligence Index, output speed, coding score, cost per task and time per task in Settings › yesman › Models, with their original units.
+- Keep Artificial Analysis sources, source effort and your own estimates clear. Distinguish unavailable figures from zero values, and mark zero task durations whose actual time is unconfirmed by the source.
+- Keep removed models and changed estimates from returning after a delayed catalog refresh.
+
+## 0.1.23
+
+- Align the Model and Effort labels and dropdowns in Add a model. Keep long options within the form and stack the fields in narrow windows.
+
+## 0.1.22
+
+- Move the attachment button to the left of the message field. Keep one action on the right: Send while idle, or Stop during a run. Enter still sends a message during a run, and Shift+Enter adds a new line.
+- Keep the message field ready for the next message after clicking Send in WebKit, while respecting focus moved to another control or conversation.
+- Reduce shadow banding behind modal dialogs with a more compact shadow.
+- Remove the stray period below the saved configuration path in the Export completion message.
+
 ## 0.1.21
 
 - Right-click a yesman and choose Rename to change its display name. The name is saved for future launches and updates throughout the app.

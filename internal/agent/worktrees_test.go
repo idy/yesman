@@ -9,6 +9,8 @@ import (
 )
 
 func TestWorktreeOwnerGuard(t *testing.T) {
+	drained := make(chan struct{})
+	close(drained)
 	for _, tc := range []struct {
 		name   string
 		a      *agent
@@ -23,6 +25,14 @@ func TestWorktreeOwnerGuard(t *testing.T) {
 		{"starting", &agent{starting: make(chan struct{})}, "alice/cleanup", false},
 		{"pending prompt", &agent{prompts: 1}, "alice/cleanup", false},
 		{"pending report", &agent{reports: 1}, "alice/cleanup", false},
+		{"initial receipt load", &agent{dir: "fixture"}, "alice/cleanup", false},
+		{"failed receipt load is stopped", &agent{dir: "fixture", deliveryErr: errors.New("read failed")}, "alice/cleanup", true},
+		{"unbound submission", &agent{deliveries: map[string]Delivery{"intent": {State: "sending"}}}, "alice/cleanup", false},
+		{"interrupted receipt", &agent{deliveries: map[string]Delivery{"intent": {State: "interrupted"}}}, "alice/cleanup", true},
+		{"own native queue", &agent{queue: QueueStatus{Known: true, Steering: 1}}, "alice/owner", false},
+		{"worker removing", &agent{removing: true}, "alice/cleanup", false},
+		{"retirement draining", &agent{retiring: true, deliveryWriter: &deliveryWriter{done: make(chan struct{})}}, "alice/cleanup", false},
+		{"retirement drained", &agent{retiring: true, deliveryWriter: &deliveryWriter{done: drained}}, "alice/cleanup", true},
 		{"self cleanup", &agent{info: Info{Status: Working}, proc: &proc{}}, "alice/owner", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

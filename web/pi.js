@@ -511,7 +511,7 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     const panel = $('#pi-info');
     if (!panel) return;
     const v = s.view;
-    const status = h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : 'idle' }, h('i', { class: 'mds-dot' }), h('span', null, v.piError ? t('Not found') : t('Found')));
+    const status = h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : 'idle' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, v.piError ? t('Not found') : t('Found')));
     const installed = v.packages.filter((p) => p.path);
     const outdated = installed.filter((p) => p.kind === 'npm' && !pinned(p) && s.updates[p.name] && p.current && s.updates[p.name] !== p.current);
     const failed = jobs().filter((j) => j.state === 'failed').length;

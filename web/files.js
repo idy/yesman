@@ -20,6 +20,7 @@ const MENU_ROWS = 500;
 // The knowledge notes of a workspace, and the note that lists them.
 const KNOWLEDGE = '.yesman/knowledge';
 const KNOWLEDGE_INDEX = `${KNOWLEDGE}/INDEX.md`;
+const TASK_LOG = '.yesman/task-log.md';
 
 // A folder shows this many entries; Go to File finds the rest.
 const MAX_TREE_ROWS = 2000;
@@ -95,8 +96,8 @@ export function createFiles(host) {
   const scopeKey = (sc) => (sc.kind === 'worktree' ? `worktree:${sc.dir}` : sc.kind);
   const rootOf = (sc) => (sc.kind === 'knowledge' ? KNOWLEDGE : sc.kind === 'worktree' ? sc.dir : '.');
   const within = (rel, root) => root === '.' || rel === root || rel.startsWith(`${root}/`);
-  // Knowledge reads as pages: its files open rendered, and read-only.
-  const locked = (p) => p.scope.kind === 'knowledge';
+  // Knowledge and the task log read as rendered pages.
+  const locked = (p, rel = p.active) => p.scope.kind === 'knowledge' || rel === TASK_LOG;
   // A worktree's pane shows its files, or its changes.
   const isChanges = (p) => p?.scope.kind === 'worktree' && p.show === 'changes';
 
@@ -150,7 +151,7 @@ export function createFiles(host) {
       const tab = tabOf(p, rel);
       if (tab && v.kind === 'text' && !editor?.has(keyOf(p, rel))) {
         tab.base = v.hash;
-        tab.readOnly = Boolean(v.truncated) || locked(p);
+        tab.readOnly = Boolean(v.truncated) || locked(p, rel);
       }
       p.views.set(rel, v);
     } catch (err) {
@@ -278,7 +279,7 @@ export function createFiles(host) {
     p.views.set(rel, v);
     // A file that grew past the limit can only be read now, or the other
     // way round.
-    const readOnly = Boolean(v.truncated) || locked(p);
+    const readOnly = Boolean(v.truncated) || locked(p, rel);
     const changed = tab.readOnly !== readOnly;
     if (changed) {
       tab.readOnly = readOnly;
@@ -318,7 +319,7 @@ export function createFiles(host) {
       if (pin) p.tabs[at].pinned = true;
     } else {
       const preview = p.tabs.findIndex((t) => !t.pinned && !t.dirty);
-      const tab = { path: rel, pinned: pin, dirty: false, base: null, conflict: null, readOnly: locked(p) };
+      const tab = { path: rel, pinned: pin, dirty: false, base: null, conflict: null, readOnly: locked(p, rel) };
       if (preview >= 0) {
         const gone = p.tabs[preview].path;
         p.views.delete(gone);
@@ -397,6 +398,11 @@ export function createFiles(host) {
     if (!p.tabs.length && Array.isArray(entries) && entries.some((e) => e.path === KNOWLEDGE_INDEX)) open(KNOWLEDGE_INDEX, true);
   }
 
+  // openTaskLog opens the single history document in the workspace viewer.
+  function openTaskLog() {
+    if (setScope(WORKSPACE)) open(TASK_LOG, true);
+  }
+
   // openWorktree shows a worktree: its changes, or its files.
   function openWorktree(dir, show = 'changes') {
     setScope({ kind: 'worktree', dir }, show);
@@ -406,7 +412,7 @@ export function createFiles(host) {
   // workspace and, for a worktree, whether its files or its changes.
   function shown() {
     const p = current();
-    return p ? { yesman: p.name, kind: p.scope.kind, dir: p.scope.dir ?? null, show: p.scope.kind === 'worktree' ? p.show : null } : null;
+    return p ? { yesman: p.name, kind: p.scope.kind, dir: p.scope.dir ?? null, path: p.active, show: p.scope.kind === 'worktree' ? p.show : null } : null;
   }
 
   // ---------- Watching ----------
@@ -557,7 +563,7 @@ export function createFiles(host) {
     const diff = isChanges(p);
     const title = diff ? t('Changes') : p.scope.kind === 'knowledge' ? t('Knowledge') : t('Files');
     const tabs = (diff ? [] : p.tabs).map((tab) => h('div', { class: 'files-tab', role: 'tab', 'aria-selected': String(tab.path === p.active), 'data-pinned': tab.pinned ? 'true' : null, 'data-dirty': tab.dirty ? 'true' : null, title: tab.dirty ? t('{path} (not saved)', { path: tab.path }) : tab.path },
-      h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = tab.path; if (!p.views.has(tab.path)) loadView(p, tab.path); render(); }, ondblclick: () => { tab.pinned = true; render(); } }, baseOf(tab.path)),
+      h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = tab.path; if (!p.views.has(tab.path)) loadView(p, tab.path); render(); }, ondblclick: () => { tab.pinned = true; render(); } }, baseOf(tab.path), tab.dirty ? icon('record', 'mds-icon files-dirty-mark') : null),
       iconButton('x', t('Close {file}', { file: baseOf(tab.path) }), () => closeTab(p, tab.path))));
     return h('div', { class: 'files-head drag' },
       tabs.length ? h('div', { class: 'files-tabs', role: 'tablist', 'aria-label': t('Open files') }, tabs) : h('strong', { class: 'files-title' }, title),
@@ -621,7 +627,7 @@ export function createFiles(host) {
     const kind = p.scope.kind;
     return h('button', {
       class: 'files-crumb files-crumb--scope', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
-      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, the knowledge or another worktree'),
+      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, Knowledge, the task log or another worktree'),
       onclick: (e) => scopeMenu(e.currentTarget, p),
     }, icon(kind === 'worktree' ? 'branch' : kind === 'knowledge' ? 'book' : 'folder', 'mds-icon files-crumb-icon'), h('span', null, scopeLabel(p)));
   }
@@ -849,6 +855,9 @@ export function createFiles(host) {
     const items = [
       item(WORKSPACE, 'folder', y.displayName || y.name, h('span', { class: 'files-menu-aside' }, t('All files')), y.path),
       item({ kind: 'knowledge' }, 'book', t('Knowledge'), null, KNOWLEDGE),
+      // Task log is a shortcut to a file in the workspace, not another scope.
+      h('button', { class: 'files-menu-item', type: 'button', role: 'menuitem', title: TASK_LOG,
+        onclick: () => { closeMenu(); openTaskLog(); } }, icon('fileText'), h('span', null, t('Task log'))),
     ];
     const wts = host.worktrees?.(y) ?? [];
     if (wts.length) items.push(h('p', { class: 'files-menu-heading', role: 'presentation' }, t('Worktrees')));
@@ -881,6 +890,7 @@ export function createFiles(host) {
           }
           break;
         case 'knowledge': openKnowledge(); break;
+        case 'task-log': openTaskLog(); break;
         case 'checkout': if (y) host.checkout(y); break;
         case 'reveal': host.call('Reveal', p.root === '.' ? p.path : absOf(p, p.root)).catch(host.fail); break;
         case 'dismiss': host.dismiss(p.name); break;
@@ -1198,10 +1208,10 @@ export function createFiles(host) {
   }
 
   function emptyNote(p) {
-    if (p.scope.kind === 'knowledge') return t('No notes yet. The agents write down here what they learn.');
+    if (p.scope.kind === 'knowledge') return t('No notes yet. Knowledge holds reusable rules, preferences and architecture decisions.');
     if (p.scope.kind === 'worktree') return t('This worktree is empty.');
     return t('The workspace is empty. Agents check repositories out into it.');
   }
 
-  return { render, open, openPath, openKnowledge, openWorktree, shown, onChange, onKey };
+  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, shown, onChange, onKey };
 }
