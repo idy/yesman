@@ -191,7 +191,7 @@ export function createUsagePage({ call, shown, openScores }) {
     if (unattributed > 0) {
       const reasons = [
         [tasks.severalModels, 'its owner used several models, and when it was done is not recorded'],
-        [tasks.reusedName, 'more than one worker held its owner’s name, and when it was done is not recorded'],
+        [tasks.reusedName, 'more than one worker may have held its owner’s name, so which did it is not known'],
         [tasks.unknownTiming, 'when its owner’s last response before it ended is not recorded'],
         [tasks.noResponses, 'its owner has no response to go by'],
         [tasks.unowned, 'no owner'],
@@ -199,6 +199,11 @@ export function createUsagePage({ call, shown, openScores }) {
         [tasks.otherRole, query.agents === 'leads' ? 'owned by a worker' : 'owned by a lead'],
       ].filter(([n]) => n > 0).map(([n, why]) => t('{reason}: {n}', { reason: t(why), n: number(n) }));
       lines.push(tn(unattributed, '1 done task is not counted for a model ({reasons}).', '{n} done tasks are not counted for a model ({reasons}).', { reasons: reasons.join(t('; ')) }));
+    }
+    for (const cut of c.startsCut || []) {
+      lines.push(t('Worker starts in {yesman} at or before {time} are not all kept: workers of a name who started by then may count as one, and tasks one of them may have done count for no model.', {
+        yesman: v.yesmen?.find((y) => y.name === cut.yesman)?.label || cut.yesman, time: when(cut.through),
+      }));
     }
     if (tasks.timeUnknown > 0) lines.push(tn(tasks.timeUnknown, '1 task was done before yesman recorded when tasks are done: it counts only in All kept history.', '{n} tasks were done before yesman recorded when tasks are done: they count only in All kept history.'));
     if (c.noEffort > 0) lines.push(tn(c.noEffort, '1 response has no recorded effort.', '{n} responses have no recorded effort.'));
@@ -209,8 +214,8 @@ export function createUsagePage({ call, shown, openScores }) {
   function method() {
     const points = [
       'Each response counts under the provider, the full model ID and the effort pi recorded for that request, so switching models in a conversation splits its usage. A response without a recorded effort is shown as Not recorded, never as the effort chosen now.',
-      'Workers are the distinct workers with usage of a model in the period, or with a task done with it then. Waking a worker again is the same worker; starting one again under a name is another, kept apart by when each started, also after it is removed. Starts before yesman recorded them count as one. A worker that used several models is in each of their rows and once in the total. Runs are not counted: session logs do not mark where a run starts.',
-      'Tasks done are board tasks marked done now, for the model and effort of their owner’s latest response that had ended when the task was marked done: a response ending later never changes that, and it does not mean that model did all the work. A task done before yesman recorded when tasks are done counts only when its owner used a single model and effort, and no other worker held the owner’s name since the task was created; editing a task, such as its note, never moves it. Reopened and dropped tasks do not count, and a worker finishing a run does not finish a task.',
+      'Workers are the distinct workers with usage of a model in the period, or with a task done with it then. Waking a worker again is the same worker; starting one again under a name is another, kept apart by when each started, also after it is removed. Starts before yesman recorded them count as one, and so do those dropped once a yesman has kept 10,000. A worker that used several models is in each of their rows and once in the total. Runs are not counted: session logs do not mark where a run starts.',
+      'Tasks done are board tasks marked done now, for the model and effort of their owner’s latest response that had ended when the task was marked done: a response ending later never changes that, and it does not mean that model did all the work. A task done before yesman recorded when tasks are done counts only when its owner used a single model and effort, and no other worker held the owner’s name since the task was created; editing a task, such as its note, never moves it. Where dropped starts leave which worker held the owner’s name unknown, a task counts for no model. Reopened and dropped tasks do not count, and a worker finishing a run does not finish a task.',
       'Tokens are pi’s usage of every response, including failed and stopped ones, and of cache warming, compaction and tools. Input does not include cache reads and writes; the total is pi’s own, which adds them; output includes reasoning. Costs are not shown: pi estimates them from its catalog’s prices, not from your bills.',
       'Output speed is the output tokens of completed responses divided by the time they took, from sending the request to the last token: it includes waiting for the first token and reasoning, not tools or idle time. Responses count by their size, not as an average of speeds. Several agents at once do not add up to it.',
       'Only the current yesmen’s logs are read, from inside each workspace: logs reached through links, and those with other hard links, are not read and are named above. Dismissed yesmen and deleted logs are not included, and what pi did not record is not reconstructed.',

@@ -22,8 +22,11 @@ type Workspace struct {
 	HiredAt time.Time
 	Workers []yesmen.Worker
 	// Starts are the recorded starts of workers, removed ones included.
-	Starts []yesmen.WorkerStart
-	Board  yesmen.Board
+	// Starts at or before StartsCut may be missing; all are kept after it.
+	// It is zero when no start was dropped.
+	Starts    []yesmen.WorkerStart
+	StartsCut time.Time
+	Board     yesmen.Board
 	// Agents are the records of each session directory, by agent name.
 	Agents map[string][]Record
 	Stats  DirStats
@@ -102,8 +105,10 @@ type TaskCounts struct {
 	Unowned       int `json:"unowned"`
 	UnknownOwner  int `json:"unknownOwner"`
 	OtherRole     int `json:"otherRole"`
-	// ReusedName counts tasks done before completion was recorded whose
-	// owner's name more than one worker held since the task was created.
+	// ReusedName counts tasks whose owner's name more than one worker may
+	// have held, so which did it is not known: since the task was created,
+	// for one done before completion was recorded, or, for any, where the
+	// starts that would tell were dropped.
 	ReusedName int `json:"reusedName"`
 	// UnknownTiming counts tasks whose owner may have last answered with
 	// a response pi did not record the end of.
@@ -131,6 +136,17 @@ type Coverage struct {
 	NoEffort int      `json:"noEffort"`
 	NoModel  int      `json:"noModel"`
 	Errors   []string `json:"errors"`
+	// StartsCut names the workspaces that no longer keep every worker
+	// start.
+	StartsCut []StartsCut `json:"startsCut"`
+}
+
+// StartsCut is a workspace whose worker starts at or before Through may be
+// missing: workers of a name that started by then may count as one, and
+// tasks one of them may have done count for no model.
+type StartsCut struct {
+	Yesman  string    `json:"yesman"`
+	Through time.Time `json:"through"`
 }
 
 // maxErrors bounds the read errors a summary lists.
@@ -193,8 +209,11 @@ func recordGroup(r Record) string {
 // owner used, when only one worker can have held the owner's name since
 // the task was created; otherwise for none. Board edits that are not
 // completions, such as of a note, never change where a task counts.
+// Where starts were dropped, a task counts only when the worker holding
+// its owner's name then is still known: dropping starts never makes a
+// task count.
 func Summarize(spaces []Workspace, q Query) Summary {
-	s := Summary{Rows: []Row{}, Coverage: Coverage{Errors: []string{}}}
+	s := Summary{Rows: []Row{}, Coverage: Coverage{Errors: []string{}, StartsCut: []StartsCut{}}}
 	rows := map[string]*row{}
 	get := func(group string) *row {
 		r := rows[group]
@@ -215,12 +234,17 @@ func Summarize(spaces []Workspace, q Query) Summary {
 				s.Coverage.Errors = append(s.Coverage.Errors, w.Name+": "+e)
 			}
 		}
+		if !w.StartsCut.IsZero() {
+			s.Coverage.StartsCut = append(s.Coverage.StartsCut, StartsCut{Yesman: w.Name, Through: w.StartsCut.UTC()})
+		}
 		starts := map[string][]time.Time{}
 		for _, x := range w.Starts {
 			starts[x.Name] = append(starts[x.Name], x.StartedAt)
 		}
+		current := map[string]time.Time{}
 		for _, wk := range w.Workers {
 			starts[wk.Name] = append(starts[wk.Name], wk.StartedAt)
+			current[wk.Name] = wk.StartedAt
 		}
 		for name, ts := range starts {
 			slices.SortFunc(ts, time.Time.Compare)
@@ -303,6 +327,21 @@ func Summarize(spaces []Workspace, q Query) Summary {
 				known[find(t.DoneOwner, t.DoneAt).key] = true
 			}
 		}
+		// held reports whether the worker holding agent's name at t is known
+		// despite dropped starts: it started after them, or is still here,
+		// so no start of the name since can have been dropped.
+		held := func(agent string, t time.Time) bool {
+			if agent == yesmen.LeadName || w.StartsCut.IsZero() {
+				return true
+			}
+			ts := starts[agent]
+			i := sort.Search(len(ts), func(i int) bool { return ts[i].After(t) })
+			if i == 0 {
+				return false
+			}
+			at, ok := current[agent]
+			return ts[i-1].After(w.StartsCut) || ok && at.Equal(ts[i-1])
+		}
 		// candidates are the instances that may have done a task created
 		// at created, done at a time not recorded, under agent's name: each
 		// held the name from its start until the next one's. The task's
@@ -370,8 +409,17 @@ func Summarize(spaces []Workspace, q Query) Summary {
 			}
 			// The owner is the instance that held the name when the task was
 			// done; without that time, the only one that can have.
+			// Where starts were dropped, that worker must still be known: when
+			// the task was done, or else since it was created.
+			at := done
+			if at.IsZero() {
+				at = t.CreatedAt
+			}
 			var in *instance
-			if !done.IsZero() {
+			if !held(owner, at) {
+				s.Tasks.ReusedName++
+				continue
+			} else if !done.IsZero() {
 				in = find(owner, done)
 			} else if cands := candidates(owner, t.CreatedAt); len(cands) == 1 {
 				in = cands[0]

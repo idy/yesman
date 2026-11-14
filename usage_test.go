@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -460,3 +463,144 @@ func TestModelUsageReadsOnlyEachWorkspace(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// Keeping worker starts bounded drops the oldest. A legacy task whose
+// owner's name an earlier, dropped worker held stays uncounted when that
+// worker's start goes: through the actual Store, as it is dropped and
+// dropped further, warm, after a restart and while workers start; other
+// tasks, workers and yesmen keep theirs, and the page says from when
+// starts are missing.
+func TestModelUsageDroppedStartsStayUnknown(t *testing.T) {
+	a := usageApp(t)
+	y := hireWith(t, a, "limit")
+	other := hireWith(t, a, "other")
+	base := time.Now().Add(-96 * time.Hour).UTC()
+	add := func(yesman, name string, at time.Time) {
+		t.Helper()
+		if err := a.yesmen.AddWorker(yesman, yesmen.Worker{Name: name, Task: "x", StartedAt: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remove := func(yesman, name string) {
+		t.Helper()
+		if err := a.yesmen.RemoveWorker(yesman, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := func(yesman, owner string) {
+		t.Helper()
+		if _, err := a.yesmen.ChangeBoard(yesman, yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: ptr("done by " + owner), Status: ptr("done"), Owner: ptr(owner)}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The first w never answered; the second did, with new/low.
+	add("limit", "w", base)
+	remove("limit", "w")
+	add("limit", "w", base.Add(time.Hour))
+	writeSession(t, y, "w", sessionLine("second", base.Add(time.Hour+time.Minute), "new", "low", 1000, 10))
+	remove("limit", "w")
+	writeSession(t, y, "lead", sessionLine("lead", base.Add(time.Minute), "l", "high", 1000, 10))
+	legacy := yesmen.Board{Next: 3, Tasks: []yesmen.Task{
+		{ID: "t1", Title: "the first w's", Status: yesmen.TaskDone, Owner: "w", CreatedAt: base.Add(time.Minute), UpdatedAt: base.Add(2 * time.Minute)},
+		{ID: "t2", Title: "the lead's", Status: yesmen.TaskDone, Owner: "lead", CreatedAt: base.Add(time.Minute), UpdatedAt: base.Add(2 * time.Minute)},
+	}}
+	for _, ws := range []yesmen.Yesman{y, other} {
+		raw, _ := json.Marshal(legacy)
+		if err := os.WriteFile(ws.BoardFile(), raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Another yesman, with a single w, keeps all its starts.
+	add("other", "w", base)
+	writeSession(t, other, "w", sessionLine("only", base.Add(2*time.Minute), "solo", "high", 1000, 10))
+	// keep is still here, started after the others to be dropped.
+	add("limit", "keep", base.Add(3*time.Hour))
+	writeSession(t, y, "keep", sessionLine("keep", base.Add(3*time.Hour+time.Minute), "k", "high", 1000, 10))
+	done("limit", "keep")
+
+	complete := viewOf(t, a, ModelUsageQuery{Agents: "all"})
+	if got := tasksOf(complete); len(got) != 3 || got["k:high"] != 1 || got["l:high"] != 1 || got["solo:high"] != 1 ||
+		complete.Tasks.ReusedName != 1 || complete.Tasks.NoResponses != 1 || len(complete.Coverage.StartsCut) != 0 {
+		t.Fatalf("complete: %v %+v %+v", got, complete.Tasks, complete.Coverage.StartsCut)
+	}
+	// Starts up to the bound, as a build that dropped them unsaid kept
+	// them: a full list may already miss some, up to its oldest.
+	starts, err := a.yesmen.WorkerStarts("limit")
+	if err != nil || len(starts) != 3 {
+		t.Fatalf("starts %+v %v", starts, err)
+	}
+	for i := len(starts); i < 10000; i++ {
+		starts = append(starts, yesmen.WorkerStart{Name: "filler", StartedAt: base.Add(2*time.Hour + time.Duration(i)*time.Millisecond)})
+	}
+	slices.SortFunc(starts, func(a, b yesmen.WorkerStart) int { return a.StartedAt.Compare(b.StartedAt) })
+	raw, _ := json.Marshal(starts)
+	if err := os.WriteFile(filepath.Join(y.MetaDir(), "worker-starts.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check := func(label string, a *app, cut time.Time, extra map[string]int) ModelUsageView {
+		t.Helper()
+		v := viewOf(t, a, ModelUsageQuery{Agents: "all"})
+		want := map[string]int{"k:high": 1, "l:high": 1, "solo:high": 1}
+		for k, n := range extra {
+			want[k] += n
+		}
+		got := tasksOf(v)
+		if !maps.Equal(got, want) || v.Tasks.ReusedName != 1 || v.Total.Total != complete.Total.Total+int64(21*len(extra)) {
+			t.Fatalf("%s: tasks %v want %v, counts %+v", label, got, want, v.Tasks)
+		}
+		if len(v.Coverage.StartsCut) != 1 || v.Coverage.StartsCut[0].Yesman != "limit" || !cut.IsZero() && !v.Coverage.StartsCut[0].Through.Equal(cut) {
+			t.Fatalf("%s: coverage %+v", label, v.Coverage.StartsCut)
+		}
+		return v
+	}
+	check("full", a, base, nil)
+	// Dropping the first w's start does not hand t1 to the second.
+	now := time.Now().UTC()
+	add("limit", "fresh", now.Add(-time.Hour))
+	writeSession(t, y, "fresh", sessionLine("fresh", now.Add(-time.Hour+time.Minute), "f", "med", 1000, 10))
+	done("limit", "fresh")
+	warm := check("dropped", a, base, map[string]int{"f:med": 1})
+	// The same, read anew after a restart.
+	cold := &app{home: a.home, yesmen: yesmen.New(filepath.Join(a.home.Root, "yesmen"), filepath.Join(a.home.Root, "archive")), catalog: a.catalog}
+	if v := check("restarted", cold, base, map[string]int{"f:med": 1}); !reflect.DeepEqual(v.Summary, warm.Summary) {
+		t.Fatalf("restarted %+v\nwarm %+v", v.Summary, warm.Summary)
+	}
+	// More are dropped while workers start and the page is read.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range 20 {
+			name := fmt.Sprintf("n%d", i)
+			if err := a.yesmen.AddWorker("limit", yesmen.Worker{Name: name, Task: "x", StartedAt: now.Add(time.Duration(i) * time.Second)}); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := a.yesmen.RemoveWorker("limit", name); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	for range 20 {
+		v := check("while starting", a, time.Time{}, map[string]int{"f:med": 1})
+		if c := v.Coverage.StartsCut[0].Through; c.Before(base) || !c.Before(base.Add(3*time.Hour)) {
+			t.Fatalf("cut %v", c)
+		}
+	}
+	wg.Wait()
+	h, err := a.yesmen.StartHistory("limit")
+	if err != nil || len(h.Starts) != 10000 || !h.Forgotten.After(base) {
+		t.Fatalf("history %d %v %v", len(h.Starts), h.Forgotten, err)
+	}
+	check("dropped further", a, h.Forgotten, map[string]int{"f:med": 1})
+
+	// Without the starts, only the current workers are known.
+	if err := os.WriteFile(filepath.Join(y.MetaDir(), "worker-starts.json"), []byte("{broken"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v := check("unreadable", a, time.Time{}, map[string]int{"f:med": 1})
+	if !slices.ContainsFunc(v.Coverage.Errors, func(e string) bool { return strings.Contains(e, "limit: worker starts") }) || v.Coverage.StartsCut[0].Through.Before(now) {
+		t.Fatalf("unreadable: %v %+v", v.Coverage.Errors, v.Coverage.StartsCut)
+	}
+}

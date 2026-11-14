@@ -9,7 +9,8 @@ import (
 	"testing"
 )
 
-// A junction is not followed, for sessions or an agent's directory.
+// A junction is not followed, for sessions or an agent's directory. CI
+// makes junctions, so there it must run rather than skip.
 func TestSessionsSkipJunctions(t *testing.T) {
 	line := resp{id: "a1", provider: "p", model: "m", at: t0, duration: 1000, output: 5}.line()
 	outside := outsideLog(t, 777)
@@ -23,6 +24,9 @@ func TestSessionsSkipJunctions(t *testing.T) {
 			t.Fatal(err)
 		}
 		if out, err := exec.Command("cmd", "/c", "mklink", "/J", path, target).CombinedOutput(); err != nil {
+			if os.Getenv("GITHUB_ACTIONS") == "true" {
+				t.Fatalf("mklink /J: %v %s", err, out)
+			}
 			t.Skipf("no junctions here: %v %s", err, out)
 		}
 		want := int64(5) // v, beside a linked w

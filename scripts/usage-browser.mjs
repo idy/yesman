@@ -31,7 +31,7 @@ const full = () => ({
  total:row({provider:'',workers:4,tasks:6,responses:1216,failed:3,other:3,input:12345680136811,output:459286,cacheRead:98770432,cacheWrite:20,total:12345780565579,speed:null}),
  overlap:1,
  tasks:{done:11,attributed:6,severalModels:1,noResponses:0,unowned:1,unknownOwner:0,otherRole:1,reusedName:1,unknownTiming:1,timeUnknown:0,recorded:2},
- coverage:{workspaces:2,files:40,records:1219,from:'2026-11-13T16:49:41Z',to:'2026-11-14T12:45:53Z',unreadable:2,oversized:0,noEffort:2,noModel:3,errors:[]},
+ coverage:{workspaces:2,files:40,records:1219,from:'2026-11-13T16:49:41Z',to:'2026-11-14T12:45:53Z',unreadable:2,oversized:0,noEffort:2,noModel:3,errors:[],startsCut:[{yesman:'alma',through:'2026-11-10T08:00:00Z'}]},
  names:{'magpie/codex-remote/codex/gpt-6.1-sol':'GPT-6.1 Sol · Codex','magpie/auto/claude-opus-5-5':'Claude Opus 5.5 · routing group'},
  yesmen:[{name:'alma',label:'Alma 项目'},{name:'gizmoth',label:'GizMoth'}],
  readAt:'2026-11-14T12:46:00Z',
@@ -40,6 +40,7 @@ function usage(q){
  const v = full();
  v.query = q;
  if (q.yesman==='alma') { v.rows=[row({model:'auto/claude-opus-5-5',effort:'high',workers:1,tasks:2,responses:3,input:3,output:300,total:303,timed:3,timedOutput:300,timedMs:3000,speed:100})]; v.total=row({provider:'',workers:1,tasks:2,responses:3,input:3,output:300,total:303}); v.overlap=0; v.tasks={...v.tasks,done:2,attributed:2,severalModels:0,unowned:0,otherRole:0}; }
+ if (q.yesman==='gizmoth') v.coverage={...v.coverage,startsCut:[]};
  if (q.yesman==='gizmoth') { v.rows=[row({model:'stale/gizmoth-model',effort:'low',responses:1,total:1})]; v.total=row({provider:'',responses:1,total:1}); }
  if (q.agents==='all') { v.rows[0].leads=1; v.total.leads=1; }
  if (q.agents==='leads') { v.rows=[row({model:'codex-remote/codex/gpt-6.1-sol',effort:'medium',leads:2,responses:9,output:90,total:90,timedOutput:90,timedMs:3000,speed:30})]; v.total=row({provider:'',leads:2,responses:9,output:90,total:90}); v.overlap=0; }
@@ -149,8 +150,9 @@ try {
       const notes = await page.locator('.usage-notes').innerText();
       assert.match(notes, /2 log lines could not be read/);
       assert.match(notes, /1 worker used more than one model or effort/);
-      assert.match(notes, /5 done tasks are not counted for a model \(its owner used several models, and when it was done is not recorded: 1; more than one worker held its owner’s name, and when it was done is not recorded: 1; when its owner’s last response before it ended is not recorded: 1; no owner: 1; owned by a lead: 1\)/);
+      assert.match(notes, /5 done tasks are not counted for a model \(its owner used several models, and when it was done is not recorded: 1; more than one worker may have held its owner’s name, so which did it is not known: 1; when its owner’s last response before it ended is not recorded: 1; no owner: 1; owned by a lead: 1\)/);
       assert.match(notes, /2 responses have no recorded effort/);
+      assert.match(notes, /Worker starts in Alma 项目 at or before \S.* are not all kept: workers of a name who started by then may count as one, and tasks one of them may have done count for no model\./);
       assert.equal(await page.locator('.usage-method').evaluate((d) => d.open), false);
       // Only the table scrolls sideways, never the page.
       const pageFits = () => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
@@ -235,6 +237,7 @@ try {
       await page.keyboard.press('Enter');
       assert.equal(await page.locator('.usage-method').evaluate((d) => d.open), true);
       assert.match(await page.locator('.usage-method').innerText(), /from sending the request to the last token/);
+      assert.match(await page.locator('.usage-method').innerText(), /dropped once a yesman has kept 10,000[\s\S]*Where dropped starts leave which worker held the owner’s name unknown, a task counts for no model\./);
 
       // The way back to the benchmark scores.
       await page.locator('.usage-page .mds-section-heading').getByRole('button', { name: 'Settings › yesman' }).click();
@@ -280,7 +283,8 @@ try {
       assert.equal(t.rows[1]['推理强度'], '超高');
       assert.equal(t.rows[1]['完成的任务'], '5');
       assert.equal(t.rows[0]['推理强度'], '— 未记录');
-      assert.match(await zh.locator('.usage-notes').innerText(), /5 个已完成的任务没有计入任何模型（负责者使用过多个模型，且没有记录完成时间：1；不止一个助手用过负责者的名字，且没有记录完成时间：1；负责者在完成前最后一个响应的结束时间没有记录：1；没有负责者：1；由主管负责：1）/);
+      assert.match(await zh.locator('.usage-notes').innerText(), /5 个已完成的任务没有计入任何模型（负责者使用过多个模型，且没有记录完成时间：1；可能不止一个助手用过负责者的名字，无法确定由哪个完成：1；负责者在完成前最后一个响应的结束时间没有记录：1；没有负责者：1；由主管负责：1）/);
+      assert.match(await zh.locator('.usage-notes').innerText(), /Alma 项目 中 \S.* 及之前的助手启动记录不完整：那时以前以同一名字启动的助手可能被算作一个，他们可能完成的任务不计入任何模型。/);
       assert.equal((await zh.locator('#settings-nav [data-page="usage"]').textContent()).trim(), '模型用量');
       await zh.screenshot({ path: `${shots}/${engineName}-narrow-zh-dark.png`, fullPage: true });
       assert.deepEqual(errors, []);

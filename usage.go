@@ -78,10 +78,14 @@ func (x *usageIndex) read(ctx context.Context, store *yesmen.Store, y yesmen.Yes
 	if w.Board, err = store.Board(y.Name); err != nil {
 		return w, err
 	}
-	// Without the recorded starts, the current workers still tell theirs.
-	if w.Starts, err = store.WorkerStarts(y.Name); err != nil {
+	// Without the recorded starts, the current workers still tell theirs,
+	// and no other start is known.
+	h, err := store.StartHistory(y.Name)
+	if err != nil {
 		w.Stats.Errors = append(w.Stats.Errors, err.Error())
+		h.Forgotten = time.Now().UTC()
 	}
+	w.Starts, w.StartsCut = h.Starts, h.Forgotten
 	return w, nil
 }
 

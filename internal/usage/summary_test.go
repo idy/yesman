@@ -521,3 +521,101 @@ func TestSummarizeCountsOwnersOfTasksDoneInPeriod(t *testing.T) {
 		t.Fatalf("row = %+v, total %+v", r, s.Total)
 	}
 }
+
+// Dropping the oldest worker starts, to keep them bounded, never makes a
+// task count, nor counts one for another model: a task counts only where
+// the worker holding its owner's name then is still known. Usage and
+// speed do not change, and workers can only merge.
+func TestSummarizeDroppedStartsNeverCredit(t *testing.T) {
+	m := func(d time.Duration) time.Time { return t0.Add(d) }
+	starts := []yesmen.WorkerStart{
+		{Name: "solo", StartedAt: m(10 * time.Minute)},
+		{Name: "cur", StartedAt: m(30 * time.Minute)},
+		{Name: "w", StartedAt: m(time.Hour)}, // no response
+		{Name: "v", StartedAt: m(time.Hour + time.Second)},
+		{Name: "w", StartedAt: m(2 * time.Hour)},             // no response
+		{Name: "v", StartedAt: m(2*time.Hour + time.Second)}, // no response
+		{Name: "w", StartedAt: m(5 * time.Hour)},
+		{Name: "v", StartedAt: m(5*time.Hour + time.Second)},
+		{Name: "fresh", StartedAt: m(6 * time.Hour)},
+	}
+	current := []yesmen.Worker{{Name: "cur", StartedAt: m(30 * time.Minute)}}
+	agents := map[string][]Record{
+		"lead":  {response("l", "high", m(time.Minute), 1000, 10)},
+		"solo":  {response("s", "xhigh", m(11*time.Minute), 1000, 10)},
+		"cur":   {response("m", "x", m(31*time.Minute), 1000, 10), response("m", "x", m(7*time.Hour), 1000, 10)},
+		"w":     {response("c", "low", m(5*time.Hour+time.Minute), 1000, 10)},
+		"v":     {response("a", "high", m(time.Hour+time.Minute), 1000, 10), response("c", "low", m(5*time.Hour+time.Minute), 1000, 10)},
+		"fresh": {response("f", "med", m(6*time.Hour+time.Minute), 1000, 10)},
+	}
+	legacy := func(id, owner string, created time.Time) yesmen.Task {
+		return yesmen.Task{ID: id, Status: yesmen.TaskDone, Owner: owner, CreatedAt: created, UpdatedAt: created}
+	}
+	recorded := func(id, owner string, done time.Time) yesmen.Task {
+		return yesmen.Task{ID: id, Status: yesmen.TaskDone, Owner: owner, DoneOwner: owner, CreatedAt: done.Add(-time.Minute), UpdatedAt: done, DoneAt: done}
+	}
+	board := yesmen.Board{Tasks: []yesmen.Task{
+		legacy("t1", "w", m(time.Hour+time.Minute)),           // any w: unknown
+		recorded("t2", "v", m(2*time.Hour+10*time.Minute)),    // the second v, which never answered
+		recorded("t3", "fresh", m(6*time.Hour+5*time.Minute)), // f med
+		recorded("t4", "cur", m(7*time.Hour+5*time.Minute)),   // m x
+		legacy("t5", "cur", m(40*time.Minute)),                // m x
+		recorded("t6", "lead", m(2*time.Minute)),              // l high
+		legacy("t7", "solo", m(12*time.Minute)),               // s xhigh
+	}}
+	space := func(name string, k int) Workspace {
+		w := Workspace{Name: name, HiredAt: t0, Workers: current, Starts: starts[k:], Agents: agents, Board: board}
+		if k > 0 {
+			w.StartsCut = starts[k-1].StartedAt
+		}
+		return w
+	}
+	base := Summarize([]Workspace{space("y", 0)}, all)
+	if got := tasksByRow(base); len(got) != 4 || got["f:med"] != 1 || got["m:x"] != 2 || got["l:high"] != 1 || got["s:xhigh"] != 1 || got["low:"] != 0 ||
+		base.Tasks.ReusedName != 1 || base.Tasks.NoResponses != 1 || len(base.Coverage.StartsCut) != 0 {
+		t.Fatalf("complete: %v %+v", got, base.Tasks)
+	}
+	baseRows := map[string]Row{}
+	for _, r := range base.Rows {
+		baseRows[r.Model+":"+r.Effort] = r
+	}
+	for k := 1; k <= len(starts); k++ {
+		s := Summarize([]Workspace{space("y", k)}, all)
+		label := "dropped through " + starts[k-1].Name
+		if s.Tasks.Done != base.Tasks.Done || s.Tasks.Attributed > base.Tasks.Attributed || s.Tasks.Attributed+unattributedSum(s.Tasks) != s.Tasks.Done {
+			t.Errorf("%s: %+v, complete %+v", label, s.Tasks, base.Tasks)
+		}
+		if s.Total.Tokens != base.Total.Tokens || s.Total.Responses != base.Total.Responses || s.Total.Workers > base.Total.Workers || len(s.Rows) != len(base.Rows) {
+			t.Errorf("%s: total %+v, complete %+v", label, s.Total, base.Total)
+		}
+		for _, r := range s.Rows {
+			b := baseRows[r.Model+":"+r.Effort]
+			if r.Tasks > b.Tasks || r.Workers > b.Workers || r.Tokens != b.Tokens || r.TimedMs != b.TimedMs || r.TimedOutput != b.TimedOutput || *r.Speed != *b.Speed {
+				t.Errorf("%s: row %+v, complete %+v", label, r, b)
+			}
+		}
+		if len(s.Coverage.StartsCut) != 1 || !s.Coverage.StartsCut[0].Through.Equal(starts[k-1].StartedAt) {
+			t.Errorf("%s: coverage %+v", label, s.Coverage.StartsCut)
+		}
+	}
+
+	// With w's and v's first two starts dropped, as when the oldest are:
+	// the w of t1 and the v of t2 are no longer known, nor is solo; cur is
+	// still here, fresh and the lead are not affected.
+	s := Summarize([]Workspace{space("y", 6)}, all)
+	if got := tasksByRow(s); len(got) != 3 || got["f:med"] != 1 || got["m:x"] != 2 || got["l:high"] != 1 || s.Tasks.ReusedName != 3 || s.Tasks.NoResponses != 0 {
+		t.Errorf("dropped: %v %+v", got, s.Tasks)
+	}
+	// Another yesman with the same names keeps all its starts.
+	both := Summarize([]Workspace{space("y", 6), space("z", 0)}, all)
+	if both.Tasks.Attributed != s.Tasks.Attributed+base.Tasks.Attributed || both.Tasks.ReusedName != s.Tasks.ReusedName+base.Tasks.ReusedName ||
+		len(both.Coverage.StartsCut) != 1 || both.Coverage.StartsCut[0].Yesman != "y" {
+		t.Errorf("with another yesman: %+v %+v", both.Tasks, both.Coverage.StartsCut)
+	}
+	// Not knowing any start leaves only what the current workers tell.
+	none := space("y", len(starts))
+	none.StartsCut = m(48 * time.Hour)
+	if got := tasksByRow(Summarize([]Workspace{none}, all)); len(got) != 2 || got["m:x"] != 2 || got["l:high"] != 1 {
+		t.Errorf("no starts known: %v", got)
+	}
+}
