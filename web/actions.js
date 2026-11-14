@@ -103,6 +103,11 @@ export function registerActions(shortcuts, host) {
       when: needAgent, run: () => host.togglePane('board'),
     },
     {
+      // Scheduled tasks: no key of its own by default; one can be set.
+      id: 'pane.tasks', label: 'Show or hide the scheduled tasks', group: 'Panels', keywords: ['tasks', 'schedule', 'recurring', 'timer'],
+      when: needAgent, run: () => host.togglePane('tasks'),
+    },
+    {
       id: 'pane.info', label: 'Show or hide the info', group: 'Panels', keywords: ['worktrees', 'storage', 'panel'],
       when: needAgent, run: () => host.togglePanel(),
     },

@@ -1052,6 +1052,7 @@ export default {
   "Panels": "面板",
   "Show or hide the board": "显示或隐藏任务板",
   "Show or hide the info": "显示或隐藏信息栏",
+  "Show or hide the scheduled tasks": "显示或隐藏定时任务",
   "Go to a file…": "转到文件…",
   "Show or hide the file tree": "显示或隐藏文件树",
   "Open Knowledge": "打开知识",

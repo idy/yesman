@@ -63,6 +63,9 @@ const USED = 'this run was already made and its record has left the history';
 // How yesman refuses a new click carrying a time ahead of its clock
 // (schedule.ErrRequestAhead): that click is not taken, so the next is new.
 const AHEAD = 'this click carries a time more than a day ahead';
+// How yesman refuses Run now while its clock is behind clicks it took
+// (schedule.ErrRunNowWaits): a later click is a new one.
+const WAITS = 'waits until this computer';
 
 function formatter(zone, opts) {
   try {
@@ -128,7 +131,10 @@ export function createSchedules(host) {
   const views = new Map(); // yesman name -> { view, error }
   const loading = new Map(); // yesman name -> { again }
   const expanded = new Set(); // `${yesman}/${plan}`
-  const running = new Map(); // `${yesman}/${plan}` -> request ID of a Run now in flight
+  const running = new Map(); // `${yesman}/${plan}` -> request ID of a Run now (or 'catchup') in flight
+  // `${yesman}/${plan}` whose Run now or catch-up is being confirmed or
+  // sent: one at a time per plan, whichever control asked.
+  const claiming = new Set();
   const retryIDs = new Map(); // `${yesman}/${plan}` -> request ID to reuse after an uncertain failure
   const busy = new Set(); // keys of actions under way, such as `${yesman}/${run}:retry`
   const loaded = new Map(); // yesman name -> how many of its loads were shown
@@ -453,48 +459,90 @@ export function createSchedules(host) {
     });
   }
 
-  async function runNow(y, p, again = false) {
-    const key = `${y.name}/${p.id}`;
-    if (running.has(key)) return;
-    if (p.open && !again) {
-      const prev = p.runs.find((r) => r.id === p.open);
-      const ok = await host.confirm(t('Run {title} again?', { title: p.title }),
-        prev?.board ? t('Its last run, board task {id}, is still open. Running it now sends the lead another request with a board task of its own.', { id: prev.board }) : t('Its last run is still open. Running it now sends the lead another request with a board task of its own.'),
-        t('Run now'));
-      if (!ok) return;
-    } else if (again) {
-      const ok = await host.confirm(t('Run {title} as a new run?', { title: p.title }),
-        t('yesman cannot tell whether the earlier run reached the lead. A new run sends the request again with a board task of its own, so the lead may get it twice.'),
-        t('Run again'));
-      if (!ok) return;
-    }
-    if (running.has(key)) return;
-    // One click is one run: the same request ID is used again only to retry
-    // a click whose answer did not arrive.
-    const id = retryIDs.get(key) ?? requestID();
-    running.set(key, id);
-    await act(`${key}:run`, { key: `${key}:run`, fallback: `${key}:open` }, async () => {
-      try {
-        await host.call('RunSchedule', y.name, p.id, id, '');
-        retryIDs.delete(key);
-      } catch (err) {
-        // Kept for a retry, unless yesman says that click's run was made
-        // and pruned, or that it refused the click for good: the next click
-        // is a new one.
-        const said = String(err?.message ?? err);
-        if (!said.includes(USED) && !said.includes(AHEAD)) retryIDs.set(key, id);
-        else retryIDs.delete(key);
-        throw err;
-      } finally {
-        running.delete(key);
-      }
-    });
+  // stillShown reports whether the pane still shows y, as when an action
+  // was asked for: an answer to a confirmation that comes after the pane
+  // was closed or moved to another yesman does nothing.
+  function stillShown(y) {
+    const now = current();
+    return !!now && now.name === y.name && String(now.hiredAt ?? '') === String(y.hiredAt ?? '');
   }
 
-  function catchUp(y, p, r) {
+  // confirmOpen asks before a plan whose last run is still open runs again,
+  // from Run now or from a missed run's Run it now alike.
+  function confirmOpen(p) {
+    const prev = p.runs.find((r) => r.id === p.open);
+    return host.confirm(t('Run {title} again?', { title: p.title }),
+      prev?.board ? t('Its last run, board task {id}, is still open. Running it now sends the lead another request with a board task of its own.', { id: prev.board }) : t('Its last run is still open. Running it now sends the lead another request with a board task of its own.'),
+      t('Run now'));
+  }
+
+  async function runNow(y, p, again = false) {
+    const key = `${y.name}/${p.id}`;
+    if (claiming.has(key) || running.has(key)) return;
+    claiming.add(key);
+    try {
+      if (p.open && !again) {
+        if (!(await confirmOpen(p))) return;
+      } else if (again) {
+        const ok = await host.confirm(t('Run {title} as a new run?', { title: p.title }),
+          t('yesman cannot tell whether the earlier run reached the lead. A new run sends the request again with a board task of its own, so the lead may get it twice.'),
+          t('Run again'));
+        if (!ok) return;
+      }
+      if ((p.open || again) && !stillShown(y)) return;
+      // One click is one run: the same request ID is used again only to
+      // retry a click whose answer did not arrive.
+      const id = retryIDs.get(key) ?? requestID();
+      running.set(key, id);
+      await act(`${key}:run`, { key: `${key}:run`, fallback: `${key}:open` }, async () => {
+        try {
+          await host.call('RunSchedule', y.name, p.id, id, '');
+          retryIDs.delete(key);
+        } catch (err) {
+          // Kept for a retry, unless yesman says that click's run was made
+          // and pruned, or that it refused the click for good: the next
+          // click is a new one.
+          const said = String(err?.message ?? err);
+          if (![USED, AHEAD, WAITS].some((text) => said.includes(text))) retryIDs.set(key, id);
+          else retryIDs.delete(key);
+          throw err;
+        } finally {
+          running.delete(key); // before act redraws the pane
+        }
+      });
+    } finally {
+      running.delete(key);
+      claiming.delete(key);
+    }
+  }
+
+  // catchUp runs a missed run now, once: the run it makes is named after
+  // the missed record, whatever the request ID, so a click repeated or sent
+  // again after a failure catches up the same one. Like Run now, it asks
+  // first while the plan's last run is open, and waits for a Run now of the
+  // same plan under way, and the other way round.
+  async function catchUp(y, p, r) {
+    const plan = `${y.name}/${p.id}`;
     const key = `${y.name}/${r.id}`;
-    // A missed run is caught up once, whatever the request ID.
-    return act(`${key}:catchup`, { key: `${key}:catchup`, fallback: `${y.name}/${p.id}:open` }, () => host.call('RunSchedule', y.name, p.id, requestID(), r.id));
+    if (claiming.has(plan) || running.has(plan) || busy.has(`${key}:catchup`)) return;
+    claiming.add(plan);
+    try {
+      if (p.open) {
+        if (!(await confirmOpen(p))) return;
+        if (!stillShown(y)) return;
+      }
+      running.set(plan, 'catchup');
+      await act(`${key}:catchup`, { key: `${key}:catchup`, fallback: `${plan}:open` }, async () => {
+        try {
+          await host.call('RunSchedule', y.name, p.id, requestID(), r.id);
+        } finally {
+          running.delete(plan); // before act redraws the pane
+        }
+      });
+    } finally {
+      running.delete(plan);
+      claiming.delete(plan);
+    }
   }
 
   function retry(y, p, r) {

@@ -171,3 +171,73 @@ func TestTakenClickWithoutATimeIsAnsweredAfterItsRecordGoes(t *testing.T) {
 		t.Fatalf("%d prompts, want %d", n, before)
 	}
 }
+
+// pruned.json stays within the size it is read at however its plans fill
+// up: 200 plans, each with its most request IDs, at their longest.
+func TestPrunedFileFitsItsLimit(t *testing.T) {
+	f, _ := decodePruned(nil)
+	latest := fmt.Sprintf("%012x", int64(1_800_000_000_000))
+	for plan := 1; plan <= maxPlans; plan++ {
+		var ids []string
+		for i := range maxPrunedRequests + maxAheadRequests + 50 {
+			ids = append(ids, fmt.Sprintf("%012x%020x", int64(1_900_000_000_000)+int64(i), i)) // 32 hex, ahead of the clock
+		}
+		f.add(fmt.Sprintf("s%d", 999000+plan), ids, latest)
+	}
+	data, err := f.encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > maxPrunedFile {
+		t.Fatalf("%d plans at their fullest take %d bytes, the file is read up to %d", maxPlans, len(data), maxPrunedFile)
+	}
+	t.Logf("%d bytes of %d", len(data), maxPrunedFile)
+}
+
+// More clicks taken before the clock went back than are kept one by one:
+// Run now of that plan sends nothing, saying why, until the clock passes
+// them, and then runs; none of the clicks taken runs again.
+func TestRunNowWaitsForTheClockPastManyClicks(t *testing.T) {
+	e := newEnv(t, "", utc("2026-11-16T12:00:00Z"))
+	e.save(PlanInput{Schedule: daily("09:00")})
+	var taken []string
+	// The newest keepRuns stay as records; more than the list keeps of
+	// the rest are ahead of the clock once it is set back.
+	for _, r := range e.manualRuns("s1", keepRuns+maxPrunedRequests+maxAheadRequests+4, yesmen.TaskDone) {
+		taken = append(taken, strings.TrimPrefix(r.ID, "s1-m-"))
+	}
+	newest := e.clock.Now()
+	e.clock.Add(-72 * time.Hour)
+	e.tick()
+	p := e.pruned().Plans["s1"]
+	if p.Floor <= latestRequest(e.clock.Now()) || len(p.Requests) != maxPrunedRequests+maxAheadRequests {
+		t.Fatalf("floor %q, %d requests", p.Floor, len(p.Requests))
+	}
+	e.restart("")
+	before := len(e.prompts())
+	for _, req := range taken {
+		if r, err := e.svc.RunNow(ws, "s1", req, ""); err == nil && r.ID != "s1-m-"+req {
+			t.Fatalf("%s made run %s", req, r.ID)
+		}
+	}
+	if _, err := e.svc.RunNow(ws, "s1", e.requestID(), ""); !errors.Is(err, ErrRunNowWaits) {
+		t.Fatalf("a new click while the clock is behind: %v", err)
+	}
+	e.svc.Wait()
+	if n := len(e.prompts()); n != before {
+		t.Fatalf("%d prompts, want %d", n, before)
+	}
+	// Within a day of them it still waits, and says so.
+	e.clock.Set(newest.Add(-time.Hour))
+	if _, err := e.svc.RunNow(ws, "s1", e.requestID(), ""); !errors.Is(err, ErrRunNowWaits) {
+		t.Fatalf("a new click within a day of them: %v", err)
+	}
+	e.clock.Set(newest.Add(time.Second))
+	if _, err := e.svc.RunNow(ws, "s1", e.requestID(), ""); err != nil {
+		t.Fatalf("once the clock passed them: %v", err)
+	}
+	e.svc.Wait()
+	if n := len(e.prompts()); n != before+1 {
+		t.Fatalf("%d prompts, want %d", n, before+1)
+	}
+}

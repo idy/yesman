@@ -172,6 +172,7 @@ func (s *Service) planView(sp *space, p Plan, tasks map[string]yesmen.Task, boar
 }
 
 func runView(r Run, p Plan, tasks map[string]yesmen.Task, boardErr error, active bool) RunView {
+	r.BoardSync = nil // the scheduler's own bookkeeping
 	v := RunView{Run: r, Status: r.State}
 	t, onBoard := taskOf(r, tasks)
 	if onBoard {

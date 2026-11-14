@@ -3,6 +3,7 @@ package schedule
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -113,6 +114,39 @@ type Run struct {
 	Prev     string `json:"prev,omitempty"`
 	// Claimer is the scheduler instance that claimed the run, or retried it.
 	Claimer string `json:"claimer,omitempty"`
+	// BoardSync is a change of its board task still to be made (boardSync).
+	BoardSync *BoardSync `json:"boardSync,omitempty"`
+}
+
+// BoardSync is a change of a run's board task that its change of state
+// calls for: blocked with a note while it was definitely not delivered, and
+// back to do when it is sent again. It is recorded with the run in the same
+// write as that change of state, then made on the board, and made again at
+// each tick until the board has it, so that neither a board write that
+// failed nor a quit in between leaves the lead a task it never got. It is
+// made only to the task as it stood when it was decided: a task the lead or
+// the user changed or removed since is left as they left it.
+type BoardSync struct {
+	Status string `json:"status"`
+	Note   string `json:"note"`
+	// From is the task as it stood, nil when the board could not be read
+	// then: the change is then made only to a task in the state it calls
+	// for (to do, or blocked by the scheduler) not changed after At.
+	From *TaskStamp `json:"from,omitempty"`
+	At   time.Time  `json:"at"` // the board's clock, when it was decided
+}
+
+// TaskStamp tells a board task's state: its status, a digest of its note,
+// and when the board last changed it. Any change of the task changes it.
+type TaskStamp struct {
+	Status    string    `json:"status"`
+	NoteSum   string    `json:"noteSum"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+func stampOf(t yesmen.Task) *TaskStamp {
+	sum := sha256.Sum256([]byte(t.Note))
+	return &TaskStamp{Status: t.Status, NoteSum: hex.EncodeToString(sum[:]), UpdatedAt: t.UpdatedAt}
 }
 
 // Attempt is one submission of a run to the lead, under its own stable
@@ -461,7 +495,10 @@ type prunedPlan struct {
 const (
 	prunedVersion     = 1
 	maxPrunedRequests = 64
-	maxPrunedFile     = 1 << 20
+	// maxAheadRequests bounds the request IDs kept beyond maxPrunedRequests
+	// because the floor may not cover them yet (prunedFile.add).
+	maxAheadRequests = 32
+	maxPrunedFile    = 1 << 20
 )
 
 var prunedKeys = []string{"version", "plans"}
@@ -519,12 +556,22 @@ var floorRE = regexp.MustCompile(`^[a-f0-9]{12}$`)
 // requestTime is the time part of a request ID, comparable as a string.
 func requestTime(id string) string { return id[:12] }
 
+// requestClock reads a request time as an instant.
+func requestClock(t string) time.Time {
+	var ms int64
+	if _, err := fmt.Sscanf(t, "%x", &ms); err != nil {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms).UTC()
+}
+
 // requestAhead is how far ahead of the scheduler's clock a request ID's
 // time may be: the page and the scheduler read the same computer's clock.
 const requestAhead = 24 * time.Hour
 
 // latestRequest is the latest request time taken from now: the latest a
-// new click may carry, and the highest the floor is raised to.
+// new click may carry, and the highest the floor is raised to while the
+// plan keeps few enough IDs ahead of the clock.
 func latestRequest(now time.Time) string {
 	return fmt.Sprintf("%012x", now.Add(requestAhead).UnixMilli())
 }
@@ -550,13 +597,16 @@ func (f prunedFile) used(plan, request string) bool {
 // add records request IDs pruned from a plan, keeping the newest
 // maxPrunedRequests exactly and raising the floor over the older ones, the
 // oldest first. A request ID leaves the exact list only when the floor
-// covers it, and the floor is never raised past latest (latestRequest), or
-// no click could pass it: an ID whose time is later stays in the list,
-// beyond maxPrunedRequests if need be, until the clock reaches it. Such an
-// ID was taken before the clock was set back, or comes from a version whose
-// request IDs did not start with their time. So no request ID taken is
-// ever forgotten; the list stays bounded by the clicks taken ahead of the
-// clock, and pruned.json by its size, past which nothing is pruned.
+// covers it, so no request ID taken is ever forgotten. The floor is not
+// raised past latest (latestRequest) while it can be helped, or no new
+// click could pass it: an ID whose time is later (taken before the clock
+// was set back, or from a version whose request IDs did not start with
+// their time) stays in the list until the clock reaches it, up to
+// maxAheadRequests of them. Past that, the floor covers the earliest of
+// them all the same, and Run now of the plan waits until the clock passes it
+// (ErrRunNowWaits): refused, never sent twice. A plan keeps at most
+// maxPrunedRequests+maxAheadRequests IDs, so pruned.json stays within the
+// size it is read at (TestPrunedFileFitsItsLimit).
 func (f *prunedFile) add(plan string, requests []string, latest string) {
 	p := f.Plans[plan]
 	if p == nil {
@@ -571,7 +621,17 @@ func (f *prunedFile) add(plan string, requests []string, latest string) {
 	for len(p.Requests) > maxPrunedRequests {
 		i := slices.IndexFunc(p.Requests, func(r string) bool { return requestTime(r) <= latest })
 		if i < 0 {
-			break // none the floor may cover yet: all stay exactly
+			if len(p.Requests) <= maxPrunedRequests+maxAheadRequests {
+				break // none the floor may cover yet: all stay exactly
+			}
+			// Too many ahead of the clock: the earliest goes under the
+			// floor, which so moves past the clock as little as it can.
+			i = 0
+			for j, r := range p.Requests {
+				if requestTime(r) < requestTime(p.Requests[i]) {
+					i = j
+				}
+			}
 		}
 		if t := requestTime(p.Requests[i]); t > p.Floor {
 			p.Floor = t

@@ -481,12 +481,16 @@ async function focused(engineName, engine) {
       await dialog.waitFor({ state: 'hidden' });
       await page.locator('#yesmen').getByText('鲍勃 Bob').click();
       await pane.getByText('No scheduled tasks yet').waitFor();
+      // Where the switch to Bob leaves the focus, once it settled.
+      await page.waitForTimeout(300);
+      const where = () => page.evaluate(() => { const el = document.activeElement; return `${el?.tagName}#${el?.id}.${el?.className}[${el?.dataset?.key ?? ''}]`; });
       await page.evaluate(() => { window.before = document.activeElement; });
+      const settled = await where();
       await page.evaluate(() => window.release());
       for (let n = 0; n < 100 && !(await plan('s2')); n++) await new Promise((r) => setTimeout(r, 20));
       assert.equal((await plan('s2'))?.title, 'Late save');
       await page.waitForTimeout(300);
-      assert.equal(await page.evaluate(() => document.activeElement === window.before), true, 'a late answer moved the focus');
+      assert.equal(await page.evaluate(() => document.activeElement === window.before), true, `a late answer moved the focus: ${settled} -> ${await where()}`);
       await page.locator('#yesmen').getByText('Alice').first().click();
       await pane.locator('.sched-plan[data-plan="alice/s2"]').waitFor();
       await page.waitForTimeout(300);
@@ -627,6 +631,103 @@ async function focused(engineName, engine) {
       for (let n = 0; n < 200 && !(await plan(id)).runs.length; n++) await new Promise((r) => setTimeout(r, 20));
       assert.equal((await plan(id)).runs.length, 1, 'a click with the right time did not run');
       step('a click ahead of the clock is refused, and the next is new');
+      await context.close();
+    }
+
+    {
+      // A missed run of a plan whose last run is still open asks first, as
+      // Run now does; one at a time per plan, whichever control asked: a
+      // cancel sends nothing, a confirmation sends the missed run once
+      // under its own name, and clicks meanwhile send nothing more. With
+      // no run open, it runs at once.
+      const made = await fx.post('/fixture/call', { method: 'SaveSchedule', args: ['alice', { title: 'Overlap check', instructions: 'Synthetic overlap', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false }] });
+      const id = made.plan.id;
+      const click = Date.now().toString(16).padStart(12, '0').slice(-12) + 'cdcdcdcdcdcd';
+      await fx.post('/fixture/call', { method: 'RunSchedule', args: ['alice', id, click, ''] });
+      // Sent, and its board task still to do: the plan's last run is open.
+      for (let n = 0; n < 200 && !(await plan(id)).open; n++) await new Promise((r) => setTimeout(r, 20));
+      let p = await plan(id);
+      assert.ok(p.open, `the manual run is open: ${JSON.stringify(p.runs.map((r) => [r.id, r.state, r.status]))}`);
+      await fx.post('/fixture/call', { method: 'SaveSchedule', args: ['alice', { ...p, schedule: { kind: 'interval', every: 15 }, enabled: true }] });
+      await fx.post('/fixture/clock', { add: '70m' });
+      await fx.post('/fixture/tick');
+      p = await plan(id);
+      const missedRun = p.runs.find((r) => r.canCatchUp);
+      assert.ok(missedRun, `a missed run: ${JSON.stringify(p.runs.map((r) => [r.id, r.status]))}`);
+      const mine = new RegExp(`scheduled task ${id} "`);
+      const sentFor = async () => (await fx.get('/fixture/prompts')).filter((m) => mine.test(m.message)).length;
+      const before = await sentFor();
+
+      const { context, page, pane } = await open();
+      await tasksEntry(page).click();
+      const row = pane.locator(`[data-plan="alice/${id}"]`);
+      await expand(row);
+      const catchUpButton = row.locator(`[data-key="alice/${missedRun.id}:catchup"]`);
+      const runButton = row.locator(`[data-key="alice/${id}:run"]`);
+      const dialog = page.locator('#confirm-dialog');
+      const calls = () => page.evaluate((plan) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[2] === plan).length, id);
+      const frames = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      // Run now asks, as before; so does the missed run's Run it now.
+      for (const button of [runButton, catchUpButton]) {
+        await button.click();
+        await page.locator('#confirm-dialog[open]').waitFor();
+        if (button === catchUpButton) {
+          // Run now of the same plan meanwhile asks nothing more.
+          await runButton.evaluate((el) => el.click());
+          await frames();
+          assert.equal(await page.locator('#confirm-dialog[open]').count(), 1);
+        }
+        await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+        await dialog.waitFor({ state: 'hidden' });
+        await frames();
+      }
+      assert.equal(await calls(), 0, 'a cancelled run was sent');
+      assert.equal(await page.locator('#confirm-dialog[open]').count(), 0);
+
+      // Confirmed: the missed run, once, whatever is clicked meanwhile.
+      await page.evaluate(() => { window.hold.RunSchedule = new Promise((r) => { window.releaseRun = r; }); });
+      await catchUpButton.click();
+      await page.locator('#confirm-dialog[open]').waitFor();
+      await page.locator('#confirm-ok').click();
+      await page.waitForFunction((plan) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[2] === plan).length === 1, id);
+      for (const button of [catchUpButton, catchUpButton, runButton]) await button.evaluate((el) => el.click());
+      await frames();
+      assert.equal(await calls(), 1);
+      assert.equal(await page.locator('#confirm-dialog[open]').count(), 0);
+      const sent = await page.evaluate((plan) => window.calls.find((c) => c[0] === 'RunSchedule' && c[2] === plan), id);
+      assert.equal(sent[4], missedRun.id, 'the missed run is the one caught up');
+      await page.evaluate(() => { delete window.hold.RunSchedule; window.releaseRun(); });
+      for (let n = 0; n < 200 && !(await plan(id)).runs.some((r) => r.id === `${missedRun.id}-c` && r.board); n++) await new Promise((r) => setTimeout(r, 20));
+      p = await plan(id);
+      assert.equal(p.runs.filter((r) => r.kind === 'catchup').length, 1);
+      for (let n = 0; n < 200 && (await sentFor()) < before + 1; n++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal(await sentFor(), before + 1);
+      step('a missed run of a plan with an open run asks first, and is sent once');
+
+      // No run open: the next missed run is caught up at once. (The tick
+      // runs the occurrence on time itself; its task is closed too.)
+      const closeAll = async () => {
+        for (const r of (await plan(id)).runs.filter((r) => r.board && r.task && r.task.status !== 'done')) await fx.post('/fixture/board', { yesman: 'alice', id: r.board, status: 'done', note: '' });
+      };
+      await closeAll();
+      await fx.post('/fixture/clock', { add: '70m' });
+      await fx.post('/fixture/tick');
+      for (let n = 0; n < 200 && (await plan(id)).runs.some((r) => r.state === 'claimed' || r.state === 'boarded' || r.state === 'sending'); n++) await new Promise((r) => setTimeout(r, 20));
+      await closeAll();
+      const sentBefore = await sentFor();
+      p = await plan(id);
+      assert.equal(p.open ?? null, null, 'a run is still open');
+      const next = p.runs.find((r) => r.canCatchUp);
+      assert.ok(next, 'a second missed run');
+      await page.reload();
+      await tasksEntry(page).click();
+      await expand(row);
+      await row.locator(`[data-key="alice/${next.id}:catchup"]`).click();
+      await page.waitForFunction((plan) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[2] === plan).length === 1, id);
+      assert.equal(await page.locator('#confirm-dialog[open]').count(), 0, 'asked with no run open');
+      for (let n = 0; n < 200 && (await sentFor()) < sentBefore + 1; n++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal(await sentFor(), sentBefore + 1);
+      step('with no run open, a missed run is caught up at once');
       await context.close();
     }
     assert.deepEqual(errors, []);

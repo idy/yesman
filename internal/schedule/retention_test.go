@@ -209,14 +209,32 @@ func TestPrunedRequestsFloor(t *testing.T) {
 	if g.used("s1", at(1_800_000_000_000, 0)) {
 		t.Fatalf("a request ID without a plausible time raised the floor: %+v", g.Plans["s1"])
 	}
-	// More than the list holds of IDs ahead of the clock: all stay.
+	// IDs ahead of the clock stay one by one, up to maxAheadRequests of
+	// them; past that the floor covers the oldest, past the clock, and none
+	// is forgotten.
 	var aheads []string
-	for i := range maxPrunedRequests + 3 {
+	for i := range maxPrunedRequests + maxAheadRequests - 2 { // with legacy and ahead: the bound
 		aheads = append(aheads, at(2_100_000_000_001+int64(i), i))
 	}
 	g.add("s1", aheads, latest)
-	if p := g.Plans["s1"]; len(p.Requests) != maxPrunedRequests+5 || p.Floor > latest {
+	if p := g.Plans["s1"]; len(p.Requests) != maxPrunedRequests+maxAheadRequests || p.Floor > latest {
 		t.Fatalf("ahead of the clock: floor %q, %d requests", p.Floor, len(p.Requests))
+	}
+	var over []string
+	for i := range 5 {
+		over = append(over, at(2_100_000_001_000+int64(i), i))
+	}
+	g.add("s1", over, latest)
+	aheads = append(aheads, over...)
+	if p := g.Plans["s1"]; len(p.Requests) != maxPrunedRequests+maxAheadRequests || p.Floor <= latest || p.Floor > requestTime(at(2_100_000_000_004, 0)) || !slices.Contains(p.Requests, legacy) {
+		// The floor rises past the clock only as far as the earliest IDs
+		// it must cover; an ID with a random time stays listed.
+		t.Fatalf("over the bound: floor %q, %d requests", p.Floor, len(p.Requests))
+	}
+	for _, id := range append(slices.Clone(taken), aheads...) {
+		if !g.used("s1", id) {
+			t.Fatalf("%s was forgotten over the bound", id)
+		}
 	}
 	// Once the clock is past them, the floor covers them and the list is
 	// bounded again; still none is forgotten.

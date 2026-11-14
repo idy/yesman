@@ -80,6 +80,11 @@ var (
 	// before anything is recorded: a click taken so would have to be kept
 	// exactly for as long, and a new click carries the right time.
 	ErrRequestAhead = errors.New("this click carries a time more than a day ahead of this computer's clock, so nothing was sent: use Run now again")
+	// ErrRunNowWaits: more clicks of the plan, taken before the computer's
+	// clock was set back, left the history than are kept one by one, so
+	// every click up to the newest of them may be one of them; Run now
+	// sends nothing until the clock has passed it.
+	ErrRunNowWaits = errors.New("Run now of this task waits until this computer's clock passes the clicks it took before the clock was set back, so nothing was sent")
 	// ErrStaleCaller: the lead that asked was stopped, restarted or
 	// dismissed, or the workspace replaced, before the change was made.
 	ErrStaleCaller = errors.New("the lead that asked is no longer running in this yesman, so nothing was saved")
@@ -573,13 +578,17 @@ func (s *Service) updateLocked(sp *space, y yesmen.Yesman, id string, fn func(*R
 	if !fn(&next.Run) {
 		return rec.Run, nil
 	}
+	if callsForBoard(rec.Run, next.Run) {
+		// Decided before the record is written, and written with it: a
+		// quit or a failed board write after this leaves it to be made.
+		next.BoardSync = s.decideBoardSync(y, next.Run)
+	}
 	next.UpdatedAt = s.now()
 	if err := s.writeRunLocked(y, &next); err != nil {
 		return rec.Run, err
 	}
-	before := rec.Run
 	*rec = next
-	s.markBoardLocked(y, before, rec.Run)
+	s.syncBoardLocked(y, rec)
 	return rec.Run, nil
 }
 
@@ -588,41 +597,107 @@ func (s *Service) updateLocked(sp *space, y yesmen.Yesman, id string, fn func(*R
 // tasks, do not take up a request it never got.
 const notDelivered = "Scheduled run not delivered to the lead:"
 
-// markBoardLocked keeps a run's board task in step with what is known of
-// its delivery: blocked with a note while it was definitely not delivered,
-// and back to do when it is sent again. A task the lead or the user changed
-// in between is left as they left it.
-func (s *Service) markBoardLocked(y yesmen.Yesman, before, after Run) {
-	if after.Board == "" || !after.fired() {
+// callsForBoard reports whether a run's change of state from before to
+// after changes what its board task should say: it was definitely not
+// delivered, or it is sent again.
+func callsForBoard(before, after Run) bool {
+	return after.Board != "" && after.fired() && (before.State == StateFailed) != (after.State == StateFailed)
+}
+
+// decideBoardSync decides the change of a run's board task its new state
+// calls for (BoardSync): blocked with a note while it was definitely not
+// delivered, and back to do when it is sent again, but only from the state
+// the scheduler left it in. A task the lead or the user changed meanwhile,
+// or no task, gets none.
+func (s *Service) decideBoardSync(y yesmen.Yesman, r Run) *BoardSync {
+	want := &BoardSync{Status: yesmen.TaskTodo, At: time.Now().UTC()}
+	if r.State == StateFailed {
+		reason := clip(strings.TrimSuffix(strings.TrimPrefix(r.Reason, "Not sent: "), "."), 300)
+		want.Status, want.Note = yesmen.TaskBlocked, fmt.Sprintf("%s %s. Send it again from Tasks.", notDelivered, reason)
+	}
+	board, err := s.cfg.Yesmen.Board(y.Name)
+	if err != nil {
+		return want // From unknown: made only to a task unchanged since At
+	}
+	for _, t := range board.Tasks {
+		if t.Schedule != nil && t.Schedule.Run == r.ID {
+			if !want.fits(t) {
+				return nil
+			}
+			want.From = stampOf(t)
+			return want
+		}
+	}
+	return nil
+}
+
+// fits reports whether a task is in the state the change is made from:
+// to do before it is blocked, and blocked by the scheduler before it is to
+// do again.
+func (b *BoardSync) fits(t yesmen.Task) bool {
+	if b.Status == yesmen.TaskBlocked {
+		return t.Status == yesmen.TaskTodo
+	}
+	return t.Status == yesmen.TaskBlocked && strings.HasPrefix(t.Note, notDelivered)
+}
+
+// made reports whether the task says what the change makes it say.
+func (b *BoardSync) made(t yesmen.Task) bool { return t.Status == b.Status && t.Note == b.Note }
+
+// unchanged reports whether the task is as it stood when the change was
+// decided.
+func (b *BoardSync) unchanged(t yesmen.Task) bool {
+	if b.From != nil {
+		now := stampOf(t)
+		return now.Status == b.From.Status && now.NoteSum == b.From.NoteSum && now.UpdatedAt.Equal(b.From.UpdatedAt)
+	}
+	return b.fits(t) && !t.UpdatedAt.After(b.At)
+}
+
+// syncBoardLocked makes the change of a run's board task its record still
+// has to make (BoardSync), and then forgets it. A change made already (the
+// app quit before forgetting it) is not made again, and a task changed or
+// removed since is left as it is; both are forgotten too. When the board
+// cannot be written, the change stays recorded and the next tick makes it.
+func (s *Service) syncBoardLocked(y yesmen.Yesman, rec *record) {
+	want := rec.BoardSync
+	if want == nil {
 		return
 	}
-	var fn func(*yesmen.Task) bool
-	switch {
-	case after.State == StateFailed && before.State != StateFailed:
-		note := fmt.Sprintf("%s %s. Send it again from Tasks.", notDelivered, strings.TrimSuffix(strings.TrimPrefix(after.Reason, "Not sent: "), "."))
-		fn = func(t *yesmen.Task) bool {
-			if t.Status != yesmen.TaskTodo {
-				return false
-			}
-			t.Status, t.Note = yesmen.TaskBlocked, note
-			return true
+	_, changed, err := s.cfg.Yesmen.UpdateScheduledTask(y.Name, rec.ID, func(t *yesmen.Task) bool {
+		if want.made(*t) || !want.unchanged(*t) {
+			return false
 		}
-	case before.State == StateFailed && after.State != StateFailed:
-		fn = func(t *yesmen.Task) bool {
-			if t.Status != yesmen.TaskBlocked || !strings.HasPrefix(t.Note, notDelivered) {
-				return false
-			}
-			t.Status, t.Note = yesmen.TaskTodo, ""
-			return true
-		}
-	default:
+		t.Status, t.Note = want.Status, want.Note
+		return true
+	})
+	if err != nil {
+		logf("board task of %s: %v", rec.ID, err)
 		return
 	}
-	if _, changed, err := s.cfg.Yesmen.UpdateScheduledTask(y.Name, after.ID, fn); err != nil {
-		logf("board task of %s: %v", after.ID, err)
-	} else if changed {
+	if changed {
 		s.cfg.BoardChanged(y.Name)
 	}
+	next := *rec
+	next.BoardSync = nil
+	if err := s.writeRunLocked(y, &next); err != nil {
+		logf("%s: forgetting its board change: %v", rec.ID, err)
+		return // the next tick finds it made
+	}
+	*rec = next
+}
+
+// syncBoardsLocked makes the board changes the runs of a workspace still
+// have to make. It reports whether it tried any.
+func (s *Service) syncBoardsLocked(sp *space, y yesmen.Yesman) bool {
+	tried := false
+	for _, id := range sortedIDs(sp.runs) {
+		if rec := sp.runs[id]; rec.BoardSync != nil {
+			s.syncBoardLocked(y, rec)
+			tried = true
+		}
+	}
+	return tried
 }
 
 func (s *Service) changed(name string) { s.cfg.OnChange(name) }
@@ -670,6 +745,10 @@ func (s *Service) tickSpace(listed yesmen.Yesman) time.Time {
 
 	sp.mu.Lock()
 	s.loadLocked(sp, y)
+	if sp.err == nil && s.syncBoardsLocked(sp, y) {
+		board, boardErr = s.cfg.Yesmen.Board(y.Name)
+		tasks = boardTasks(board, boardErr)
+	}
 	changed := s.followBoardLocked(sp, y, tasks, boardErr, now)
 	var launch []string
 	// Runs left on their way by a crash or a quit resume or resolve. Runs
@@ -1944,6 +2023,10 @@ func (s *Service) RunNow(name, id, requestID, from string) (Run, error) {
 			err := sp.prunedErr
 			sp.mu.Unlock()
 			return Run{}, err
+		}
+		if pp := sp.pruned.Plans[p.ID]; pp != nil && pp.Floor > fmt.Sprintf("%012x", now.UnixMilli()) && requestTime(requestID) <= pp.Floor && !slices.Contains(pp.Requests, requestID) {
+			sp.mu.Unlock()
+			return Run{}, fmt.Errorf("%w (%s)", ErrRunNowWaits, requestClock(pp.Floor).Format("2006-01-02 15:04 MST"))
 		}
 		if sp.pruned.used(p.ID, requestID) {
 			sp.mu.Unlock()
