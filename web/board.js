@@ -98,6 +98,8 @@ export function createBoard(host) {
         ? h('ol', { class: 'board-list', 'aria-label': t('Open tasks') }, open.map((task) => row(y, task)))
         : h('p', { class: 'board-empty' }, t('Nothing open.')));
       if (closed.length) {
+        // A finished task being revealed shows: its section opens for it.
+        if (revealing && closed.some((task) => `${y.name}/${task.id}` === revealing)) doneOpen = true;
         const done = h('details', { class: 'board-done', open: doneOpen },
           h('summary', null, icon('chevron', 'mds-icon board-fold'), t('Done {n}', { n: formatNumber(closed.length) })),
           h('ol', { class: 'board-list' }, closed.map((task) => row(y, task))));
@@ -165,10 +167,12 @@ export function createBoard(host) {
     render();
     afterRender();
   }
+  // afterRender brings a task being revealed into view and focus, once it
+  // shows; until the board has it (it may still load), it waits.
   const afterRender = () => {
     if (!revealing) return;
     const el = $(`#board [data-key="${CSS.escape(revealing)}"]`);
-    if (el) {
+    if (el && el.getClientRects().length) {
       el.scrollIntoView({ block: 'nearest' });
       el.focus({ preventScroll: true });
       revealing = null;

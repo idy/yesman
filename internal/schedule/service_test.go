@@ -797,3 +797,93 @@ func TestInvalidPlanInTheFileNeverRuns(t *testing.T) {
 		t.Fatal("turned on with a time zone it cannot use")
 	}
 }
+
+// Pruning keeps the record the schedule goes on from, however many manual
+// runs came after it: the occurrence it recorded never runs again.
+func TestPruningKeepsTheScheduleCursor(t *testing.T) {
+	e := newEnv(t, "", utc("2026-11-16T08:59:00Z"))
+	e.save(PlanInput{Schedule: daily("09:00"), Enabled: true})
+	e.clock.Set(utc("2026-11-16T09:00:01Z"))
+	e.tick()
+	e.waitPrompts(1)
+	scheduled := e.run("s1-20261116t0900")
+	e.setTask(scheduled.Board, yesmen.TaskDone)
+	for i := range keepRuns + 2 {
+		e.clock.Add(time.Second)
+		r, err := e.svc.RunNow(ws, "s1", fmt.Sprintf("%016x", i+1), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.svc.Wait()
+		e.setTask(e.run(r.ID).Board, yesmen.TaskDone) // nothing open holds the schedule back
+	}
+	e.waitPrompts(keepRuns + 3)
+	e.tick() // prunes, still within the 09:00 on-time window
+	e.tick()
+	time.Sleep(50 * time.Millisecond)
+	if n := len(e.scheduledTasks("s1-20261116t0900")); n != 1 {
+		t.Fatalf("the 09:00 run has %d board tasks", n)
+	}
+	if n := len(e.prompts()); n != keepRuns+3 {
+		t.Fatalf("%d prompts, want %d: an occurrence ran again", n, keepRuns+3)
+	}
+	for _, r := range e.plan("s1").Runs {
+		if r.Kind == RunMissed || r.Kind == RunSkipped {
+			t.Fatalf("an occurrence handled already was recorded again: %+v", r)
+		}
+	}
+	if r := e.run("s1-20261116t0900"); r.Kind != RunScheduled || len(r.Attempts) != 1 || r.Attempts[0].ID != scheduled.Attempts[0].ID {
+		t.Fatalf("the 09:00 run changed: %+v", r)
+	}
+	if _, err := os.Stat(filepath.Join(e.root, "yesmen", ws, ".yesman", "schedules", "runs", "s1-20261116t0900.json")); err != nil {
+		t.Fatalf("the cursor's record was pruned: %v", err)
+	}
+}
+
+// A run claimed on time is sent however long it waits for its turn behind
+// slow deliveries; only a run picked up again after a crash can be late.
+func TestAQueuedRunIsNotLate(t *testing.T) {
+	e := newEnv(t, "", utc("2026-11-16T08:59:00Z"))
+	slow := true
+	e.reopen(Config{Concurrency: 1, afterBoard: func(r Run) error {
+		if slow {
+			slow = false
+			e.clock.Add(25 * time.Minute) // the first delivery takes long
+		}
+		return nil
+	}})
+	e.save(PlanInput{Title: "First", Schedule: daily("09:00"), Enabled: true})
+	e.save(PlanInput{Title: "Second", Schedule: daily("09:00"), Enabled: true})
+	e.clock.Set(utc("2026-11-16T09:00:01Z"))
+	e.tick()
+	e.waitPrompts(2)
+	for _, id := range []string{"s1-20261116t0900", "s2-20261116t0900"} {
+		if r := e.run(id); r.Status != StateSent {
+			t.Fatalf("%s = %+v", id, r)
+		}
+	}
+}
+
+// Check again reads a run while updates replace it, without a race.
+func TestCheckWhileTheRunChanges(t *testing.T) {
+	e := newEnv(t, "", utc("2026-11-16T08:59:00Z"))
+	e.save(PlanInput{Schedule: daily("09:00"), Enabled: true})
+	e.clock.Set(utc("2026-11-16T09:00:01Z"))
+	e.tick()
+	e.waitPrompts(1)
+	id := "s1-20261116t0900"
+	y, _ := e.store.Get(ws)
+	sp := e.svc.spaceFor(y)
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Go(func() {
+			if _, err := e.svc.Check(ws, id); err != nil {
+				t.Error(err)
+			}
+		})
+		wg.Go(func() {
+			_, _ = e.svc.update(sp, id, func(r *Run) bool { r.Outcome = &Outcome{Status: "todo", Note: fmt.Sprint(i)}; return true })
+		})
+	}
+	wg.Wait()
+}

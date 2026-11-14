@@ -89,13 +89,18 @@ type space struct {
 	name  string
 	since time.Time // the workspace's HiredAt: a same-name hire is another space
 
-	mu      sync.Mutex
-	loaded  bool
-	err     error // the plans file cannot be read; nothing is written over it
-	stamp   fileStamp
-	plans   plansFile
-	runs    map[string]*record
-	active  map[string]bool   // runs whose pipeline is queued or running
+	mu     sync.Mutex
+	loaded bool
+	err    error // the plans file cannot be read; nothing is written over it
+	stamp  fileStamp
+	plans  plansFile
+	runs   map[string]*record
+	active map[string]bool // runs whose pipeline is queued or running
+	// fresh holds runs this scheduler claimed (or was asked to send again)
+	// and queued at once: waiting their turn does not make them late. A run
+	// picked up again later, after a crash, a quit or a step that failed,
+	// is not fresh.
+	fresh   map[string]bool
 	problem map[string]string // plan ID -> why it could not run last time
 	queue   []string
 	working bool
@@ -276,7 +281,7 @@ func (s *Service) spaceFor(y yesmen.Yesman) *space {
 		sp = nil
 	}
 	if sp == nil {
-		sp = &space{name: y.Name, since: y.HiredAt, active: map[string]bool{}, problem: map[string]string{}}
+		sp = &space{name: y.Name, since: y.HiredAt, active: map[string]bool{}, fresh: map[string]bool{}, problem: map[string]string{}}
 		s.spaces[y.Name] = sp
 	}
 	return sp
@@ -611,15 +616,26 @@ func open(r Run, tasks map[string]yesmen.Task, boardErr error) bool {
 // runs twice.
 func cursor(p Plan, records []*record) time.Time {
 	c := p.ActiveSince
-	for _, r := range records {
-		if r.State == StateDamaged {
-			continue
-		}
-		if l := r.latest(); l.After(c) && (r.Kind == RunScheduled || r.Kind == RunMissed || r.Kind == RunSkipped) {
-			c = l
-		}
+	if r := cursorRecord(records); r != nil && r.latest().After(c) {
+		c = r.latest()
 	}
 	return c
+}
+
+// cursorRecord is the record of a plan's newest recorded occurrence: its
+// newest scheduled, missed or skipped record. Manual runs and catch-ups are
+// not occurrences of its schedule.
+func cursorRecord(records []*record) *record {
+	var newest *record
+	for _, r := range records {
+		if r.State == StateDamaged || r.Kind != RunScheduled && r.Kind != RunMissed && r.Kind != RunSkipped {
+			continue
+		}
+		if newest == nil || r.latest().After(newest.latest()) {
+			newest = r
+		}
+	}
+	return newest
 }
 
 // dueLocked records what is due of a plan: the newest occurrence, if seen
@@ -695,7 +711,7 @@ func (s *Service) dueLocked(sp *space, y yesmen.Yesman, p Plan, tasks map[string
 					if s.cfg.afterClaim != nil && s.cfg.afterClaim(rec.Run) != nil {
 						break
 					}
-					sp.active[rec.ID] = true
+					sp.active[rec.ID], sp.fresh[rec.ID] = true, true
 					launch = append(launch, rec.ID)
 				}
 			}
@@ -791,13 +807,9 @@ func (s *Service) pruneLocked(sp *space, y yesmen.Yesman, tasks map[string]yesme
 		if len(list) <= keepRuns {
 			continue
 		}
-		// The record the cursor rests on stays, whatever its age.
-		var anchor *record
-		for _, r := range list {
-			if r.State != StateDamaged && (anchor == nil || r.latest().After(anchor.latest())) {
-				anchor = r
-			}
-		}
+		// The record the cursor rests on stays, whatever its age: chosen as
+		// cursor chooses it, or the plan's schedule would start over.
+		anchor := cursorRecord(list)
 		for _, r := range prune(list, func(r *record) bool { return open(r.Run, tasks, boardErr) }) {
 			if r == anchor || sp.active[r.ID] {
 				continue
@@ -859,10 +871,15 @@ func (s *Service) current(sp *space, id string) (Run, bool) {
 	return r.Run, true
 }
 
-// late reports whether a run is past the window in which it may still be
-// sent by itself: a run left on its way that long ago is not sent after
-// all, so a closed app or a long sleep never floods the lead.
-func (s *Service) late(r Run) bool {
+// late reports whether a run picked up again is past the window in which it
+// may still be sent by itself: a run left on its way that long ago, by a
+// crash or a quit, is not sent after all, so a closed app or a long sleep
+// never floods the lead. A fresh run, claimed on time and queued since, is
+// never late, however long it waits for its turn.
+func (s *Service) late(r Run, fresh bool) bool {
+	if fresh {
+		return false
+	}
 	window := OnTime
 	if r.Kind == RunScheduled {
 		window = r.Schedule.window()
@@ -874,6 +891,10 @@ func (s *Service) late(r Run) bool {
 // submission ID, then the submission. Every step is recorded before the
 // next, so a crash leaves a state the next start resumes from.
 func (s *Service) pipeline(sp *space, id string) {
+	sp.mu.Lock()
+	fresh := sp.fresh[id]
+	delete(sp.fresh, id)
+	sp.mu.Unlock()
 	for range 6 {
 		if s.isClosed() || sp.retired.Load() {
 			return
@@ -885,11 +906,11 @@ func (s *Service) pipeline(sp *space, id string) {
 		var more bool
 		switch r.State {
 		case StateClaimed:
-			more = s.stepBoard(sp, r)
+			more = s.stepBoard(sp, r, fresh)
 		case StateBoarded:
-			more = s.stepAttempt(sp, r)
+			more = s.stepAttempt(sp, r, fresh)
 		case StateSending:
-			s.stepSend(sp, r)
+			s.stepSend(sp, r, fresh)
 		}
 		s.changed(sp.name)
 		if !more {
@@ -898,14 +919,14 @@ func (s *Service) pipeline(sp *space, id string) {
 	}
 }
 
-func (s *Service) stepBoard(sp *space, r Run) bool {
+func (s *Service) stepBoard(sp *space, r Run, fresh bool) bool {
 	y, release, err := s.lease(sp)
 	if err != nil {
 		return false
 	}
 	defer release()
 	link := yesmen.TaskSchedule{Plan: r.Plan, Run: r.ID}
-	if s.late(r) {
+	if s.late(r, fresh) {
 		// Left claimed by a crash or quit long ago: add no task now. One added
 		// before the crash is still found.
 		board, _ := s.cfg.Yesmen.Board(y.Name)
@@ -963,13 +984,13 @@ func (s *Service) newSubmissionID() string {
 	return fmt.Sprintf("%012x%s", s.cfg.IDNow().UnixMilli(), randomHex(18))
 }
 
-func (s *Service) stepAttempt(sp *space, r Run) bool {
+func (s *Service) stepAttempt(sp *space, r Run, fresh bool) bool {
 	y, release, err := s.lease(sp)
 	if err != nil {
 		return false
 	}
 	defer release()
-	if s.late(r) {
+	if s.late(r, fresh) {
 		_, _ = s.updateLeased(sp, y, r.ID, func(r *Run) bool {
 			r.State, r.Reason = StateFailed, "Not sent: yesman stopped before it could send it"
 			return true
@@ -994,7 +1015,7 @@ func (s *Service) stepAttempt(sp *space, r Run) bool {
 // submitted already. An ID is submitted only when it is proven never to have
 // been registered; anything else is resolved from its receipt or shown as
 // unknown, never sent under a new ID by itself.
-func (s *Service) stepSend(sp *space, r Run) {
+func (s *Service) stepSend(sp *space, r Run, fresh bool) {
 	a := r.attempt()
 	if a == nil {
 		_, _ = s.update(sp, r.ID, func(r *Run) bool { r.State = StateBoarded; return true })
@@ -1018,7 +1039,7 @@ func (s *Service) stepSend(sp *space, r Run) {
 		s.resolve(sp, r.ID, a.ID, nil, "Its delivery record is no longer kept, so yesman cannot confirm it reached the lead; it was not sent again")
 		return
 	}
-	if s.late(r) {
+	if s.late(r, fresh) {
 		_, _ = s.update(sp, r.ID, func(r *Run) bool {
 			if at := r.attempt(); at != nil && at.ID == a.ID {
 				at.Definite, at.Error = true, "never sent"
@@ -1521,7 +1542,7 @@ func (s *Service) RunNow(name, id, requestID, from string) (Run, error) {
 	if missed != nil {
 		_, _ = s.updateLocked(sp, y, missed.ID, func(m *Run) bool { m.CaughtUp = rec.ID; return true })
 	}
-	sp.active[rec.ID] = true
+	sp.active[rec.ID], sp.fresh[rec.ID] = true, true
 	run := rec.Run
 	sp.mu.Unlock()
 	release()
@@ -1570,7 +1591,7 @@ func (s *Service) Retry(name, runID string) (Run, error) {
 		sp.mu.Unlock()
 		return Run{}, err
 	}
-	sp.active[runID] = true
+	sp.active[runID], sp.fresh[runID] = true, true
 	sp.mu.Unlock()
 	release()
 	s.enqueue(sp, runID)
@@ -1591,11 +1612,15 @@ func (s *Service) Check(name, runID string) (Run, error) {
 	sp.mu.Lock()
 	s.loadLocked(sp, y)
 	rec, active := sp.runs[runID], sp.active[runID]
+	var r Run
+	if rec != nil {
+		// A copy, taken under the lock: updates replace the record whole.
+		r = rec.Run
+	}
 	sp.mu.Unlock()
 	if rec == nil {
 		return Run{}, fmt.Errorf("no run %s", runID)
 	}
-	r := rec.Run
 	a := r.attempt()
 	if a == nil || r.inFlight() || active {
 		return r, nil

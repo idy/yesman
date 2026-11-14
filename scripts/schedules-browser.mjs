@@ -223,6 +223,12 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
     // The board's status is the outcome.
     await fx.post('/fixture/board', { yesman: 'alice', id: 't1', status: 'done', note: 'All green' });
     await pane.locator('.sched-run').first().locator('.sched-chip').getByText(T('Done', '已完成')).waitFor();
+    // Its finished task opens in the board, out of the folded Done section.
+    await pane.locator('.sched-run').first().getByRole('button', { name: 't1' }).click();
+    await board.locator('.board-done[open] [data-key$="/t1"][aria-expanded="true"]').waitFor();
+    assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'alice/t1');
+    await board.getByRole('button', { name: T('Scheduled', '定时') }).click();
+    await pane.locator('.sched-plan').first().locator('.sched-details').waitFor();
     step('board done is the outcome');
 
     // Asleep for three days: one missed entry, caught up once.
