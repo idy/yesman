@@ -32,6 +32,7 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
  case 'Update':return {enabled:false};
  case 'TakeFocus':return '';
  case 'Crew':return {members:[],models:[],date:'2026-11-14',top:100};
+ case 'Shortcuts':return {}; // no keys changed from their defaults, as Go says
  case 'Grants':{
   const value=structuredClone(fixture);
   if(holdRead)await new Promise(resolve=>window.resolveRead=resolve);
@@ -183,8 +184,8 @@ try {
     assert(geometry.rows.every(r=>r.scroll<=r.width+1));
     assert.equal(await page.locator('.grant-toolbar h2').innerText(),lang==='en'?'Grant':'授权');
     await page.screenshot({path:out+'/'+[name,lang,theme,width].join('-')+'.png'});
-    const navigation=await page.locator('#settings-nav').evaluate(el=>({items:el.children.length,height:el.getBoundingClientRect().height,scroll:el.scrollHeight,branch:el.closest('.settings-branch').outerHTML}));
-    assert.equal(navigation.items,10);
+    const navigation=await page.locator('#settings-nav').evaluate(el=>({items:el.children.length,pages:[...el.children].map(c=>c.dataset.page),height:el.getBoundingClientRect().height,scroll:el.scrollHeight,branch:el.closest('.settings-branch').outerHTML}));
+    assert.deepEqual(navigation.pages,['general','shortcuts','grant','yesman','repositories','secrets','variables','storage','pi','config','about']);
     assert(navigation.height>250,JSON.stringify({name,lang,theme,width,navigation}));
     results.push({engine:name,lang,theme,width,geometry,navigation});
    }

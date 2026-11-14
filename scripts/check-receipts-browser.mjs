@@ -10,11 +10,11 @@
 // folded line that opens to all of them while every message, image and reply
 // stays as it was, and that what is sent now reads as the person's message
 // with its state: sending, accepted, refused, uncertain and retried, two with
-// the same text, images, a native message tied late, another agent, repeated
-// records and snapshots, reloading, Chinese, dark and narrow windows, and the
-// local icon font with outside requests blocked. Set YESMAN_RECEIPTS_WEB to
-// another page's web directory (such as an earlier release's) to check it
-// instead. A browser bridge is not the native window, pi or a real provider.
+// the same text, images, a native message tied late, another agent, the
+// command palette, keys and Settings pages, repeated records and snapshots,
+// reloading, Chinese, dark and narrow windows, and the local icon font with
+// outside requests blocked. Set YESMAN_RECEIPTS_WEB to another page's web
+// directory (such as an earlier release's) to check it instead. A browser bridge is not the native window, pi or a real provider.
 const { chromium, webkit } = await import(process.env.YESMAN_TEST_PLAYWRIGHT_MODULE || "playwright");
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -132,6 +132,8 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
     };
     window.mygo = {
       locale: "en",
+      // macOS, so ⌘ is the shortcuts' modifier whatever system runs the check.
+      platform: "darwin",
       on: (n, f) => (window.events[n] = f),
       call: async (method, ...args) => {
         switch (method.replace("Yesman.", "")) {
@@ -153,6 +155,9 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
             return new Promise((resolve, reject) => (pending[id] = { resolve, reject }));
           }
           case "TakeFocus": return "";
+          case "Shortcuts": return {};
+          case "Grants": return { platform: "darwin", items: [] };
+          case "ModelUsage": throw new Error("no usage in this check");
           default: return {};
         }
       },
@@ -314,6 +319,34 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await frame(page);
     assert.equal((await seen(page)).ownReceipts, 0);
 
+    // One still to come when the next is sent, which pi then stops before
+    // taking, folds as it finishes: nothing keeps it as it was sent.
+    let count = await page.evaluate(() => window.sent.length);
+    await input.fill("first while working");
+    await page.locator("input[type=file]").setInputFiles([{ name: "d.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") }]);
+    await page.waitForFunction(() => document.querySelectorAll(".composer-image").length === 1);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    const early = await sentID();
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), early);
+    await settled();
+    await input.fill("second while working");
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 2, count);
+    const later = await sentID();
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), later);
+    await settled();
+    assert.equal(await row(early).locator(".msg-user img").count(), 1);
+    assert.match(await row(early).innerText(), /^first while working\s*Accepted for steering/);
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed"), early);
+    await frame(page);
+    assert.equal(await row(early).count(), 0, "a submission a later one followed kept its own row once it finished");
+    assert.match(await folded.locator(`[data-delivery="${early}"]`).innerText(), /^Submission: first while working · 1 image submitted\s*Delivery unconfirmed$/);
+    assert.match(await row(later).innerText(), /^second while working\s*Accepted for steering/);
+    await page.evaluate((id) => window.fixture.native("alice/lead", id, "second while working"), later);
+    await frame(page);
+    assert.equal((await seen(page)).ownReceipts, 0);
+
     // The bridge fails before the server hears of it: uncertain, kept as sent;
     // retrying the unchanged draft is the same submission and the same row.
     await page.evaluate(() => (window.fixture.bridgeDown = true));
@@ -324,8 +357,9 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await row(lost).locator(".msg-user").innerText(), "did this arrive?");
     assert.equal(await row(lost).locator(".delivery-status").innerText(), "Delivery unconfirmed");
     assert.equal(await input.inputValue(), "did this arrive?");
+    count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
-    await page.waitForFunction(() => window.sent.length === 5);
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
     assert.equal(await sentID(), lost);
     await row(lost).locator(".delivery-status", { hasText: "Sending" }).waitFor();
     assert.equal(await page.locator("#thread > .msg-delivery", { hasText: "did this arrive?" }).count(), 1);
@@ -339,8 +373,9 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     // Editing is a new intent. The current uncertain failure remains visible
     // even after the payload display cache lets go of it.
     await input.fill("did this arrive? (edited)");
+    count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
-    await page.waitForFunction(() => window.sent.length === 6);
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
     const edited = await sentID();
     assert.notEqual(edited, lost);
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), edited);
@@ -356,7 +391,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await settled();
     const unheard = await sentID();
     assert.match(await row(unheard).innerText(), /^never heard of\s*Delivery unconfirmed$/);
-    let count = await page.evaluate(() => window.sent.length);
+    count = await page.evaluate(() => window.sent.length);
     await input.fill("never heard of (edited)");
     await input.press("Enter");
     await page.waitForFunction((n) => window.sent.length === n + 1, count);
@@ -394,11 +429,12 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await settled();
     assert.equal(await row(alone).locator(".delivery-status").innerText(), "Accepted for follow-up · delivery unconfirmed");
     assert.equal(await row(refused).count(), 1, "a later submission hid the current refusal");
-    assert.equal((await seen(page)).foldedSummary, "27 earlier submissions | 26 delivery unconfirmed · 1 handled by an extension");
+    assert.equal((await seen(page)).foldedSummary, "28 earlier submissions | 27 delivery unconfirmed · 1 handled by an extension");
     // The uncertain answer from the server, the latest now, is in view.
     await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed", { error: "pi stopped before answering" }), alone);
     await frame(page);
     assert.match(await row(alone).innerText(), /Delivery unconfirmed/);
+    assert.equal(await row(alone).locator(".msg-user img").count(), 1, "the latest let go of what it was sent as");
     const live = await seen(page);
     results[`${engine}-live`] = { ...live, people: live.people.length };
 
@@ -413,6 +449,42 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await input.inputValue(), "");
     assert.deepEqual(await seen(page), live);
 
+    // Keys, the command palette and Settings around it: the folded line stays
+    // open and keeps focus, and the conversation is as it was.
+    const summary = folded.locator(":scope > summary");
+    const focused = (locator) => locator.evaluate((el) => document.activeElement === el);
+    await summary.focus();
+    await page.keyboard.press("Meta+KeyK");
+    await page.locator("dialog.palette-dialog[open]").waitFor();
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector("dialog.palette-dialog[open]"));
+    await frame(page);
+    assert.equal(await focused(summary), true, "the palette gave focus back elsewhere");
+    assert.equal(await folded.evaluate((el) => el.open), true);
+    await page.keyboard.press("Meta+KeyL");
+    assert.equal(await focused(input), true);
+    assert.equal(await folded.evaluate((el) => el.open), true);
+    // Settings › Grant and Settings › Model usage, then back by the sidebar.
+    await page.keyboard.press("Meta+Comma");
+    await page.locator('#settings-nav [data-page="grant"]').click();
+    await page.locator(".grant-page").waitFor();
+    await page.locator('#settings-nav [data-page="usage"]').click();
+    await page.locator('#settings-nav [data-page="usage"][aria-current="page"]').waitFor();
+    await page.waitForTimeout(50);
+    await page.locator('[data-agent="alice/lead"]').first().click();
+    await folded.waitFor();
+    assert.equal(await folded.evaluate((el) => el.open), true);
+    assert.deepEqual(await seen(page), live);
+    // The next conversation and back by keys.
+    await summary.focus();
+    await page.keyboard.press("Meta+Alt+ArrowDown");
+    await page.locator("#thread .thread-empty").waitFor();
+    await page.keyboard.press("Meta+Alt+ArrowUp");
+    await folded.waitFor();
+    assert.equal(await folded.evaluate((el) => el.open), true);
+    assert.deepEqual(await seen(page), live);
+    assert.equal(await folded.locator(".receipts-body > [data-delivery]").count(), 28);
+
     // History reads the same, without what only this window had: the folded
     // line closed again, the latest uncertain one in view from its preview.
     await page.reload();
@@ -423,7 +495,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.deepEqual(reloaded.people, live.people);
     assert.equal(reloaded.replies, live.replies);
     // The one the server never heard of was only ever this window's.
-    assert.equal(reloaded.foldedSummary, "28 earlier submissions | 26 delivery unconfirmed · 1 handled by an extension · 1 not sent");
+    assert.equal(reloaded.foldedSummary, "29 earlier submissions | 27 delivery unconfirmed · 1 handled by an extension · 1 not sent");
     assert.equal(await folded.evaluate((el) => el.open), false);
     assert.equal(await row(alone).locator(".delivery-image-count").innerText(), "1 image submitted");
     assert.equal(await row(alone).locator("img").count(), 0, "an image was made up from a receipt");
@@ -436,7 +508,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     // Chinese.
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
     await page.waitForTimeout(50);
-    assert.equal((await seen(page)).foldedSummary, "较早的提交记录 · 28 条 | 26 条交付状态尚未确认 · 1 条已由扩展处理 · 1 条未发送");
+    assert.equal((await seen(page)).foldedSummary, "较早的提交记录 · 29 条 | 27 条交付状态尚未确认 · 1 条已由扩展处理 · 1 条未发送");
     assert.deepEqual(errors, []);
     assert.deepEqual(outside, []);
     await context.close();
@@ -456,7 +528,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await shot(dark.page, "dark-narrow", engine);
     assert.deepEqual(dark.errors, []);
     await dark.context.close();
-    console.log(engine, "earlier receipts folded/messages and replies whole/opened in order/repeats/sent as sent/states/same text/late native/retry/edit/refusal/images/agents/reload/i18n/dark/narrow/local icons PASS");
+    console.log(engine, "earlier receipts folded/messages and replies whole/opened in order/repeats/sent as sent/states/same text/late native/retry/edit/refusal/images/agents/palette/keys/Settings/reload/i18n/dark/narrow/local icons PASS");
   } finally {
     await browser.close();
   }

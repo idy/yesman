@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -32,6 +33,66 @@ type Settings struct {
 	// Crew matches pi's models to Artificial Analysis's, and chooses the
 	// crew and what new agents start as.
 	Crew crew.Config `json:"crew,omitzero"`
+	// Shortcuts are the keys chosen in Settings › Shortcuts instead of an
+	// action's defaults (shortcuts.go).
+	Shortcuts Shortcuts `json:"shortcuts,omitempty"`
+
+	// extra keeps the keys of settings.json this yesman does not know, as
+	// a newer one wrote them, so saving a setting does not lose them.
+	extra map[string]json.RawMessage
+}
+
+// settingsKeys are the keys of settings.json this yesman knows.
+var settingsKeys = func() map[string]bool {
+	keys := map[string]bool{}
+	t := reflect.TypeFor[Settings]()
+	for i := range t.NumField() {
+		if name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); name != "" && name != "-" {
+			keys[name] = true
+		}
+	}
+	return keys
+}()
+
+func (s *Settings) UnmarshalJSON(data []byte) error {
+	type plain Settings
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return err
+	}
+	p.extra = nil
+	for key, value := range all {
+		if !settingsKeys[key] {
+			if p.extra == nil {
+				p.extra = map[string]json.RawMessage{}
+			}
+			p.extra[key] = value
+		}
+	}
+	*s = Settings(p)
+	return nil
+}
+
+func (s Settings) MarshalJSON() ([]byte, error) {
+	type plain Settings
+	data, err := json.Marshal(plain(s))
+	if err != nil || len(s.extra) == 0 {
+		return data, err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, err
+	}
+	for key, value := range s.extra {
+		if !settingsKeys[key] {
+			all[key] = value
+		}
+	}
+	return json.Marshal(all)
 }
 
 // autoFetchChoices are the intervals the Repositories page offers, in

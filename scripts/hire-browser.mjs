@@ -90,6 +90,7 @@ try {
               case 'Crew': return { members: [{ key: 'magpie/auto/claude-opus-5-5:xhigh', modelName: 'Claude Opus 5.5', model: 'auto/claude-opus-5-5', effort: 'xhigh' }], yesman: 'magpie/auto/claude-opus-5-5:xhigh', models: [] };
               case 'Info': return { knowledge: [], worktrees: [] };
               case 'Board': return { tasks: [] };
+              case 'Shortcuts': return {}; // no keys changed from their defaults, as Go says
               case 'WatchFiles': return;
               default: throw Error('Unmocked method ' + m);
             }
@@ -114,6 +115,7 @@ try {
       assert.equal(await welcome.evaluate((e) => e.checkValidity()), true);
       await firstInput.press('Enter');
       await lead('gizmoth').waitFor();
+      assert.equal(await hireCount(), 1);
       assert.equal(await lead('gizmoth').locator('.name').innerText(), 'GizMoth');
       assert.equal(await page.locator('#crumbs').innerText(), 'GizMoth');
       assert.equal(await page.locator('.composer textarea').getAttribute('placeholder'), 'Message GizMoth…');
@@ -140,6 +142,23 @@ try {
       await lead('checkout-v2').waitFor();
       assert.equal(await lead('checkout-v2').locator('.name').innerText(), 'checkout-v2');
       assert.deepEqual(await page.evaluate(() => calls.filter((c) => c[0] === 'Hire')), []);
+      // The keyboard shortcut opens the same form once; while it is open the
+      // dialog keeps the keys (no palette, no second form), and Enter hires once.
+      const MOD = await page.evaluate(() => (/mac/i.test(navigator.platform) ? 'Meta' : 'Control'));
+      const keyed = await hireCount();
+      await page.locator('.composer textarea').click();
+      await page.keyboard.press(`${MOD}+KeyN`);
+      await input.waitFor();
+      assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('#hire-form input')), true);
+      await page.keyboard.press(`${MOD}+KeyK`);
+      await page.keyboard.press(`${MOD}+KeyN`);
+      assert.equal(await page.locator('dialog.palette-dialog[open]').count(), 0);
+      assert.equal(await page.locator('dialog[open]').count(), 1);
+      await input.fill('KeyHire'); await input.press('Enter');
+      await lead('keyhire').waitFor();
+      await page.waitForTimeout(150); // a second creation would have been sent by now
+      assert.equal(await hireCount(), keyed + 1);
+      assert.equal(await lead('keyhire').locator('.name').innerText(), 'KeyHire');
       // Required/trim/control validation, cancellation and Escape do not write.
       const before = await hireCount();
       await open();
