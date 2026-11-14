@@ -1,5 +1,5 @@
 // A roomy model chooser using Magpie's select surfaces and keyboard pattern.
-import { h } from './dom.js';
+import { h, icon } from './dom.js';
 import { t, formatNumber } from './i18n.js';
 
 let serial = 0;
@@ -10,10 +10,10 @@ export function createModelPicker({ models, provider, model, disabled, onSelect 
   const selected = models.findIndex((m) => m.id === model && m.provider === provider);
   const choice = models[selected];
   const trigger = h('button', {
-    class: 'mds-select mds-select--text mds-select-trigger composer-model', type: 'button', role: 'combobox',
+    class: 'mds-select mds-select--text mds-select-trigger mds-select--font-caret composer-model', type: 'button', role: 'combobox',
     'aria-label': t('Model'), 'aria-haspopup': 'listbox', 'aria-expanded': 'false', 'aria-controls': id,
     disabled: disabled || !models.length, title: `${provider}/${model}`,
-  }, choice?.name || model || t('No models available'));
+  }, choice?.name || model || t('No models available'), icon('caret-down', 'mds-icon mds-select-caret'));
   const menu = h('div', { class: 'mds-select-menu model-menu', id, role: 'listbox', 'aria-label': t('Model'), hidden: true });
   const topLayer = typeof menu.showPopover === 'function';
   if (topLayer) menu.setAttribute('popover', 'manual');

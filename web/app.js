@@ -332,7 +332,7 @@ function renderWorking() {
   thread.querySelector('.working-live')?.remove();
   const a = selectedAgent();
   if (a?.status === 'working') {
-    thread.append(h('div', { class: 'working working-live', 'data-status': 'working' }, h('i', { class: 'mds-dot' }), h('span', { class: 'working-label' }, workingLabel(a))));
+    thread.append(h('div', { class: 'working working-live', 'data-status': 'working' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', { class: 'working-label' }, workingLabel(a))));
   }
 }
 
@@ -516,7 +516,7 @@ function scheduleLive(c, index) {
 // ---------- Sidebar ----------
 
 function statusDot(status) {
-  return h('span', { class: 'dot-wrap', 'data-status': status }, h('i', { class: 'mds-dot' }));
+  return h('span', { class: 'dot-wrap', 'data-status': status }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }));
 }
 
 // How long a run has gone on: 8s, 4m, 1h 5m.
@@ -935,8 +935,10 @@ function renderDock({ focusComposer = false } = {}) {
   });
   dock.append(form);
   composerSelects.push(...[...form.querySelectorAll('select')].map((el) => {
+    el.classList.add('mds-select--font-caret');
     const select = initSelect(el);
     select.trigger.title = el.title;
+    select.trigger.parentElement.append(icon('caret-down', 'mds-icon mds-select-caret'));
     return select;
   }));
   sync();

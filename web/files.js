@@ -557,7 +557,7 @@ export function createFiles(host) {
     const diff = isChanges(p);
     const title = diff ? t('Changes') : p.scope.kind === 'knowledge' ? t('Knowledge') : t('Files');
     const tabs = (diff ? [] : p.tabs).map((tab) => h('div', { class: 'files-tab', role: 'tab', 'aria-selected': String(tab.path === p.active), 'data-pinned': tab.pinned ? 'true' : null, 'data-dirty': tab.dirty ? 'true' : null, title: tab.dirty ? t('{path} (not saved)', { path: tab.path }) : tab.path },
-      h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = tab.path; if (!p.views.has(tab.path)) loadView(p, tab.path); render(); }, ondblclick: () => { tab.pinned = true; render(); } }, baseOf(tab.path)),
+      h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = tab.path; if (!p.views.has(tab.path)) loadView(p, tab.path); render(); }, ondblclick: () => { tab.pinned = true; render(); } }, baseOf(tab.path), tab.dirty ? icon('record', 'mds-icon files-dirty-mark') : null),
       iconButton('x', t('Close {file}', { file: baseOf(tab.path) }), () => closeTab(p, tab.path))));
     return h('div', { class: 'files-head drag' },
       tabs.length ? h('div', { class: 'files-tabs', role: 'tablist', 'aria-label': t('Open files') }, tabs) : h('strong', { class: 'files-title' }, title),
