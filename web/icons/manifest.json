@@ -258,14 +258,6 @@
     "archive": {
       "name": "archive",
       "codepoint": "e00c"
-    },
-    "history": {
-      "name": "clock-counter-clockwise",
-      "codepoint": "e1a0"
-    },
-    "calendar": {
-      "name": "calendar",
-      "codepoint": "e108"
     }
   },
   "fonts": {
