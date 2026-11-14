@@ -121,7 +121,7 @@ sops:
 '''
 ```
 
-In Settings › Storage, **Change…** lets you enter or browse to a data folder, then **Use folder and restart** opens it after restarting. Existing folders with data are accepted; a new folder starts fresh. To keep existing data elsewhere, quit yesman, copy the folder yourself, then reopen yesman and select the copy. Data transfers and any Git worktree path repairs are manual. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice. Storage also has a compact list of the repo pool, workspace parent, archive, secrets, variables, runtime files, settings file and storage configuration, with a Reveal action for each and the full path on hover.
+In Settings › Storage, **Change…** lets you enter or browse to a data folder, then **Use folder and restart** opens it after restarting. Existing folders with data are accepted; a new folder starts fresh. To keep existing data elsewhere, quit yesman, copy the folder yourself, then reopen yesman and select the copy. Data transfers and any Git worktree path repairs are manual. The chosen location is kept in `yesman/storage.json` under the operating system's user configuration directory (Application Support on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows). A launch with `YESMAN_HOME` overrides that choice. Below it, Usage measures the data folder in the background: its total size and file count, a bar of the repo pool, workspaces, archive, runtime files and the rest, each with its share, and the space left on its disk. A measure is reused for a minute unless you measure again; symbolic links are not followed. Storage also has a compact list of the repo pool, workspace parent, archive, secrets, variables, runtime files, settings file and storage configuration, with a Reveal action for each and the full path on hover.
 
 Release builds update themselves through MyGo's updater: they check GitHub releases of `idy/yesman` at launch and every 6 hours, and download and install a newer version in the background. The titlebar then offers to restart into it, and the next launch runs it anyway. Only release builds, made with `mygo build` and signed, do that; development builds (`go run`, `go build`) never check.
 
@@ -189,7 +189,7 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | Path | Contents |
 | --- | --- |
 | `main.go`, `app.go`, `service.go` | App startup, tray, window and notifications; the methods the page calls |
-| `settings.go`, `storage.go`, `internal/home/` | Settings and About, the remembered data location and directory layout |
+| `settings.go`, `storage.go`, `disk_*.go`, `internal/home/` | Settings and About, the remembered data location, its usage and disk space, and directory layout |
 | `pipackages.go`, `internal/pipkg`, `web/pi.js` | Settings › pi: pi's packages, installed, updated and removed through pi, and found in the npm registry |
 | `config.go` | The configuration file: export, and import by merging or replacing |
 | `secrets.go`, `internal/secrets`, `web/env.js` | Settings › Secrets and Variables: the sops and age format, the vault, the variables file, and their pages |

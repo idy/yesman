@@ -13,6 +13,7 @@ import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
 import { createEnvPage } from './env.js';
+import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, formatNumber, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
@@ -54,6 +55,7 @@ const state = {
   settingsPage: 'general',
   settings: null, // Yesman.Settings, for the General page
   storageDraft: null, // destination and inline feedback while changing folders
+  storageUsage: { u: null, busy: false, error: '' }, // Yesman.StorageUsage, measured in the background
   about: null, // Yesman.About
   config: { busy: false, exported: null, imported: null }, // the last export and import, for Import and export
   repoQuery: '',
@@ -1038,6 +1040,7 @@ function showSettings(page) {
 
 // Pages render what they last had at once and refresh it from the app.
 async function loadSettingsPage(page) {
+  if (page === 'storage') loadStorageUsage();
   try {
     if (page === 'general' || page === 'storage') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
@@ -1147,6 +1150,7 @@ function renderStorage(inner) {
   if (!v) return;
   inner.append(
     settingsSection(t('Data folder'), t('Choose where yesman keeps its data.'), ...storageRows(v)),
+    storageUsageSection(),
     settingsSection(t('Locations'), t('What yesman keeps, and where. Hover over a row for its full path.'),
       ...[
         ['Repositories', 'The shared pool of bare Git repositories.', v.pool],
@@ -1159,6 +1163,74 @@ function renderStorage(inner) {
         ['Storage configuration', 'Remembers the data folder across launches.', v.storageConfig],
       ].filter(([, , path]) => path).map(([label, hint, path]) => storagePathRow(t(label), t(hint), path))),
   );
+}
+
+// The locations Usage measures, in the order Locations lists them.
+const STORAGE_PARTS = { repos: 'Repositories', yesmen: 'Workspaces', archive: 'Archive', runtime: 'Runtime', other: 'Other files' };
+
+// loadStorageUsage measures the yesman folder, which can take a while, and
+// draws the card again in place: a folder being typed keeps its focus.
+async function loadStorageUsage(refresh = false) {
+  const s = state.storageUsage;
+  if (s.busy) return;
+  s.busy = true;
+  redrawStorageUsage();
+  try {
+    s.u = await call('StorageUsage', refresh);
+    s.error = '';
+  } catch (err) {
+    s.error = errorText(err);
+  } finally {
+    s.busy = false;
+    redrawStorageUsage();
+  }
+}
+
+function redrawStorageUsage() {
+  if (state.view.kind === 'settings' && state.view.page === 'storage') $('#storage-usage')?.replaceWith(storageUsageSection());
+}
+
+// The yesman folder's size, a bar of its locations, then each, and what
+// is left on the disk.
+function storageUsageSection() {
+  const { u, busy, error } = state.storageUsage;
+  const refresh = h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Measure again'), 'aria-label': t('Measure again'), disabled: busy, 'aria-busy': busy ? 'true' : null, onclick: () => loadStorageUsage(true) },
+    busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload'));
+  let body;
+  if (!u) {
+    body = [h('div', { class: 'storage-usage-head' },
+      error ? h('p', { class: 'danger', role: 'alert' }, error) : h('p', { class: 'storage-usage-meta' }, t('Measuring…')),
+      h('div', { class: 'storage-usage-when' }, refresh))];
+  } else {
+    const whole = u.bytes || 1;
+    const parts = u.parts.map((p) => ({ ...p, label: t(STORAGE_PARTS[p.kind] ?? p.kind) }));
+    const share = (p) => {
+      const pct = (p.bytes / whole) * 100;
+      return p.bytes > 0 && pct < 1 ? '<1%' : `${Math.round(pct)}%`;
+    };
+    const files = tn(u.files, '{n} file', '{n} files');
+    const meta = [u.partial ? t('At least, in {files}', { files }) : files];
+    if (u.disk) meta.push(t('{free} free of {total} on this disk', { free: formatSize(u.disk.free), total: formatSize(u.disk.total) }));
+    body = [
+      h('div', { class: 'storage-usage-head' },
+        h('div', null,
+          h('p', { class: 'storage-usage-total' }, formatSize(u.bytes)),
+          h('p', { class: 'storage-usage-meta' }, meta.join(' · '))),
+        h('div', { class: 'storage-usage-when' }, h('span', null, ago(u.measuredAt, 'measured')), refresh)),
+      error ? h('p', { class: 'danger', role: 'alert' }, error) : null,
+      h('div', { class: 'storage-meter', role: 'img', 'aria-label': t('{size} in all', { size: formatSize(u.bytes) }) },
+        parts.filter((p) => p.bytes > 0).map((p) => h('span', { 'data-tone': p.kind, style: `flex-grow: ${p.bytes / whole}`, title: `${p.label}: ${formatSize(p.bytes)}` }))),
+      h('ul', { class: 'storage-legend', role: 'list' }, parts.map((p) => h('li', { title: `${p.label}\n${tn(p.files, '{n} file', '{n} files')}` },
+        h('i', { class: 'storage-swatch', 'data-tone': p.kind, 'aria-hidden': 'true' }),
+        h('span', { class: 'storage-legend-label' }, p.label),
+        h('span', { class: 'storage-legend-size' }, formatSize(p.bytes)),
+        h('span', { class: 'storage-legend-share' }, share(p))))),
+    ];
+  }
+  const section = settingsSection(t('Usage'), t('The disk yesman’s data takes, by location.'),
+    h('div', { class: 'storage-usage', 'aria-busy': String(busy) }, body));
+  section.id = 'storage-usage';
+  return section;
 }
 
 function storagePathRow(label, hint, path) {
@@ -1477,6 +1549,7 @@ const AGO = {
   fetched: ['never fetched', 'fetched just now', 'fetched {n} min ago', 'fetched {n} h ago', 'fetched {n} d ago'],
   checked: ['never checked', 'checked just now', 'checked {n} min ago', 'checked {n} h ago', 'checked {n} d ago'],
   published: ['never published', 'published just now', 'published {n} min ago', 'published {n} h ago', 'published {n} d ago'],
+  measured: ['never measured', 'measured just now', 'measured {n} min ago', 'measured {n} h ago', 'measured {n} d ago'],
 };
 
 function ago(iso, what = 'fetched') {
