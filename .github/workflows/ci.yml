@@ -47,6 +47,7 @@ jobs:
           runtime=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).root)' "$RUNNER_TEMP/yesman-runtime.json")
           echo "YESMAN_TEST_RUNTIME=$runtime" >> "$GITHUB_ENV"
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-queue-runtime.mjs
+          YESMAN_TEST_RUNTIME="$runtime" node scripts/check-queue-preparation.mjs
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-queue-sdk.mjs
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-promote-checkpoints.mjs
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-input-identity.mjs

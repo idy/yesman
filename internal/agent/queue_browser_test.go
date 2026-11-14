@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,7 +23,9 @@ func TestQueueActionsBrowserBridge(t *testing.T) {
 	}
 	var mu sync.Mutex
 	events := []Event{}
-	f := newPromotionFixtureWithEvents(t, func(e Event) { mu.Lock(); events = append(events, e); mu.Unlock() })
+	gate := newPreparationGate()
+	f := newPromotionFixtureWithContext(t, func(e Event) { mu.Lock(); events = append(events, e); mu.Unlock() }, gate.serve)
+	t.Cleanup(gate.open)
 	var promotes int
 	done := make(chan struct{})
 	var once sync.Once
@@ -112,6 +115,25 @@ func TestQueueActionsBrowserBridge(t *testing.T) {
 			mu.Lock()
 			value = map[string]int{"promote": promotes}
 			mu.Unlock()
+		case "HoldContext":
+			gate.armed.Store(true)
+		case "ContextReady":
+			select {
+			case <-gate.entered:
+				value = true
+			default:
+				value = false
+			}
+		case "ReleaseContext":
+			gate.open()
+		case "Abort":
+			err = f.m.Abort(r.Context(), text(0))
+		case "HoldProvider":
+			_ = os.Remove(f.gate)
+			_ = os.Remove(filepath.Join(filepath.Dir(f.gate), "audit"))
+		case "ProviderReady":
+			_, statErr := os.Stat(filepath.Join(filepath.Dir(f.gate), "audit"))
+			value = statErr == nil
 		case "ReleaseProvider":
 			err = os.WriteFile(f.gate, []byte("release"), 0600)
 		case "Repos", "Clones":

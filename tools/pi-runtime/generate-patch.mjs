@@ -191,5 +191,5 @@ await patch('@earendil-works/pi-coding-agent/package.json', (change) => {
 });
 await identityPatch(patch, core, app);
 await idlePatch(patch, core, app);
-await writeFile(dest, JSON.stringify({ upstream: '1.5.2', revision: 3, patches }, null, 2)+'\n');
+await writeFile(dest, JSON.stringify({ upstream: '1.5.2', revision: 4, patches }, null, 2)+'\n');
 console.log(`${patches.length} source files recorded in ${dest}`);

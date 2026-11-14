@@ -51,7 +51,7 @@ const image={type:'image',mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAABA
 const id=n=>Date.now().toString(16).padStart(12,'0')+n.toString(16).padStart(36,'0');
 const results=[];
 try {
- const initial=await call({type:'get_state'});assert.equal(initial.pendingQueue.capability,3);assert.equal(initial.runtime,'yesman-pi/1.5.2-3');
+ const initial=await call({type:'get_state'});assert.equal(initial.pendingQueue.capability,3);assert.equal(initial.runtime,'yesman-pi/1.5.2-4');
  for(const mode of ['one-at-a-time','all']){
   await rm(`${temp}/gate`,{force:true});
   await call({type:'set_steering_mode',mode});await call({type:'set_follow_up_mode',mode});

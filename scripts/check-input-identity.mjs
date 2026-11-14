@@ -73,19 +73,25 @@ try{
  history=await call({type:'get_messages'});
  assert(history.recordedInputs.some(r=>r.identity?.submissionId===ids[0]),'compaction discarded intake evidence');
  assert(history.inputRefs.length===history.messages.length);
- // Once claimed, preparation belongs to one Session. Stop during its hook must
- // prevent a model request; competing input waits in that same native queue.
+ // Preparation belongs to one Session, but native intake is not committed.
+ // Stop during its hook preserves both the promoted original and other input.
  await call({type:'follow_up',message:'pause-prepare',submissionId:ids[4]});
  q=await call({type:'get_pending_queue'});const start=records.length;
  const admission=await promote(q,q.items[0]);assert.equal(admission.outcome,'promoted');
- await until(()=>records.slice(start).some(e=>e.type==='queue_update'&&e.pending.changes.some(c=>c.state==='taken')));
  await until(()=>existsSync(`${temp}/ready`));
+ assert.equal(records.slice(start).filter(e=>e.type==='queue_update'&&e.pending.changes.some(c=>c.state==='taken')).length,0,'preparation prematurely took input');
  await call({type:'prompt',message:'other pending',streamingBehavior:'followUp',submissionId:ids[5]});
  const stopped=call({type:'abort'});
  await until(()=>records.slice(start).some(e=>e.type==='queue_update'&&e.pending.controlGeneration>q.controlGeneration));
  await writeFile(`${temp}/release`,'release');await stopped;
  assert.equal(records.slice(start).filter(e=>e.type==='agent_start').length,0,'Stop during queued preparation still ran a model loop');
  const afterStop=await call({type:'get_pending_queue'});assert(afterStop.items.some(i=>i.submissionId===ids[5]));
+ const retained=afterStop.items.find(i=>i.submissionId===ids[4]);
+ assert(retained,'Stop discarded the original during preparation');
+ assert.equal(retained.queueId,q.items[0].queueId);assert.equal(retained.kind,'steer');
+ assert.equal(records.slice(start).filter(e=>e.type==='queue_update'&&e.pending.changes.some(c=>c.state==='taken')).length,0);
+ assert.equal((await call({type:'get_messages'})).recordedInputs.some(r=>r.identity?.submissionId===ids[4]),false);
+ assert.equal((await call({type:'cancel_queued_message',epoch:afterStop.epoch,queueId:retained.queueId,expectedRevision:retained.itemRevision})).outcome,'cancelled');
  assert.equal((await promote(q,q.items[0])).outcome,'stale_control');
  await call({type:'cancel_queued_message',epoch:afterStop.epoch,queueId:afterStop.items.find(i=>i.submissionId===ids[5]).queueId});
  await call({type:'new_session'});

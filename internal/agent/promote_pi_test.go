@@ -34,6 +34,9 @@ func newPromotionFixture(t *testing.T) *promotionFixture {
 	return newPromotionFixtureWithEvents(t, nil)
 }
 func newPromotionFixtureWithEvents(t *testing.T, onEvent func(Event)) *promotionFixture {
+	return newPromotionFixtureWithContext(t, onEvent, nil)
+}
+func newPromotionFixtureWithContext(t *testing.T, onEvent func(Event), beforeContext func()) *promotionFixture {
 	t.Helper()
 	runtime := os.Getenv("YESMAN_TEST_RUNTIME")
 	if runtime == "" {
@@ -59,6 +62,9 @@ func newPromotionFixtureWithEvents(t *testing.T, onEvent func(Event)) *promotion
 	}
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/context" {
+			if beforeContext != nil {
+				beforeContext()
+			}
 			io.WriteString(w, "Synthetic promotion fixture")
 		} else {
 			io.WriteString(w, `{"env":{},"hide":[]}`)

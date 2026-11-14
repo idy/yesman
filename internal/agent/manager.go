@@ -560,6 +560,10 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 	m.observeDelivery(a, p, kind, raw)
 	m.follow(a, p, kind, raw)
 	switch kind {
+	case "queue_resume_start":
+		// Native Session reserved preparation; no message has been taken and no
+		// provider turn/usage is implied. Expose Stop while the app context loads.
+		m.setStatus(a, p, Working, "")
 	case "agent_start":
 		m.setStatus(a, p, Working, "")
 	case "agent_settled":

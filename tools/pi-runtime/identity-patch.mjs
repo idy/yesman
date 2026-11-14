@@ -99,7 +99,7 @@ export interface PendingQueueItem {`);
   change('session.steer(command.message, command.images, { source: "rpc", submissionId: command.submissionId })','session.steer(command.message, command.images, { source: "rpc", submissionId: command.submissionId, hostOrigin: command.hostOrigin })');
   change('session.followUp(command.message, command.images, { source: "rpc", submissionId: command.submissionId })','session.followUp(command.message, command.images, { source: "rpc", submissionId: command.submissionId, hostOrigin: command.hostOrigin })');
   change('return success(id, "get_messages", { messages: session.messages });','return success(id, "get_messages", session.getHostMessages());');
-  change('runtime: "yesman-pi/1.5.2-2"','runtime: "yesman-pi/1.5.2-3"');
+  change('runtime: "yesman-pi/1.5.2-2"','runtime: "yesman-pi/1.5.2-4"');
  });
  await patch(app+'modes/rpc/rpc-client.js',(change)=>{
   change('    async getMessages() {','    async getHostMessages() { return this.getData(await this.send({ type: "get_messages" })); }\n    async getMessages() {');

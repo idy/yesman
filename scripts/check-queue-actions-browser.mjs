@@ -88,10 +88,42 @@ try { for(const [engineName,engine]of Object.entries({chromium,webkit})) for(con
   assert.equal(await row(ids[0]).locator('.msg-user').innerText(),long);
   assert.equal(await row(ids[1]).locator('img').count(),1);
   await page.screenshot({path:`${out}/${engineName}-${language}-taken.png`});
+  // Actual idle Session preparation pauses only on production yesman.ts's
+  // /v1/context request. Stop must leave this exact input pending/recallable.
+  const setupDeadline=Date.now()+10000;
+  while((await control('State')).agents.find(x=>x.id===a.id).status!=='idle'){assert(Date.now()<setupDeadline);await new Promise(r=>setTimeout(r,10))}
+  await control('HoldProvider');await submit('hold prepare recovery');
+  while(!(await control('ProviderReady'))){assert(Date.now()<setupDeadline,'provider gate not entered');await new Promise(r=>setTimeout(r,10))}
+  const prepareID=newID();await control('FixtureFollowUp',a.id,prepareID,long,[image,image],a.since);
+  await control('Abort',a.id);
+  await row(prepareID).locator('.message-promote').waitFor();
+  const reserved=(await control('NativeSnapshot')).items.find(i=>i.submissionId===prepareID);
+  await control('HoldContext');await row(prepareID).locator('.message-promote').click();
+  const prepareDeadline=Date.now()+10000;while(!(await control('ContextReady'))){assert(Date.now()<prepareDeadline,'production context gate not entered');await new Promise(r=>setTimeout(r,10))}
+  await row(prepareID).locator('.message-recall').waitFor();
+  await page.waitForFunction(id=>document.querySelector(`[data-delivery="${id}"] .delivery-status`)?.dataset.state==='steering',prepareID);
+  assert.equal(await row(prepareID).getAttribute('data-bound'),null);
+  assert.equal(await row(prepareID).locator('.delivery-status').getAttribute('data-state'),'steering');
+  assert.equal((await control('State')).agents.find(x=>x.id===a.id).detail ?? '', '', 'preparation created a false attention/error box');
+  const stoppingGeneration=(await control('NativeSnapshot')).controlGeneration;
+  await page.locator('.composer .round--stop').click();
+  while((await control('NativeSnapshot')).controlGeneration===stoppingGeneration){assert(Date.now()<prepareDeadline,'Stop did not reach pi');await new Promise(r=>setTimeout(r,10))}
+  assert.equal((await control('NativeSnapshot')).items.find(i=>i.submissionId===prepareID)?.queueId,reserved.queueId);
+  assert.equal(await row(prepareID).locator('.delivery-status').getAttribute('data-state'),'steering');
+  await page.screenshot({path:`${out}/${engineName}-${language}-stop-prepare.png`});
+  await control('ReleaseContext');
+  while((await control('State')).agents.find(x=>x.id===a.id).status!=='idle'){assert(Date.now()<prepareDeadline,'stopped Session did not settle');await new Promise(r=>setTimeout(r,10))}
+  await row(prepareID).locator('.message-recall').click();await page.waitForFunction(text=>document.querySelector('.composer textarea').value===text,long);
+  assert.equal(await page.locator('.composer-image').count(),2);
+  for(const src of await page.locator('.composer-image img').evaluateAll(els=>els.map(el=>el.src)))assert.equal(src,`data:image/png;base64,${png}`);
+  await control('ReleaseProvider');
+  const repaired=await submit(long+' after Stop');assert.notEqual(repaired,prepareID);
+  await page.waitForFunction(id=>!!document.querySelector(`[data-delivery="${id}"][data-bound=true]`),repaired);
+  assert.equal(await page.locator(`[data-delivery="${prepareID}"][data-bound=true]`).count(),0);
   assert.deepEqual(await page.evaluate(()=>window.stopFixturePolling()),[]);assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
-  reports.push({engine:engineName,language,pending:ids.length,followUp:follow,before,after,boundOrder,canonicalReload:true,originalPayload:true,cacheEviction:true,errors});
+  reports.push({engine:engineName,language,pending:ids.length,followUp:follow,before,after,boundOrder,canonicalReload:true,originalPayload:true,cacheEviction:true,prepareStop:{id:prepareID,queueId:reserved.queueId,newIntent:repaired,originalImages:'exact',button:'actual Stop'},errors});
  } catch(error){if(page)await page.screenshot({path:`${out}/${engineName}-${language}-failure.png`}).catch(()=>{});throw error}
- finally {await browser.close();await fetch(`${api}/stop`).catch(()=>{});const deadline=Date.now()+15000;while(exit===undefined&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));if(exit===undefined)child.kill();await writeFile(`${out}/${engineName}-${language}-bridge.log`,log);await rm(temp,{recursive:true,force:true})}
+ finally {await control('ReleaseContext').catch(()=>{});await browser.close();await fetch(`${api}/stop`).catch(()=>{});const deadline=Date.now()+15000;while(exit===undefined&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));if(exit===undefined)child.kill();await writeFile(`${out}/${engineName}-${language}-bridge.log`,log);await rm(temp,{recursive:true,force:true})}
  await writeFile(`${out}/results.json`,JSON.stringify(reports,null,2));
  console.log(engineName,language,'real pending/cache/reload/promote/exact occurrence/order/cancel/edit/canonical Copy PASS');
 }} finally {server.close()}

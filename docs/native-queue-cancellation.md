@@ -1,7 +1,7 @@
 # Managed pi and native message recall
 
 yesman's default supported runtime is **pi 1.5.2 with queue protocol patch 1**
-(`1.5.2-yesman.3`). It provides actual per-occurrence pending identity and atomic
+(`1.5.2-yesman.4`). It provides actual per-occurrence pending identity and atomic
 cancellation. Original upstream pi 1.5.2 lacks that API; external runtimes retain
 normal sending/Copy and only expose recall if they report the supported protocol.
 
@@ -111,12 +111,29 @@ steering FIFO/mode. The same occurrence may be taken before its promotion ACK
 arrives; receipt reconciliation preserves that later state.
 
 An idle Session reserves its existing lifecycle before asynchronous model/auth
-checks (bounded and cancellable), then claims the core run before promoting and
-draining native input. It prepares that claimed input without repeating input
-hooks/template expansion, and reuses the original retry/compaction/settle driver.
-Abort invalidates admission and can stop a claimed input during preparation before
-any model request. A stopped process has no queue authority and cannot be resumed
-by this operation. The message footer offers **Send now** only for a confirmed
+checks (bounded and cancellable). Promotion changes priority first, but **does not
+take the occurrence**. Preparation uses an isolated copy of a captured steering
+prefix while every original stays native-pending and cancellable. After the
+production context request, compaction and hooks finish, the core validates the
+same epoch, exact entries/revisions/order/mode, Session reservation, control
+generation and abort signals. Only then does a synchronous commit consume
+next-turn context and those exact queue entries, immediately entering the normal
+prompt-recording loop. Appended inputs remain in order for a later checkpoint.
+
+Stop, cancellation, an invalidated batch or preparation failure before this commit
+leaves surviving originals pending with their complete text/images. A preparation
+failure produces no synthetic assistant turn/usage record; settling without intake
+is aborted, not task completion. The additive `queue_resume_start` host event
+exposes the real Session preparation as busy so the desktop Stop button works;
+it is not `agent_start` or a provider request. A priority acknowledgement can thus
+be followed by a still-pending steering item after Stop, which the user can recall
+or process with a later explicit input. Already-steering retries never start a run.
+
+After intake commits, a Stop uses the normal loop to record the committed inputs
+with its aborted signal; it never discards or re-enqueues them. Input/template
+hooks are not repeated, and the original retry/compaction/settle driver remains the
+sole Session owner. Full process retirement still invalidates volatile queue and
+payload authority rather than replaying old intents. The message footer offers **Send now** only for a confirmed
 follow-up whose live runtime admits promotion. Already-steering messages show
 that they are waiting for an input checkpoint. A pending action reserves that
 item in the page, so repeated clicks cannot issue another mutation; generation

@@ -1,6 +1,6 @@
 {
   "upstream": "1.5.2",
-  "revision": 3,
+  "revision": 4,
   "patches": [
     {
       "path": "@earendil-works/pi-coding-agent/dist/bundle/cli.js",
@@ -16,7 +16,7 @@
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.js",
       "before": "f45ae001e2b14fced8ae151f0a00303b5fbdb5fc4b25418d45de6a5546f48a8c",
-      "after": "7a8b8d8655d36849db5c72eed7571d1f78b5404d7c8152116b6c78a7ac0a6f8b",
+      "after": "7d9c8decdefec4c6ef4498374a441c90decc12af82c6626d025ce3d9b1b234d5",
       "edits": [
         {
           "before": "class PendingMessageQueue {\n    messages = [];\n    mode;\n    constructor(mode) {\n        this.mode = mode;\n    }\n    enqueue(message) {\n        this.messages.push(message);\n    }\n    hasItems() {\n        return this.messages.length > 0;\n    }\n    peek() {\n        if (this.mode === \"all\")\n            return this.messages.slice();\n        const first = this.messages[0];\n        return first ? [first] : [];\n    }\n    drain() {\n        const drained = this.peek();\n        this.messages = this.messages.slice(drained.length);\n        return drained;\n    }\n    clear() {\n        this.messages = [];\n    }\n}\n",
@@ -68,14 +68,14 @@
         },
         {
           "before": "    /** Remove all queued steering messages. */",
-          "after": "    async runQueuedInput(epoch, queueId, expectedRevision, prepare, claimed) {\n        if (this.activeRun) throw new Error(\"Agent is already processing.\");\n        const before = this.pendingQueue.snapshot();\n        const target = before.items.find(i => i.queueId === queueId);\n        if (before.epoch !== epoch || !target || target.kind !== \"followUp\" || target.itemRevision !== expectedRevision)\n            return { ...before, outcome: before.epoch !== epoch ? \"stale\" : target ? \"stale_item\" : \"not_pending\" };\n        let result;\n        await this.runWithLifecycle(async signal => {\n            // The lifecycle lock precedes observers of the committed queue change.\n            result = this.pendingQueue.promote(epoch,queueId,expectedRevision);\n            if (result.outcome !== \"promoted\") return;\n            if (!this.pendingQueue.pending.has(queueId) || signal.aborted) {\n                result = { ...this.pendingQueue.snapshot(), outcome: \"not_pending\" }; return;\n            }\n            const messages = this.steeringQueue.drain();\n            if (!messages.length) { result = { ...this.pendingQueue.snapshot(), outcome: \"not_pending\" }; return; }\n            claimed(result);\n            const prepared = await prepare(messages,signal);\n            if (signal.aborted) return;\n            await runAgentLoop(prepared, this.createContextSnapshot(), this.createLoopConfig({skipInitialSteeringPoll:true}),\n                event => this.processEvents(event), signal, this.streamFunction);\n        });\n        return result;\n    }\n    /** Remove all queued steering messages. */"
+          "after": "    async runQueuedInput(epoch, queueId, expectedRevision, prepare, claimed, canCommit, committed) {\n        if (this.activeRun) throw new Error(\"Agent is already processing.\");\n        const before = this.pendingQueue.snapshot();\n        const target = before.items.find(i => i.queueId === queueId);\n        if (before.epoch !== epoch || !target || target.kind !== \"followUp\" || target.itemRevision !== expectedRevision)\n            return { ...before, outcome: before.epoch !== epoch ? \"stale\" : target ? \"stale_item\" : \"not_pending\" };\n        let result, preparationError;\n        await this.runWithLifecycle(async signal => {\n            // The lifecycle lock precedes observers of the committed queue change.\n            result = this.pendingQueue.promote(epoch,queueId,expectedRevision);\n            if (result.outcome !== \"promoted\") return;\n            let plan, prepared;\n            try {\n                const target = this.pendingQueue.pending.get(queueId);\n                const revision = target?.itemRevision;\n                plan = this.steeringQueue.prepareDrain();\n                const valid = () => !signal.aborted && canCommit() && this.pendingQueue.epoch === epoch &&\n                    this.pendingQueue.pending.get(queueId) === target && target?.itemRevision === revision && this.steeringQueue.canCommitDrain(plan);\n                if (!valid()) return;\n                claimed(result); // priority changed; intake has NOT committed\n                prepared = await prepare(plan.messages,signal);\n                if (!prepared || !valid() || !prepared.commit()) return;\n            } catch(error) {\n                // Preparation is not a model turn: keep originals and do not\n                // fabricate an assistant failure/usage record for untaken input.\n                preparationError = error;\n                return;\n            }\n            // All asynchronous preparation is over. No await between validation,\n            // consuming Session nextTurn context and exact native intake.\n            if (!this.steeringQueue.commitDrain(plan)) return;\n            committed();\n            // Intake has committed. Even if a queue observer just requested Stop,\n            // use the normal loop's prompt recording with its aborted signal.\n            // Never reinsert messages after this point or discard them on abort.\n            await runAgentLoop(prepared.messages, this.createContextSnapshot(), this.createLoopConfig({skipInitialSteeringPoll:true}),\n                event => this.processEvents(event), signal, this.streamFunction);\n        });\n        if (preparationError) throw preparationError;\n        return result;\n    }\n    /** Remove all queued steering messages. */"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.d.ts",
       "before": "05968f90cf20eec86cfd352c6a87dff94f7e177d8579c3864697e8a7bb773ace",
-      "after": "77f7d7c11d705252b0c8c371e45f40c015402bd69bb15662b6f97a783bc601f2",
+      "after": "4ea33b4e0fa70d68c9c081bc1351b9432c26423a3b1cc28af6519fe80702ae38",
       "edits": [
         {
           "before": "export declare class Agent {",
@@ -107,14 +107,14 @@
         },
         {
           "before": "    notifyPendingQueue(): void;",
-          "after": "    notifyPendingQueue(): void;\n    runQueuedInput(epoch:string,queueId:string,expectedRevision:number,prepare:(messages:AgentMessage[],signal:AbortSignal)=>Promise<AgentMessage[]>,claimed:(result:PendingPromotionResult)=>void):Promise<PendingPromotionResult>;"
+          "after": "    notifyPendingQueue(): void;\n    runQueuedInput(epoch:string,queueId:string,expectedRevision:number,prepare:(messages:AgentMessage[],signal:AbortSignal)=>Promise<{messages:AgentMessage[];commit:()=>boolean}|undefined>,claimed:(result:PendingPromotionResult)=>void,canCommit:()=>boolean,committed:()=>void):Promise<PendingPromotionResult>;"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.js",
       "before": "ee756f6f74afe9f8930ebf216c95334605d913a275a0eec2c9702f101baef3c3",
-      "after": "9a0744dbc59b51c62c9d28aaa51437695d302b57a386242911fc6b69070c0706",
+      "after": "a2d85cfdf32bd6e28cf494cb84b7b4197998908e3332595f09daa626f7ed2a5b",
       "edits": [
         {
           "before": "            followUp: [...this._followUpMessages],",
@@ -317,8 +317,12 @@
           "after": "        if (queuedMessages) {\n            messages.push(...queuedMessages);\n        }\n        else if (trigger.messageType === \"custom\") {\n            messages.push(trigger.message);"
         },
         {
+          "before": "        messages.push(...this._pendingNextTurnMessages);\n        this._pendingNextTurnMessages = [];",
+          "after": "        const nextTurn = queuedMessages ? this._pendingNextTurnMessages.slice() : this._pendingNextTurnMessages;\n        messages.push(...nextTurn);\n        if (!queuedMessages) this._pendingNextTurnMessages = [];"
+        },
+        {
           "before": "        return bindInputBatch(messages, messages.map((_, index) => index === (updateMessage ? 1 : 0) ? triggerIdentity(trigger) : undefined));",
-          "after": "        if (queuedMessages) {\n            const offset = updateMessage ? 1 : 0;\n            return bindInputBatch(messages, messages.map((_,i) => i >= offset && i < offset + queuedMessages.length ? inputRefAt(queuedMessages,i-offset) : undefined));\n        }\n        return bindInputBatch(messages, messages.map((_, index) => index === (updateMessage ? 1 : 0) ? triggerIdentity(trigger) : undefined));"
+          "after": "        if (queuedMessages) {\n            const offset = updateMessage ? 1 : 0;\n            const batch = bindInputBatch(messages, messages.map((_,i) => i >= offset && i < offset + queuedMessages.length ? inputRefAt(queuedMessages,i-offset) : undefined));\n            return { messages: batch, commit: () => {\n                if (!nextTurn.every((m,i) => this._pendingNextTurnMessages[i] === m)) return false;\n                this._recordSelection();\n                this._pendingToolNames.clear();\n                this._pendingNextTurnMessages.splice(0,nextTurn.length);\n                return true;\n            }};\n        }\n        return bindInputBatch(messages, messages.map((_, index) => index === (updateMessage ? 1 : 0) ? triggerIdentity(trigger) : undefined));"
         },
         {
           "before": "    _queueControlGeneration = 0;",
@@ -334,14 +338,14 @@
         },
         {
           "before": "        return this._decoratePendingQueue(this.agent.promoteQueuedMessage(epoch, queueId, expectedRevision));\n    }",
-          "after": "        if (item.kind === \"steer\" || this.isStreaming)\n            return this._decoratePendingQueue(this.agent.promoteQueuedMessage(epoch, queueId, expectedRevision));\n        // Reserve the Session synchronously; prompt preflights after this point\n        // queue into this run. No input hook is repeated for the target.\n        this._isAgentRunActive = true;\n        this._agentRunAbortRequested = false;\n        let resolveAdmission, rejectAdmission;\n        const admission = new Promise((resolve,reject) => {resolveAdmission=resolve;rejectAdmission=reject});\n        const reservation = { abort: new AbortController() };\n        const admissionTimer = setTimeout(() => reservation.abort.abort(), 15000);\n        this._queuedResume = reservation;\n        this.agent.notifyPendingQueue();\n        let admitted = false, driven = false;\n        reservation.done = (async () => {\n            try {\n                if (!this.model) throw new Error(formatNoModelSelectedMessage());\n                const hasAuth = this._modelRuntime.hasConfiguredAuth(this.model.provider) ||\n                    (await Promise.race([\n                        this._modelRuntime.checkAuth(this.model.provider),\n                        new Promise((_,reject) => reservation.abort.signal.addEventListener(\"abort\", () => reject(new Error(\"Queue admission was stopped or timed out\")), {once:true}))\n                    ])) !== undefined;\n                if (!hasAuth) throw new Error(formatNoApiKeyFoundMessage(this.model.provider));\n                if (reservation.abort.signal.aborted || this._agentRunAbortRequested || controlGeneration !== this._queueControlGeneration)\n                    throw new Error(\"Queue admission was stopped\");\n                const result = await this.agent.runQueuedInput(epoch,queueId,expectedRevision,\n                    async (messages,signal) => {\n                        const first = messages[0];\n                        const images = Array.isArray(first?.content) ? first.content.filter(b=>b.type==='image') : undefined;\n                        const prepared = await this._prepareRun({messageType:\"user\",prompt:contentText(first?.content,\"\"),images},messages);\n                        if (signal.aborted || this._agentRunAbortRequested) return [];\n                        this._recordSelection();\n                        this._pendingToolNames.clear();\n                        return prepared;\n                    }, result => {\n                        admitted = true;\n                        clearTimeout(admissionTimer);\n                        this._queuedResume = undefined;\n                        this.agent.notifyPendingQueue();\n                        resolveAdmission(this._decoratePendingQueue(result));\n                    });\n                if (!admitted) {resolveAdmission(this._decoratePendingQueue(result));return;}\n                // Core's initial queue run finished. Existing Session recovery,\n                // before-settle, retries and final cleanup remain the sole owner.\n                driven = true;\n                await this._driveOwnedRun(async () => {});\n            } catch(error) {\n                if (!admitted) rejectAdmission(error);\n                else this._emit({type:\"queue_resume_error\",message:String(error)});\n            } finally {\n                clearTimeout(admissionTimer);\n                if (this._queuedResume === reservation) this._queuedResume = undefined;\n                if (!driven && this._isAgentRunActive) {\n                    this._failedResponse = undefined;\n                    this._runSystemPromptOptions = undefined;\n                    await this._emitAgentSettled();\n                }\n            }\n        })();\n        // The promise is retained/observed by the Session and RPC shutdown waits\n        // for waitForIdle. This is not a wake-on-settle background task.\n        void reservation.done.catch(error => this._emit({type:\"queue_resume_error\",message:String(error)}));\n        return admission;\n    }"
+          "after": "        if (item.kind === \"steer\" || this.isStreaming)\n            return this._decoratePendingQueue(this.agent.promoteQueuedMessage(epoch, queueId, expectedRevision));\n        // Reserve the Session synchronously; prompt preflights after this point\n        // queue into this run. No input hook is repeated for the target.\n        this._isAgentRunActive = true;\n        this._agentRunAbortRequested = false;\n        let resolveAdmission, rejectAdmission;\n        const admission = new Promise((resolve,reject) => {resolveAdmission=resolve;rejectAdmission=reject});\n        const reservation = { abort: new AbortController() };\n        const admissionTimer = setTimeout(() => reservation.abort.abort(), 15000);\n        this._queuedResume = reservation;\n        this._emit({type:\"queue_resume_start\"});\n        this.agent.notifyPendingQueue();\n        let admitted = false, driven = false, started = false;\n        reservation.done = (async () => {\n            try {\n                if (!this.model) throw new Error(formatNoModelSelectedMessage());\n                const hasAuth = this._modelRuntime.hasConfiguredAuth(this.model.provider) ||\n                    (await Promise.race([\n                        this._modelRuntime.checkAuth(this.model.provider),\n                        new Promise((_,reject) => reservation.abort.signal.addEventListener(\"abort\", () => reject(new Error(\"Queue admission was stopped or timed out\")), {once:true}))\n                    ])) !== undefined;\n                if (!hasAuth) throw new Error(formatNoApiKeyFoundMessage(this.model.provider));\n                if (reservation.abort.signal.aborted || this._agentRunAbortRequested || controlGeneration !== this._queueControlGeneration)\n                    throw new Error(\"Queue admission was stopped\");\n                const result = await this.agent.runQueuedInput(epoch,queueId,expectedRevision,\n                    async (messages,signal) => {\n                        const first = messages[0];\n                        const images = Array.isArray(first?.content) ? first.content.filter(b=>b.type==='image') : undefined;\n                        const prepared = await this._prepareRun({messageType:\"user\",prompt:contentText(first?.content,\"\"),images},messages);\n                        if (signal.aborted || this._agentRunAbortRequested) return undefined;\n                        return prepared;\n                    }, result => {\n                        admitted = true;\n                        resolveAdmission(this._decoratePendingQueue(result));\n                    }, () => !reservation.abort.signal.aborted && !this._agentRunAbortRequested &&\n                        this._queuedResume === reservation && controlGeneration === this._queueControlGeneration,\n                    () => {\n                        started = true;\n                        clearTimeout(admissionTimer);\n                        this._queuedResume = undefined;\n                        this.agent.notifyPendingQueue();\n                    });\n                if (!admitted) {resolveAdmission(this._decoratePendingQueue(result));return;}\n                if (!started) return; // aborted/changed preparation never wakes a generic continuation\n                // Core's initial queue run finished. Existing Session recovery,\n                // before-settle, retries and final cleanup remain the sole owner.\n                driven = true;\n                await this._driveOwnedRun(async () => {});\n            } catch(error) {\n                if (!admitted) rejectAdmission(error);\n                else this._emit({type:\"queue_resume_error\",message:String(error)});\n            } finally {\n                clearTimeout(admissionTimer);\n                if (this._queuedResume === reservation) this._queuedResume = undefined;\n                if (!driven && this._isAgentRunActive) {\n                    if (!started) this._agentRunAbortRequested = true;\n                    this._failedResponse = undefined;\n                    this._runSystemPromptOptions = undefined;\n                    await this._emitAgentSettled();\n                }\n            }\n        })();\n        // The promise is retained/observed by the Session and RPC shutdown waits\n        // for waitForIdle. This is not a wake-on-settle background task.\n        void reservation.done.catch(error => this._emit({type:\"queue_resume_error\",message:String(error)}));\n        return admission;\n    }"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts",
       "before": "56d24887a400d77a77b428deb1cce25576cac27e18089e722f536d600fa32c3a",
-      "after": "9ed8e13d5cc3df97771f5da99e9b830c76d8e1be256b0aad768566514d1dac0b",
+      "after": "08beaa6820a552980b5c436c5fe80486c49242c8526ba811c3de81af5446da9c",
       "edits": [
         {
           "before": "export interface PromptOptions {",
@@ -384,6 +388,10 @@
           "after": "    getHostMessages(): { messages: AgentMessage[]; inputRefs: (import(\"@earendil-works/pi-agent-core\").HostInputRef|null)[]; hostSession: string; recordedInputs: import(\"@earendil-works/pi-agent-core\").HostInputRef[] };\n    getPendingQueue():"
         },
         {
+          "before": "    type: \"queue_update\";",
+          "after": "    type: \"queue_resume_start\";\n} | {\n    type: \"queue_update\";"
+        },
+        {
           "before": "promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number, controlGeneration: number): import(\"@earendil-works/pi-agent-core\").PendingPromotionResult;",
           "after": "promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number, controlGeneration: number): Promise<import(\"@earendil-works/pi-agent-core\").PendingPromotionResult>;"
         }
@@ -392,7 +400,7 @@
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js",
       "before": "505297dba2df1de3003c0399b3312fd581359a4e27a5e9262b274b6cb5cb4ef3",
-      "after": "c6ee1737172adf5b77c35b4bbfcc3bfad9d6911788adbf86c96e5ba0bb9a9b33",
+      "after": "1914c28015294d2931480f666b71ae681412edd0b294032213042cae77a153d3",
       "edits": [
         {
           "before": "                    streamingBehavior: command.streamingBehavior,",
@@ -432,7 +440,7 @@
         },
         {
           "before": "runtime: \"yesman-pi/1.5.2-2\"",
-          "after": "runtime: \"yesman-pi/1.5.2-3\""
+          "after": "runtime: \"yesman-pi/1.5.2-4\""
         },
         {
           "before": "                return success(id, \"promote_queued_message\", session.promoteQueuedMessage(command.epoch, command.queueId, command.expectedRevision, command.controlGeneration));",

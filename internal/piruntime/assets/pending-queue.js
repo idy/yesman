@@ -166,6 +166,27 @@ export class PendingMessageQueue {
   }
   hasItems() { return this.messages.length > 0; }
   peek() { return (this.mode === 'all' ? this.messages : this.messages.slice(0, 1)).map((e) => e.message); }
+  // Prepare from an isolated copy while keeping the exact native occurrences
+  // pending/cancellable. A later commit only takes the unchanged captured prefix.
+  prepareDrain() {
+    const entries = (this.mode === 'all' ? this.messages : this.messages.slice(0, 1)).slice();
+    const epoch = this.registry.epoch, mode = this.mode;
+    const revisions = entries.map(e => e.itemRevision);
+    return { epoch, mode, entries, revisions,
+      messages: bindInputBatch(structuredClone(entries.map(e => e.message)),
+        entries.map(e => Object.freeze({ ...e.identity, epoch, queueId:e.queueId }))) };
+  }
+  canCommitDrain(plan) {
+    return plan.epoch === this.registry.epoch && plan.mode === this.mode && plan.entries.length > 0 &&
+      plan.entries.every((e,i) => this.messages[i] === e && this.registry.pending.get(e.queueId) === e && e.itemRevision === plan.revisions[i]);
+  }
+  commitDrain(plan) {
+    if (!this.canCommitDrain(plan)) return false;
+    this.messages.splice(0,plan.entries.length);
+    for (const entry of plan.entries) this.registry.pending.delete(entry.queueId);
+    this.registry.change(plan.entries,'taken');
+    return true;
+  }
   drain() {
     const entries = this.messages.splice(0, this.mode === 'all' ? this.messages.length : 1);
     for (const entry of entries) this.registry.pending.delete(entry.queueId);
