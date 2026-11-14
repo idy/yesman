@@ -18,7 +18,7 @@ evidence.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='Yes Man install ', dir=os.environ['RUNNER_TEMP']) as directory:
     profile = pathlib.Path(directory) / 'Profile with spaces'
     profile.mkdir()
-    env = {k:v for k,v in os.environ.items() if k in ('PATH','DISPLAY','DBUS_SESSION_BUS_ADDRESS','XDG_RUNTIME_DIR','LANG')}
+    env = {k:v for k,v in os.environ.items() if k in ('PATH','DISPLAY','XAUTHORITY','DBUS_SESSION_BUS_ADDRESS','XDG_RUNTIME_DIR','LANG')}
     env.update(HOME=str(profile), XDG_DATA_HOME=str(profile / '.local/share'), XDG_CONFIG_HOME=str(profile / '.config'), XDG_CACHE_HOME=str(profile / '.cache'), YESMAN_HOME=str(profile / 'workspace-vault-data'), YESMAN_PI=str(profile / 'missing-pi'), PI_CODING_AGENT_DIR=str(profile / 'pi-config'), HTTP_PROXY='http://127.0.0.1:9', HTTPS_PROXY='http://127.0.0.1:9')
     sentinel = profile / 'workspace-vault-session-sentinel'
     sentinel.write_text('preserved')

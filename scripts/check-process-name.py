@@ -38,6 +38,13 @@ def powershell(code):
     return json.loads(subprocess.check_output(['powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', code], text=True))
 
 
+def windows_pids(executable):
+    quoted = str(executable).replace("'", "''")
+    # -InputObject keeps [] and [pid] arrays intact; piping would enumerate
+    # a singleton to a scalar (or produce no JSON at all for zero matches).
+    return powershell("ConvertTo-Json -Compress -InputObject @((Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq '" + quoted + "'}).ProcessId)")
+
+
 def windows(pid):
     from ctypes import wintypes
     user = ctypes.WinDLL('user32', use_last_error=True)
@@ -71,7 +78,7 @@ def native(pid, helper):
         value['psComm'] = subprocess.check_output(['ps', '-p', str(pid), '-o', 'comm='], text=True).strip()
         return value
     if sys.platform == 'win32':
-        value = powershell(f"$p=Get-Process -Id {pid}; [ordered]@{{processName=$p.ProcessName;executable=$p.Path;fileDescription=$p.FileVersionInfo.FileDescription;productName=$p.FileVersionInfo.ProductName}} | ConvertTo-Json -Compress")
+        value = powershell(f"$p=Get-Process -Id {pid}; $v=[Diagnostics.FileVersionInfo]::GetVersionInfo($p.Path); [ordered]@{{processName=$p.ProcessName;executable=$p.Path;fileDescription=$v.FileDescription;productName=$v.ProductName}} | ConvertTo-Json -Compress")
         value['windows'] = windows(pid)
         return value
     root = pathlib.Path('/proc') / str(pid)
@@ -173,7 +180,7 @@ def main():
     endpoint = 'http://127.0.0.1:' + str(server.server_port)
     process = None
     try:
-        with tempfile.TemporaryDirectory(prefix='Yes Man smoke ', dir=os.environ['RUNNER_TEMP']) as directory:
+        with tempfile.TemporaryDirectory(prefix='Yes Man smoke ', dir=os.environ['RUNNER_TEMP'], ignore_cleanup_errors=True) as directory:
             temp = pathlib.Path(directory)
             observed = temp / 'web'
             shutil.copytree(web, observed)
@@ -194,7 +201,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             for phase in ('embedded', 'legacy-cli', 'production-page-with-observer'):
                 data = temp / (phase + ' data')
                 data.mkdir()
-                env = {k: v for k, v in os.environ.items() if k in ('HOME', 'USER', 'LOGNAME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'SHELL', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS')}
+                env = {k: v for k, v in os.environ.items() if k in ('HOME', 'USER', 'LOGNAME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'SHELL', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'DISPLAY', 'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS')}
                 env.update(YESMAN_HOME=str(data), YESMAN_PI=str(temp / 'missing-pi'), PI_CODING_AGENT_DIR=str(temp / 'pi-config'), HTTP_PROXY=endpoint, HTTPS_PROXY=endpoint, NO_PROXY='127.0.0.1,localhost,::1')
                 if phase == 'production-page-with-observer': env['YESMAN_WEB_DIR'] = str(observed)
                 with (evidence / (phase + '.log')).open('w') as log:
@@ -203,10 +210,9 @@ window.addEventListener('DOMContentLoaded', async () => {
                     process = subprocess.Popen([str(entry)], cwd=temp, env=env, stdout=log, stderr=subprocess.STDOUT)
                     if phase == 'legacy-cli' and sys.platform == 'win32':
                         assert process.wait(timeout=20) == 0, 'Compatibility launcher failed'
-                        quoted = str(executable).replace("'", "''")
                         deadline = time.monotonic() + 30
                         while time.monotonic() < deadline:
-                            ids = powershell("@((Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq '" + quoted + "'}).ProcessId) | ConvertTo-Json -Compress")
+                            ids = windows_pids(executable)
                             if ids:
                                 assert len(ids) == 1, ids
                                 process = WindowsChild(ids[0])
@@ -230,6 +236,21 @@ window.addEventListener('DOMContentLoaded', async () => {
                         assert info['fileDisplayName'] in ('Yes Man', 'Yes Man.app'), info
                     if sys.platform == 'win32':
                         assert info['fileDescription'] == info['productName'] == 'Yes Man', info
+                    if phase == 'embedded':
+                        # A second launch through the legacy entry must forward
+                        # to this PID under the same stable single-instance key.
+                        legacy = executable.with_name('yesman.exe' if sys.platform == 'win32' else 'yesman')
+                        second = subprocess.Popen([str(legacy)], cwd=temp, env=env, stdout=log, stderr=subprocess.STDOUT)
+                        assert second.wait(timeout=20) == 0
+                        assert process.poll() is None, 'Second launch replaced the running instance'
+                        if sys.platform == 'win32':
+                            end = time.monotonic() + 20
+                            while time.monotonic() < end:
+                                ids = windows_pids(executable)
+                                if ids == [process.pid]: break
+                                time.sleep(.2)
+                            else: raise AssertionError('Duplicate application instance: ' + str(ids))
+                        proof['singleInstanceLegacyEntry'] = True
                     if phase == 'production-page-with-observer':
                         assert received.wait(60), 'No actual webview/Go bridge result'
                         assert result.get('ok') and result['state']['home'] == str(data) and not result['state']['yesmen'] and not result['state']['agents'], result
@@ -239,6 +260,16 @@ window.addEventListener('DOMContentLoaded', async () => {
                     proof['phases'].append({'phase': phase, 'pid': process.pid, 'native': info, 'exitCode': process.returncode})
                     process = None
             assert hashlib.sha256(executable.read_bytes()).hexdigest() == proof['binarySHA256']
+            # The display name must not silently select a second empty profile.
+            if sys.platform == 'win32':
+                for key in ('APPDATA', 'LOCALAPPDATA'):
+                    assert not (pathlib.Path(os.environ[key]) / 'Yes Man').exists()
+            elif sys.platform == 'darwin':
+                assert not (pathlib.Path.home() / 'Library/Application Support/Yes Man').exists()
+            else:
+                assert not (pathlib.Path.home() / '.config/Yes Man').exists()
+                assert not (pathlib.Path.home() / '.cache/Yes Man').exists()
+            proof['stableProfilePaths'] = True
             proof['passed'] = True
     finally:
         if process is not None and process.poll() is None:
@@ -247,6 +278,8 @@ window.addEventListener('DOMContentLoaded', async () => {
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        if 'temp' in locals():
+            shutil.rmtree(temp, ignore_errors=True) # after stopping the owned process
         server.shutdown()
         server.server_close()
         (evidence / 'process-name.json').write_text(json.dumps(proof, indent=2))
