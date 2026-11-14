@@ -823,6 +823,7 @@ function renderDock({ focusComposer = false } = {}) {
   const a = selectedAgent();
   const keep = dock?.querySelector('textarea');
   const focused = keep && document.activeElement === keep;
+  const actionFocused = dock?.querySelector('.composer-action') === document.activeElement;
   const caret = focused ? [keep.selectionStart, keep.selectionEnd, keep.selectionDirection] : null;
   const control = dock?.contains(document.activeElement) && document.activeElement.getAttribute('role') === 'combobox'
     ? document.activeElement.getAttribute('aria-label') : null;
@@ -877,13 +878,16 @@ function renderDock({ focusComposer = false } = {}) {
     // Read-only keeps the caret/focus while RPC acceptance is pending. A
     // disabled textarea would drop focus to BODY before the next render.
     rows: 1, 'aria-label': t('Message'), readonly: attachments.sending,
+    title: working ? t('Enter to send after the current step; Shift+Enter for a new line') : '',
     placeholder: a.role === 'lead' ? t('Message {name}…', { name: a.yesman }) : t('Message worker {name}…', { name: a.name }),
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
-  const send = h('button', { class: 'round', type: 'submit', 'aria-label': t('Send'), title: working ? t('Send: delivered after its current step') : t('Send') }, icon('enter'));
-  const stop = working ? h('button', { class: 'round round--stop', type: 'button', 'aria-label': t('Stop'), title: t('Stop the current run'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop')) : null;
+  const action = working
+    ? h('button', { class: 'round round--stop composer-action', type: 'button', 'aria-label': t('Stop'), title: t('Stop the current run'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop'))
+    : h('button', { class: 'round composer-action', type: 'submit', 'aria-label': t('Send'), title: t('Send') }, icon('enter'));
   const sync = () => {
-    send.disabled = (!textarea.value.trim() && !attachments.items.length) || busy || !!state.modelOptions.get(keyOf(a))?.busy;
+    // A run can be interrupted even with an empty draft or a pending image/send.
+    if (!working) action.disabled = (!textarea.value.trim() && !attachments.items.length) || busy || !!state.modelOptions.get(keyOf(a))?.busy;
     textarea.style.height = 'auto';
     textarea.style.height = `${textarea.scrollHeight}px`;
   };
@@ -900,7 +904,7 @@ function renderDock({ focusComposer = false } = {}) {
   });
   const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea); } },
     fileInput, previews,
-    h('div', { class: 'composer-input' }, textarea, h('div', { class: 'ask-actions' }, attach, stop, send)),
+    h('div', { class: 'composer-input' }, attach, textarea, action),
     h('div', { class: 'composer-controls' }, modelOptionsEl(a, working), contextViewer.mount(a)),
   );
   form.addEventListener('dragover', (e) => {
@@ -918,7 +922,8 @@ function renderDock({ focusComposer = false } = {}) {
   sync();
   const nextControl = composerSelects.find((select) => select.trigger.getAttribute('aria-label') === control);
   if (nextControl && !nextControl.trigger.disabled) nextControl.trigger.focus({ preventScroll: true });
-  else if (focusComposer || focused || !keep) {
+  else if (actionFocused && !focusComposer && !action.disabled) action.focus({ preventScroll: true });
+  else if (focusComposer || focused || actionFocused || !keep) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
   }

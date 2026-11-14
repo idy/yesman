@@ -167,7 +167,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .dock { flex: 0 0 auto; padding: 0 24px 18px; }
 .dock-inner { max-width: var(--thread-width); margin: 0 auto; display: grid; gap: 10px; }
 .composer { --composer-action-size: 24px; display: grid; gap: 4px; }
-.composer-input { display: flex; align-items: flex-end; gap: 12px; border: 1px solid var(--app-rule); border-radius: 16px; background: var(--mds-field); padding: 10px 10px 10px 14px; }
+.composer-input { display: flex; align-items: flex-end; gap: 12px; border: 1px solid var(--app-rule); border-radius: 16px; background: var(--mds-field); padding: 10px; }
 .composer-input:focus-within { border-color: var(--app-focus); }
 .composer-images { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0; }
 .composer-images[hidden] { display: none; }
@@ -193,7 +193,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .model-option-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-option-context { color: var(--mds-muted); font-size: var(--mds-text-note); }
 .model-menu .mds-select-group { padding-left: 12px; }
-.composer-input > .ask-actions { flex-shrink: 0; flex-wrap: nowrap; }
+.composer-input > .round { flex-shrink: 0; }
 .round { display: grid; place-items: center; width: var(--composer-action-size); height: var(--composer-action-size); padding: 0; border-radius: var(--mds-radius-xs); border: 0; background: transparent; color: var(--mds-ink); }
 .round:hover:not(:disabled) { background: var(--mds-selected); }
 .round:disabled { color: var(--mds-faint); }
