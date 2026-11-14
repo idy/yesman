@@ -41,11 +41,13 @@ from the actual process name. See the [desktop Exec specification](https://speci
 
 ## Building
 
-Use `go run ./tools/package`, with the ordinary MyGo build options, such as
-`-platform darwin/arm64,darwin/amd64 -skip-dmg` or `-upload`. `go build` and `go run .`
-remain development commands; their output filename is selected by Go/the caller.
-The main process of an unrenamed development executable keeps that filename.
-Do not use raw `go tool mygo build` for a distribution: upstream has no independent
+Use `go tool mygo build`, with the ordinary MyGo build options, such as
+`-platform darwin/arm64,darwin/amd64 -skip-dmg` or `-upload`. The tool directive
+points to `tools/mygo`: builds route through `tools/package` and other commands
+forward to the pinned upstream command. `go run ./tools/package` is equivalent
+for builds. `go build` and `go run .` remain development commands; their output
+filename is selected by Go/the caller. The main process of an unrenamed
+development executable keeps that filename. Upstream MyGo has no independent
 Linux executable name or stable outer bundle-name setting.
 
 The adapter stages the exact Go-module-checksummed MyGo v0.9.0 source in a private
@@ -95,10 +97,11 @@ Native Windows/Linux ARM execution is not implied by their cross-builds.
 
 Before publishing the release containing this change:
 
-1. Integrate against the final preceding main and use `go run ./tools/package` in
-   all production startup and draft-smoke build steps. The stable `yesman.app`
-   archive path remains valid; binary discovery must read CFBundleExecutable.
-   Preserve macOS cgo, deployment target, permission entitlements and purpose strings.
+1. Integrate against the final preceding main. Existing `go tool mygo build`
+   commands in production startup and draft-smoke steps now route through this
+   repository's adapter. The stable `yesman.app` archive path remains valid;
+   binary discovery must read CFBundleExecutable. Preserve macOS cgo, deployment
+   target, permission entitlements and purpose strings.
 2. Recheck all six final archives, binary layouts, file lists, signatures,
    deltas and ordinary manifest URLs. Download filenames remain lowercase.
 3. Run the production naming smoke and existing Grant startup/draft smoke against

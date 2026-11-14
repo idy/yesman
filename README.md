@@ -207,7 +207,7 @@ Automation cannot reach native file dialogs, so in such builds `YESMAN_E2E_SAVE`
 
 Updates are signed with a key whose secret half is the repository's `MYGO_UPDATER_PRIVATE_KEY` secret, with a copy kept outside the repository. Installed copies accept only updates signed with it, so it must not be lost or replaced.
 
-To build a release locally, without uploading: `go run ./tools/package`, with the key in `MYGO_UPDATER_PRIVATE_KEY` for the update files. This stages the pinned MyGo dependency in a temporary directory, applies the reviewed naming adapter, then invokes its ordinary builder. The repository and module cache are unchanged. Use this entry point for distribution builds; plain `go build` remains available for development.
+To build a release locally, without uploading: `go tool mygo build`, with the key in `MYGO_UPDATER_PRIVATE_KEY` for the update files. The repository's `mygo` tool routes builds through `tools/package`, which stages the pinned MyGo dependency in a temporary directory, applies the reviewed naming adapter, then invokes its ordinary builder. Other MyGo commands forward to the pinned upstream tool. The repository and module cache are unchanged; plain `go build` remains available for development.
 
 The builds are not yet signed for other machines: macOS apps are signed ad hoc, which Gatekeeper blocks on first open from a download, and Windows apps have no signature, so SmartScreen warns.
 

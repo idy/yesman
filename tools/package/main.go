@@ -118,7 +118,7 @@ func run() error {
 	if strings.Contains(flags, "overlay") || strings.Contains(flags, "modfile") {
 		return fmt.Errorf("GOFLAGS must not supply another overlay or modfile")
 	}
-	cmd = exec.Command("go", append([]string{"tool", "mygo", "build"}, os.Args[1:]...)...)
+	cmd = exec.Command("go", append([]string{"run", "github.com/egoist/mygo/cmd/mygo", "build"}, os.Args[1:]...)...)
 	if len(os.Args) == 2 && os.Args[1] == "-verify-updater" {
 		if err := os.WriteFile(filepath.Join(staged, "yesman_name_test.go"), updaterContract, 0o644); err != nil {
 			return err

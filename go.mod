@@ -23,4 +23,4 @@ require (
 	golang.org/x/text v0.43.0 // indirect
 )
 
-tool github.com/egoist/mygo/cmd/mygo
+tool github.com/idy/yesman/tools/mygo
