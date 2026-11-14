@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.24
+
+- Show each configured model's Intelligence Index, output speed, coding score, cost per task and time per task in Settings › yesman › Models, with their original units.
+- Keep Artificial Analysis sources, source effort and your own estimates clear. Distinguish unavailable figures from zero values, and mark zero task durations whose actual time is unconfirmed by the source.
+- Keep removed models and changed estimates from returning after a delayed catalog refresh.
+
 ## 0.1.23
 
 - Align the Model and Effort labels and dropdowns in Add a model. Keep long options within the form and stack the fields in narrow windows.
