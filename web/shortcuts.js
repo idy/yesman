@@ -255,9 +255,13 @@ export function createShortcuts({ platform, call, fail = () => {}, t = (s) => s,
 
   // ---------- Keeping keys ----------
 
+  // load reads the keys kept, after the changes being saved, so that an
+  // answer read before them does not undo them.
   async function load() {
+    const seq = ++saveSeq;
     try {
-      setOverrides(await call('Shortcuts'));
+      const saved = await saving.catch(() => {}).then(() => call('Shortcuts'));
+      if (seq === saveSeq) setOverrides(saved);
     } finally {
       ready = true;
     }

@@ -1768,6 +1768,7 @@ async function importConfig() {
     c.imported = { lines: importLines(plan, result) };
     state.settings = null; // the next General or Repositories page reads them again
     refreshState();
+    shortcuts.load().catch(fail); // the file may carry shortcuts
   } catch (err) {
     fail(err);
   } finally {
@@ -1788,8 +1789,12 @@ function settingChanges(plan) {
     else if (plan.replace[key] !== now) lines.push({ text: t('{setting}: {from} → {to}', { setting: label, from: show(now), to: show(plan.replace[key]) }), replaceOnly: true });
   }
   const keys = plan.shortcuts ?? { merge: [], replace: [] };
-  if (keys.merge.length) lines.push({ text: tn(keys.merge.length, 'Keyboard shortcuts: 1 action changes', 'Keyboard shortcuts: {n} actions change') });
-  else if (keys.replace.length) lines.push({ text: tn(keys.replace.length, 'Keyboard shortcuts: 1 action changes', 'Keyboard shortcuts: {n} actions change'), replaceOnly: true });
+  const shortcutLine = (n) => tn(n, 'Keyboard shortcuts: 1 action changes', 'Keyboard shortcuts: {n} actions change');
+  if (keys.merge.length) lines.push({ text: shortcutLine(keys.merge.length) });
+  // Replacing also gives the actions the file leaves out their defaults.
+  if (keys.replace.length !== keys.merge.length || keys.replace.some((id) => !keys.merge.includes(id))) {
+    lines.push({ text: shortcutLine(keys.replace.length), replaceOnly: true });
+  }
   return lines;
 }
 
@@ -2561,7 +2566,15 @@ const actionHost = {
   abort: (a) => call('Abort', a.id),
   sleep: (a) => call('Stop', a.id),
   dialogOpen: () => !!document.querySelector('dialog[open]'),
-  showSettings: (page) => showSettings(page ?? state.settingsPage),
+  showSettings(page) {
+    showSettings(page ?? state.settingsPage);
+    // The page replaced what had focus: Settings › Shortcuts focuses its
+    // search, another page its own item in Settings.
+    const now = document.activeElement;
+    if (!now || now === document.body) {
+      (state.view.page === 'shortcuts' ? $('#shortcut-search') : $('#settings-nav [aria-current="page"]'))?.focus({ preventScroll: true });
+    }
+  },
   settingsPages: () => SETTINGS,
   openHire,
   togglePane,
@@ -2580,7 +2593,14 @@ const actionHost = {
 };
 registerActions(shortcuts, actionHost);
 
-const palette = createPalette({ shortcuts, items: () => paletteItems(actionHost), fail });
+// The message box is drawn again as its agent starts or stops: closing the
+// palette gives focus back to the same agent's box, never another's.
+const composerKey = () => (state.view.kind === 'agent' ? keyOf(selectedAgent() ?? {}) : null);
+const palette = createPalette({
+  shortcuts, items: () => paletteItems(actionHost), fail,
+  place: () => ({ agent: composerKey(), composer: !!document.activeElement?.matches?.('#dock textarea') }),
+  back: (where) => (where?.composer && where.agent && composerKey() === where.agent ? $('#dock textarea') : null),
+});
 
 // Settings › Shortcuts, in shortcuts-page.js.
 const shortcutsPage = createShortcutsPage({

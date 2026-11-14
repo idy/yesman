@@ -328,6 +328,100 @@ test('actions register once, with stable IDs', () => {
   assert.throws(() => s.register({ id: 'Bad ID', label: 'Bad', run() {} }), /Bad action ID/);
 });
 
+// The production action table (actions.js) on each platform, with a stub of
+// the window: IDs Go accepts, defaults each platform can use, no two actions
+// on one key, and what the native files menu and the renames rely on.
+const { registerActions } = await import('../web/actions.js');
+const { readFileSync } = await import('node:fs');
+
+function actionTable(platform, shown = null) {
+  const s = createShortcuts({ platform, builtIn: ['Mod+S'], call: async () => ({}) });
+  const lead = { id: 'alice/lead', yesman: 'alice', role: 'lead', status: 'idle' };
+  const host = {
+    t: (text) => text, selectedAgent: () => shown, yesmanOf: (a) => (a ? { name: a.yesman } : null), label: (n) => n,
+    entries: () => [lead, ...(shown && shown !== lead ? [shown] : [])], leads: () => [lead], needsYou: () => null,
+    step() {}, selectAgent() {}, composer: () => (shown ? {} : null), abort() {}, sleep() {}, dialogOpen: () => false,
+    showSettings() {}, settingsPages: () => [{ page: 'general', label: 'General' }, { page: 'shortcuts', label: 'Shortcuts' }],
+    openHire() {}, togglePane() {}, togglePanel() {}, files: () => ({ current: () => false }), openCheckout() {}, renameYesman() {},
+    removeWorker() {}, dismiss() {}, addRepos() {}, fetchAll() {}, palette: () => ({ open() {} }),
+  };
+  registerActions(s, host);
+  return s;
+}
+
+test('the action table registers stable IDs Go accepts, with usable, distinct defaults', () => {
+  // The same ID pattern in Go (shortcuts.go) and the page (shortcuts.js).
+  const goRE = /regexp\.MustCompile\(`([^`]+)`\)/.exec(readFileSync(new URL('../shortcuts.go', import.meta.url), 'utf8'))[1];
+  const jsRE = /if \(!\/(.+?)\/\.test\(action\.id\)/.exec(readFileSync(new URL('../web/shortcuts.js', import.meta.url), 'utf8'))[1];
+  assert.equal(jsRE, goRE);
+  const idRE = new RegExp(goRE);
+  for (const platform of ['mac', 'windows', 'linux']) {
+    const s = actionTable(platform);
+    const ids = s.actions().map((a) => a.id);
+    assert.equal(ids.length, 35, platform); // 33 actions and two Settings pages here
+    for (const id of ids) assert.ok(idRE.test(id) && id.length <= 64, id);
+    // The IDs settings.json keeps: the three renamed ones, and none in camelCase.
+    for (const id of ['agent.needs-you', 'files.task-log', 'repos.fetch-all']) assert.ok(ids.includes(id), id);
+    assert.deepEqual(ids.filter((id) => /[A-Z]/.test(id)), []);
+    const seen = new Map();
+    for (const id of ids) {
+      for (const b of s.bindingsOf(id)) {
+        assert.equal(b.problem, null, `${platform} ${id} ${b.binding}`);
+        const key = bindingId(b.binding, platform);
+        assert.equal(seen.get(key), undefined, `${platform}: ${id} and ${seen.get(key)} share ${b.binding}`);
+        seen.set(key, id);
+      }
+    }
+    assert.deepEqual(s.defaultsOf('palette.open'), ['Mod+K', 'Mod+Shift+P']);
+    assert.deepEqual(s.defaultsOf('agent.next'), platform === 'mac' ? ['Mod+Alt+ArrowDown'] : ['Ctrl+PageDown']);
+    // The native files menu shows these two actions' keys (files_menu.go).
+    assert.equal(s.primary('files.find'), 'Mod+P');
+    assert.equal(s.primary('files.tree'), 'Mod+Shift+Y');
+    // Every action can say why it cannot run, without a conversation.
+    for (const action of s.actions()) {
+      const state = s.state(action, { source: 'palette' });
+      assert.ok(state.enabled || (typeof state.reason === 'string' && state.reason.length > 0), action.id);
+    }
+    assert.equal(s.state(s.action('agent.stop')).reason, 'Open a conversation first.');
+    assert.equal(s.state(s.action('worker.remove')).reason, 'Open a worker’s conversation first.');
+  }
+  const menu = readFileSync(new URL('../files_menu.go', import.meta.url), 'utf8');
+  assert.match(menu, /shortcut\(keys, "files\.find"\)/);
+  assert.match(menu, /shortcut\(keys, "files\.tree"\)/);
+});
+
+test('side effect actions run only on the agent shown, and only when it can', () => {
+  const working = { id: 'alice/worker-one', yesman: 'alice', role: 'worker', status: 'working' };
+  const s = actionTable('mac', working);
+  assert.equal(s.state(s.action('agent.stop')).enabled, true);
+  assert.equal(s.state(s.action('worker.remove')).enabled, true);
+  assert.equal(s.state(s.action('agent.lead')).enabled, true);
+  const idle = actionTable('windows', { id: 'alice/lead', yesman: 'alice', role: 'lead', status: 'idle' });
+  assert.equal(idle.state(idle.action('agent.stop')).reason, 'This agent is not running.');
+  assert.equal(idle.state(idle.action('worker.remove')).enabled, false);
+  assert.equal(idle.state(idle.action('agent.sleep')).enabled, true);
+  assert.equal(idle.state(idle.action('yesman.goto.2')).reason, 'There is no yesman {n}.');
+});
+
+test('loading the keys waits for changes being saved', async () => {
+  let saved = { 'a.one': ['Mod+J'] };
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const s = createShortcuts({ platform: 'mac', call: async (m, arg) => {
+    if (m === 'Shortcuts') return structuredClone(saved);
+    await gate;
+    saved = { ...saved, ...arg };
+    return structuredClone(saved);
+  } });
+  s.register({ id: 'a.one', label: 'One', keys: ['Mod+K'], run() {} });
+  await s.load();
+  const change = s.update({ 'a.one': ['Mod+U'] });
+  const reload = s.load(); // as after an import: must not read before the save lands
+  release();
+  await Promise.all([change, reload]);
+  assert.deepEqual(s.bindingsOf('a.one').map((b) => b.binding), ['Mod+U']);
+});
+
 test('the palette ranks by label, then group and keywords', () => {
   const entries = [
     { label: 'Show or hide the files', group: 'Panels', keywords: ['explorer'], keys: ['⇧⌘E'] },

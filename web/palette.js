@@ -44,7 +44,9 @@ export function rank(entries, query) {
   }).filter(Boolean).sort((a, b) => b.total - a.total || a.i - b.i).map((r) => r.e);
 }
 
-export function createPalette({ shortcuts, items = () => [], fail = () => {} }) {
+// place says where focus was when the palette opened, and back(place) finds
+// that place again when the control that had focus was drawn again since.
+export function createPalette({ shortcuts, items = () => [], fail = () => {}, place = () => null, back = () => null }) {
   const platform = shortcuts.platform;
   let dialog = null;
   let input = null;
@@ -54,6 +56,7 @@ export function createPalette({ shortcuts, items = () => [], fail = () => {} }) 
   let shown = [];
   let active = 0;
   let opener = null;
+  let where = null;
   let seq = 0;
 
   function build() {
@@ -197,8 +200,12 @@ export function createPalette({ shortcuts, items = () => [], fail = () => {} }) 
   // nothing else has taken it.
   function restore() {
     const now = document.activeElement;
-    if ((!now || now === document.body || dialog.contains(now)) && opener?.isConnected) opener.focus({ preventScroll: true });
+    if (!now || now === document.body || dialog.contains(now)) {
+      const target = opener?.isConnected ? opener : back(where);
+      target?.focus({ preventScroll: true });
+    }
     opener = null;
+    where = null;
   }
 
   function onClose() {
@@ -211,6 +218,7 @@ export function createPalette({ shortcuts, items = () => [], fail = () => {} }) 
     if (!dialog) build();
     if (dialog.open || document.querySelector('dialog[open]')) return;
     opener = document.activeElement;
+    where = place();
     seq++;
     entries = collect();
     input.value = '';
