@@ -4,7 +4,15 @@ Each release's section is what installed copies show as its release notes.
 
 ## 0.1.19
 
-- Settings › Secrets keeps password fields at a fixed width, so long secret values no longer widen the list. The fields fit within the available space in narrow windows.
+- Keep Secrets list value fields at a fixed width, and constrain long values and editors within the list in narrow windows.
+
+## 0.1.18
+
+- Settings › yesman lists the crew: the models agents run as, each one of pi's models at one reasoning effort. Add and remove them there, and choose what new yesmen run as.
+- Hiring a yesman asks only for its name: its lead runs as the model chosen for new yesmen.
+- The lead chooses a member of the crew for each worker, weighing how smart, fast and costly each is for the task, from Artificial Analysis's scores. Without a choice, a worker runs as its lead's model.
+- yesman finds each model's scores by its name. For a model Artificial Analysis has no record of, you give your own estimate when you add it.
+- You can still run any agent as any of pi's models from the composer.
 
 ## 0.1.17
 

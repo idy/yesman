@@ -59,8 +59,13 @@ func (s *service) State(ctx context.Context) (State, error) {
 }
 
 // Hire creates a yesman. Its lead starts when you first talk to it.
-func (s *service) Hire(name string) (yesmen.Yesman, error) {
-	y, err := s.app.yesmen.Hire(name)
+func (s *service) Hire(ctx context.Context, name string) (yesmen.Yesman, error) {
+	// Its lead runs as the model Settings › yesman chooses for new yesmen.
+	model, err := s.app.yesmanModel(ctx)
+	if err != nil {
+		return yesmen.Yesman{}, err
+	}
+	y, err := s.app.yesmen.HireAs(name, model)
 	if err != nil {
 		return y, err
 	}
@@ -210,6 +215,8 @@ func (s *service) SendImages(ctx context.Context, id, text string, images []agen
 }
 
 // Models lists pi's available models and this agent's effective selection.
+// The user may run an agent as any of them; the crew is what yesman starts
+// agents as.
 func (s *service) Models(ctx context.Context, id string) (agent.ModelOptions, error) {
 	return s.app.agents.Models(ctx, id)
 }

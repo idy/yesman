@@ -271,7 +271,8 @@ func readConfig(path string) (config, error) {
 func (c config) settings(current Settings, mode importMode) Settings {
 	next := current
 	if mode == importReplace {
-		next = Settings{Appearance: mygo.ThemeSystem}
+		// The file does not carry the crew, so replacing keeps it.
+		next = Settings{Appearance: mygo.ThemeSystem, Crew: current.Crew}
 	}
 	if c.appearance != nil {
 		next.Appearance = *c.appearance

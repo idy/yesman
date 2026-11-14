@@ -369,6 +369,12 @@ export default function yesman(pi: ExtensionAPI) {
 			name: Type.String({ description: "Short name: 1-32 lowercase letters, digits and dashes, such as fix-login" }),
 			title: Type.String({ description: "The subject of its work in a few words, up to 80 characters, as the user should see it: usually its board task's title, such as \"Fix the login timeout\". Not an instruction like \"Do task t5\"." }),
 			task: Type.String({ description: "The task, complete enough to work on without asking" }),
+			crew: Type.Optional(
+				Type.String({
+					description:
+						"The key of the crew member to run as, from the Crew section of your context: a model at a thinking level, such as provider/model:high. Leave it out to run the worker as your own model and effort.",
+				}),
+			),
 		}),
 		async execute(_id, params, signal) {
 			const info = await call("POST", "/v1/workers", params, signal);
