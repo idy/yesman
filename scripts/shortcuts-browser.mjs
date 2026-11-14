@@ -9,7 +9,7 @@
 // Windows rules in Chromium and WebKit; they are not WebView2 on Windows,
 // and the browser's own editing keys stay those of the system it runs on.
 //
-// YESMAN_SHORTCUTS_GROUPS (palette, settings, context, display),
+// YESMAN_SHORTCUTS_GROUPS (palette, settings, context, display, saving, search),
 // YESMAN_SHORTCUTS_ENGINES (chromium, webkit) and YESMAN_SHORTCUTS_PLATFORMS
 // (darwin, win32) choose what runs, all by default. YESMAN_SHORTCUTS_OUT
 // names a folder for a JSON result per run and screenshots.
@@ -23,7 +23,7 @@ const root = fileURLToPath(new URL('../web/', import.meta.url));
 const out = process.env.YESMAN_SHORTCUTS_OUT || '';
 if (out) await mkdir(out, { recursive: true });
 const list = (name, all) => (process.env[name] ? process.env[name].split(',') : all);
-const GROUPS = list('YESMAN_SHORTCUTS_GROUPS', ['palette', 'settings', 'context', 'display']);
+const GROUPS = list('YESMAN_SHORTCUTS_GROUPS', ['palette', 'settings', 'context', 'display', 'saving', 'search']);
 const ENGINES = list('YESMAN_SHORTCUTS_ENGINES', ['chromium', 'webkit']);
 const PLATFORMS = list('YESMAN_SHORTCUTS_PLATFORMS', ['darwin', 'win32']);
 // A 1×1 PNG, attached as a user would.
@@ -42,6 +42,12 @@ window.agents = [
 const saved = () => JSON.parse(localStorage.getItem('synthetic.shortcuts') || '{}');
 window.fileText = 'const a = 1;\\n';
 window.importPlan = null;
+// With holdSaves, each SetShortcuts and ResetShortcuts waits in held until
+// the test answers it: held.shift().resolve() lets it save as Go does,
+// held.shift().reject(err) fails it, saving nothing.
+window.holdSaves = false;
+window.held = [];
+const hold = () => (holdSaves ? new Promise((resolve, reject) => held.push({resolve, reject})) : null);
 // Each modal dialog opened, by name: the palette, hire, confirm, rename, ...
 window.modalOpens = {};
 const showModal = HTMLDialogElement.prototype.showModal;
@@ -77,13 +83,14 @@ async function answer(m, args) {
   case 'Submit': return {id:args[1],revision:1,state:'accepted',agentSince:''};
   case 'Shortcuts': return saved();
   case 'SetShortcuts': {
+    await hold();
     const next = saved();
     for (const [id, list] of Object.entries(args[0])) { if (list === null) delete next[id]; else next[id] = list; }
     if (window.failSave) throw Error('Synthetic save failure');
     localStorage.setItem('synthetic.shortcuts', JSON.stringify(next));
     return next;
   }
-  case 'ResetShortcuts': localStorage.removeItem('synthetic.shortcuts'); return {};
+  case 'ResetShortcuts': await hold(); localStorage.removeItem('synthetic.shortcuts'); return {};
   case 'SetAppearance': return;
   case 'ChooseConfigFile': return '/synthetic/in.toml';
   case 'PreviewImport': return importPlan;
@@ -126,8 +133,8 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 
 // open loads the page in a new browser context, with keys of the user's own
 // saved: ⌥⌘E (Ctrl+Alt+E) shows the info.
-async function open(browser, platform, { locale = 'en', viewport = { width: 1180, height: 780 }, seed = { 'pane.info': ['Mod+Alt+E'] } } = {}) {
-  const context = await browser.newContext({ viewport });
+async function open(browser, platform, { locale = 'en', browserLocale, viewport = { width: 1180, height: 780 }, seed = { 'pane.info': ['Mod+Alt+E'] } } = {}) {
+  const context = await browser.newContext({ viewport, ...(browserLocale ? { locale: browserLocale } : {}) });
   // The vendored editor (CodeMirror) reads the platform from navigator: on
   // the Windows runs say Win32 to it too, so its Mod is Ctrl as on Windows.
   // This lines the fixture up; it is not a run on Windows.
@@ -712,6 +719,210 @@ async function context(x, check) {
   check(`the editor keeps ${cap('⌘/', 'Ctrl+/')} (comment) and saves once with ${cap('⌘S', 'Ctrl+S')}; ${cap('⌘K', 'Ctrl+K')} works there and gives focus back; ${cap('⌘P', 'Ctrl+P')} finds, ${cap('⇧⌘Y', 'Ctrl+Shift+Y')} toggles the tree; the files menu gets their keys`);
 }
 
+// ---------- 5. Saving: changes made while others save, failures, Esc ----------
+async function saving(x, check) {
+  const { page, MOD, cap } = x;
+  const row = (id) => page.locator(`[data-action="${id}"]`);
+  const chips = (id) => row(id).locator('.shortcut-chip .keycap').allInnerTexts();
+  const resetAll = page.locator('#shortcut-reset-all');
+  const kept = () => page.evaluate(() => JSON.parse(localStorage.getItem('synthetic.shortcuts') || '{}'));
+  const sets = () => page.evaluate(() => calls.filter((c) => c[0] === 'SetShortcuts').map((c) => c[1]));
+  const heldCount = () => page.evaluate(() => held.length);
+  const answer = (ok = true) => page.evaluate((ok) => (ok ? held.shift().resolve() : held.shift().reject(new Error('Synthetic save failure'))), ok);
+  // seed keeps keys as settings.json would, then restarts the page.
+  const restart = async (keys) => {
+    await page.evaluate((keys) => {
+      localStorage.setItem('synthetic.shortcuts', JSON.stringify(keys));
+      localStorage.setItem('yesman.info', 'hidden'); // an earlier part may have shown it
+    }, keys);
+    await x.load();
+    assert.equal(await x.infoShown(), false);
+    assert.equal(await x.boardShown(), false);
+  };
+  const openShortcuts = async () => {
+    await x.textarea.click();
+    await page.keyboard.press(`${MOD}+Slash`);
+    await page.locator('#shortcut-list').waitFor();
+  };
+  // press runs keys on the lead's conversation, outside any text field.
+  const press = async (keys) => {
+    await x.lead.click();
+    await x.lead.focus();
+    await page.keyboard.press(keys);
+  };
+  // Each part starts from its own keys and runs even when one before it
+  // failed, so that each finding is told apart.
+  const failures = [];
+  const part = async (name, fn) => {
+    try { await fn(); } catch (err) { failures.push(`${name}: ${err.message.split('\n').slice(0, 6).join(' ')}`); }
+  };
+
+  // Reset all follows the keys: off with none changed, on after the first
+  // change saves, off again after resetting, without leaving the page.
+  await part('reset-all', async () => {
+    await restart({});
+    await openShortcuts();
+    assert.equal(await resetAll.isDisabled(), true);
+    await row('pane.info').locator('.shortcut-add').click();
+    await page.keyboard.press(`${MOD}+Shift+KeyJ`);
+    await page.locator('#shortcut-recorder').waitFor({ state: 'detached' });
+    assert.deepEqual(await kept(), { 'pane.info': ['Mod+Shift+J'] });
+    assert.equal(await resetAll.isDisabled(), false);
+    await resetAll.click();
+    assert.match(await page.locator('#confirm-dialog').innerText(), /1 action has keys of its own/);
+    await page.locator('#confirm-ok').click();
+    await page.waitForFunction(() => calls.some((c) => c[0] === 'ResetShortcuts'));
+    await page.waitForFunction(() => document.querySelector('#shortcut-reset-all')?.disabled === true);
+    assert.deepEqual(await chips('pane.info'), []);
+    check('Reset all turns on as soon as the first change saves, counts it, and off again after resetting');
+  });
+
+  // Esc cancels a recording whose keys another action has, from the
+  // conflict's buttons too; nothing saves and the keys keep their action.
+  await part('escape', async () => {
+    await restart({});
+    await openShortcuts();
+    await row('pane.info').locator('.shortcut-add').click();
+    await page.keyboard.press(`${MOD}+KeyK`);
+    await page.locator('.shortcut-conflict').waitFor();
+    assert.equal(await page.evaluate(() => document.activeElement.matches('.shortcut-conflict .mds-button--primary')), true);
+    const before = (await sets()).length;
+    await page.keyboard.press('Escape');
+    await page.locator('#shortcut-recorder').waitFor({ state: 'detached' });
+    assert.equal(await page.locator('.shortcut-conflict').count(), 0);
+    assert.equal(await page.evaluate(() => document.activeElement.matches('[data-action="pane.info"] .shortcut-add')), true);
+    assert.equal((await sets()).length, before);
+    assert.deepEqual(await chips('palette.open'), [cap('⌘K', 'Ctrl+K'), cap('⇧⌘P', 'Ctrl+Shift+P')]);
+    assert.equal(await page.evaluate(() => document.querySelector('#app').dataset.view), 'settings');
+    // Enter on the conflict's choice still takes the keys.
+    await row('pane.info').locator('.shortcut-add').click();
+    await page.keyboard.press(`${MOD}+KeyK`);
+    await page.locator('.shortcut-conflict').waitFor();
+    await page.keyboard.press('Enter');
+    await page.locator('#shortcut-recorder').waitFor({ state: 'detached' });
+    assert.deepEqual(await kept(), { 'pane.info': ['Mod+K'], 'palette.open': ['Mod+Shift+P'] });
+    await press(`${MOD}+KeyK`);
+    assert.equal(await x.infoShown(), true);
+    assert.equal(await x.palette.isVisible(), false);
+    check('Esc on a conflict’s buttons cancels the recording and saves nothing; Enter there still reassigns, and the keys run their new action');
+  });
+
+  // Two removals before the first saves: the second goes out after the
+  // first answers, from what it saved, and both keys are gone.
+  await part('two-removals', async () => {
+    await restart({});
+    await openShortcuts();
+    await page.evaluate(() => { holdSaves = true; });
+    await row('palette.open').locator('.shortcut-chip button').nth(0).click();
+    await page.waitForFunction(() => held.length === 1);
+    await row('palette.open').locator('.shortcut-chip button').nth(1).click();
+    await page.waitForTimeout(100); // a second request would have gone out by now
+    assert.equal((await sets()).length, 1);
+    await answer();
+    await page.waitForFunction(() => held.length === 1);
+    await answer();
+    await page.waitForFunction(() => document.querySelectorAll('[data-action="palette.open"] .shortcut-chip').length === 0);
+    assert.deepEqual(await sets(), [{ 'palette.open': ['Mod+Shift+P'] }, { 'palette.open': [] }]);
+    assert.deepEqual(await kept(), { 'palette.open': [] });
+    // Removals on two actions, both pending: each keeps its own.
+    await row('pane.files').locator('.shortcut-chip button').click();
+    await row('pane.board').locator('.shortcut-chip button').click();
+    await page.waitForFunction(() => held.length === 1);
+    await answer();
+    await page.waitForFunction(() => held.length === 1);
+    await answer();
+    await page.waitForFunction(() => document.querySelectorAll('[data-action="pane.board"] .shortcut-chip').length === 0);
+    assert.deepEqual(await kept(), { 'palette.open': [], 'pane.files': [], 'pane.board': [] });
+    assert.equal(await heldCount(), 0);
+    await page.evaluate(() => { holdSaves = false; });
+    await press(`${MOD}+KeyK`);
+    assert.equal(await x.palette.isVisible(), false);
+    await page.keyboard.press(`${MOD}+Shift+KeyP`);
+    assert.equal(await x.palette.isVisible(), false);
+    await page.keyboard.press(`${MOD}+Shift+KeyB`);
+    assert.equal(await x.boardShown(), false);
+    await x.load();
+    await press(`${MOD}+KeyK`);
+    assert.equal(await x.palette.isVisible(), false);
+    check('removing two keys before the first saves removes both, one request after another; removals on two actions keep both; after a reload neither runs');
+  });
+
+  // A save that succeeds, then one that fails: the first stays, and its
+  // removed keys stop running; the failure says so on its own action.
+  await part('success-then-failure', async () => {
+    await restart({ 'pane.info': ['Mod+Alt+E'] });
+    await openShortcuts();
+    await page.evaluate(() => { holdSaves = true; });
+    await row('pane.info').locator('.shortcut-chip button').click();
+    await page.waitForFunction(() => held.length === 1);
+    await row('pane.board').locator('.shortcut-chip button').click();
+    await answer(true);
+    await page.waitForFunction(() => held.length === 1);
+    await answer(false);
+    await row('pane.board').getByText('Synthetic save failure').waitFor();
+    assert.deepEqual(await kept(), {});
+    assert.deepEqual(await chips('pane.info'), []);
+    assert.deepEqual(await chips('pane.board'), [cap('⇧⌘B', 'Ctrl+Shift+B')]);
+    assert.equal(await resetAll.isDisabled(), true);
+    await page.evaluate(() => { holdSaves = false; });
+    await press(`${MOD}+Alt+KeyE`);
+    assert.equal(await x.infoShown(), false);
+    await page.keyboard.press(`${MOD}+Shift+KeyB`);
+    assert.equal(await x.boardShown(), true);
+    await page.keyboard.press(`${MOD}+Shift+KeyB`);
+    check('a save that succeeds before one that fails keeps its change: its removed key stops running, the failed action keeps its keys and shows why');
+  });
+
+  // A change that saves, then Reset all failing: the change stays, Reset all
+  // stays on and says why.
+  await part('success-then-reset-failure', async () => {
+    await restart({ 'pane.info': ['Mod+Alt+E'] });
+    await openShortcuts();
+    await page.evaluate(() => { holdSaves = true; });
+    await row('pane.board').locator('.shortcut-chip button').click();
+    await page.waitForFunction(() => held.length === 1);
+    await resetAll.click();
+    await page.locator('#confirm-ok').click();
+    // Reset all has been asked for once its button turns off.
+    await page.waitForFunction(() => document.querySelector('#shortcut-reset-all')?.disabled === true);
+    await answer(true);
+    await page.waitForFunction(() => held.length === 1);
+    await answer(false);
+    await page.locator('.mds-toolbar [role="alert"]').getByText('Synthetic save failure').waitFor();
+    assert.deepEqual(await kept(), { 'pane.info': ['Mod+Alt+E'], 'pane.board': [] });
+    assert.deepEqual(await chips('pane.board'), []);
+    assert.deepEqual(await chips('pane.info'), [cap('⌥⌘E', 'Ctrl+Alt+E')]);
+    assert.equal(await resetAll.isDisabled(), false);
+    await page.evaluate(() => { holdSaves = false; });
+    await press(`${MOD}+Shift+KeyB`);
+    assert.equal(await x.boardShown(), false);
+    await page.keyboard.press(`${MOD}+Alt+KeyE`);
+    assert.equal(await x.infoShown(), true);
+    check('a change that saves before Reset all fails stays; Reset all stays available and says why; the keys run as saved');
+  });
+  if (failures.length) throw new Error(`saving parts failed:\n${failures.join('\n')}`);
+}
+
+// ---------- 6. Search on a system with other case rules ----------
+// The browser speaks Turkish, where "I" lowers to a dotless "ı"; the
+// page is in English. Searching "import" still finds Import and export.
+async function search(x, check) {
+  const { page, MOD } = x;
+  assert.equal(await page.evaluate(() => 'Import'.toLocaleLowerCase()), 'ımport'); // the system's rules apply here
+  await x.textarea.click();
+  await page.keyboard.press(`${MOD}+KeyK`);
+  await x.palette.waitFor({ state: 'visible' });
+  await page.keyboard.type('import');
+  assert.match(await x.palette.locator('[role="option"]').first().innerText(), /Import and export/);
+  await page.keyboard.press('Escape');
+  await x.palette.waitFor({ state: 'hidden' });
+  await page.keyboard.press(`${MOD}+Slash`);
+  await page.locator('#shortcut-list').waitFor();
+  await page.locator('#shortcut-search').fill('import');
+  assert.deepEqual(await page.locator('#shortcut-list [data-action]').evaluateAll((els) => els.map((e) => e.dataset.action)), ['settings.page.config']);
+  check('with Turkish case rules in the browser, "import" finds Import and export in the palette and in Settings › Shortcuts');
+}
+
 // ---------- 4. Language, theme, narrow ----------
 async function display(x, check) {
   const { page, MOD, cap } = x;
@@ -747,7 +958,7 @@ async function display(x, check) {
   check('Simplified Chinese, dark, 640px: Settings › Shortcuts and the palette fit, keycaps stay the platform’s');
 }
 
-const groups = { palette, settings, context, display };
+const groups = { palette, settings, context, display, saving, search };
 const results = [];
 let failed = 0;
 try {
@@ -757,7 +968,9 @@ try {
       for (const platform of PLATFORMS) {
         for (const group of GROUPS) {
           const options = group === 'display' ? { locale: 'zh-Hans', viewport: { width: 640, height: 760 } }
-            : group === 'context' ? { seed: { 'pane.info': ['Mod+Alt+E'], 'pane.board': ['Mod+Shift+B', 'Alt+K'] } } : {};
+            : group === 'context' ? { seed: { 'pane.info': ['Mod+Alt+E'], 'pane.board': ['Mod+Shift+B', 'Alt+K'] } }
+              : group === 'saving' ? { seed: {} }
+              : group === 'search' ? { browserLocale: 'tr-TR' } : {};
           const result = { group, engine: engineName, platform, checks: [], ok: false, started: new Date().toISOString() };
           let x;
           try {

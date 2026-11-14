@@ -64,16 +64,28 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
 
   const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
-  // change saves an action's new keys, or its defaults when they are.
-  async function change(changes) {
-    const next = {};
-    for (const [id, list] of Object.entries(changes)) next[id] = list && sameList(list, shortcuts.defaultsOf(id)) ? null : list;
-    for (const id of Object.keys(next)) errors.delete(id);
+  // change saves actions' new keys, or their defaults when they are.
+  // compute works the keys out from those kept when the change's turn to
+  // save comes, after the changes before it have saved or failed: a key
+  // removed while another removal saves is not brought back by it.
+  async function change(compute) {
+    let ids = [];
     try {
-      await shortcuts.update(next);
+      await shortcuts.update(() => {
+        const next = {};
+        for (const [id, list] of Object.entries(compute())) {
+          const value = list && sameList(list, shortcuts.defaultsOf(id)) ? null : list;
+          // Leave out what would not change.
+          if (value === null ? !shortcuts.isCustom(id) : shortcuts.isCustom(id) && sameList(value, current(id))) continue;
+          next[id] = value;
+        }
+        ids = Object.keys(next);
+        for (const id of ids) errors.delete(id);
+        return next;
+      });
       return true;
     } catch (err) {
-      for (const id of Object.keys(next)) errors.set(id, err?.message || String(err));
+      for (const id of ids) errors.set(id, err?.message || String(err));
       if (shown()) renderList();
       return false;
     }
@@ -132,8 +144,18 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
   }
 
   function record(e) {
-    if (!rec || e.target?.id !== 'shortcut-recorder') return;
+    if (!rec) return;
     const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
+    if (e.target?.id !== 'shortcut-recorder') {
+      // Esc cancels from anywhere in the recording, its conflict's buttons
+      // too; other keys there do as they would (Enter chooses).
+      if (e.type === 'keydown' && e.key === 'Escape' && plain && !e.shiftKey && !e.isComposing && inRecording(e.target)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (!e.repeat && !rec.saving) stopRecording(true);
+      }
+      return;
+    }
     if (e.type === 'keydown' && e.key === 'Tab' && plain) { stopRecording(); return; } // focus moves on
     // The keys are the recorder's: nothing else on the page takes them.
     e.preventDefault();
@@ -189,9 +211,13 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
     const r = rec;
     r.saving = true;
     const id = bindingId(binding, platform);
-    const changes = { [r.id]: [...current(r.id), binding] };
-    for (const other of others) changes[other.id] = current(other.id).filter((b) => bindingId(b, platform) !== id);
-    const ok = await change(changes);
+    const same = (b) => bindingId(b, platform) === id;
+    const ok = await change(() => {
+      const mine = current(r.id);
+      const changes = { [r.id]: mine.some(same) ? mine : [...mine, binding] };
+      for (const other of others) changes[other.id] = current(other.id).filter((b) => !same(b));
+      return changes;
+    });
     if (rec !== r) return;
     r.saving = false;
     if (ok) stopRecording(true);
@@ -223,7 +249,7 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
       h('button', {
         class: 'mds-icon-button mds-icon-button--compact', type: 'button', disabled: !!rec,
         title: t('Remove {keys}', { keys: k.text }), 'aria-label': t('Remove {keys} from {action}', { keys: k.spoken, action: shortcuts.label(action) }),
-        onclick: () => change({ [action.id]: current(action.id).filter((x) => x !== b.binding) }),
+        onclick: () => change(() => ({ [action.id]: current(action.id).filter((x) => x !== b.binding) })),
       }, icon('x')));
   }
 
@@ -274,7 +300,7 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
       controls.append(h('button', {
         class: 'mds-link-button shortcut-reset', type: 'button', disabled: !!rec,
         'aria-label': t('Reset {action} to its default shortcuts', { action: label }),
-        onclick: () => change({ [action.id]: null }),
+        onclick: () => change(() => ({ [action.id]: null })),
       }, t('Reset')));
     }
     const info = notes(action, list);
@@ -301,12 +327,14 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
       h('div', { class: 'mds-row-control' }, controls));
   }
 
+  // Search folds case the same way whatever the system's language: the
+  // page is in English or Chinese, and Turkish rules would not find “import”.
   function matchesQuery(action) {
-    const q = query.trim().toLocaleLowerCase();
+    const q = query.trim().toLowerCase();
     if (!q) return true;
     const texts = [shortcuts.label(action), t(action.group ?? ''), action.id, ...(action.keywords ?? []).map((k) => t(k)),
       ...shortcuts.bindingsOf(action.id).flatMap((b) => (b.chord ? [b.binding, keycap(b.chord, platform).text, keycap(b.chord, platform).spoken] : [b.binding]))];
-    return q.split(/\s+/).every((word) => texts.some((s) => s.toLocaleLowerCase().includes(word)));
+    return q.split(/\s+/).every((word) => texts.some((s) => s.toLowerCase().includes(word)));
   }
 
   function renderList() {
@@ -322,6 +350,16 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
     el.replaceChildren(...(sections.length ? sections
       : [h('div', { class: 'card-empty' }, h('span', null, t('No action matches “{query}”.', { query: query.trim() })))]));
     paintRecorder();
+    paintResetAll();
+  }
+
+  const customCount = () => shortcuts.actions().filter((a) => shortcuts.isCustom(a.id)).length;
+
+  // Reset all is there while any action has keys of its own, as they are
+  // saved, loaded or reset, and not while recording or resetting.
+  function paintResetAll() {
+    const button = document.getElementById('shortcut-reset-all');
+    if (button) button.disabled = !customCount() || resetting || !!rec;
   }
 
   function builtInSection() {
@@ -353,11 +391,11 @@ export function createShortcutsPage({ shortcuts, confirm, shown, rerender, setti
       h('input', { class: 'mds-input', id: 'shortcut-search', type: 'search', placeholder: t('Find an action or keys'), 'aria-label': t('Find an action or keys'),
         spellcheck: 'false', autocomplete: 'off', value: query,
         oninput: (e) => { query = e.currentTarget.value; renderList(); } }));
-    const custom = shortcuts.actions().filter((a) => shortcuts.isCustom(a.id)).length;
-    const resetAll = h('button', { class: 'mds-button mds-button--small', type: 'button', id: 'shortcut-reset-all', disabled: !custom || resetting || !!rec,
+    const resetAll = h('button', { class: 'mds-button mds-button--small', type: 'button', id: 'shortcut-reset-all', disabled: !customCount() || resetting || !!rec,
       onclick: async () => {
-        if (!(await confirm(t('Reset all shortcuts?'), tnCount(custom), t('Reset all')))) return;
+        if (!(await confirm(t('Reset all shortcuts?'), tnCount(customCount()), t('Reset all')))) return;
         resetting = true;
+        errors.delete('*');
         rerender();
         try {
           await shortcuts.resetAll();

@@ -12,11 +12,13 @@ import { t } from './i18n.js';
 
 // score says how well a query matches a text, higher better, or 0 for not
 // at all: the whole text, its start, a word's start, anywhere, or the first
-// letters of its words in order ("shf" for Show or hide the files).
+// letters of its words in order ("shf" for Show or hide the files). Case
+// folds the same way whatever the system's language, so that "import"
+// finds "Import" on a Turkish system too.
 export function score(query, text) {
-  const q = query.trim().toLocaleLowerCase();
+  const q = query.trim().toLowerCase();
   if (!q) return 1;
-  const s = text.toLocaleLowerCase();
+  const s = text.toLowerCase();
   if (s === q) return 100;
   if (s.startsWith(q)) return 80;
   const at = s.indexOf(q);

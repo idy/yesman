@@ -192,7 +192,7 @@ const RESERVED = {
     system: ['Cmd+Q', 'Cmd+Shift+Q', 'Cmd+Alt+Shift+Q', 'Cmd+Ctrl+Q', 'Cmd+H', 'Cmd+Alt+H', 'Cmd+M', 'Cmd+Alt+M',
       'Cmd+W', 'Cmd+Alt+W', 'Cmd+`', 'Cmd+~', 'Cmd+Shift+3', 'Cmd+Shift+4', 'Cmd+Shift+5', 'Cmd+Shift+6',
       'Cmd+Ctrl+Shift+3', 'Cmd+Ctrl+Shift+4', 'Cmd+Alt+D', 'Cmd+Ctrl+D', 'Cmd+Ctrl+F', 'Cmd+R', 'Cmd+Shift+R',
-      'Cmd+Alt+I', 'Cmd+0', 'Cmd+=', 'Cmd++', 'Cmd+-'],
+      'Cmd+Alt+I', 'Cmd+0', 'Cmd+=', 'Cmd++', 'Cmd+-', 'Shift+F10'],
     editing: ['Cmd+Z', 'Cmd+Shift+Z', 'Cmd+X', 'Cmd+C', 'Cmd+V', 'Cmd+Alt+Shift+V', 'Cmd+A'],
   },
   windows: {

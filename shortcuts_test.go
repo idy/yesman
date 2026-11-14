@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -163,10 +164,44 @@ func TestSetShortcutsKeepsTheOtherSettings(t *testing.T) {
 	if !reflect.DeepEqual(s.Shortcuts(), want) {
 		t.Errorf("a failed change left %v", s.Shortcuts())
 	}
-	// So does one that cannot be written.
-	if err := os.Chmod(a.home.Root, 0o500); err == nil && os.Getuid() != 0 {
+	// So does one that cannot be written, on every platform: a folder in
+	// the settings file's place cannot be replaced by a file.
+	settingsPath := a.home.Settings()
+	if err := os.Rename(settingsPath, settingsPath+".aside"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(settingsPath, "in the way"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetShortcuts(map[string]*[]string{"palette.open": nil}); err == nil {
+		t.Error("saved over a folder")
+	} else if !reflect.DeepEqual(s.Shortcuts(), want) {
+		t.Errorf("a failed save left %v", s.Shortcuts())
+	}
+	if _, err := s.ResetShortcuts(); err == nil {
+		t.Error("reset over a folder")
+	} else if !reflect.DeepEqual(s.Shortcuts(), want) {
+		t.Errorf("a failed reset left %v", s.Shortcuts())
+	}
+	if err := os.RemoveAll(settingsPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(settingsPath+".aside", settingsPath); err != nil {
+		t.Fatal(err)
+	}
+	if saved := loadSettings(settingsPath); !reflect.DeepEqual(map[string][]string(saved.Shortcuts), want) {
+		t.Errorf("after failed saves the file has %v", saved.Shortcuts)
+	}
+	// And, where folder permissions say so, a folder it may not write in.
+	// Windows does not refuse new files in a folder by its mode bits.
+	if runtime.GOOS != "windows" && os.Getuid() != 0 {
+		if err := os.Chmod(a.home.Root, 0o500); err != nil {
+			t.Fatal(err)
+		}
 		_, err := s.SetShortcuts(map[string]*[]string{"palette.open": nil})
-		os.Chmod(a.home.Root, 0o700)
+		if err := os.Chmod(a.home.Root, 0o700); err != nil {
+			t.Fatal(err)
+		}
 		if err == nil {
 			t.Error("saved into a folder it cannot write")
 		} else if !reflect.DeepEqual(s.Shortcuts(), want) {

@@ -53,8 +53,7 @@ export function createShortcuts({ platform, call, fail = () => {}, t = (s) => s,
   let ready = false;
   let recording = false;
   let composing = false;
-  let saving = Promise.resolve();
-  let saveSeq = 0;
+  let queue = Promise.resolve(); // loads and saves, one after another
   const listeners = new Set();
 
   const defaultsOf = (action) => {
@@ -255,39 +254,70 @@ export function createShortcuts({ platform, call, fail = () => {}, t = (s) => s,
 
   // ---------- Keeping keys ----------
 
-  // load reads the keys kept, after the changes being saved, so that an
-  // answer read before them does not undo them.
-  async function load() {
-    const seq = ++saveSeq;
+  // The keys are those the app last said it keeps. Loads and saves go to
+  // it one at a time, in order, each answered before the next is asked, so
+  // every answer is the newest the app has, and each one is taken: a save
+  // that succeeds stays, whatever comes after it. A change that fails
+  // changes nothing, and the keys are read again, in case the app kept
+  // some of it after all.
+  function enqueue(step) {
+    const next = queue.then(step);
+    queue = next.catch(() => {});
+    return next;
+  }
+
+  async function reread() {
     try {
-      const saved = await saving.catch(() => {}).then(() => call('Shortcuts'));
-      if (seq === saveSeq) setOverrides(saved);
-    } finally {
-      ready = true;
+      setOverrides(await call('Shortcuts'));
+    } catch {
+      // Keep the keys last known; the failure that led here is reported.
     }
   }
 
-  // update changes actions' keys together: a list of bindings, [] for none,
-  // or null for the defaults. Changes save one after another; the newest
-  // answer wins.
+  // load reads the keys kept, after the changes being saved.
+  function load() {
+    return enqueue(async () => {
+      try {
+        setOverrides(await call('Shortcuts'));
+      } finally {
+        ready = true;
+      }
+    });
+  }
+
+  // update changes actions' keys together: to a list of bindings, [] for
+  // none, or null for the defaults. changes may be a function that works
+  // them out from the keys kept when its turn to save comes, after the
+  // changes before it: two removals made before the first has saved then
+  // both take effect. Nothing is asked when there is nothing to change.
   function update(changes) {
-    const seq = ++saveSeq;
-    const next = saving.catch(() => {}).then(() => call('SetShortcuts', changes)).then((saved) => {
-      if (seq === saveSeq) setOverrides(saved);
+    return enqueue(async () => {
+      const next = typeof changes === 'function' ? changes() : changes;
+      if (!next || !Object.keys(next).length) return structuredClone(overrides);
+      let saved;
+      try {
+        saved = await call('SetShortcuts', next);
+      } catch (err) {
+        await reread();
+        throw err;
+      }
+      setOverrides(saved);
       return saved;
     });
-    saving = next;
-    return next;
   }
 
   function resetAll() {
-    const seq = ++saveSeq;
-    const next = saving.catch(() => {}).then(() => call('ResetShortcuts')).then((saved) => {
-      if (seq === saveSeq) setOverrides(saved);
+    return enqueue(async () => {
+      let saved;
+      try {
+        saved = await call('ResetShortcuts');
+      } catch (err) {
+        await reread();
+        throw err;
+      }
+      setOverrides(saved);
       return saved;
     });
-    saving = next;
-    return next;
   }
 
   return {

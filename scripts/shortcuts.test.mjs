@@ -110,7 +110,9 @@ test('a binding is refused where the platform or text editing needs its keys', (
   assert.equal(problem('Mod+Y', 'mac'), null); // ⌘Y is free on a Mac
   for (const b of ['Mod+Q', 'Mod+W', 'Mod+H', 'Mod+M', 'Mod+R', 'Mod+0', 'Mod+=', 'Mod+-', 'Mod+Alt+I', 'Mod+Ctrl+F', 'Mod+`']) assert.equal(problem(b, 'mac'), 'system', b);
   assert.equal(problem('Alt+F4', 'windows'), 'system');
-  assert.equal(problem('Shift+F10', 'windows'), 'system');
+  // Shift+F10 opens a sidebar entry's menu everywhere, as Settings says.
+  for (const p of ['mac', 'windows', 'linux']) assert.equal(problem('Shift+F10', p), 'system', p);
+  assert.equal(problem('F10', 'mac'), null);
   assert.equal(problem('Mod+Q', 'windows'), null); // Windows has no ⌘Q
   // Moving and deleting through text keep their keys.
   for (const b of ['Mod+ArrowLeft', 'Alt+ArrowUp', 'Mod+Backspace', 'Ctrl+ArrowUp', 'Shift+ArrowDown']) assert.equal(problem(b, 'mac'), 'caret', b);
@@ -422,7 +424,139 @@ test('loading the keys waits for changes being saved', async () => {
   assert.deepEqual(s.bindingsOf('a.one').map((b) => b.binding), ['Mod+U']);
 });
 
+// An app whose saves wait until the test answers them, one at a time, as
+// Go does: each answer is what it keeps after that change.
+function heldApp(initial = {}) {
+  let kept = structuredClone(initial);
+  const held = [];
+  const sent = [];
+  const call = async (m, arg) => {
+    if (m === 'Shortcuts') return structuredClone(kept);
+    sent.push([m, structuredClone(arg ?? null)]);
+    await new Promise((resolve, reject) => held.push({ resolve, reject }));
+    if (m === 'ResetShortcuts') kept = {};
+    else for (const [id, list] of Object.entries(arg)) { if (list === null) delete kept[id]; else kept[id] = list; }
+    return structuredClone(kept);
+  };
+  const s = createShortcuts({ platform: 'mac', call });
+  s.register(
+    { id: 'a.one', label: 'One', keys: ['Mod+K', 'Mod+Shift+P'], run() {} },
+    { id: 'a.two', label: 'Two', keys: ['Mod+J'], run() {} },
+    { id: 'a.three', label: 'Three', run() {} },
+  );
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  return {
+    s, sent, held, kept: () => kept, tick,
+    async answer(ok = true) {
+      await tick();
+      const h = held.shift();
+      if (ok) h.resolve(); else h.reject(new Error('disk full'));
+      await tick();
+    },
+  };
+}
+
+const keysOf = (s, id) => s.bindingsOf(id).map((b) => b.binding);
+const without = (s, id, binding) => () => ({ [id]: keysOf(s, id).filter((b) => b !== binding) });
+
+test('a change worked out when its turn comes builds on the changes saved before it', async () => {
+  const app = heldApp();
+  const { s } = app;
+  await s.load();
+  const first = s.update(without(s, 'a.one', 'Mod+K'));
+  const second = s.update(without(s, 'a.one', 'Mod+Shift+P'));
+  await app.tick();
+  assert.equal(app.sent.length, 1); // the second waits for the first's answer
+  await app.answer();
+  await app.answer();
+  await Promise.all([first, second]);
+  assert.deepEqual(app.sent.map((c) => c[1]), [{ 'a.one': ['Mod+Shift+P'] }, { 'a.one': [] }]);
+  assert.deepEqual(app.kept(), { 'a.one': [] });
+  assert.deepEqual(keysOf(s, 'a.one'), []);
+  assert.equal(s.match({ key: 'k', code: 'KeyK', metaKey: true, target: null }), null);
+  // A change worked out to nothing asks nothing (Settings leaves out the
+  // actions a change would not change).
+  await s.update(() => ({}));
+  assert.equal(app.sent.length, 2);
+});
+
+test('a save that succeeds stays when the next one fails', async () => {
+  const app = heldApp({ 'a.three': ['Mod+Alt+E'] });
+  const { s } = app;
+  await s.load();
+  const first = s.update({ 'a.three': null });
+  const second = s.update({ 'a.two': [] });
+  await app.answer(true);
+  await app.answer(false);
+  await first;
+  await assert.rejects(second, /disk full/);
+  assert.deepEqual(app.kept(), {});
+  assert.deepEqual(s.overrides(), {});
+  // The removed key no longer runs; the failed action keeps its key.
+  assert.equal(s.match({ key: 'e', code: 'KeyE', metaKey: true, altKey: true, target: null }), null);
+  assert.equal(s.match({ key: 'j', code: 'KeyJ', metaKey: true, target: null }).action.id, 'a.two');
+});
+
+test('a save that succeeds stays when Reset all fails after it, and the other way round', async () => {
+  const app = heldApp({ 'a.three': ['Mod+Alt+E'] });
+  const { s } = app;
+  await s.load();
+  const change = s.update({ 'a.two': [] });
+  const reset = s.resetAll();
+  await app.answer(true);
+  await app.answer(false);
+  await change;
+  await assert.rejects(reset, /disk full/);
+  assert.deepEqual(s.overrides(), { 'a.three': ['Mod+Alt+E'], 'a.two': [] });
+  assert.deepEqual(app.kept(), s.overrides());
+  const reset2 = s.resetAll();
+  const change2 = s.update({ 'a.one': ['Mod+L'] });
+  await app.answer(true);
+  await app.answer(false);
+  await reset2;
+  await assert.rejects(change2, /disk full/);
+  assert.deepEqual(s.overrides(), {});
+  assert.deepEqual(keysOf(s, 'a.two'), ['Mod+J']);
+});
+
+test('a failed save reads the keys again, keeping the last known when that fails too', async () => {
+  let kept = { 'a.one': ['Mod+L'] };
+  let reads = 0;
+  let readFails = false;
+  const s = createShortcuts({ platform: 'mac', call: async (m) => {
+    if (m === 'Shortcuts') { reads++; if (readFails) throw new Error('gone'); return structuredClone(kept); }
+    // The app kept the change although the answer was lost on the way.
+    kept = { 'a.one': ['Mod+U'] };
+    throw new Error('lost');
+  } });
+  s.register({ id: 'a.one', label: 'One', keys: ['Mod+K'], run() {} });
+  await s.load();
+  await assert.rejects(s.update({ 'a.one': ['Mod+U'] }), /lost/);
+  assert.equal(reads, 2);
+  assert.deepEqual(keysOf(s, 'a.one'), ['Mod+U']);
+  readFails = true;
+  await assert.rejects(s.resetAll(), /lost/);
+  assert.deepEqual(keysOf(s, 'a.one'), ['Mod+U']);
+});
+
+test('loads and saves keep their order', async () => {
+  const app = heldApp();
+  const { s } = app;
+  await s.load();
+  const change = s.update({ 'a.two': ['Mod+U'] });
+  const reload = s.load(); // as after an import
+  const after = s.update(() => ({ 'a.one': [...keysOf(s, 'a.two'), 'Mod+L'] }));
+  await app.answer();
+  await app.answer();
+  await Promise.all([change, reload, after]);
+  assert.deepEqual(app.sent.map((c) => c[1]), [{ 'a.two': ['Mod+U'] }, { 'a.one': ['Mod+U', 'Mod+L'] }]);
+  assert.deepEqual(s.overrides(), { 'a.two': ['Mod+U'], 'a.one': ['Mod+U', 'Mod+L'] });
+});
+
 test('the palette ranks by label, then group and keywords', () => {
+  // Case folds the same way on every system: "import" finds "Import".
+  assert.ok(score('import', 'Import and export') > 0);
+  assert.ok(score('IMPORT', 'import') > 0);
   const entries = [
     { label: 'Show or hide the files', group: 'Panels', keywords: ['explorer'], keys: ['⇧⌘E'] },
     { label: 'Open Settings', group: 'General', keywords: ['preferences'] },
