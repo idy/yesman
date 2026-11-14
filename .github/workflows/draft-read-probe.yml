@@ -7,6 +7,8 @@ permissions:
   contents: read
 jobs:
   probe:
+    permissions:
+      contents: write # Diagnose the minimum scope needed by the draft GET APIs.
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -18,7 +20,7 @@ jobs:
           import hashlib, json, os, pathlib, subprocess, urllib.request, urllib.error
           repo = 'idy/yesman'
           rid, tag, aid = 444130251, 'v0.1.11', 743348931
-          proof = {'run': os.environ['GITHUB_RUN_ID'], 'source': os.environ['GITHUB_SHA'], 'permission': 'contents:read', 'releaseID': rid, 'tag': tag, 'gh': subprocess.check_output(['gh','--version']).decode().splitlines()[0]}
+          proof = {'run': os.environ['GITHUB_RUN_ID'], 'source': os.environ['GITHUB_SHA'], 'permission': 'contents:write', 'releaseID': rid, 'tag': tag, 'gh': subprocess.check_output(['gh','--version']).decode().splitlines()[0]}
           def get(path, auth=True):
               headers={'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}
               if auth: headers['Authorization']='Bearer '+os.environ['GH_TOKEN']
