@@ -463,6 +463,7 @@ export default {
   "Selection deleted": "已删除所选内容",
   "Send": "发送",
   "Send: delivered after its current step": "发送：将在当前步骤结束后送达",
+  "Enter to send after the current step; Shift+Enter for a new line": "Enter 发送，将在当前步骤结束后送达；Shift+Enter 换行",
   "Session totals": "会话总计",
   "Set a password": "设置密码",
   "Set by YESMAN_HOME. Unset it and restart to change the folder here.": "由 YESMAN_HOME 指定。取消设置并重启后，才能在这里更改文件夹。",
