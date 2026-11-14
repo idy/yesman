@@ -893,3 +893,46 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 .board-empty strong { display: block; margin-bottom: 4px; color: var(--mds-ink); font-family: var(--mds-font-heading); font-weight: 400; }
 .board-empty[data-tone="error"] { color: var(--mds-error); }
 @media (prefers-reduced-motion: reduce) { .board-fold { transition: none; } }
+
+/* Needs you: what waits on the user, from every yesman. The entry always
+   shows; its requests follow it, each with where it is from and what it asks. */
+.needs-you-entry { width: 100%; margin-top: 4px; }
+.needs-you-entry .needs-you-label { flex: 1 1 auto; min-width: 0; }
+.needs-you-count {
+  min-width: 20px; padding: 0 6px; border-radius: 999px; background: var(--mds-warn-bg); color: var(--mds-warn);
+  border: 1px solid var(--mds-warn-line); font-size: var(--mds-text-caption); line-height: 18px; text-align: center; font-variant-numeric: tabular-nums;
+}
+.needs-you-row { grid-template-areas: "dot name meta" ". what what"; row-gap: 0; padding-block: 4px; }
+.needs-you-row > .needs-you-what { grid-area: what; min-width: 0; overflow: hidden; color: var(--mds-muted); font-size: var(--mds-text-caption); text-overflow: ellipsis; white-space: nowrap; }
+.needs-you-more { display: block; width: 100%; margin: 0; padding: 2px 10px 2px 32px; border: 0; background: transparent; color: var(--mds-muted); font: inherit; font-size: var(--mds-text-caption); text-align: left; cursor: default; }
+.needs-you-more:hover { color: var(--mds-ink); }
+.app[data-view="needs-you"] :is(.main, .titlebar-content) { background: var(--mds-canvas); }
+.needs-you-page h1:focus { outline: none; }
+.needs-you-intro, .needs-you-hint { margin: 0; color: var(--mds-muted); }
+.needs-you-empty { display: grid; justify-items: center; gap: 6px; padding: 40px 16px; border: 1px dashed var(--mds-line); border-radius: var(--mds-radius-md); text-align: center; }
+.needs-you-empty p { margin: 0; }
+.needs-you-empty .mds-icon { width: 20px; height: 20px; font-size: 20px; color: var(--mds-good); }
+.needs-you-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.needs-you-card {
+  display: grid; gap: 4px; width: 100%; padding: 12px 14px; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-md);
+  background: var(--app-inset, var(--mds-surface)); color: var(--mds-ink); font: inherit; text-align: left; cursor: default;
+}
+.needs-you-card:hover { border-color: var(--mds-warn-line); }
+.needs-you-type { display: inline-flex; align-items: center; gap: 6px; color: var(--mds-warn); font-size: var(--mds-text-caption); }
+.needs-you-type .mds-icon { width: 14px; height: 14px; font-size: 14px; }
+.needs-you-title { color: var(--mds-ink-strong); font-family: var(--mds-font-heading); overflow-wrap: anywhere; }
+.needs-you-summary { color: var(--mds-ink-soft); font-size: var(--mds-text-note); overflow-wrap: anywhere; }
+.needs-you-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.needs-you-meta [data-elapsed] { font-variant-numeric: tabular-nums; }
+.needs-you-history summary { color: var(--mds-muted); }
+.needs-you-history ul { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.needs-you-history li { display: grid; gap: 2px; }
+.needs-you-history-meta { color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.ask.handoff .md { color: var(--mds-warn-detail); font-size: var(--mds-text-note); }
+.ask.handoff .md > :first-child { margin-top: 0; }
+.ask.handoff .md > :last-child { margin-bottom: 0; }
+/* The request opened from Needs you, found where it was asked. */
+.needs-you-target { outline: 2px solid var(--app-focus); outline-offset: 2px; }
+.needs-you-back { justify-self: start; }
+.needs-you-back .mds-icon { width: 14px; height: 14px; font-size: 14px; }
+@media (pointer: coarse) { .needs-you-more { min-height: 44px; } }

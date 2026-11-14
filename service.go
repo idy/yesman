@@ -29,10 +29,15 @@ type State struct {
 	Agents  []agent.Info `json:"agents"`
 }
 
-// YesmanView is a yesman with its worktrees.
+// YesmanView is a yesman with its worktrees, and its handoffs: what its lead
+// handed the user to do, open and recently closed (Needs you).
 type YesmanView struct {
 	yesmen.Yesman
-	Worktrees []pool.Worktree `json:"worktrees"`
+	Worktrees []pool.Worktree  `json:"worktrees"`
+	Handoffs  []yesmen.Handoff `json:"handoffs"`
+	// HandoffsError says why its handoffs cannot be read; the page shows it
+	// rather than an empty list.
+	HandoffsError string `json:"handoffsError,omitempty"`
 }
 
 // State returns the yesmen, their worktrees and agents.
@@ -52,7 +57,13 @@ func (s *service) State(ctx context.Context) (State, error) {
 			snapshot.Worktrees = nil
 		}
 		for _, y := range ys {
-			st.Yesmen = append(st.Yesmen, YesmanView{Yesman: y, Worktrees: snapshot.Under(y.Path)})
+			view := YesmanView{Yesman: y, Worktrees: snapshot.Under(y.Path), Handoffs: []yesmen.Handoff{}}
+			if hs, err := a.yesmen.Handoffs(y.Name); err != nil {
+				view.HandoffsError = err.Error()
+			} else {
+				view.Handoffs = hs.Items
+			}
+			st.Yesmen = append(st.Yesmen, view)
 		}
 	}
 	return st, nil
@@ -122,6 +133,7 @@ func (s *service) Dismiss(name string) (string, error) {
 		return "", err
 	}
 	a.agents.ForgetYesman(name, archivedSince)
+	a.countHandoffs(name) // its handoffs went into the archive with it
 	// The pool still records the worktrees at their old paths: point it at
 	// the archive before pruning, or the prune would delete their records
 	// and break the archived checkouts.

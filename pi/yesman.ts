@@ -5,7 +5,7 @@
 // worktrees, the repo pool, Knowledge, the task-log path, the board and other
 // agents)
 // and tools to check repositories out of the pool, keep the board and, for
-// a lead, to run workers. Its shell tool sets the user's secrets and
+// a lead, to run workers and hand the user what only they can do (Needs you). Its shell tool sets the user's secrets and
 // variables in every command, asking the app for them each time, and what
 // tools return hides the secrets' values from the model. It also records in
 // the session who wrote each user message, as the app knows (trackOrigins).
@@ -505,6 +505,60 @@ export default function yesman(pi: ExtensionAPI) {
 		async execute(_id, params, signal) {
 			await call("POST", "/v1/workers/answer", params, signal);
 			return result(`Answered ${params.name}.`);
+		},
+	});
+
+	const handoffLine = (h: any) => `- ${h.id} (${h.type}): ${h.title}${h.task ? `, task ${h.task}` : ""}${h.worker ? `, worker ${h.worker}` : ""}, since ${h.createdAt}`;
+	pi.registerTool({
+		name: "yesman_needs_you",
+		label: "yesman: needs you",
+		description:
+			"What waits on the user, under Needs you in their window. Call it with no arguments to list it in short, or with id for one handoff in full. " +
+			"add registers something only the user can do or decide: a decision, information, logging in, installing, or another manual step; link it to the board task that waits on it, which you mark blocked. " +
+			"handOver gives the user a worker's question you cannot answer yourself (its requestId from the [yesman] message); you can still answer it. " +
+			"resolve closes a handoff that was settled otherwise. When the user marks one done or not needed, you hear of it. " +
+			"Never ask for passwords, keys, tokens or codes this way or in chat: point the user to Settings › Secrets.",
+		parameters: Type.Object({
+			id: Type.Optional(Type.String({ description: "A handoff's ID, such as n3, to read it in full" })),
+			add: Type.Optional(
+				Type.Object({
+					type: Type.String({ description: "decision, input, login, install or manual" }),
+					title: Type.String({ description: "What the user needs to do, in one line, up to 200 characters" }),
+					detail: Type.Optional(Type.String({ description: "How, in Markdown: the options and your recommendation, where to log in, what to install" })),
+					task: Type.Optional(Type.String({ description: "The board task waiting on it, such as t5" })),
+					worker: Type.Optional(Type.String({ description: "The worker whose work it concerns" })),
+				}),
+			),
+			handOver: Type.Optional(
+				Type.Object({
+					worker: Type.String({ description: "The worker's name" }),
+					requestId: Type.String({ description: "The question's requestId, from its notification; never substitute a newer question" }),
+				}),
+			),
+			resolve: Type.Optional(
+				Type.Object({
+					id: Type.String({ description: "The handoff's ID, such as n3" }),
+					note: Type.Optional(Type.String({ description: "How it was settled" })),
+				}),
+			),
+		}),
+		async execute(toolCallId, params, signal) {
+			if (params.add || params.handOver || params.resolve) {
+				const out = await call("POST", "/v1/needs-you", { add: params.add, handOver: params.handOver, resolve: params.resolve, toolCall: toolCallId }, signal);
+				if (params.handOver) return result(`Handed ${params.handOver.worker}'s question to the user.`, out);
+				if (params.resolve) return result(`Resolved ${out.id}.`, out);
+				return result(`Registered ${out.id}: it shows under Needs you until the user acts on it.`, out);
+			}
+			if (params.id) {
+				const h = await call("GET", `/v1/needs-you?id=${encodeURIComponent(params.id)}`, undefined, signal);
+				return result(json(h), h);
+			}
+			const view = await call("GET", "/v1/needs-you", undefined, signal);
+			const lines = [
+				...view.handoffs.map(handoffLine),
+				...view.questions.map((q: any) => `- worker ${q.worker}'s question ${JSON.stringify(q.requestId)}: ${q.title}, since ${q.since}`),
+			];
+			return result(lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user.", {});
 		},
 	});
 

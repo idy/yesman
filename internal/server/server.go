@@ -36,6 +36,9 @@ type Server struct {
 	Changed func()
 	// BoardChanged is told when a yesman's board changes.
 	BoardChanged func(yesman string)
+	// NeedsYouChanged is told when what waits on a yesman's user changes,
+	// with the handoff a lead added, if it added one.
+	NeedsYouChanged func(yesman string, added *yesmen.Handoff)
 	// AddRepo, when set, clones a GitHub repository into the pool in place
 	// of resolving and cloning it here, so the app can show it cloning.
 	AddRepo func(ctx context.Context, repo string) (pool.Repo, error)
@@ -87,6 +90,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/origin", s.origin)
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
+	mux.HandleFunc("GET /v1/needs-you", s.handle(s.needsYou))
+	mux.HandleFunc("POST /v1/needs-you", s.handle(s.changeNeedsYou))
 	return mux
 }
 
@@ -497,6 +502,9 @@ func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, e
 	if c.agent.Role == agent.RoleLead && s.Crew != nil {
 		text += CrewContext(s.Crew(ctx), c.agent)
 	}
+	if c.agent.Role == agent.RoleLead {
+		text += s.needsYouContext(c)
+	}
 	return text, nil
 }
 
@@ -580,12 +588,13 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 		w("\n## Seeing it through\n\n")
 		w("You answer for this yesman: what you take on, you see through to the end. The user should not have to look after the workers. ")
 		w("When a report arrives, check it against the board, mark the task, and start the next step yourself (follow-ups, fixes, reviews) until everything the user asked for is done.\n")
-		w("- A worker's question arrives as a [yesman] message: answer it with yesman_worker_answer, or with yesman_worker_send when the worker asked in its report.\n")
+		w("- A worker's question arrives as a [yesman] message: answer it with yesman_worker_answer, or with yesman_worker_send when the worker asked in its report. If only the user can answer it, hand it to them with yesman_needs_you handOver: it shows under Needs you in their window.\n")
 		w("- A worker whose process failed: message it with yesman_worker_send to start it again, or start a fresh worker. Tell the user only if it keeps failing.\n")
 		w("- A worker's run the user stopped: that was their call. Leave it stopped and mark its task blocked, unless they say otherwise.\n")
 		w("- When you end a run with tasks still todo or doing and no worker running, yesman reminds you once.\n")
 		w("Decide everything you can. Bring the user only what you cannot decide: what to build, trade-offs only they can weigh, taste, credentials, or anything irreversible they did not ask for. ")
 		w("Never hold the rest of the work for these: mark each task that waits on one blocked, with the question in its note, finish everything else, and then put the open decisions to the user together, each with the options and your recommendation.\n")
+		w("- Register each thing only the user can do or decide with yesman_needs_you add (a decision, information, logging in, installing, another manual step), linked to its board task: it shows under Needs you until they mark it done or not needed, and you hear when they do. Resolve it yourself when it is settled otherwise. Never ask for passwords, keys, tokens or codes in chat: point the user to Settings › Secrets.\n")
 	} else {
 		w("You are %q, a worker of the yesman named %q. Your lead started you for one task and receives your final message when you finish a run, so end each run with a short report: what you did, where (worktree, branch, PR) and what is left.\n", me.Name, y.Label())
 		w("Do not stop to ask. When something is unclear, make the reasonable choice, say so in your report, and go on. If you cannot go on without a decision, finish everything that does not depend on it, then end your run with the question in your report: your lead answers it, not the user. Questions your tools ask go to your lead too.\n")

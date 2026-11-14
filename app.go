@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"runtime"
 	"strconv"
@@ -69,8 +70,14 @@ type app struct {
 	last        map[string]agent.Status
 	release     func() // ends KeepRunning while no agent works
 	completions completionNotices
-	// working and waiting count the agents, for the tray's tooltip.
+	// working and waiting count the agents, for the tray's tooltip; waiting
+	// counts everything under Needs you.
 	working, waiting int
+	handoffs         map[string]int    // open handoffs per yesman
+	handed           map[string]string // the dialog each worker's lead handed over
+	// notifier, when set, receives notifications in place of the system,
+	// in tests.
+	notifier func(id, title, body string)
 
 	fmu          sync.Mutex
 	pendingFocus string // the agent a notification click asked to show
@@ -222,6 +229,9 @@ func (a *app) agentsChanged(list []agent.Info) {
 	if a.last == nil {
 		a.last = map[string]agent.Status{}
 	}
+	if a.handed == nil {
+		a.handed = map[string]string{}
+	}
 	for _, i := range list {
 		prev := a.last[i.ID]
 		a.last[i.ID] = i.Status
@@ -229,8 +239,18 @@ func (a *app) agentsChanged(list []agent.Info) {
 		switch {
 		case i.Status == agent.Working:
 			working++
-		case i.Status == agent.Waiting && lead:
+		case i.Status == agent.Waiting && (lead || i.HandedOver):
 			waiting++
+		}
+		// A worker's question reaches the user only when its lead hands it
+		// over; tell them once per question.
+		if handed := handedOverDialog(i); handed != a.handed[i.ID] {
+			if handed != "" {
+				notes = append(notes, note{i.ID, tr("%s needs you", a.yesmanLabel(i.Yesman)), tr("A worker's question was handed to you.")})
+				a.handed[i.ID] = handed
+			} else {
+				delete(a.handed, i.ID)
+			}
 		}
 		if !lead || prev == i.Status || prev == "" && i.Status != agent.Waiting {
 			continue
@@ -248,6 +268,7 @@ func (a *app) agentsChanged(list []agent.Info) {
 		a.release()
 		a.release = nil
 	}
+	waiting += a.openHandoffsLocked()
 	a.working, a.waiting = working, waiting
 	a.smu.Unlock()
 
@@ -270,6 +291,19 @@ func (a *app) agentsChanged(list []agent.Info) {
 	for _, n := range notes {
 		a.notify(n.id, n.title, n.body)
 	}
+}
+
+// handedOverDialog is the request ID of the dialog a worker's lead handed to
+// the user, or "".
+func handedOverDialog(i agent.Info) string {
+	if !i.HandedOver {
+		return ""
+	}
+	var d struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(i.Dialog, &d)
+	return d.ID
 }
 
 func (a *app) yesmanLabel(name string) string {
@@ -303,6 +337,10 @@ func (a *app) yesmanSettled(yesman string) bool {
 // notify shows a notification about an agent, unless the window has focus;
 // clicking it shows that agent.
 func (a *app) notify(id, title, body string) {
+	if a.notifier != nil {
+		a.notifier(id, title, body)
+		return
+	}
 	if a.windowFocused() {
 		return
 	}

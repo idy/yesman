@@ -28,7 +28,7 @@ import (
 // message's "yesman" field.
 type Origin struct {
 	Source string `json:"source"`         // OriginUser, OriginLead or OriginYesman
-	Kind   string `json:"kind,omitempty"` // lead: "task" or "message"; yesman: "report", "question", "stopped", "failed" or "tasks"
+	Kind   string `json:"kind,omitempty"` // lead: "task" or "message"; yesman: "report", "question", "stopped", "failed", "tasks" or "needs-you"
 	// Worker names the worker a yesman notice is about.
 	Worker string `json:"worker,omitempty"`
 	// Submission is the receipt ID of a user's submission from the window.

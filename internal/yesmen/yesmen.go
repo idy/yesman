@@ -10,6 +10,7 @@
 //	    board.json         the task board its agents keep
 //	    knowledge/         durable guidance shared by every agent; INDEX.md lists it
 //	    task-log.md        task and PR history, maintained by the lead
+//	    needs-you.json     what the lead handed to the user to do (Needs you)
 //	    sessions/<agent>/  each agent's pi session log
 //	  <repo>--<topic>/     worktrees
 package yesmen
