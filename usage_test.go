@@ -131,9 +131,9 @@ func TestModelUsageSummarizesCurrentYesmen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// beta's response and its task are older than a day; the task was done
-	// just now, so it counts.
-	if r := findRow(v, "fast", "high"); r == nil || r.Output != 150 || r.Tasks != 1 || r.Workers != 1 || r.Leads != 1 {
+	// beta's response is older than a day; its task was done just now, so
+	// it counts, with its owner among the model's workers.
+	if r := findRow(v, "fast", "high"); r == nil || r.Output != 150 || r.Tasks != 1 || r.Workers != 2 || r.Leads != 1 {
 		t.Fatalf("all agents, 24h = %+v", r)
 	}
 
@@ -226,6 +226,31 @@ func TestModelUsageFollowsDismissalAndFailures(t *testing.T) {
 	}
 	if len(v.Coverage.Errors) != 1 || !strings.HasPrefix(v.Coverage.Errors[0], "beta: ") || v.Coverage.Workspaces != 1 {
 		t.Errorf("errors = %v, workspaces %d", v.Coverage.Errors, v.Coverage.Workspaces)
+	}
+}
+
+// A name started, removed and started again keeps each start's usage
+// apart, through the Store's own record of starts.
+func TestModelUsageKeepsRemovedWorkersApart(t *testing.T) {
+	a := usageApp(t)
+	y := hireWith(t, a, "alpha")
+	base := time.Now().Add(-3 * time.Hour).UTC()
+	for i, model := range []string{"one", "two", "three"} {
+		start := base.Add(time.Duration(i) * time.Hour)
+		if err := a.yesmen.AddWorker("alpha", yesmen.Worker{Name: "w", Task: "x", StartedAt: start}); err != nil {
+			t.Fatal(err)
+		}
+		writeSession(t, y, "w", sessionLine(fmt.Sprintf("r%d", i), start.Add(time.Minute), model, "high", 1000, 10))
+		if err := a.yesmen.RemoveWorker("alpha", "w"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v, err := a.modelUsage(context.Background(), ModelUsageQuery{}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Rows) != 3 || v.Total.Workers != 3 || v.Overlap != 0 || len(v.Coverage.Errors) != 0 {
+		t.Fatalf("rows = %+v, total %+v, overlap %d, errors %v", v.Rows, v.Total, v.Overlap, v.Coverage.Errors)
 	}
 }
 

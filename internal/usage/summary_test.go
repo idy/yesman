@@ -258,3 +258,50 @@ func TestSummarizeEmpty(t *testing.T) {
 		t.Fatalf("empty summary = %+v", s)
 	}
 }
+
+// Recorded starts keep each start of a name apart, after its workers are
+// removed and the name started again any number of times; removing the
+// current worker does not change who did what.
+func TestSummarizeKeepsStartsAfterRemoval(t *testing.T) {
+	s1, s2, s3 := t0.Add(time.Hour), t0.Add(2*time.Hour), t0.Add(3*time.Hour)
+	starts := []yesmen.WorkerStart{{Name: "w", StartedAt: s1}, {Name: "w", StartedAt: s2}, {Name: "w", StartedAt: s3}}
+	records := []Record{
+		response("old", "high", t0.Add(time.Minute), 1000, 1), // before any recorded start
+		response("a", "high", s1.Add(time.Minute), 1000, 1),
+		response("b", "high", s2.Add(time.Minute), 1000, 1),
+		response("b", "high", s2.Add(2*time.Minute), 1000, 1),
+		response("c", "high", s3.Add(time.Minute), 1000, 1),
+	}
+	board := yesmen.Board{Tasks: []yesmen.Task{
+		task("t1", yesmen.TaskDone, "w", s1.Add(30*time.Minute)), // the first start: a
+		task("t2", yesmen.TaskDone, "w", s2.Add(30*time.Minute)), // the second: b
+		task("t3", yesmen.TaskDone, "w", s3.Add(30*time.Minute)), // the third: c
+	}}
+	for _, current := range [][]yesmen.Worker{{{Name: "w", StartedAt: s3}}, nil} {
+		w := Workspace{Name: "y", Workers: current, Starts: starts, Board: board, Agents: map[string][]Record{"w": records}}
+		s := Summarize([]Workspace{w}, Query{Workers: true})
+		if s.Total.Workers != 4 || s.Overlap != 0 {
+			t.Fatalf("with %d listed: total = %+v, overlap %d", len(current), s.Total, s.Overlap)
+		}
+		for model, want := range map[string]Row{"a": {Workers: 1, Tasks: 1, Responses: 1}, "b": {Workers: 1, Tasks: 1, Responses: 2}, "c": {Workers: 1, Tasks: 1, Responses: 1}, "old": {Workers: 1, Responses: 1}} {
+			r := rowOf(t, s, "p/"+model, "high")
+			if r.Workers != want.Workers || r.Tasks != want.Tasks || r.Responses != want.Responses {
+				t.Errorf("with %d listed: %s = %+v", len(current), model, r)
+			}
+		}
+	}
+}
+
+// A task done in a period counts its owner among the model's workers there,
+// though the owner last used the model before the period.
+func TestSummarizeCountsOwnersOfTasksDoneInPeriod(t *testing.T) {
+	since := t0.Add(24 * time.Hour)
+	w := Workspace{Name: "y", Workers: []yesmen.Worker{{Name: "w1", StartedAt: t0}},
+		Agents: map[string][]Record{"w1": {response("m", "high", t0.Add(time.Hour), 1000, 10)}},
+		Board:  yesmen.Board{Tasks: []yesmen.Task{{ID: "t1", Status: yesmen.TaskDone, Owner: "w1", UpdatedAt: since.Add(time.Hour), DoneAt: since.Add(time.Hour), DoneOwner: "w1"}}}}
+	s := Summarize([]Workspace{w}, Query{Workers: true, Since: since})
+	r := rowOf(t, s, "p/m", "high")
+	if r.Tasks != 1 || r.Workers != 1 || r.Responses != 0 || r.Total != 0 || s.Total.Workers != 1 {
+		t.Fatalf("row = %+v, total %+v", r, s.Total)
+	}
+}

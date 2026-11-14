@@ -77,6 +77,10 @@ func (x *usageIndex) read(ctx context.Context, store *yesmen.Store, y yesmen.Yes
 	if w.Board, err = store.Board(y.Name); err != nil {
 		return w, err
 	}
+	// Without the recorded starts, the current workers still tell theirs.
+	if w.Starts, err = store.WorkerStarts(y.Name); err != nil {
+		w.Stats.Errors = append(w.Stats.Errors, err.Error())
+	}
 	root := filepath.Join(y.MetaDir(), "sessions")
 	entries, err := os.ReadDir(root)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

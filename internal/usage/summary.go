@@ -21,7 +21,9 @@ type Workspace struct {
 	Name    string
 	HiredAt time.Time
 	Workers []yesmen.Worker
-	Board   yesmen.Board
+	// Starts are the recorded starts of workers, removed ones included.
+	Starts []yesmen.WorkerStart
+	Board  yesmen.Board
 	// Agents are the records of each session directory, by agent name.
 	Agents map[string][]Record
 	Stats  DirStats
@@ -137,8 +139,12 @@ func completed(stop string) bool {
 func failed(stop string) bool { return stop == "error" || stop == "aborted" }
 
 // instance is one agent: a lead of one hire, or a worker of one start.
-// A worker hired again under a name continues that name's session, so its
-// records are split by when each instance started.
+// A worker started again under a name continues that name's session, so
+// the name's records are split by when each start happened: the recorded
+// starts, removed workers' included, and the current workers'. Records
+// before the first known start belong to earlier starts that were not
+// recorded, counted as one; a name with no known start is one removed
+// worker.
 type instance struct {
 	key, role string
 	groups    map[string]int // responses by group, at any time
@@ -197,23 +203,29 @@ func Summarize(spaces []Workspace, q Query) Summary {
 				s.Coverage.Errors = append(s.Coverage.Errors, w.Name+": "+e)
 			}
 		}
-		listed := map[string]yesmen.Worker{}
+		starts := map[string][]time.Time{}
+		for _, x := range w.Starts {
+			starts[x.Name] = append(starts[x.Name], x.StartedAt)
+		}
 		for _, wk := range w.Workers {
-			listed[wk.Name] = wk
+			starts[wk.Name] = append(starts[wk.Name], wk.StartedAt)
+		}
+		for name, ts := range starts {
+			slices.SortFunc(ts, time.Time.Compare)
+			starts[name] = slices.CompactFunc(ts, time.Time.Equal)
 		}
 		instances := map[string]*instance{}
 		find := func(agent string, at time.Time) *instance {
-			var key, role string
-			wk, ok := listed[agent]
-			switch {
-			case agent == yesmen.LeadName:
+			key, role := w.Name+"/"+agent+"@unlisted", RoleWorker
+			if agent == yesmen.LeadName {
 				key, role = w.Name+"/lead@"+w.HiredAt.UTC().Format(time.RFC3339Nano), RoleLead
-			case ok && !at.Before(wk.StartedAt):
-				key, role = w.Name+"/"+agent+"@"+wk.StartedAt.UTC().Format(time.RFC3339Nano), RoleWorker
-			case ok:
-				key, role = w.Name+"/"+agent+"@earlier", RoleWorker
-			default:
-				key, role = w.Name+"/"+agent+"@unlisted", RoleWorker
+			} else if ts := starts[agent]; len(ts) > 0 {
+				i := sort.Search(len(ts), func(i int) bool { return ts[i].After(at) })
+				if i == 0 {
+					key = w.Name + "/" + agent + "@earlier"
+				} else {
+					key = w.Name + "/" + agent + "@" + ts[i-1].UTC().Format(time.RFC3339Nano)
+				}
 			}
 			in := instances[key]
 			if in == nil {
@@ -280,13 +292,12 @@ func Summarize(spaces []Workspace, q Query) Summary {
 			if done.IsZero() {
 				owner = t.Owner
 			}
-			_, isListed := listed[owner]
 			_, hasLog := w.Agents[owner]
 			switch {
 			case owner == "":
 				s.Tasks.Unowned++
 				continue
-			case owner != yesmen.LeadName && !isListed && !hasLog:
+			case owner != yesmen.LeadName && len(starts[owner]) == 0 && !hasLog:
 				s.Tasks.UnknownOwner++
 				continue
 			}
@@ -303,7 +314,11 @@ func Summarize(spaces []Workspace, q Query) Summary {
 			}
 			switch group, why := in.attribute(done); why {
 			case attributed:
-				get(group).Tasks++
+				// Its owner counts among the model's agents, even when its
+				// usage of it was before the period.
+				x := get(group)
+				x.Tasks++
+				x.members[in.key] = in.role
 				s.Tasks.Attributed++
 			case severalModels:
 				s.Tasks.SeveralModels++
