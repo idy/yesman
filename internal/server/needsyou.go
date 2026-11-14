@@ -48,9 +48,43 @@ type HandedOver struct {
 }
 
 // NeedsYouView is what waits on the user from one yesman, for its lead.
+// CallMemory is there only when the tool-call memory is nearly full, full
+// or kept by a pre-release version: counts, never a call.
 type NeedsYouView struct {
-	Handoffs  []yesmen.Handoff `json:"handoffs"`
-	Questions []HandedOver     `json:"questions"`
+	Handoffs   []yesmen.Handoff   `json:"handoffs"`
+	Questions  []HandedOver       `json:"questions"`
+	CallMemory *yesmen.CallMemory `json:"callMemory,omitempty"`
+}
+
+// AddedHandoff is a handoff add returns, with the tool-call memory when it
+// is nearly full.
+type AddedHandoff struct {
+	yesmen.Handoff
+	CallMemory *yesmen.CallMemory `json:"callMemory,omitempty"`
+}
+
+// callMemoryNotice returns the memory when the lead should hear of it.
+func callMemoryNotice(hs yesmen.Handoffs) *yesmen.CallMemory {
+	m := hs.CallMemory()
+	if m.State == "near" || m.Refusing() {
+		return &m
+	}
+	return nil
+}
+
+// callMemoryLine tells the lead what the tool-call memory means for it.
+func callMemoryLine(m *yesmen.CallMemory) string {
+	switch m.State {
+	case "near":
+		return fmt.Sprintf("The tool-call memory of Needs you holds %d of %d tool calls: once it is full, add is refused until the user starts a new one under Needs you.", m.Used, m.Capacity)
+	case "full":
+		return fmt.Sprintf("The tool-call memory of Needs you is full (%d of %d tool calls): add with a new tool call is refused until the user starts a new one under Needs you. Tell the user; calling again does not help.", m.Used, m.Capacity)
+	case "blocked":
+		return "This yesman's Needs you was kept by a pre-release version that forgot tool calls without a trace: add is refused until the user starts a new tool-call memory under Needs you. Tell the user; calling again does not help."
+	case "legacy-full":
+		return "This yesman's Needs you was kept by a pre-release version whose memory of older tool calls is so full that add refuses many new ones: tell the user, who can start a new tool-call memory under Needs you."
+	}
+	return ""
 }
 
 func (s *Server) needsYouView(c caller) (NeedsYouView, error) {
@@ -58,7 +92,7 @@ func (s *Server) needsYouView(c caller) (NeedsYouView, error) {
 	if err != nil {
 		return NeedsYouView{}, err
 	}
-	view := NeedsYouView{Handoffs: hs.Open(), Questions: []HandedOver{}}
+	view := NeedsYouView{Handoffs: hs.Open(), Questions: []HandedOver{}, CallMemory: callMemoryNotice(hs)}
 	if view.Handoffs == nil {
 		view.Handoffs = []yesmen.Handoff{}
 	}
@@ -154,10 +188,14 @@ func (s *Server) commitNeedsYou(y yesmen.Yesman, req NeedsYouChange) (any, *yesm
 		if err != nil {
 			return nil, nil, err
 		}
-		if created {
-			return h, &h, nil
+		out := AddedHandoff{Handoff: h}
+		if hs, err := s.Yesmen.Handoffs(y.Name); err == nil {
+			out.CallMemory = callMemoryNotice(hs)
 		}
-		return h, nil, nil
+		if created {
+			return out, &h, nil
+		}
+		return out, nil, nil
 	case req.HandOver != nil:
 		name := strings.TrimSpace(req.HandOver.Worker)
 		if name == yesmen.LeadName || name == "" {
@@ -185,11 +223,19 @@ func (s *Server) needsYouContext(c caller) string {
 		return fmt.Sprintf("\n## Needs you\n\nWhat waits on the user cannot be read: %v\n", err)
 	}
 	total := len(view.Handoffs) + len(view.Questions)
-	if total == 0 {
+	if total == 0 && view.CallMemory == nil {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n## Needs you\n\n%d waiting on the user; see them with yesman_needs_you:\n", total)
+	b.WriteString("\n## Needs you\n\n")
+	if view.CallMemory != nil {
+		b.WriteString(callMemoryLine(view.CallMemory) + "\n")
+		if total == 0 {
+			return b.String()
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "%d waiting on the user; see them with yesman_needs_you:\n", total)
 	shown := 0
 	for _, h := range view.Handoffs {
 		if shown == needsYouContextLimit {

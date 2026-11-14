@@ -54,6 +54,46 @@ func (s *service) ResolveHandoff(yesman string, hiredAt time.Time, id, resolutio
 	return h, nil
 }
 
+// ResetCallMemory starts a new memory of a yesman's tool calls, once the
+// user confirmed it under Needs you: the fingerprints of the tool calls of
+// handoffs no longer kept are forgotten, so that new tool calls register
+// again, and its lead hears of it. Only the user's window calls it, never a
+// lead's tool. hiredAt and the counts are what the page showed: once the
+// yesman was replaced, or its memory reset or changed since, nothing is
+// forgotten and the page shows it again.
+func (s *service) ResetCallMemory(yesman string, hiredAt time.Time, epoch, used, forgettable int) (yesmen.CallMemory, error) {
+	a := s.app
+	var (
+		m       yesmen.CallMemory
+		cleared int
+		since   time.Time
+	)
+	err := a.yesmen.Use(yesman, func(y yesmen.Yesman) error {
+		if !y.HiredAt.Equal(hiredAt) {
+			return errors.New("this yesman was replaced: refresh the window")
+		}
+		since = y.HiredAt
+		var err error
+		m, cleared, err = a.yesmen.ResetCallMemory(y.Name, hiredAt, epoch, used, forgettable)
+		return err
+	})
+	if err != nil {
+		return yesmen.CallMemory{}, err
+	}
+	a.needsYouChanged(yesman, nil)
+	if a.agents != nil {
+		msg := fmt.Sprintf("[yesman] The user started a new tool-call memory for Needs you: %d older tool-call records were forgotten, and add takes new tool calls again. Register again what was refused for the memory, if the user still needs to do it.", cleared)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := a.agents.TellLeadAboutUser(ctx, yesman, since, msg); err != nil {
+				log.Printf("yesman: tell %s's lead about its new tool-call memory: %v", yesman, err)
+			}
+		}()
+	}
+	return m, nil
+}
+
 // handoffNotice is what the lead hears when the user closes a handoff.
 func handoffNotice(h yesmen.Handoff) string {
 	what := fmt.Sprintf("%s (%s) %q", h.ID, h.Type, h.Title)

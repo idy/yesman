@@ -38,6 +38,9 @@ type YesmanView struct {
 	// HandoffsError says why its handoffs cannot be read; the page shows it
 	// rather than an empty list.
 	HandoffsError string `json:"handoffsError,omitempty"`
+	// CallMemory is how full the memory of its lead's tool calls is, and
+	// what the user may reset: counts only.
+	CallMemory *yesmen.CallMemory `json:"callMemory,omitempty"`
 }
 
 // State returns the yesmen, their worktrees and agents.
@@ -62,6 +65,8 @@ func (s *service) State(ctx context.Context) (State, error) {
 				view.HandoffsError = err.Error()
 			} else {
 				view.Handoffs = hs.Items
+				m := hs.CallMemory()
+				view.CallMemory = &m
 			}
 			st.Yesmen = append(st.Yesmen, view)
 		}

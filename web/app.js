@@ -70,6 +70,7 @@ const state = {
   // back (opened from the Needs you page), pending (still to be located) }.
   request: null,
   resolving: new Set(), // keys of handoffs being closed
+  resetting: new Set(), // yesmen whose request memory is being reset
 };
 
 const agentById = (id) => state.snap.agents.find((a) => a.id === id);
@@ -1074,9 +1075,13 @@ function renderNeedsYou(body) {
         icon('arrowLeft'), t('Back to the conversation')) : null));
   }
   for (const y of state.snap.yesmen) {
-    if (!y.handoffsError || !inScope(y.name)) continue;
-    inner.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
-      h('strong', null, t('What {name} handed to you cannot be read', { name: y.displayName || y.name })), h('p', null, y.handoffsError))));
+    if (!inScope(y.name)) continue;
+    if (y.handoffsError) {
+      inner.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+        h('strong', null, t('What {name} handed to you cannot be read', { name: y.displayName || y.name })), h('p', null, y.handoffsError))));
+    }
+    const memory = callMemoryNotice(y);
+    if (memory) inner.append(memory);
   }
   if (!items.length) {
     inner.append(h('div', { class: 'needs-you-empty', role: 'status' }, icon('check', 'mds-icon'),
@@ -1095,6 +1100,54 @@ function renderNeedsYou(body) {
           `${yesmanLabel(yesman)} · ${t(RESOLUTIONS[handoff.resolution] ?? 'Closed')} · ${t('{time} ago', { time: elapsed(handoff.closedAt) })}`))))));
   }
   body.append(h('div', { class: 'page' }, inner));
+}
+
+// What a yesman's memory of its lead's tool calls means for the user, when
+// it matters: nearly full, full, or kept by a pre-release version; with the
+// way to start a new one, which only the user can.
+const CALL_MEMORY = {
+  near: { tone: 'warn', title: "{name}'s request memory is nearly full", body: 'It remembers {used} of {capacity} of the tool calls its lead used to hand you requests, so that none registers twice. Once it is full, its lead cannot hand you new requests until you start a new memory.' },
+  full: { tone: 'error', title: "{name}'s lead cannot hand you new requests", body: 'Its request memory is full: it remembers {used} of {capacity} tool calls. Start a new memory to let its lead hand you requests again.' },
+  blocked: { tone: 'error', title: "{name}'s lead cannot hand you new requests", body: 'Its requests were kept by a pre-release version of yesman, which forgot some of its lead\'s tool calls without a trace, so a new one cannot be told from a repeat. Start a new memory to let its lead hand you requests again.' },
+  legacy: { tone: 'warn', title: "{name}'s requests were kept by a pre-release version", body: 'It remembers older tool calls of its lead in a way that may refuse some new requests. If its lead says a request was refused, start a new memory.' },
+  'legacy-full': { tone: 'error', title: "{name}'s lead cannot hand you most new requests", body: 'Its requests were kept by a pre-release version of yesman, whose memory of older tool calls is so full that it refuses most new ones. Start a new memory to let its lead hand you requests again.' },
+};
+
+function callMemoryNotice(y) {
+  const m = y.callMemory;
+  const text = m && CALL_MEMORY[m.state];
+  if (!text) return null;
+  const name = yesmanLabel(y.name);
+  const busy = state.resetting.has(y.name);
+  return h('div', { class: 'mds-notice needs-you-memory', role: m.state === 'near' || m.state === 'legacy' ? 'status' : 'alert', 'data-tone': text.tone, 'data-memory': y.name, 'data-state': m.state },
+    h('div', null,
+      h('strong', null, t(text.title, { name })),
+      h('p', null, t(text.body, { used: formatNumber(m.used), capacity: formatNumber(m.capacity) }))),
+    h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: busy, onclick: () => resetCallMemory(y, m) }, t('Start a new memory…')));
+}
+
+async function resetCallMemory(y, m) {
+  if (state.resetting.has(y.name)) return;
+  const name = yesmanLabel(y.name);
+  const forgets = m.forgettable > 0
+    ? t('This forgets {n} records of older tool calls {name}\'s lead used to hand you requests.', { n: formatNumber(m.forgettable), name })
+    : t('This forgets what a pre-release version remembered of the tool calls {name}\'s lead used to hand you requests.', { name });
+  const body = [forgets,
+    t('Requests waiting for you, recently handled ones and the latest tool calls stay.'),
+    t('A request handled long ago may show up once more if its lead repeats an old tool call; it is remembered again then. A later reset can let it back once more.')].join(' ');
+  if (!(await confirmAction(t('Start a new request memory for {name}?', { name }), body, t('Start a new memory')))) return;
+  state.resetting.add(y.name);
+  render();
+  try {
+    await call('ResetCallMemory', y.name, y.hiredAt, m.epoch, m.used, m.forgettable);
+    toast(t('{name}\'s lead can hand you new requests again.', { name }));
+  } catch (err) {
+    fail(err);
+  } finally {
+    state.resetting.delete(y.name);
+    await refreshState();
+    if (state.view.kind === 'needs-you') ($(`#body [data-memory="${CSS.escape(y.name)}"] button`) || $('#body .needs-you-page h1'))?.focus();
+  }
 }
 
 function requestCard(item) {
@@ -1489,14 +1542,18 @@ function renderBody() {
   if (state.view.kind === 'needs-you') {
     renderNeedsYou(body);
     // A refresh keeps focus on the request it was on, or, when that one is
-    // gone, on the one now in its place, or the page's heading.
+    // gone, on the one now in its place, or the page's heading; and on a
+    // yesman's request memory, or the heading once it is gone.
     const key = active?.closest?.('[data-request]')?.dataset.request;
     const again = key && body.querySelector(`[data-request="${CSS.escape(key)}"]`);
+    const memory = active?.closest?.('[data-memory]')?.dataset.memory;
     if (again) again.focus();
     else if (cardAt >= 0) {
       const now = body.querySelectorAll('.needs-you-card');
       (now[Math.min(cardAt, now.length - 1)] ?? body.querySelector('.needs-you-page h1'))?.focus();
-    }
+    } else if (memory !== undefined) {
+      (body.querySelector(`[data-memory="${CSS.escape(memory)}"] button`) ?? body.querySelector('.needs-you-page h1'))?.focus();
+    } else if (active?.matches?.('.needs-you-page h1')) body.querySelector('.needs-you-page h1')?.focus();
     return;
   }
   const a = selectedAgent();
@@ -2838,6 +2895,8 @@ const info = createInfo({
   needsYou: (y) => ({
     count: needsYouItems(state.snap).filter((item) => item.yesman === y.name).length,
     error: state.snap.yesmen.find((v) => v.name === y.name)?.handoffsError ?? '',
+    // New requests are refused until the user starts a new memory.
+    refused: ['full', 'blocked', 'legacy-full'].includes(state.snap.yesmen.find((v) => v.name === y.name)?.callMemory?.state),
   }),
   openNeedsYou: (y) => showNeedsYou(null, { yesman: y.name, hiredAt: y.hiredAt ?? '', from: state.view.kind === 'agent' ? state.view.id : null }),
   openWorktree: (dir, show) => files.openWorktree(dir, show),

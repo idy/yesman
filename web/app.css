@@ -948,5 +948,8 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 .needs-you-back { justify-self: start; }
 .needs-you-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0 0 16px; color: var(--mds-muted); font-size: var(--mds-text-note); }
 .needs-you-scope .mds-icon { width: 14px; height: 14px; font-size: 14px; }
+.needs-you-memory { flex-wrap: wrap; margin: 0 0 16px; }
+.needs-you-memory > div { flex: 1 1 40ch; min-width: 0; }
+.needs-you-memory > button { flex: 0 0 auto; }
 .needs-you-back .mds-icon { width: 14px; height: 14px; font-size: 14px; }
 @media (pointer: coarse) { .needs-you-more { min-height: 44px; } }

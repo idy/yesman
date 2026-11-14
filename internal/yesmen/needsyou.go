@@ -75,13 +75,16 @@ type Handoffs struct {
 	Next  int       `json:"next"`
 	// trimmed remembers the latest tool calls of closed handoffs trimmed
 	// from Items, so that the same call cannot register one again, and
-	// forgotten a fingerprint of the older ones; see trim.
-	trimmed   []trimmedCall
-	forgotten *callFilter
-	// unsure, only in a file of a pre-release version, is when the latest
-	// of the calls it forgot without a fingerprint was registered: since
-	// those cannot be told from new calls, every call it does not know is
-	// refused.
+	// memory the fingerprints of the older ones; see needsyou_calls.go.
+	trimmed []trimmedCall
+	memory  callMemory
+	// filter and unsure are only in a file of a pre-release version. filter
+	// is the Bloom filter it kept older calls in, still checked, never
+	// added to. unsure is when the latest of the calls it forgot without a
+	// trace was registered: since those cannot be told from new calls,
+	// every call it does not know is refused, until the user starts a new
+	// tool-call memory.
+	filter *callFilter
 	unsure time.Time
 	extra  map[string]json.RawMessage
 }
@@ -118,7 +121,7 @@ const (
 	maxOpenHandoffs = 50
 	// keptClosed closed handoffs are kept as history, the most recently
 	// closed; the tool calls of keptCalls older ones are kept as they are,
-	// and of the others as a fingerprint.
+	// and of the others as fingerprints (needsyou_calls.go).
 	keptClosed        = 30
 	keptCalls         = 1000
 	maxHandoffTitle   = 200
@@ -164,21 +167,30 @@ func (s *Store) handoffLock(name string) *sync.Mutex {
 }
 
 func (s *Store) openHandoffs(name string) (*handoffsFile, Handoffs, error) {
+	f, _, hs, err := s.openHandoffsOf(name)
+	return f, hs, err
+}
+
+// openHandoffsOf also returns the yesman whose handoffs were opened.
+func (s *Store) openHandoffsOf(name string) (*handoffsFile, Yesman, Handoffs, error) {
 	y, err := s.Get(name)
 	if err != nil {
-		return nil, Handoffs{}, err
+		return nil, Yesman{}, Handoffs{}, err
 	}
-	return openHandoffs(s.root, y, &s.metaMu)
+	f, hs, err := openHandoffs(s.root, y, &s.metaMu)
+	return f, y, hs, err
 }
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // AddHandoff registers a handoff and returns it, and whether it is new.
 //
-// A tool call registers one handoff, ever, whichever process makes it: the
-// same call again returns that handoff, without a second one, or, once the
-// handoff was closed and trimmed from the history, an error. What decides is
-// the call itself, kept in the file, never when its process started.
+// A tool call registers one handoff while the yesman remembers it, whichever
+// process makes it: the same call again returns that handoff, without a
+// second one, or, once the handoff was closed and trimmed from the history,
+// an error. What decides is the call itself, kept in the file, never when
+// its process started. A new tool call is taken only while the tool-call
+// memory has room for it (needsyou_calls.go).
 func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 	h.Type = strings.TrimSpace(h.Type)
 	if !slices.Contains(HandoffTypes, h.Type) {
@@ -216,11 +228,22 @@ func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 		if i := slices.IndexFunc(hs.trimmed, func(c trimmedCall) bool { return c.ToolCall == h.ToolCall }); i >= 0 {
 			return Handoff{}, false, fmt.Errorf("tool call %s already registered handoff %s, which was closed since; nothing was added", h.ToolCall, hs.trimmed[i].ID)
 		}
-		if hs.forgotten.has(h.ToolCall) {
-			return Handoff{}, false, fmt.Errorf("tool call %s may repeat one whose handoff was closed long ago; nothing was added. For a new request, call again", h.ToolCall)
+		if hs.memory.has(h.ToolCall) {
+			return Handoff{}, false, fmt.Errorf("tool call %s matches the fingerprint of a tool call whose handoff was closed long ago; nothing was added. For a new request, call again", h.ToolCall)
+		}
+		if hs.filter.has(h.ToolCall) {
+			if hs.filter.refusesNew() >= legacyRefusing {
+				return Handoff{}, false, fmt.Errorf("tool call %s may repeat one a pre-release version remembered, in a memory so full that it takes many new calls for old ones; nothing was added. Calling again is likely refused too: new handoffs need the user to start a new tool-call memory under Needs you", h.ToolCall)
+			}
+			return Handoff{}, false, fmt.Errorf("tool call %s may repeat one a pre-release version remembered; nothing was added. For a new request, call again", h.ToolCall)
 		}
 		if !hs.unsure.IsZero() {
-			return Handoff{}, false, fmt.Errorf("this yesman's handoffs were kept by a pre-release version that forgot tool calls without a trace, so tool call %s cannot be told from a repeated one; nothing was added", h.ToolCall)
+			return Handoff{}, false, fmt.Errorf("this yesman's handoffs were kept by a pre-release version that forgot tool calls without a trace, so tool call %s cannot be told from a repeated one; nothing was added. New handoffs are refused until the user starts a new tool-call memory under Needs you", h.ToolCall)
+		}
+		// Room for this call, and every call already taken, wherever
+		// trimming moves them.
+		if n := hs.callRecords(); n >= maxCallRecords {
+			return Handoff{}, false, fmt.Errorf("this yesman's tool-call memory is full (%d of %d tool calls remembered); nothing was added. New handoffs are refused until the user starts a new tool-call memory under Needs you", n, maxCallRecords)
 		}
 	}
 	if len(hs.Open()) >= maxOpenHandoffs {
@@ -327,7 +350,8 @@ func (s *Store) CloseHandoff(name, id, resolution, by, note string) (Handoff, er
 
 // trim keeps every open handoff and the keptClosed most recently closed,
 // in their order, and remembers the tool calls of the others: the latest
-// keptCalls as they are, the older ones as a fingerprint.
+// keptCalls as they are, the older ones as fingerprints. It only moves
+// tool calls: callRecords never grows.
 func (hs *Handoffs) trim() {
 	var closed []int
 	for i, h := range hs.Items {
@@ -355,12 +379,51 @@ func (hs *Handoffs) trim() {
 	hs.Items = keep
 	if n := len(hs.trimmed) - keptCalls; n > 0 {
 		slices.SortStableFunc(hs.trimmed, func(a, b trimmedCall) int { return a.CreatedAt.Compare(b.CreatedAt) })
-		if hs.forgotten == nil {
-			hs.forgotten = newCallFilter()
-		}
 		for _, c := range hs.trimmed[:n] {
-			hs.forgotten.add(c.ToolCall)
+			hs.memory.add(c.ToolCall)
 		}
 		hs.trimmed = slices.Clone(hs.trimmed[n:])
 	}
+}
+
+// ErrCallMemoryChanged says the tool-call memory a reset was confirmed for
+// is not the one there now.
+var ErrCallMemoryChanged = errors.New("the tool-call memory changed since it was shown; nothing was forgotten. Look at it again and confirm")
+
+// ResetCallMemory starts a new tool-call memory for a yesman, for the user
+// who confirmed it under Needs you: it forgets the fingerprints of the tool
+// calls of handoffs no longer kept, and what a pre-release version kept in
+// their place, so that new tool calls are taken again. Every handoff, the
+// tool calls kept as they are and the fields this version does not know
+// stay. hiredAt, epoch, used and forgettable are what the user was shown: if
+// the yesman was replaced, or its memory was reset or changed since, nothing
+// is forgotten. Within an epoch the fingerprints are only added to, so the
+// same counts are the same fingerprints. It returns the new memory and how
+// many records it forgot.
+//
+// After it, a tool call forgotten by it registers one new handoff if it is
+// made again, and is then remembered again; another reset can let it back
+// once more.
+func (s *Store) ResetCallMemory(name string, hiredAt time.Time, epoch, used, forgettable int) (CallMemory, int, error) {
+	l := s.handoffLock(name)
+	l.Lock()
+	defer l.Unlock()
+	f, y, hs, err := s.openHandoffsOf(name)
+	if err != nil {
+		return CallMemory{}, 0, err
+	}
+	defer f.close()
+	if !y.HiredAt.Equal(hiredAt) {
+		return CallMemory{}, 0, errors.New("this yesman was replaced: refresh the window")
+	}
+	if m := hs.CallMemory(); m.Epoch != epoch || m.Used != used || m.Forgettable != forgettable {
+		return CallMemory{}, 0, ErrCallMemoryChanged
+	} else if !m.Resettable() {
+		return CallMemory{}, 0, errors.New("there is nothing to forget: new tool calls are taken")
+	}
+	cleared := hs.forgetCalls(time.Now().UTC())
+	if err := f.write(hs); err != nil {
+		return CallMemory{}, 0, err
+	}
+	return hs.CallMemory(), cleared, nil
 }

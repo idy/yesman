@@ -179,13 +179,15 @@ export function createInfo(host) {
   // What waits on the user from this yesman, counted from what Needs you
   // shows; it opens there.
   function needsYouEntry(y) {
-    const { count, error } = host.needsYou(y);
+    const { count, error, refused } = host.needsYou(y);
     return {
       key: 'needs-you', label: t('Needs you'), title: t('See what {name} needs from you', { name: y.displayName || y.name }),
-      // A file that cannot be read is said, not counted as nothing.
+      // A file that cannot be read is said, not counted as nothing; and so
+      // is a lead that cannot hand over new requests.
       aside: error ? [count && tn(count, '{n} waiting', '{n} waiting'), t('Cannot be read')].filter(Boolean).join(' · ')
+        : refused ? [count && tn(count, '{n} waiting', '{n} waiting'), t('New requests refused')].filter(Boolean).join(' · ')
         : count ? tn(count, '{n} waiting', '{n} waiting') : t('Nothing waiting'),
-      tone: error ? 'error' : count ? 'waiting' : null,
+      tone: error || refused ? 'error' : count ? 'waiting' : null,
       open: () => host.openNeedsYou(y),
     };
   }

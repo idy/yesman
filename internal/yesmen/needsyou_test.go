@@ -2,6 +2,7 @@ package yesmen
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -363,6 +364,14 @@ func TestHandoffsMalformedFileKept(t *testing.T) {
 		`{"items":[],"next":0,"forgottenCalls":null}`,
 		`{"items":[],"next":0,"forgottenCalls":{"places":0,"bits":"AA==","count":1}}`,
 		`{"items":[],"next":0,"forgottenCalls":{"places":7,"bits":"","count":1}}`,
+		`{"items":[],"next":0,"callMemory":null}`,
+		`{"items":[],"next":0,"callMemory":{"epoch":-1,"fingerprints":"","resets":[]}}`,
+		`{"items":[],"next":0,"callMemory":{"epoch":0,"fingerprints":"AAAA","resets":[]}}`,
+		`{"items":[],"next":0,"callMemory":{"epoch":0,"fingerprints":"AAAAAAAAAAEAAAAAAAAAAQ==","resets":[]}}`,
+		`{"items":[],"next":0,"callMemory":{"epoch":0,"fingerprints":"AAAAAAAAAAIAAAAAAAAAAQ==","resets":[]}}`,
+		`{"items":[],"next":0,"callMemory":{"epoch":0,"fingerprints":"","resets":[{"epoch":1,"at":"2026-01-01T00:00:00Z","cleared":0,"sha256":"` + strings.Repeat("0", 64) + `"}]}}`,
+		`{"items":[],"next":0,"callMemory":{"epoch":1,"fingerprints":"","resets":[{"epoch":1,"at":"2026-01-01T00:00:00Z","cleared":0,"sha256":"00"}]}}`,
+		`{"items":[],"next":0,"callMemory":{"epoch":0,"fingerprints":"` + base64.StdEncoding.EncodeToString(make([]byte, 8*(maxCallFingerprints+1))) + `","resets":[]}}`,
 	} {
 		t.Run(raw, func(t *testing.T) {
 			s := handoffStore(t)
@@ -377,7 +386,87 @@ func TestHandoffsMalformedFileKept(t *testing.T) {
 				t.Error("added")
 			}
 			if data, _ := os.ReadFile(y.HandoffsFile()); string(data) != raw {
-				t.Errorf("rewritten: %s", data)
+				t.Errorf("rewritten: %.200s", data)
+			}
+		})
+	}
+}
+
+// The yesman's identity is read from its own yesman.json, a regular file of
+// a bounded size: one that cannot be read, or is not that, is an error, and
+// the handoffs file stays as it is.
+func TestHandoffsIdentityIsReadSafely(t *testing.T) {
+	for _, tc := range []struct {
+		name, says string
+		change     func(t *testing.T, meta string)
+	}{
+		{"the same yesman", "", func(*testing.T, string) {}},
+		{"oversized", "larger than", func(t *testing.T, meta string) {
+			data, _ := os.ReadFile(meta)
+			padded := append(bytes.TrimSuffix(bytes.TrimSpace(data), []byte("}")), []byte(`,"pad":"`+strings.Repeat("x", maxMetaBytes)+`"}`)...)
+			if err := os.WriteFile(meta, padded, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"not JSON", "yesman.json", func(t *testing.T, meta string) {
+			if err := os.WriteFile(meta, []byte("{"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a directory", "not a regular file", func(t *testing.T, meta string) {
+			if err := os.Remove(meta); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(meta, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a link to the same content", "not a regular file", func(t *testing.T, meta string) {
+			copied := filepath.Join(t.TempDir(), "yesman.json")
+			data, _ := os.ReadFile(meta)
+			if err := os.WriteFile(copied, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(meta); err != nil {
+				t.Fatal(err)
+			}
+			symlinkOrSkip(t, copied, meta)
+		}},
+		{"missing", "replaced", func(t *testing.T, meta string) {
+			if err := os.Remove(meta); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := handoffStore(t)
+			if _, err := s.Hire("bob"); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "one"}); err != nil {
+				t.Fatal(err)
+			}
+			y, _ := s.Get("alice")
+			before, _ := os.ReadFile(y.HandoffsFile())
+			tc.change(t, filepath.Join(y.MetaDir(), "yesman.json"))
+			f, hs, err := openHandoffs(s.root, y, &s.metaMu)
+			if f != nil {
+				f.close()
+			}
+			switch {
+			case tc.says == "" && (err != nil || len(hs.Items) != 1):
+				t.Fatalf("%+v %v", hs, err)
+			case tc.says != "" && (err == nil || !strings.Contains(err.Error(), tc.says)):
+				t.Fatalf("opened: %v", err)
+			}
+			if tc.says != "" && tc.says != "replaced" && strings.Contains(err.Error(), "replaced") {
+				t.Errorf("an unreadable identity taken for another yesman: %v", err)
+			}
+			if after, _ := os.ReadFile(y.HandoffsFile()); !bytes.Equal(before, after) {
+				t.Error("the handoffs file changed")
+			}
+			if _, _, err := s.AddHandoff("bob", Handoff{Type: HandoffManual, Title: "bob's"}); err != nil {
+				t.Errorf("bob: %v", err)
 			}
 		})
 	}
@@ -442,8 +531,8 @@ func TestHandoffsHistoryAndRepeatedCalls(t *testing.T) {
 	}
 }
 
-// Past keptCalls the oldest calls are kept only as a fingerprint, which
-// still refuses them, in a new Store as in any process, through every later
+// Past keptCalls the oldest calls are kept only as fingerprints, which
+// still refuse them, in a new Store as in any process, through every later
 // trimming; new calls register.
 func TestHandoffsForgottenCalls(t *testing.T) {
 	s := handoffStore(t)
@@ -474,8 +563,11 @@ func TestHandoffsForgottenCalls(t *testing.T) {
 	}
 	fresh := func() *Store { return New(filepath.Dir(y.Path), filepath.Join(t.TempDir(), "archive")) }
 	read, err := fresh().Handoffs("alice")
-	if err != nil || len(read.Items) != keptClosed || len(read.trimmed) != keptCalls || read.trimmed[0].ToolCall != "c3" || read.forgotten.Count != 3 {
-		t.Fatalf("read back %d items, %d calls, %+v, %v", len(read.Items), len(read.trimmed), read.forgotten, err)
+	if err != nil || len(read.Items) != keptClosed || len(read.trimmed) != keptCalls || read.trimmed[0].ToolCall != "c3" || len(read.memory.Set) != 3 {
+		t.Fatalf("read back %d items, %d calls, %d fingerprints, %v", len(read.Items), len(read.trimmed), len(read.memory.Set), err)
+	}
+	if m := read.CallMemory(); m.Used != keptClosed+keptCalls+3 || m.Capacity != maxCallRecords || m.State != "" || m.Forgettable != 3 {
+		t.Fatalf("call memory %+v", m)
 	}
 	refused := func(store *Store, call, says string) {
 		t.Helper()
@@ -508,8 +600,8 @@ func TestHandoffsForgottenCalls(t *testing.T) {
 		}
 	}
 	read, _ = fresh().Handoffs("alice")
-	if read.forgotten.Count != 33 || read.trimmed[0].ToolCall != "c33" {
-		t.Fatalf("after trimming again: %d forgotten, oldest kept %s", read.forgotten.Count, read.trimmed[0].ToolCall)
+	if len(read.memory.Set) != 33 || read.trimmed[0].ToolCall != "c33" {
+		t.Fatalf("after trimming again: %d forgotten, oldest kept %s", len(read.memory.Set), read.trimmed[0].ToolCall)
 	}
 	for _, call := range []string{"c0", "c2", "c3", "c32"} {
 		refused(fresh(), call, "long ago")
@@ -527,29 +619,6 @@ func TestHandoffsForgottenCalls(t *testing.T) {
 	if _, created, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "by hand"}); err != nil || !created {
 		t.Fatalf("without a call: %v %v", created, err)
 	}
-}
-
-// The fingerprint refuses about one new call in 500 once it holds 20,000.
-func TestCallFilterRarelyRefusesANewCall(t *testing.T) {
-	f := newCallFilter()
-	for i := range 20000 {
-		f.add("toolu_held_" + strconv.Itoa(i))
-	}
-	for i := range 20000 {
-		if !f.has("toolu_held_" + strconv.Itoa(i)) {
-			t.Fatalf("lost call %d", i)
-		}
-	}
-	refused := 0
-	for i := range 20000 {
-		if f.has("toolu_new_" + strconv.Itoa(i)) {
-			refused++
-		}
-	}
-	if refused > 100 {
-		t.Fatalf("%d of 20000 new calls refused", refused)
-	}
-	t.Logf("%d of 20000 new calls refused", refused)
 }
 
 // A file of a pre-release version, which forgot calls without keeping their
@@ -583,6 +652,31 @@ func TestHandoffsUnsureFileRefusesUnknownCalls(t *testing.T) {
 	}
 	if _, created, err := fresh.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "by hand"}); err != nil || !created {
 		t.Errorf("without a call: %v %v", created, err)
+	}
+	// Until the user starts a new tool-call memory, which forgets only the
+	// mark: what is kept stays, and stays refused or found.
+	hs, err := fresh.Handoffs("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := hs.CallMemory()
+	if m.State != "blocked" || !m.Refusing() || !m.Resettable() {
+		t.Fatalf("call memory %+v", m)
+	}
+	if _, _, err := fresh.ResetCallMemory("alice", y.HiredAt, m.Epoch, m.Used, m.Forgettable); err != nil {
+		t.Fatal(err)
+	}
+	if h, created, err := fresh.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "x", ToolCall: "call-0"}); err != nil || !created {
+		t.Errorf("a call after the reset: %+v %v %v", h, created, err)
+	}
+	if h, created, err := fresh.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "x", ToolCall: "known"}); err != nil || created || h.ID != "n9" {
+		t.Errorf("known call after the reset: %+v %v %v", h, created, err)
+	}
+	if _, _, err := fresh.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "x", ToolCall: "kept"}); err == nil || !strings.Contains(err.Error(), "n8") {
+		t.Errorf("kept call after the reset: %v", err)
+	}
+	if raw, _ := os.ReadFile(y.HandoffsFile()); bytes.Contains(raw, []byte(unsureKey)) {
+		t.Error("the mark is still in the file")
 	}
 }
 

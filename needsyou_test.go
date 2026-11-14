@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -119,5 +121,42 @@ func TestStartupCountsKeptHandoffs(t *testing.T) {
 	restarted.agentsChanged([]agent.Info{lead})
 	if restarted.waiting != 1 {
 		t.Errorf("the lead answered: waiting %d", restarted.waiting)
+	}
+}
+
+// Only the user's window starts a new tool-call memory, for the yesman it
+// showed, as it showed it.
+func TestResetCallMemoryIsTheUsers(t *testing.T) {
+	a, _ := crewApp(t)
+	a.keepAwake = func(string) func() { return func() {} }
+	y, err := a.yesmen.Hire("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"items":[],"next":0,"trimmedCallsBefore":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(y.HandoffsFile(), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hs, _ := a.yesmen.Handoffs("alice")
+	m := hs.CallMemory()
+	if m.State != "blocked" {
+		t.Fatalf("call memory %+v", m)
+	}
+	s := &service{app: a}
+	if _, err := s.ResetCallMemory("alice", y.HiredAt.Add(-time.Second), m.Epoch, m.Used, m.Forgettable); err == nil {
+		t.Fatal("a stale window reset the memory")
+	}
+	if _, err := s.ResetCallMemory("alice", y.HiredAt, m.Epoch+1, m.Used, m.Forgettable); !errors.Is(err, yesmen.ErrCallMemoryChanged) {
+		t.Fatalf("a confirmation of another memory: %v", err)
+	}
+	if data, _ := os.ReadFile(y.HandoffsFile()); string(data) != raw {
+		t.Fatal("a refused reset changed the file")
+	}
+	got, err := s.ResetCallMemory("alice", y.HiredAt, m.Epoch, m.Used, m.Forgettable)
+	if err != nil || got.State != "" || got.Epoch != 1 {
+		t.Fatalf("reset = %+v, %v", got, err)
+	}
+	if _, created, err := a.yesmen.AddHandoff("alice", yesmen.Handoff{Type: yesmen.HandoffManual, Title: "x", ToolCall: "toolu_1"}); err != nil || !created {
+		t.Fatalf("a call after the reset: %v %v", created, err)
 	}
 }

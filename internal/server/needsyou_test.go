@@ -2,6 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -111,12 +115,13 @@ func TestNeedsYouIsTheLeadsAndExplicit(t *testing.T) {
 
 	body := `{"add":{"type":"login","title":"Log in to the registry","detail":"Run npm login.","task":"#1","worker":"w1"},"toolCall":"call-7"}`
 	out, err := needsYouCall(s, lead, body)
-	h, _ := out.(yesmen.Handoff)
-	if err != nil || h.ID != "n1" || h.Task != "t1" || h.Worker != "w1" || h.ToolCall != "call-7" {
+	added, _ := out.(AddedHandoff)
+	h := added.Handoff
+	if err != nil || added.CallMemory != nil || h.ID != "n1" || h.Task != "t1" || h.Worker != "w1" || h.ToolCall != "call-7" {
 		t.Fatalf("add = %+v, %v", out, err)
 	}
 	// The same call again (a retried tool call) adds and announces nothing new.
-	if out, err := needsYouCall(s, lead, body); err != nil || out.(yesmen.Handoff).ID != "n1" {
+	if out, err := needsYouCall(s, lead, body); err != nil || out.(AddedHandoff).ID != "n1" {
 		t.Fatalf("repeated add = %+v, %v", out, err)
 	}
 	if got := strings.Join(f.told, ","); got != "alice:n1,alice:" {
@@ -233,5 +238,73 @@ func TestNeedsYouChangeFromARetiredLeadIsRefused(t *testing.T) {
 				t.Errorf("handoffs after the retired request: %+v", hs.Items)
 			}
 		})
+	}
+}
+
+// fingerprintsJSON is a tool-call memory of n fingerprints, as the file
+// keeps it: base64 of 8 bytes each, sorted.
+func fingerprintsJSON(n int) string {
+	b := make([]byte, 8*n)
+	for i := range n {
+		binary.BigEndian.PutUint64(b[8*i:], uint64(i+1))
+	}
+	return `{"epoch":0,"fingerprints":"` + base64.StdEncoding.EncodeToString(b) + `","resets":[]}`
+}
+
+// The lead hears how full the tool-call memory is once it matters, in its
+// context, in the list and in what add returns: counts, never a call or a
+// fingerprint, and that the user, not another call, takes it on.
+func TestNeedsYouCallMemoryForTheLead(t *testing.T) {
+	f := needsYouServer(t)
+	s, y := f.s, f.y
+	lead := f.start(t, "alice/lead")
+	write := func(raw string) {
+		t.Helper()
+		if err := os.WriteFile(y.HandoffsFile(), []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	near := 262144 / 10 * 9 // where the lead hears of it
+	write(`{"items":[],"next":0,"callMemory":` + fingerprintsJSON(near-1) + `}`)
+	if text := s.needsYouContext(lead); text != "" {
+		t.Errorf("context below 90%%: %q", text)
+	}
+	out, err := needsYouCall(s, lead, `{"add":{"type":"manual","title":"Step"},"toolCall":"call-near"}`)
+	added, _ := out.(AddedHandoff)
+	if err != nil || added.CallMemory == nil || added.CallMemory.State != "near" || added.CallMemory.Used != near {
+		t.Fatalf("add near full = %+v, %v", out, err)
+	}
+	text := s.needsYouContext(lead)
+	if !strings.Contains(text, fmt.Sprintf("holds %d of 262144", near)) || !strings.Contains(text, "1 waiting on the user") {
+		t.Errorf("context near full: %q", text)
+	}
+	view, err := s.needsYouView(lead)
+	if err != nil || view.CallMemory == nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(view.CallMemory)
+	if string(raw) != fmt.Sprintf(`{"used":%d,"capacity":262144,"forgettable":%d,"epoch":0,"state":"near"}`, near, near-1) {
+		t.Errorf("the lead sees %s", raw)
+	}
+
+	write(`{"items":[],"next":0,"callMemory":` + fingerprintsJSON(262144) + `}`)
+	if _, err := needsYouCall(s, lead, `{"add":{"type":"manual","title":"Step"},"toolCall":"call-full"}`); err == nil || !strings.Contains(err.Error(), "is full") || strings.Contains(err.Error(), "call again") {
+		t.Errorf("add when full: %v", err)
+	}
+	if out, err := needsYouCall(s, lead, `{"add":{"type":"manual","title":"By hand"}}`); err != nil || out.(AddedHandoff).CallMemory.State != "full" {
+		t.Errorf("add without a call when full: %+v %v", out, err)
+	}
+	if text := s.needsYouContext(lead); !strings.Contains(text, "is full (262144 of 262144") || !strings.Contains(text, "calling again does not help") {
+		t.Errorf("context when full: %q", text)
+	}
+
+	// A lead has no way to start a new memory itself.
+	if _, err := needsYouCall(s, lead, `{"resetCallMemory":{"epoch":0,"used":262144}}`); err == nil {
+		t.Error("a lead reset the memory")
+	}
+
+	write(`{"items":[],"next":0,"trimmedCallsBefore":"2026-01-01T00:00:00Z"}`)
+	if text := s.needsYouContext(lead); !strings.Contains(text, "pre-release") || strings.Contains(text, "waiting on the user") {
+		t.Errorf("context of a pre-release file: %q", text)
 	}
 }

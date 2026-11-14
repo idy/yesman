@@ -17,7 +17,9 @@ import (
 // TestNeedsYouForgottenCallWithPiFixture runs the installed pi with yesman's
 // extension and a local backend. A history trimmed by real closes forgets
 // call-0 from what it keeps as it is; a new pi process that sends call-0
-// again is refused, the file untouched, while a new call registers once:
+// again is refused, the file untouched, while a new call registers once.
+// Once the tool-call memory is full, a new call is refused, saying so, until
+// the user starts a new memory; then it registers:
 //
 //	YESMAN_TEST_PI_FIXTURE=1 go test ./internal/server -run NeedsYouForgottenCallWithPiFixture -v
 func TestNeedsYouForgottenCallWithPiFixture(t *testing.T) {
@@ -38,6 +40,10 @@ func TestNeedsYouForgottenCallWithPiFixture(t *testing.T) {
 			return call("toolu_fresh", "log in")
 		case strings.Contains(body, "REPLAY-FORGOTTEN") && answered(body, "call-0") == 0:
 			return call("call-0", "original completed step")
+		case strings.Contains(body, "WHEN-FULL") && answered(body, "toolu_full") == 0:
+			return call("toolu_full", "install the CLI")
+		case strings.Contains(body, "AFTER-RESET") && answered(body, "toolu_full") == 1:
+			return call("toolu_full", "install the CLI")
 		}
 		return []any{map[string]any{"type": "text_start", "contentIndex": 0}, map[string]any{"type": "text_end", "contentIndex": 0, "content": "fixture reply"}}
 	})
@@ -114,5 +120,44 @@ func TestNeedsYouForgottenCallWithPiFixture(t *testing.T) {
 	}
 	if r := result("toolu_fresh"); len(r) != 2 || r[1].IsError || !strings.Contains(string(r[1].Content), open[0].ID) {
 		t.Fatalf("the same call's result: %+v", r)
+	}
+
+	// Full: as many fingerprints as leave no room for another call.
+	hs, err := f.store.Handoffs("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := hs.CallMemory()
+	var file map[string]json.RawMessage
+	current, _ := os.ReadFile(y.HandoffsFile())
+	if err := json.Unmarshal(current, &file); err != nil {
+		t.Fatal(err)
+	}
+	file["callMemory"] = json.RawMessage(fingerprintsJSON(m.Capacity - (m.Used - m.Forgettable)))
+	full, _ := json.Marshal(file)
+	if err := os.WriteFile(y.HandoffsFile(), full, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if hs, _ := f.store.Handoffs("alice"); hs.CallMemory().State != "full" {
+		t.Fatalf("not full: %+v", hs.CallMemory())
+	}
+	ask("WHEN-FULL a new request")
+	if r := result("toolu_full"); len(r) != 1 || !r[0].IsError || !strings.Contains(string(r[0].Content), "memory is full") || strings.Contains(string(r[0].Content), "call again") {
+		t.Fatalf("a new call when full: %+v", r)
+	}
+	if after, _ := os.ReadFile(y.HandoffsFile()); !bytes.Equal(after, full) {
+		t.Fatal("refusing changed the file")
+	}
+	hs, _ = f.store.Handoffs("alice")
+	m = hs.CallMemory()
+	if _, _, err := f.store.ResetCallMemory("alice", y.HiredAt, m.Epoch, m.Used, m.Forgettable); err != nil {
+		t.Fatal(err)
+	}
+	ask("AFTER-RESET the same request")
+	if r := result("toolu_full"); len(r) != 2 || r[1].IsError || !strings.Contains(string(r[1].Content), "Registered") {
+		t.Fatalf("the call after the reset: %+v", r)
+	}
+	if open := pending(); len(open) != 2 || open[1].ToolCall != "toolu_full" {
+		t.Fatalf("after the reset: %+v", open)
 	}
 }

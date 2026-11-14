@@ -35,12 +35,14 @@ const (
 	handoffsName = "needs-you.json"
 	// maxHandoffsBytes bounds a read. Everything this version writes stays
 	// far below it: the open and kept items at their longest fields, fully
-	// escaped, are a few megabytes.
+	// escaped, with the tool-call memory full, are some 6.5 MB
+	// (TestCallMemoryAtCapacity).
 	maxHandoffsBytes = 16 << 20
 )
 
 // handoffFault, set only by tests, fails or holds up a step of reading
-// ("read") or writing ("write", "rename") the file at path.
+// ("read") or writing ("write", "rename") the file at path, or of reading
+// the yesman's identity ("meta", between checking and opening it).
 var handoffFault func(step, path string) error
 
 // handoffsFile is a handoffs file opened for reading and, maybe, replacing.
@@ -115,25 +117,85 @@ func (f *handoffsFile) open(root string, y Yesman, metaMu *sync.Mutex) (Handoffs
 	}
 	// The workspace opened must be the yesman asked for, not a newer one
 	// of the same name that took its place since.
-	if !f.hiredAt(metaMu).Equal(y.HiredAt) {
+	hired, err := f.hiredAt(metaMu)
+	if err != nil {
+		return Handoffs{}, err
+	}
+	if !hired.Equal(y.HiredAt) {
 		return Handoffs{}, errors.New("the workspace was replaced while it was opened")
 	}
 	return f.read()
 }
 
-// hiredAt reads when the opened workspace's yesman was hired, as Store.Get
-// does: zero when it cannot be read.
-func (f *handoffsFile) hiredAt(metaMu *sync.Mutex) time.Time {
-	metaMu.Lock()
-	data, err := f.meta.ReadFile("yesman.json")
-	metaMu.Unlock()
+// maxMetaBytes bounds the yesman.json read for the yesman's identity.
+const maxMetaBytes = 1 << 20
+
+// hiredAt reads when the opened workspace's yesman was hired, from its own
+// yesman.json: a regular file of a bounded size, opened without blocking, so
+// that a pipe, a device or a link in its place is refused, never waited on.
+// A workspace without one was hired at the zero time, as Store.Get says; one
+// that cannot be read or parsed is an error. metaMu, which Rename's atomic
+// replacement needs on Windows, is held only to open and read the file once
+// it is known to be a regular one.
+func (f *handoffsFile) hiredAt(metaMu *sync.Mutex) (time.Time, error) {
+	data, err := readRegular(f.meta, "yesman.json", maxMetaBytes, metaMu)
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("yesman.json: %w", err)
+	}
 	var meta struct {
 		HiredAt time.Time `json:"hiredAt"`
 	}
-	if err == nil {
-		_ = json.Unmarshal(data, &meta)
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return time.Time{}, fmt.Errorf("yesman.json: %w", err)
 	}
-	return meta.HiredAt
+	return meta.HiredAt, nil
+}
+
+// readRegular reads the regular file name in root, of at most limit bytes,
+// opening it without blocking: a link, pipe, directory or device in its
+// place, or one swapped in while it is opened, is refused unread. lock is
+// held only while the file is opened and read.
+func readRegular(root *os.Root, name string, limit int64, lock sync.Locker) ([]byte, error) {
+	fi, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errors.New("not a regular file (a link, pipe, directory or device)")
+	}
+	if fi.Size() > limit {
+		return nil, fmt.Errorf("larger than %d bytes", limit)
+	}
+	if handoffFault != nil {
+		if err := handoffFault("meta", name); err != nil {
+			return nil, err
+		}
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	file, err := root.OpenFile(name, os.O_RDONLY|openNoBlock, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(fi, opened) {
+		return nil, errors.New("it changed while it was opened")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("larger than %d bytes", limit)
+	}
+	return data, nil
 }
 
 func (f *handoffsFile) read() (Handoffs, error) {
@@ -316,12 +378,13 @@ var (
 	trimmedKeys = jsonKeys(reflect.TypeFor[trimmedCall]())
 )
 
-// The file's own keys besides "items" and "next". unsureKey is only in
-// files of a pre-release version.
+// The file's own keys besides "items" and "next". filterKey and unsureKey
+// are only in files of a pre-release version.
 const (
-	trimmedKey   = "trimmedCalls"
-	forgottenKey = "forgottenCalls"
-	unsureKey    = "trimmedCallsBefore"
+	trimmedKey = "trimmedCalls"
+	memoryKey  = "callMemory"
+	filterKey  = "forgottenCalls"
+	unsureKey  = "trimmedCallsBefore"
 )
 
 func jsonKeys(t reflect.Type) []string {
@@ -371,7 +434,7 @@ func decodeHandoffs(data []byte) (Handoffs, error) {
 	if err := json.Unmarshal(rawItems, &items); err != nil || items == nil {
 		return Handoffs{}, errors.New(`"items" is not a list`)
 	}
-	hs := Handoffs{Items: make([]Handoff, 0, len(items)), extra: unknownFields(top, "items", "next", trimmedKey, forgottenKey, unsureKey)}
+	hs := Handoffs{Items: make([]Handoff, 0, len(items)), extra: unknownFields(top, "items", "next", trimmedKey, memoryKey, filterKey, unsureKey)}
 	if err := json.Unmarshal(rawNext, &hs.Next); err != nil || hs.Next < 0 {
 		return Handoffs{}, errors.New(`"next" is not a count`)
 	}
@@ -409,14 +472,19 @@ func decodeTrimmed(top map[string]json.RawMessage, hs *Handoffs) error {
 			return fmt.Errorf("%q is not a time", unsureKey)
 		}
 	}
-	if raw, ok := top[forgottenKey]; ok {
+	if raw, ok := top[filterKey]; ok {
 		var obj map[string]json.RawMessage
 		var c callFilter
 		if json.Unmarshal(raw, &obj) != nil || obj == nil || json.Unmarshal(raw, &c) != nil || c.valid() != nil {
-			return fmt.Errorf("%q is not a filter of tool calls", forgottenKey)
+			return fmt.Errorf("%q is not a filter of tool calls", filterKey)
 		}
 		c.extra = unknownFields(obj, callFilterKeys...)
-		hs.forgotten = &c
+		hs.filter = &c
+	}
+	if raw, ok := top[memoryKey]; ok {
+		if err := decodeCallMemory(raw, &hs.memory); err != nil {
+			return fmt.Errorf("%q: %w", memoryKey, err)
+		}
 	}
 	raw, ok := top[trimmedKey]
 	if !ok {
@@ -493,14 +561,20 @@ func encodeHandoffs(hs Handoffs) ([]byte, error) {
 		}
 		b.WriteByte(']')
 	}
-	if hs.forgotten != nil {
-		known, err := json.Marshal(hs.forgotten)
+	if !hs.memory.empty() {
+		b.WriteString(`,"` + memoryKey + `":`)
+		if err := encodeCallMemory(&b, &hs.memory); err != nil {
+			return nil, err
+		}
+	}
+	if hs.filter != nil {
+		known, err := json.Marshal(hs.filter)
 		if err != nil {
 			return nil, err
 		}
-		b.WriteString(`,"` + forgottenKey + `":`)
+		b.WriteString(`,"` + filterKey + `":`)
 		b.Write(known[:len(known)-1])
-		if err := writeFields(&b, hs.forgotten.extra); err != nil {
+		if err := writeFields(&b, hs.filter.extra); err != nil {
 			return nil, err
 		}
 		b.WriteByte('}')
@@ -542,5 +616,78 @@ func writeFields(b *bytes.Buffer, fields map[string]json.RawMessage) error {
 		b.WriteByte(':')
 		b.Write(fields[k])
 	}
+	return nil
+}
+
+// The tool-call memory's own keys.
+var callMemoryKeys = []string{"epoch", "fingerprints", "resets"}
+
+// decodeCallMemory reads the tool-call memory: its epoch, its fingerprints,
+// base64 of 8 bytes each, big-endian, sorted and each once, and its resets.
+func decodeCallMemory(raw json.RawMessage, m *callMemory) error {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil || obj == nil {
+		return errors.New("not an object")
+	}
+	var known struct {
+		Epoch        int               `json:"epoch"`
+		Fingerprints []byte            `json:"fingerprints"`
+		Resets       []json.RawMessage `json:"resets"`
+	}
+	if err := json.Unmarshal(raw, &known); err != nil {
+		return err
+	}
+	if known.Epoch < 0 {
+		return errors.New("the epoch is negative")
+	}
+	set, err := decodeCallSet(known.Fingerprints)
+	if err != nil {
+		return err
+	}
+	m.Epoch, m.Set, m.extra = known.Epoch, set, unknownFields(obj, callMemoryKeys...)
+	for i, raw := range known.Resets {
+		var obj map[string]json.RawMessage
+		var r callReset
+		if json.Unmarshal(raw, &obj) != nil || obj == nil || json.Unmarshal(raw, &r) != nil ||
+			r.Epoch < 1 || r.Epoch > known.Epoch || r.At.IsZero() || r.Cleared < 0 || len(r.SHA256) != 64 {
+			return fmt.Errorf("reset %d is not a record of a reset", i+1)
+		}
+		r.extra = unknownFields(obj, callResetKeys...)
+		m.Resets = append(m.Resets, r)
+	}
+	return nil
+}
+
+func encodeCallMemory(b *bytes.Buffer, m *callMemory) error {
+	if len(m.Set) > maxCallFingerprints {
+		return errors.New("its tool-call memory would hold more fingerprints than can be read")
+	}
+	resets := make([]json.RawMessage, 0, len(m.Resets))
+	for _, r := range m.Resets {
+		known, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		var one bytes.Buffer
+		one.Write(known[:len(known)-1])
+		if err := writeFields(&one, r.extra); err != nil {
+			return err
+		}
+		one.WriteByte('}')
+		resets = append(resets, one.Bytes())
+	}
+	known, err := json.Marshal(struct {
+		Epoch        int               `json:"epoch"`
+		Fingerprints []byte            `json:"fingerprints"`
+		Resets       []json.RawMessage `json:"resets"`
+	}{m.Epoch, m.setBytes(), resets})
+	if err != nil {
+		return err
+	}
+	b.Write(known[:len(known)-1])
+	if err := writeFields(b, m.extra); err != nil {
+		return err
+	}
+	b.WriteByte('}')
 	return nil
 }

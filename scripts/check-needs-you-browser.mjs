@@ -39,7 +39,7 @@ function bridge() {
   localStorage.setItem('yesman.info', 'hidden');
   window.handlers = {};
   window.calls = [];
-  const forward = ['State', 'Messages', 'Answer', 'ResolveHandoff', 'Info', 'ListFiles', 'ReadFile'];
+  const forward = ['State', 'Messages', 'Answer', 'ResolveHandoff', 'ResetCallMemory', 'Info', 'ListFiles', 'ReadFile'];
   window.mygo = {
     locale: localStorage.getItem('fixture.locale') || 'en',
     on: (name, fn) => { handlers[name] = fn; },
@@ -388,7 +388,100 @@ async function scenario(engineName, page) {
   const overflow = await page.evaluate(() => [...document.querySelectorAll('#yesmen, .needs-you-page')].some((el) => el.scrollWidth > el.clientWidth + 1));
   assert.equal(overflow, false);
   await shot('zh-dark-narrow');
+
+  // The request memory, in Chinese, dark and narrow: Bob's is full, which
+  // Needs you and his Info row say; the user starts a new one by keyboard,
+  // and his lead hears of it.
+  const memory = page.locator('.needs-you-memory[data-memory="bob"]');
+  const memoryState = () => page.evaluate(() => document.querySelector('.needs-you-memory[data-memory="bob"]')?.dataset.state ?? '');
+  const memoryIs = (state) => until(`Bob's memory ${state || 'fine'}`, async () => {
+    await page.evaluate(() => handlers.changed(true));
+    await page.waitForTimeout(250);
+    return (await memoryState()) === state;
+  });
+  const dialog = page.locator('#confirm-dialog');
+  const resets = () => page.evaluate(() => calls.filter((c) => c[0] === 'ResetCallMemory').length);
+  await ctl('call-memory', { yesman: 'bob', message: 'full' });
+  await memoryIs('full');
+  assert.equal(await memory.getAttribute('role'), 'alert');
+  assert.match(await memory.innerText(), /bob 的 lead 无法再交给你新请求[\s\S]*262,144 \/ 262,144[\s\S]*开始新的记忆…/);
+  assert.equal(await page.evaluate(() => [...document.querySelectorAll('#yesmen, .needs-you-page')].some((el) => el.scrollWidth > el.clientWidth + 1)), false);
+  await shot('zh-dark-narrow-memory-full');
+  await lead('bob').click();
+  await until('Bob\'s Info row', async () => /需要你[\s\S]*新请求被拒绝/.test(await infoRow('needs-you').innerText().catch(() => '')));
+  await entry.click();
+  await memory.waitFor();
+  await memory.getByRole('button').focus();
+  await page.keyboard.press('Enter');
+  await dialog.waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#confirm-title').innerText(), '为 bob 开始新的请求记忆？');
+  assert.match(await page.locator('#confirm-body').innerText(), /清除 bob 的 lead 交给你请求时用过的 262,144 条较早工具调用的去重记录[\s\S]*可能会再出现一次[\s\S]*以后再次重置，它还可能再出现一次/);
+  await page.locator('#confirm-ok').focus();
+  await page.keyboard.press('Enter');
+  await memoryIs('');
+  await until('focus on the page', () => page.evaluate(() => document.activeElement?.matches('.needs-you-page h1')));
+  assert.equal(await resets(), 1);
+  assert.equal((await ctl('call-memory', { yesman: 'bob' })).epoch, 1);
+  await prompted('bob/lead', '[yesman] The user started a new tool-call memory for Needs you: 262144 older tool-call records were forgotten');
+
+  // In English, light and wide: nearly full. Cancelling forgets nothing; a
+  // confirmation shown before the lead took another call forgets nothing
+  // either and shows the memory again; confirming that one resets it.
   await page.evaluate(() => localStorage.removeItem('fixture.locale'));
+  await page.reload();
+  await entry.waitFor();
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await ctl('call-memory', { yesman: 'bob', message: 'near' });
+  await entry.click();
+  await memoryIs('near');
+  assert.equal(await memory.getAttribute('role'), 'status');
+  assert.match(await memory.innerText(), /bob's request memory is nearly full[\s\S]*235,926 of 262,144/);
+  await shot('memory-near');
+  await memory.getByRole('button').focus();
+  await page.keyboard.press('Enter');
+  await dialog.waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#confirm-title').innerText(), 'Start a new request memory for bob?');
+  assert.match(await page.locator('#confirm-body').innerText(), /This forgets 235,926 records[\s\S]*may show up once more[\s\S]*A later reset can let it back once more\./);
+  // The dialog's close event is delivered before it opens again (headless
+  // Chromium can deliver it late, and an earlier close would settle the next
+  // opening).
+  await page.evaluate(() => { window.confirmClosed = false; document.querySelector('#confirm-dialog').addEventListener('close', () => { window.confirmClosed = true; }, { once: true }); });
+  await page.keyboard.press('Escape');
+  await until('the dialog closed', () => page.evaluate(() => window.confirmClosed));
+  assert.equal(await resets(), 0); // this page's, since the reload
+  await until('focus back on the button', () => page.evaluate(() => !!document.activeElement?.closest('.needs-you-memory[data-memory="bob"]')));
+  await page.keyboard.press('Enter');
+  await dialog.waitFor({ state: 'visible' });
+  await ctl('prompt', { agent: 'bob/lead', message: needsYou({ add: { type: 'manual', title: 'Rotate the signing key' }, toolCall: 'call-bob-key' }) });
+  await until('the call taken', async () => (await ctl('call-memory', { yesman: 'bob' })).used === 235927);
+  await page.locator('#confirm-ok').click();
+  await until('the refusal', async () => /changed since it was shown/.test(await page.locator('.mds-toast').innerText().catch(() => '')));
+  const kept = await ctl('call-memory', { yesman: 'bob' });
+  assert.equal(kept.epoch, 1);
+  assert.equal(kept.state, 'near');
+  await until('the memory shown again', async () => /235,927 of 262,144/.test(await memory.innerText()));
+  await until('focus kept on the button', () => page.evaluate(() => !!document.activeElement?.closest('.needs-you-memory[data-memory="bob"]')));
+  await page.keyboard.press('Enter');
+  await dialog.waitFor({ state: 'visible' });
+  await page.locator('#confirm-ok').click();
+  await memoryIs('');
+  const fresh = await ctl('call-memory', { yesman: 'bob' });
+  assert.equal(fresh.epoch, 2);
+  assert.equal(fresh.state ?? '', '');
+
+  // Kept by a pre-release version: nothing to count, and still the way out.
+  await ctl('call-memory', { yesman: 'bob', message: 'blocked' });
+  await memoryIs('blocked');
+  assert.match(await memory.innerText(), /bob's lead cannot hand you new requests[\s\S]*pre-release version/);
+  await shot('memory-blocked');
+  await memory.getByRole('button').click();
+  await dialog.waitFor({ state: 'visible' });
+  assert.match(await page.locator('#confirm-body').innerText(), /This forgets what a pre-release version remembered/);
+  await page.locator('#confirm-ok').click();
+  await memoryIs('');
+  await ctl('prompt', { agent: 'bob/lead', message: needsYou({ add: { type: 'manual', title: 'Confirm the release notes' }, toolCall: 'call-bob-after' }) });
+  await until('a new call taken after the reset', async () => (await ctl('call-memory', { yesman: 'bob' })).used === 2);
 }
 
 try {
@@ -410,7 +503,7 @@ try {
       });
       assert.deepEqual(errors, []);
       results.push(`${engineName}: PASS`);
-      console.log(`${engineName}: Needs you sources, count, jump/focus/draft, answer, done, expiry, archive/rehire, remove, reload, Info card rows/counts/scope/back/late response, focus across refresh, history re-read with a live reply, long handoffs, zh/dark/narrow passed`);
+      console.log(`${engineName}: Needs you sources, count, jump/focus/draft, answer, done, expiry, archive/rehire, remove, reload, Info card rows/counts/scope/back/late response, focus across refresh, history re-read with a live reply, long handoffs, zh/dark/narrow, request memory near/full/pre-release with a keyboard reset, a stale confirmation and the lead told passed`);
     } finally {
       await browser?.close();
       await backend.close();

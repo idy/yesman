@@ -547,18 +547,21 @@ export default function yesman(pi: ExtensionAPI) {
 				const out = await call("POST", "/v1/needs-you", { add: params.add, handOver: params.handOver, resolve: params.resolve, toolCall: toolCallId }, signal);
 				if (params.handOver) return result(`Handed ${params.handOver.worker}'s question to the user.`, out);
 				if (params.resolve) return result(`Resolved ${out.id}.`, out);
-				return result(`Registered ${out.id}: it shows under Needs you until the user acts on it.`, out);
+				const m = out.callMemory;
+				const memory = m ? `\nThe tool-call memory of Needs you holds ${m.used} of ${m.capacity} tool calls: ${m.used >= m.capacity ? "it is full, so" : "once it is full,"} add is refused until the user starts a new one under Needs you.` : "";
+				return result(`Registered ${out.id}: it shows under Needs you until the user acts on it.${memory}`, out);
 			}
 			if (params.id) {
 				const h = await call("GET", `/v1/needs-you?id=${encodeURIComponent(params.id)}`, undefined, signal);
 				return result(json(h), h);
 			}
 			const view = await call("GET", "/v1/needs-you", undefined, signal);
+			const memory = view.callMemory ? `Tool-call memory: ${view.callMemory.used} of ${view.callMemory.capacity} tool calls remembered (${view.callMemory.state}).\n` : "";
 			const lines = [
 				...view.handoffs.map(handoffLine),
 				...view.questions.map((q: any) => `- worker ${q.worker}'s question ${JSON.stringify(q.requestId)}: ${q.title}, since ${q.since}`),
 			];
-			return result(lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user.", {});
+			return result(memory + (lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user."), {});
 		},
 	});
 

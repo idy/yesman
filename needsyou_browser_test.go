@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -260,6 +262,21 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 					}
 				}
 			}
+		case "ResetCallMemory":
+			var name string
+			var hiredAt time.Time
+			var epoch, used, forgettable int
+			if err = arg(req.Args, 0, &name); err == nil {
+				if err = arg(req.Args, 1, &hiredAt); err == nil {
+					if err = arg(req.Args, 2, &epoch); err == nil {
+						if err = arg(req.Args, 3, &used); err == nil {
+							if err = arg(req.Args, 4, &forgettable); err == nil {
+								value, err = s.ResetCallMemory(name, hiredAt, epoch, used, forgettable)
+							}
+						}
+					}
+				}
+			}
 		default:
 			err = fmt.Errorf("unsupported fixture method %s", req.Method)
 		}
@@ -298,6 +315,8 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 			value, err = s.Hire(ctx, req.Yesman)
 		case "remove-worker":
 			err = s.RemoveWorker(req.Agent)
+		case "call-memory":
+			value, err = fixtureCallMemory(a.yesmen, req.Yesman, req.Message)
 		case "observed":
 			mu.Lock()
 			value = map[string]any{"notes": append([]map[string]string(nil), notes...), "prompts": prompts}
@@ -318,4 +337,50 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 	defer page.Close()
 	fmt.Println("NEEDS_YOU_BROWSER_URL=" + page.URL)
 	_, _ = io.Copy(io.Discard, os.Stdin)
+}
+
+// fixtureCallMemory returns a yesman's tool-call memory, after putting it,
+// in its file, in a state: "near" (90% full), "full", or "blocked" (kept by
+// a pre-release version that forgot calls without a trace).
+func fixtureCallMemory(store *yesmen.Store, name, state string) (yesmen.CallMemory, error) {
+	hs, err := store.Handoffs(name)
+	if err != nil || state == "" {
+		return hs.CallMemory(), err
+	}
+	y, err := store.Get(name)
+	if err != nil {
+		return yesmen.CallMemory{}, err
+	}
+	m := hs.CallMemory()
+	file := map[string]json.RawMessage{"items": json.RawMessage(`[]`), "next": json.RawMessage(`0`)}
+	if raw, err := os.ReadFile(y.HandoffsFile()); err == nil {
+		if err := json.Unmarshal(raw, &file); err != nil {
+			return yesmen.CallMemory{}, err
+		}
+	}
+	n := 0
+	switch state {
+	case "near":
+		n = m.Capacity/10*9 - (m.Used - m.Forgettable)
+	case "full":
+		n = m.Capacity - (m.Used - m.Forgettable)
+	case "blocked":
+		file["trimmedCallsBefore"] = json.RawMessage(`"2026-01-01T00:00:00Z"`)
+	default:
+		return yesmen.CallMemory{}, fmt.Errorf("no call-memory state %q", state)
+	}
+	b := make([]byte, 8*n)
+	for i := range n {
+		binary.BigEndian.PutUint64(b[8*i:], uint64(i+1))
+	}
+	file["callMemory"] = json.RawMessage(fmt.Sprintf(`{"epoch":%d,"fingerprints":%q,"resets":[]}`, m.Epoch, base64.StdEncoding.EncodeToString(b)))
+	raw, err := json.Marshal(file)
+	if err != nil {
+		return yesmen.CallMemory{}, err
+	}
+	if err := os.WriteFile(y.HandoffsFile(), raw, 0o600); err != nil {
+		return yesmen.CallMemory{}, err
+	}
+	hs, err = store.Handoffs(name)
+	return hs.CallMemory(), err
 }
