@@ -289,7 +289,7 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 	}
 	for _, stored := range disk.Records {
 		d := stored.Delivery
-		if !deliveryID.MatchString(d.ID) || len(stored.Fingerprint) != 64 || d.ImageCount < 0 || d.ImageCount > 4 || !d.Origin.valid() {
+		if !deliveryID.MatchString(d.ID) || len(stored.Fingerprint) != 64 || d.ImageCount < 0 || d.ImageCount > 4 || !receiptOrigin(d.Origin) {
 			return nil, 0, errors.New("invalid delivery metadata")
 		}
 		switch d.State {

@@ -30,8 +30,8 @@ type Delivery struct {
 	// handled); empty until pi answered, or when it refused. It stays when
 	// the state later turns unconfirmed or interrupted.
 	Ack string `json:"ack,omitempty"`
-	// Origin marks a submission the app made for the user, such as a
-	// scheduled task; nil for what the user typed.
+	// Origin marks a submission the app made for the user, a scheduled
+	// task's run; nil for what a person typed.
 	Origin      *Origin `json:"origin,omitempty"`
 	boundSeq    uint64
 	fingerprint string
@@ -103,7 +103,7 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	if !deliveryID.MatchString(messageID) {
 		return Delivery{}, errors.New("invalid message ID")
 	}
-	if !origin.valid() {
+	if !receiptOrigin(origin) {
 		return Delivery{}, errors.New("invalid submission origin")
 	}
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
@@ -229,7 +229,13 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	m.mu.Unlock()
 	// Only the private receipt ID crosses this Go call. The pi command and
 	// user text remain byte-for-byte the same as the original submission path.
-	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, images...)
+	// Who wrote it is decided from pi's records of this prompt and kept
+	// beside the message (originTracker); a scheduled run says so.
+	written := Origin{Source: OriginUser, Submission: messageID}
+	if origin != nil {
+		written = Origin{Source: origin.Source, Plan: origin.Plan, Run: origin.Run, Submission: messageID}
+	}
+	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, written, images...)
 	m.mu.Lock()
 	current := a.deliveries[messageID]
 	if !a.deliverySealed && err != nil && (current.State == "sending" || current.State == "interrupted" && current.Session == "") {

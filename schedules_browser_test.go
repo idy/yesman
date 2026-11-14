@@ -42,6 +42,7 @@ func browserFakePi() {
 		out.Flush()
 	}
 	var queue []string
+	var messages []any // the session's user messages, as pi keeps them
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 4096), 8<<20)
 	for sc.Scan() {
@@ -62,7 +63,7 @@ func browserFakePi() {
 		case "get_state":
 			respond(map[string]any{"model": map[string]any{"id": "fixture", "provider": "local"}, "thinkingLevel": "off", "sessionId": "fixture-session"})
 		case "get_messages":
-			respond(map[string]any{"messages": []any{}})
+			respond(map[string]any{"messages": messages})
 		case "prompt":
 			if f, err := os.OpenFile(os.Getenv("FAKE_PI_LOG"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
 				data, _ := json.Marshal(map[string]string{"message": c.Message, "behavior": c.Behavior})
@@ -77,8 +78,13 @@ func browserFakePi() {
 				write(map[string]any{"type": "queue_update", "steering": []string{}, "followUp": queue})
 				respond(map[string]any{"disposition": "queued"})
 			default:
+				// The run starts with the prompt as its user message, as pi's.
 				respond(map[string]any{"disposition": "started"})
 				write(map[string]any{"type": "agent_start"})
+				msg := map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": c.Message}}, "timestamp": time.Now().UnixMilli()}
+				write(map[string]any{"type": "message_start", "message": msg})
+				write(map[string]any{"type": "message_end", "message": msg})
+				messages = append(messages, msg)
 				write(map[string]any{"type": "agent_settled", "aborted": false})
 			}
 		default:
@@ -118,8 +124,11 @@ func TestSchedulesBrowserBridge(t *testing.T) {
 	events := newBrowserEvents()
 	a.agents = agent.New(agent.Config{
 		Pi: exe, Extension: filepath.Join(a.home.Root, "none.ts"), Yesmen: a.yesmen,
-		Env:      []string{"YESMAN_FAKE_PI=1", "FAKE_PI_LOG=" + logPath, "FAKE_PI_MODE_FILE=" + modePath},
-		OnEvent:  func(e agent.Event) { a.schedules.OnAgentEvent(e) },
+		Env: []string{"YESMAN_FAKE_PI=1", "FAKE_PI_LOG=" + logPath, "FAKE_PI_MODE_FILE=" + modePath},
+		OnEvent: func(e agent.Event) {
+			a.schedules.OnAgentEvent(e)
+			events.send("agent-event", e) // the window follows conversations live
+		},
 		OnChange: func(list []agent.Info) { events.send("agents", list) },
 	})
 	t.Cleanup(a.agents.StopAll)

@@ -78,7 +78,7 @@ func TestDailyRunReachesTheLeadOnce(t *testing.T) {
 		t.Errorf("the message carries private IDs:\n%s", msg)
 	}
 	d, found := e.receipt(r.Attempts[0].ID)
-	if found != agent.DeliveryFound || d.Origin == nil || d.Origin.Kind != agent.OriginSchedule || d.Origin.Run != r.ID {
+	if found != agent.DeliveryFound || d.Origin == nil || d.Origin.Source != agent.OriginSchedule || d.Origin.Run != r.ID {
 		t.Fatalf("receipt = %+v (%v)", d, found)
 	}
 	if next := e.plan(p.ID).Next; next == nil || !next.Equal(utc("2026-11-17T09:00:00Z")) {

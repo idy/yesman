@@ -197,6 +197,21 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
     step('run now once per click');
     await shot('history');
 
+    // The conversation shows the run as a scheduled task's, from the origin
+    // recorded beside it, never as a person's message.
+    const thread = page.locator('#thread');
+    const scheduledNote = thread.locator('.note--scheduled').filter({ hasText: T('Scheduled task s1', '定时任务 s1') }).first();
+    await scheduledNote.waitFor();
+    assert.equal(await thread.locator('.msg-user').filter({ hasText: 'Scheduled task s1' }).count(), 0, 'a scheduled run shown as a person\'s message');
+    await scheduledNote.getByText(T('The request it sent', '发出的请求')).click();
+    await scheduledNote.locator('.md').getByText(T(/Check the overnight CI runs/, /检查夜间 CI/)).waitFor();
+    await shot('conversation');
+    await pane.getByRole('button', { name: T('Close the tasks', '关闭定时任务') }).click();
+    await pane.waitFor({ state: 'hidden' });
+    await scheduledNote.getByRole('button', { name: T('Open in Tasks', '在定时任务中打开') }).click();
+    await pane.locator('.sched-plan').first().locator('.sched-details').waitFor();
+    step('conversation shows the scheduled run');
+
     // The run's board task, and back.
     await plan.locator('.sched-run').first().getByRole('button', { name: 't1' }).click();
     const board = page.locator('#board');
@@ -246,6 +261,9 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
     await pane.locator('.sched-run').first().locator('.sched-chip').getByText(T('Queued for the lead', '已排队等主管处理')).waitFor();
     prompts = await fx.get('/fixture/prompts');
     assert.equal(prompts.at(-1).behavior, 'followUp');
+    // Still in pi's queue, its receipt shows as the scheduled run it is.
+    await thread.locator('.note--scheduled[data-delivery] .delivery-status[data-state="queued"]').first().waitFor();
+    assert.equal(await thread.locator('.msg-user').filter({ hasText: /Scheduled task/ }).count(), 0);
     step('busy lead queues a follow-up');
 
     // Save conflict keeps the input.

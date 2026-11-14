@@ -7,21 +7,10 @@ import (
 	"time"
 )
 
-// Origin says where a submission came from when the user did not type it,
-// such as a scheduled task. It is side metadata of the receipt only: pi's
-// command and the message text are exactly what the sender gave, and no
-// hook or model sees it.
-type Origin struct {
-	Kind string `json:"kind"` // "schedule"
-	Plan string `json:"plan,omitempty"`
-	Run  string `json:"run,omitempty"`
-}
-
-// OriginSchedule marks submissions of scheduled tasks.
-const OriginSchedule = "schedule"
-
-func (o *Origin) valid() bool {
-	return o == nil || len(o.Kind) <= 32 && len(o.Plan) <= 16 && len(o.Run) <= 120
+// receiptOrigin checks the origin a receipt keeps: none, for what a person
+// typed, or a scheduled run's.
+func receiptOrigin(o *Origin) bool {
+	return o == nil || o.Source == OriginSchedule && originPlanRE.MatchString(o.Plan) && originRunRE.MatchString(o.Run)
 }
 
 // DeliveryLookup says what is known of a submission ID.
@@ -41,11 +30,13 @@ const (
 	DeliveryUnknown
 )
 
-// SubmitFollowUp submits a message the app sends for the user, such as a
-// scheduled task, through the same receipt path as Submit: registered
-// durably before dispatch, idempotent under its ID. It is a follow-up, so an
-// agent answering something finishes that first; it is never steered into
-// a run or aborted for it.
+// SubmitFollowUp submits a message the app sends for the user, a scheduled
+// task's run, through the same receipt path as Submit: registered durably
+// before dispatch, idempotent under its ID. It is a follow-up, so an agent
+// answering something finishes that first; it is never steered into a run or
+// aborted for it. Its origin (Source OriginSchedule, with the plan and run)
+// is kept in the receipt and, like every origin, beside the message: pi's
+// command and the text are exactly what the scheduler gave.
 func (m *Manager) SubmitFollowUp(ctx context.Context, id, messageID, text string, origin Origin, expectedSince time.Time) (Delivery, error) {
 	return m.submit(ctx, id, messageID, text, nil, "followUp", &origin, expectedSince)
 }

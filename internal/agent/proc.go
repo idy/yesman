@@ -59,6 +59,8 @@ type proc struct {
 	done   chan struct{}
 	err    error // why it exited, set before done closes
 	stderr tail
+
+	origins originTracker // who wrote its user messages
 }
 
 // startProc starts pi. Records that are not answers to commands, the

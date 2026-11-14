@@ -7,12 +7,14 @@
 // and tools to check repositories out of the pool, keep the board and, for
 // a lead, to run workers. Its shell tool sets the user's secrets and
 // variables in every command, asking the app for them each time, and what
-// tools return hides the secrets' values from the model. Everything is
-// done by the yesman app; this file only forwards.
+// tools return hides the secrets' values from the model. It also records in
+// the session who wrote each user message, as the app knows (trackOrigins).
+// Everything is done by the yesman app; this file only forwards.
 //
 // A lead delegates, so that it is always free to talk: it has no shell and
 // writes only Knowledge notes and the task log. Its tools are narrowed when
 // its session starts, and any call outside them is refused.
+import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -181,8 +183,60 @@ function boardText(board: any): string {
 	return parts.join("\n\n");
 }
 
+// Who wrote a user message: the user, the agent's lead, yesman telling a
+// lead about its workers, or a scheduled task's run (with its plan and run).
+// See Origin in internal/agent/origin.go.
+type Origin = { source: "user" | "lead" | "yesman" | "schedule"; kind?: string; worker?: string; submission?: string; plan?: string; run?: string };
+
+const SOURCES = new Set(["user", "lead", "yesman", "schedule"]);
+// The custom entry type origins are recorded under (originEntry in Go).
+const ORIGIN_ENTRY = "yesman-origin";
+
+// validOrigin keeps only the bounded fields the window reads.
+function validOrigin(o: any): Origin | undefined {
+	if (!o || typeof o !== "object" || !SOURCES.has(o.source)) return undefined;
+	const match = (s: unknown, re: RegExp) => (typeof s === "string" && re.test(s) ? s : undefined);
+	const out: Origin = { source: o.source };
+	// Worker names follow the app's rule for them (nameRE in internal/yesmen).
+	const kind = match(o.kind, /^[a-z]{1,16}$/), worker = match(o.worker, /^[a-z0-9][a-z0-9-]{0,31}$/);
+	if (kind) out.kind = kind;
+	if (worker) out.worker = worker;
+	if (typeof o.submission === "string" && /^[a-f0-9]{48}$/.test(o.submission)) out.submission = o.submission;
+	// A scheduled run's plan and run IDs, as internal/schedule makes them.
+	const plan = match(o.plan, /^s[1-9][0-9]{0,5}$/), run = match(o.run, /^s[1-9][0-9]{0,5}-[a-z0-9-]{1,80}$/);
+	if (o.source === "schedule" && plan && run) Object.assign(out, { plan, run });
+	return out;
+}
+
+// trackOrigins records in pi's session who wrote each user message, so the
+// window can still tell after a restart. The app decides it from pi's own
+// records of the prompt, in order, never from the text; this asks it as the
+// message ends, identifying the message by its timestamp and the digest of its
+// JSON, and appends the answer as a custom entry, which pi keeps beside the
+// message and never puts in a model's context. The message itself, its text,
+// images and every other extension's input, context and provider hooks are
+// left alone. When the app does not know, nothing is recorded, and the window
+// shows the message as a person's.
+function trackOrigins(pi: ExtensionAPI) {
+	pi.on("message_end", async (event) => {
+		const message = event.message as any;
+		if (message?.role !== "user" || typeof message.timestamp !== "number") return;
+		let origin: Origin | undefined;
+		try {
+			const digest = createHash("sha256").update(JSON.stringify(message)).digest("hex");
+			const r = await call("POST", "/v1/origin", { timestamp: message.timestamp, digest }, AbortSignal.timeout(3000));
+			origin = validOrigin(r?.origin);
+		} catch {}
+		// pi appends the message right after its message_end handlers, so this
+		// entry is the message's parent in the session.
+		if (origin) pi.appendEntry(ORIGIN_ENTRY, { timestamp: message.timestamp, origin });
+	});
+}
+
 export default function yesman(pi: ExtensionAPI) {
 	if (!API || !TOKEN || !AGENT) return; // not started by yesman
+
+	trackOrigins(pi);
 
 	if (ROLE === "lead") {
 		// Narrow the lead's tools before every run, in case something

@@ -21,7 +21,7 @@ func TestSubmitFollowUpKeepsOriginAndAcceptance(t *testing.T) {
 	if _, found, err := m.LookupDelivery(ctx, id, messageID, y.HiredAt); err != nil || found != DeliveryAbsent {
 		t.Fatalf("before: %v %v", found, err)
 	}
-	origin := Origin{Kind: OriginSchedule, Plan: "s1", Run: "s1-20261116t0900"}
+	origin := Origin{Source: OriginSchedule, Plan: "s1", Run: "s1-20261116t0900"}
 	d, err := m.SubmitFollowUp(ctx, id, messageID, "[yesman] Scheduled task s1 is due.", origin, y.HiredAt)
 	if err != nil || d.Ack != "accepted" || d.Origin == nil || *d.Origin != origin {
 		t.Fatalf("submit: %+v %v", d, err)

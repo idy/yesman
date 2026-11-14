@@ -1029,7 +1029,7 @@ func (s *Service) stepSend(sp *space, r Run) {
 		return
 	}
 	text := message(r)
-	origin := agent.Origin{Kind: agent.OriginSchedule, Plan: r.Plan, Run: r.ID}
+	origin := agent.Origin{Source: agent.OriginSchedule, Plan: r.Plan, Run: r.ID}
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Minute)
 	d, err = s.cfg.Agents.SubmitFollowUp(ctx, lead, a.ID, text, origin, sp.since)
 	cancel()
@@ -1144,7 +1144,7 @@ func (s *Service) handleEvent(e agent.Event) {
 		Type     string         `json:"type"`
 		Delivery agent.Delivery `json:"delivery"`
 	}
-	if json.Unmarshal(e.Data, &ev) != nil || ev.Type != "delivery_update" || ev.Delivery.Origin == nil || ev.Delivery.Origin.Kind != agent.OriginSchedule {
+	if json.Unmarshal(e.Data, &ev) != nil || ev.Type != "delivery_update" || ev.Delivery.Origin == nil || ev.Delivery.Origin.Source != agent.OriginSchedule {
 		return
 	}
 	yesman, name, err := agent.SplitID(e.Agent)
