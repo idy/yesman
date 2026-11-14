@@ -163,7 +163,9 @@ func TestPrunedRequestIsNotANewRun(t *testing.T) {
 }
 
 // pruned.json keeps the newest request IDs of a plan exactly and a floor
-// below them; an ID without a plausible time does not raise the floor.
+// below them; an ID without a plausible time, or one ahead of the clock,
+// does not raise the floor and stays in the list until the floor may cover
+// it: no ID taken is ever forgotten.
 func TestPrunedRequestsFloor(t *testing.T) {
 	f, _ := decodePruned(nil)
 	at := func(ms int64, n int) string { return fmt.Sprintf("%012x%012x", ms, n) }
@@ -186,14 +188,47 @@ func TestPrunedRequestsFloor(t *testing.T) {
 	if f.used("s1", at(1_700_000_001_000, 0)) || f.used("s2", ids[0]) {
 		t.Fatal("a new request was taken as used")
 	}
-	legacy := strings.Repeat("f", 16)
+	legacy, ahead := strings.Repeat("f", 16), at(2_100_000_000_000, 0)
 	g, _ := decodePruned(nil)
-	g.add("s1", []string{legacy}, latest)
-	for i := range maxPrunedRequests {
-		g.add("s1", []string{at(1_700_000_000_000+int64(i), i)}, latest)
+	g.add("s1", []string{legacy, ahead}, latest)
+	taken := []string{legacy, ahead}
+	for i := range 3 * maxPrunedRequests {
+		id := at(1_700_000_000_000+int64(i), i)
+		taken = append(taken, id)
+		g.add("s1", []string{id}, latest)
+		p := g.Plans["s1"]
+		if p.Floor > latest || len(p.Requests) > maxPrunedRequests || !slices.Contains(p.Requests, legacy) || !slices.Contains(p.Requests, ahead) {
+			t.Fatalf("after %d: floor %q, %d requests", i, p.Floor, len(p.Requests))
+		}
 	}
-	if g.Plans["s1"].Floor != "" || g.used("s1", at(1_800_000_000_000, 0)) {
+	for i, id := range taken {
+		if !g.used("s1", id) {
+			t.Fatalf("request %d was forgotten", i)
+		}
+	}
+	if g.used("s1", at(1_800_000_000_000, 0)) {
 		t.Fatalf("a request ID without a plausible time raised the floor: %+v", g.Plans["s1"])
+	}
+	// More than the list holds of IDs ahead of the clock: all stay.
+	var aheads []string
+	for i := range maxPrunedRequests + 3 {
+		aheads = append(aheads, at(2_100_000_000_001+int64(i), i))
+	}
+	g.add("s1", aheads, latest)
+	if p := g.Plans["s1"]; len(p.Requests) != maxPrunedRequests+5 || p.Floor > latest {
+		t.Fatalf("ahead of the clock: floor %q, %d requests", p.Floor, len(p.Requests))
+	}
+	// Once the clock is past them, the floor covers them and the list is
+	// bounded again; still none is forgotten.
+	later := fmt.Sprintf("%012x", int64(2_200_000_000_000))
+	g.add("s1", []string{at(2_150_000_000_000, 9)}, later)
+	if p := g.Plans["s1"]; len(p.Requests) != maxPrunedRequests || p.Floor > later {
+		t.Fatalf("after the clock passed them: floor %q, %d requests", p.Floor, len(p.Requests))
+	}
+	for _, id := range append(append(taken, aheads...), at(2_150_000_000_000, 9)) {
+		if !g.used("s1", id) {
+			t.Fatalf("%s was forgotten", id)
+		}
 	}
 	data, err := f.encode()
 	if err != nil {

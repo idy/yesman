@@ -519,6 +519,16 @@ var floorRE = regexp.MustCompile(`^[a-f0-9]{12}$`)
 // requestTime is the time part of a request ID, comparable as a string.
 func requestTime(id string) string { return id[:12] }
 
+// requestAhead is how far ahead of the scheduler's clock a request ID's
+// time may be: the page and the scheduler read the same computer's clock.
+const requestAhead = 24 * time.Hour
+
+// latestRequest is the latest request time taken from now: the latest a
+// new click may carry, and the highest the floor is raised to.
+func latestRequest(now time.Time) string {
+	return fmt.Sprintf("%012x", now.Add(requestAhead).UnixMilli())
+}
+
 // clone copies the file deeply enough to change it.
 func (f prunedFile) clone() prunedFile {
 	out := prunedFile{Version: f.Version, Plans: make(map[string]*prunedPlan, len(f.Plans)), extra: f.extra}
@@ -538,9 +548,15 @@ func (f prunedFile) used(plan, request string) bool {
 }
 
 // add records request IDs pruned from a plan, keeping the newest
-// maxPrunedRequests exactly and raising the floor over the older ones. A
-// time after latest (a request ID from before they carried their time) does
-// not raise it, or no click could pass it.
+// maxPrunedRequests exactly and raising the floor over the older ones, the
+// oldest first. A request ID leaves the exact list only when the floor
+// covers it, and the floor is never raised past latest (latestRequest), or
+// no click could pass it: an ID whose time is later stays in the list,
+// beyond maxPrunedRequests if need be, until the clock reaches it. Such an
+// ID was taken before the clock was set back, or comes from a version whose
+// request IDs did not start with their time. So no request ID taken is
+// ever forgotten; the list stays bounded by the clicks taken ahead of the
+// clock, and pruned.json by its size, past which nothing is pruned.
 func (f *prunedFile) add(plan string, requests []string, latest string) {
 	p := f.Plans[plan]
 	if p == nil {
@@ -553,10 +569,14 @@ func (f *prunedFile) add(plan string, requests []string, latest string) {
 		}
 	}
 	for len(p.Requests) > maxPrunedRequests {
-		if t := requestTime(p.Requests[0]); t > p.Floor && t <= latest {
+		i := slices.IndexFunc(p.Requests, func(r string) bool { return requestTime(r) <= latest })
+		if i < 0 {
+			break // none the floor may cover yet: all stay exactly
+		}
+		if t := requestTime(p.Requests[i]); t > p.Floor {
 			p.Floor = t
 		}
-		p.Requests = p.Requests[1:]
+		p.Requests = slices.Delete(p.Requests, i, i+1)
 	}
 }
 

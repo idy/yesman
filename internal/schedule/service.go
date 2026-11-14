@@ -74,6 +74,12 @@ var (
 	// left the history; it is not taken for a new run.
 	ErrRequestUsed = errors.New("this run was already made and its record has left the history, so it was not sent again: use Run now again for a new run")
 	errCaughtUp    = errors.New("this missed run was caught up already")
+	// ErrRequestAhead: a new click whose request ID carries a time more than
+	// a day ahead of the scheduler's clock, which was set back since the page
+	// made it (or an ID that does not start with its time). It is refused
+	// before anything is recorded: a click taken so would have to be kept
+	// exactly for as long, and a new click carries the right time.
+	ErrRequestAhead = errors.New("this click carries a time more than a day ahead of this computer's clock, so nothing was sent: use Run now again")
 	// ErrStaleCaller: the lead that asked was stopped, restarted or
 	// dismissed, or the workspace replaced, before the change was made.
 	ErrStaleCaller = errors.New("the lead that asked is no longer running in this yesman, so nothing was saved")
@@ -101,8 +107,13 @@ type Service struct {
 	// service is open, so once Close set closed, work.Wait waits for every
 	// worker there will be.
 	work sync.WaitGroup
-	// released is closed once Close let the lock go, after every worker
-	// ended.
+	// ops counts the operations that may write a workspace's files: a save,
+	// a click, a check, a tick, a receipt update. Like a worker, one is
+	// counted only while the service is open (begin), so once Close set
+	// closed, ops.Wait waits for every one there will be.
+	ops sync.WaitGroup
+	// released is closed once Close let the lock go, after every worker and
+	// operation ended.
 	released chan struct{}
 	// epoch counts the receipt updates missed: one dropped makes every run
 	// waiting on a receipt to be checked again.
@@ -199,14 +210,15 @@ func (s *Service) Start() {
 // closeWait is how long Close waits for the deliveries under way.
 const closeWait = 2 * time.Second
 
-// Close stops scheduling: no run is claimed after it returns. Runs on their
-// way stay recorded as they are and are resumed or resolved on the next
-// start. The lock is let go once every delivery under way has ended, and
-// not before, so that no other app takes a run over while it may still go
-// out: when they end, whether or not a Close still waits for them. Close
-// waits a little for that. It may be called again, also at once from
-// several goroutines; each call returns once the lock was let go, or after
-// the same short wait.
+// Close stops scheduling: no run is claimed after it returns, and no
+// operation that may write starts. Runs on their way stay recorded as they
+// are and are resumed or resolved on the next start. The lock is let go
+// once every delivery and every operation under way has ended, and not
+// before, so that no other app takes the tasks over while a run may still
+// go out or a record still be written here: when they end, whether or not
+// a Close still waits for them. Close waits a little for that. It may be
+// called again, also at once from several goroutines; each call returns
+// once the lock was let go, or after the same short wait.
 func (s *Service) Close() {
 	s.mu.Lock()
 	first := !s.closed
@@ -230,10 +242,12 @@ func (s *Service) Close() {
 	}
 }
 
-// release lets the lock go once every delivery worker has ended. No worker
-// starts once the service is closed (enqueue), so none can start after.
+// release lets the lock go once every delivery worker and every operation
+// has ended. None starts once the service is closed (enqueue, begin), so
+// none can start after.
 func (s *Service) release() {
 	s.work.Wait()
+	s.ops.Wait()
 	s.mu.Lock()
 	lock := s.lock
 	s.lock, s.owner = nil, false
@@ -619,9 +633,11 @@ func (s *Service) changed(name string) { s.cfg.OnChange(name) }
 // missed or skipped, resumes runs left on their way and follows their board
 // tasks. It returns the next time something is due, zero for none.
 func (s *Service) Tick(ctx context.Context) time.Time {
-	if !s.Owner() {
+	done, err := s.begin(true)
+	if err != nil {
 		return time.Time{}
 	}
+	defer done()
 	ys, err := s.cfg.Yesmen.List()
 	if err != nil {
 		return time.Time{}
@@ -1010,7 +1026,7 @@ func (s *Service) pruneLocked(sp *space, y yesmen.Yesman, tasks map[string]yesme
 	}
 	if len(requests) > 0 {
 		next := sp.pruned.clone()
-		latest := fmt.Sprintf("%012x", s.now().Add(24*time.Hour).UnixMilli())
+		latest := latestRequest(s.now())
 		for plan, reqs := range requests {
 			next.add(plan, reqs, latest)
 		}
@@ -1451,6 +1467,11 @@ func (s *Service) handleEvent(e agent.Event) {
 	if err != nil || name != yesmen.LeadName {
 		return
 	}
+	done, err := s.begin(false)
+	if err != nil {
+		return // the next start reads the receipt again
+	}
+	defer done()
 	s.mu.Lock()
 	sp := s.spaces[yesman]
 	s.mu.Unlock()
@@ -1506,16 +1527,22 @@ func (in PlanInput) normalize(now time.Time) (PlanInput, *time.Location, error) 
 	return in, loc, nil
 }
 
-func (s *Service) ownerError() error {
+// begin admits an operation that may write a workspace's files, owning the
+// scheduled tasks when owned: it is counted until its done is called, and
+// Close lets the lock go only after. Waiting happens without any lock
+// held: an operation waits on pi or a file as it would anyway, and Close
+// returns after its short wait while the lock stays held until it ends.
+func (s *Service) begin(owned bool) (done func(), err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return ErrClosed
+		return nil, ErrClosed
 	}
-	if !s.ownerLocked() {
-		return ErrNotOwner
+	if owned && !s.ownerLocked() {
+		return nil, ErrNotOwner
 	}
-	return nil
+	s.ops.Add(1)
+	return s.ops.Done, nil
 }
 
 // edit runs a change of a workspace's plans with it held and loaded.
@@ -1530,9 +1557,11 @@ func (s *Service) edit(name string, fn func(sp *space, y yesmen.Yesman, f *plans
 // guard, when given, is asked with the workspace held before anything is
 // changed: an error leaves everything as it was.
 func (s *Service) editThen(name string, guard func(yesmen.Yesman) error, fn func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error)) error {
-	if err := s.ownerError(); err != nil {
+	done, err := s.begin(true)
+	if err != nil {
 		return err
 	}
+	defer done()
 	y, release, err := s.cfg.Yesmen.BeginUse(name)
 	if err != nil {
 		return err
@@ -1849,9 +1878,11 @@ func (s *Service) RunNow(name, id, requestID, from string) (Run, error) {
 	if !requestRE.MatchString(requestID) {
 		return Run{}, errors.New("invalid request ID")
 	}
-	if err := s.ownerError(); err != nil {
+	done, err := s.begin(true)
+	if err != nil {
 		return Run{}, err
 	}
+	defer done()
 	y, release, err := s.cfg.Yesmen.BeginUse(name)
 	if err != nil {
 		return Run{}, err
@@ -1929,6 +1960,13 @@ func (s *Service) RunNow(name, id, requestID, from string) (Run, error) {
 			return Run{}, errors.New("this task's last run is still being sent: try again once it has been sent")
 		}
 	}
+	// A new click: before it is claimed, its ID must carry a time pruning
+	// can cover once its record goes (prunedFile.add). Clicks already taken
+	// were answered above, whatever their IDs.
+	if r.Kind == RunManual && requestTime(requestID) > latestRequest(now) {
+		sp.mu.Unlock()
+		return Run{}, ErrRequestAhead
+	}
 	rec, err := s.claimLocked(sp, y, r)
 	if errors.Is(err, errClaimed) && sp.runs[r.ID] != nil {
 		run := sp.runs[r.ID].Run
@@ -1954,9 +1992,11 @@ func (s *Service) RunNow(name, id, requestID, from string) (Run, error) {
 // Retry sends a run that was definitely not sent again, under a new
 // submission ID, keeping its board task.
 func (s *Service) Retry(name, runID string) (Run, error) {
-	if err := s.ownerError(); err != nil {
+	done, err := s.begin(true)
+	if err != nil {
 		return Run{}, err
 	}
+	defer done()
 	y, release, err := s.cfg.Yesmen.BeginUse(name)
 	if err != nil {
 		return Run{}, err
@@ -2001,9 +2041,13 @@ func (s *Service) Retry(name, runID string) (Run, error) {
 
 // Check reads a run's receipt again, without sending anything.
 func (s *Service) Check(name, runID string) (Run, error) {
-	if err := s.ownerError(); err != nil {
+	// Counted until its record is written: Close keeps the lock until then,
+	// so no other app writes the run meanwhile.
+	done, err := s.begin(true)
+	if err != nil {
 		return Run{}, err
 	}
+	defer done()
 	y, err := s.cfg.Yesmen.Get(name)
 	if err != nil {
 		return Run{}, err

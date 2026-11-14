@@ -60,6 +60,9 @@ function requestID() {
 // How yesman refuses a click whose run was made and has left the history
 // (schedule.ErrRequestUsed).
 const USED = 'this run was already made and its record has left the history';
+// How yesman refuses a new click carrying a time ahead of its clock
+// (schedule.ErrRequestAhead): that click is not taken, so the next is new.
+const AHEAD = 'this click carries a time more than a day ahead';
 
 function formatter(zone, opts) {
   try {
@@ -476,8 +479,10 @@ export function createSchedules(host) {
         retryIDs.delete(key);
       } catch (err) {
         // Kept for a retry, unless yesman says that click's run was made
-        // and pruned: the next click is a new one.
-        if (!String(err?.message ?? err).includes(USED)) retryIDs.set(key, id);
+        // and pruned, or that it refused the click for good: the next click
+        // is a new one.
+        const said = String(err?.message ?? err);
+        if (!said.includes(USED) && !said.includes(AHEAD)) retryIDs.set(key, id);
         else retryIDs.delete(key);
         throw err;
       } finally {

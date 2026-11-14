@@ -502,7 +502,9 @@ async function focused(engineName, engine) {
       // archived and off.
       const made = await fx.post('/fixture/call', { method: 'SaveSchedule', args: ['alice', { title: 'Archived plan', instructions: 'Synthetic archived', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false }] });
       const id = made.plan.id;
-      await fx.post('/fixture/call', { method: 'RunSchedule', args: ['alice', id, 'abababababababab', ''] });
+      // A click as the page makes it: its time, then random.
+      const click = Date.now().toString(16).padStart(12, '0').slice(-12) + 'abababababab';
+      await fx.post('/fixture/call', { method: 'RunSchedule', args: ['alice', id, click, ''] });
       let run;
       for (let n = 0; n < 100; n++) {
         run = (await plan(id)).runs[0];
@@ -588,6 +590,43 @@ async function focused(engineName, engine) {
       assert.equal(await pane.locator('[data-plan="alice/s99"]').count(), 0);
       assert.equal(await page.evaluate(() => !!document.activeElement?.closest('.sched-plan')), false);
       step('a plan no longer kept is said to be gone');
+      await context.close();
+    }
+
+    {
+      // A click carrying a time more than a day ahead of yesman's clock,
+      // set back since, is refused before anything is recorded; the next
+      // click is a new one, not that click again. Once the clock is right,
+      // a click runs.
+      const made = await fx.post('/fixture/call', { method: 'SaveSchedule', args: ['alice', { title: 'Clock check', instructions: 'Synthetic clock', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false }] });
+      const id = made.plan.id;
+      const before = (await fx.get('/fixture/prompts')).length;
+      await fx.post('/fixture/clock', { add: '-48h' });
+      const { context, page, pane } = await open();
+      try {
+        await tasksEntry(page).click();
+        const row = pane.locator(`[data-plan="alice/${id}"]`);
+        const runButton = row.getByRole('button', { name: /^Run .* now$/ });
+        const calls = () => page.evaluate((p) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[2] === p).map((c) => c[3]), id);
+        for (const n of [1, 2]) {
+          await runButton.click();
+          await page.waitForFunction(([p, k]) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[2] === p).length === k, [id, n]);
+          await row.locator('[aria-busy="true"]').waitFor({ state: 'detached' });
+        }
+        const ids = await calls();
+        assert.equal(new Set(ids).size, 2, `the refused click was sent again: ${JSON.stringify(ids)}`);
+        assert.equal((await plan(id)).runs.length, 0, 'a click ahead of the clock was recorded');
+        assert.equal((await fx.get('/fixture/prompts')).length, before);
+      } finally {
+        await fx.post('/fixture/clock', { add: '48h' });
+      }
+      await page.reload();
+      await tasksEntry(page).click();
+      const row = pane.locator(`[data-plan="alice/${id}"]`);
+      await row.getByRole('button', { name: /^Run .* now$/ }).click();
+      for (let n = 0; n < 200 && !(await plan(id)).runs.length; n++) await new Promise((r) => setTimeout(r, 20));
+      assert.equal((await plan(id)).runs.length, 1, 'a click with the right time did not run');
+      step('a click ahead of the clock is refused, and the next is new');
       await context.close();
     }
     assert.deepEqual(errors, []);
