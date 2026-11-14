@@ -8,7 +8,7 @@ import { orderWorkers } from './sidebar.js';
 import { needsYouItems, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
 import { renderMarkdown } from './markdown.js';
 import { project } from './conversation.js';
-import { $, h, icon } from './dom.js';
+import { $, h, icon, openModal } from './dom.js';
 import { createFiles } from './files.js';
 import { createInfo } from './info.js';
 import { createBoard } from './board.js';
@@ -3045,7 +3045,9 @@ async function confirmAction(title, body, ok) {
   $('#confirm-title').textContent = title;
   $('#confirm-body').textContent = body;
   $('#confirm-ok').textContent = ok;
-  return (await openDialog(dialog)) === 'ok';
+  // Not openDialog: a close that arrives late must not answer the next
+  // confirmation.
+  return (await openModal(dialog)) === 'ok';
 }
 
 async function dismiss(name) {

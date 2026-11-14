@@ -443,12 +443,10 @@ async function scenario(engineName, page) {
   await dialog.waitFor({ state: 'visible' });
   assert.equal(await page.locator('#confirm-title').innerText(), 'Start a new request memory for bob?');
   assert.match(await page.locator('#confirm-body').innerText(), /This forgets 235,926 records[\s\S]*may show up once more[\s\S]*A later reset can let it back once more\./);
-  // The dialog's close event is delivered before it opens again (headless
-  // Chromium can deliver it late, and an earlier close would settle the next
-  // opening).
-  await page.evaluate(() => { window.confirmClosed = false; document.querySelector('#confirm-dialog').addEventListener('close', () => { window.confirmClosed = true; }, { once: true }); });
+  // Escape, then Enter again at once: the close event of the first opening
+  // can arrive after the second opened, and must not answer it.
   await page.keyboard.press('Escape');
-  await until('the dialog closed', () => page.evaluate(() => window.confirmClosed));
+  await dialog.waitFor({ state: 'hidden' });
   assert.equal(await resets(), 0); // this page's, since the reload
   await until('focus back on the button', () => page.evaluate(() => !!document.activeElement?.closest('.needs-you-memory[data-memory="bob"]')));
   await page.keyboard.press('Enter');
