@@ -277,9 +277,12 @@ function indexMessage(c, message) {
       if (block.type === 'toolCall') indexTool(c, block);
     }
   } else if (message.role === 'toolResult') {
+    // The result message is final: an extension may have changed what the
+    // execution returned, its output and whether it failed, as it ended.
     const tool = c.tools.get(message.toolCallId) ?? {};
-    tool.status = message.isError ? 'error' : 'done';
-    tool.result = resultText(message);
+    const status = message.isError ? 'error' : 'done', result = resultText(message);
+    if (tool.status !== status || tool.result !== result) tool.revision = (tool.revision ?? 0) + 1;
+    Object.assign(tool, { status, result, final: true });
     c.tools.set(message.toolCallId, tool);
   }
 }
@@ -788,6 +791,7 @@ function applyEvent(c, e, replaying,seq = 0) {
     case 'tool_execution_update':
     case 'tool_execution_end': {
       const tool = c.tools.get(e.toolCallId) ?? { args: e.args };
+      if (tool.final) break; // its result message came first, and is final
       tool.args = e.args ?? tool.args;
       if (e.type === 'tool_execution_end') {
         tool.status = e.isError ? 'error' : 'done';

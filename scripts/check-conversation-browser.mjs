@@ -9,7 +9,11 @@
 // replies stay in full, and live streaming, steering, keyboard, scrolling,
 // switching agents, reloading, Chinese, dark and narrow windows behave. Set
 // YESMAN_CONVERSATION_BEFORE to another page's web directory (such as an
-// earlier release's) to draw the same history there for comparison.
+// earlier release's) to draw the same history there for comparison, and
+// YESMAN_CONVERSATION_WEB to check another page instead of this one.
+// YESMAN_TOOL_EVENTS replays a recording of pi's events for tools whose
+// results an extension replaces (TestOriginCollisionWithPiFixture writes one);
+// without it, the same events as recorded from pi 1.5.2 are used.
 // A browser bridge is not the native window, pi or a real provider.
 const { chromium, webkit } = await import(process.env.YESMAN_TEST_PLAYWRIGHT_MODULE || "playwright");
 import { fileURLToPath } from "node:url";
@@ -29,7 +33,7 @@ const serve = (root) =>
       res.writeHead(404).end();
     }
   }).listen(0, "127.0.0.1");
-const after = serve(fileURLToPath(new URL("../web", import.meta.url)));
+const after = serve(process.env.YESMAN_CONVERSATION_WEB || fileURLToPath(new URL("../web", import.meta.url)));
 const before = process.env.YESMAN_CONVERSATION_BEFORE ? serve(process.env.YESMAN_CONVERSATION_BEFORE) : null;
 await Promise.all([after, before].filter(Boolean).map((s) => new Promise((r) => (s.listening ? r() : s.on("listening", r)))));
 
@@ -150,8 +154,109 @@ const geometry = (page) =>
 const shot = (page, name, engine) => page.screenshot({ path: `${tmpdir()}/yesman-conversation-${name}-${engine}.png`, fullPage: false });
 const summaries = async (page) => (await page.locator("#thread > .work > summary").allInnerTexts()).map((s) => s.trim().split(/\s*\n\s*/).join(" | "));
 
+
+// pi's events for two tool calls whose results an extension's message_end
+// hook replaces: the first keeps its outcome, the second is failed. Recorded
+// from pi 1.5.2 by TestOriginCollisionWithPiFixture (parallel tools); only the
+// timestamps differ.
+const recordedTools = () => {
+  const call = (id) => ({ type: "toolCall", id, name: "fixture_tool", arguments: {} });
+  const text = (t) => [{ type: "text", text: t }];
+  const result = (id, t, isError) => ({ role: "toolResult", toolCallId: id, toolName: "fixture_tool", content: text(t), details: {}, isError, durationMs: 0, timestamp: 1_794_655_000_001 });
+  return [
+    { type: "message_end", message: { role: "assistant", content: [call("fixture-call"), call("fixture-fail")], api: "pi-messages", provider: "fixture", model: "m", stopReason: "toolUse", timestamp: 1_794_655_000_000 } },
+    { type: "tool_execution_start", toolCallId: "fixture-call", toolName: "fixture_tool", args: {} },
+    { type: "tool_execution_start", toolCallId: "fixture-fail", toolName: "fixture_tool", args: {} },
+    { type: "tool_execution_update", toolCallId: "fixture-call", toolName: "fixture_tool", args: {}, partialResult: { content: text("partial output"), details: {} } },
+    { type: "tool_execution_update", toolCallId: "fixture-fail", toolName: "fixture_tool", args: {}, partialResult: { content: text("partial output"), details: {} } },
+    { type: "tool_execution_end", toolCallId: "fixture-call", toolName: "fixture_tool", result: { content: text("before message_end"), details: {} }, isError: false, durationMs: 0 },
+    { type: "tool_execution_end", toolCallId: "fixture-fail", toolName: "fixture_tool", result: { content: text("before message_end"), details: {} }, isError: false, durationMs: 0 },
+    { type: "message_start", message: result("fixture-call", "before message_end", false) },
+    { type: "message_end", message: result("fixture-call", "FINAL canonical result", false) },
+    { type: "message_start", message: result("fixture-fail", "before message_end", false) },
+    { type: "message_end", message: result("fixture-fail", "FINAL refused by a hook", true) },
+  ];
+};
+const toolEvents = process.env.YESMAN_TOOL_EVENTS
+  ? JSON.parse(await readFile(process.env.YESMAN_TOOL_EVENTS, "utf8")).events.filter((e) =>
+      e.type.startsWith("tool_execution") || (e.type === "message_start" || e.type === "message_end") && (e.message.role === "toolResult" || e.message.role === "assistant" && e.message.content.some((b) => b.type === "toolCall")))
+  : recordedTools();
+
+// A tool's result message is final: an extension may replace what its
+// execution returned, and fail it. An open tool shows the final output in
+// place, keeping focus; its state and the work line's counts follow, a late
+// execution record does not undo it, and history reads the same.
+async function hookedTools(browser, engine) {
+  const { page, errors } = await open(browser, after);
+  const emit = (data) => page.evaluate((d) => window.fixture.emit("alice/lead", d), data);
+  const frame = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const at = (type, pred) => toolEvents.findIndex((e) => e.type === type && pred(e));
+  const run = async (from, to) => { for (const e of toolEvents.slice(from, to)) await emit(e); await frame(); };
+  await page.evaluate(() => window.fixture.status("lead", "working", "Running fixture_tool"));
+  await emit({ type: "agent_start" });
+  const firstUpdate = at("tool_execution_update", () => true);
+  await run(0, firstUpdate);
+  const work = page.locator("#thread > .work").last();
+  await work.locator(":scope > summary").focus();
+  await page.keyboard.press("Enter");
+  const tool = work.locator('[data-tool="fixture-call"]');
+  await tool.waitFor();
+  await tool.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await tool.evaluate((el) => (el.dataset.kept = "1"));
+  // Running output shows as it comes.
+  const firstEnd = at("tool_execution_end", () => true);
+  await run(firstUpdate, firstEnd);
+  assert.match(await tool.locator(".tool-body").innerText(), /partial output/);
+  assert.equal(await tool.getAttribute("data-status"), "running");
+  // The execution's result, then the final message replacing it.
+  await run(firstEnd, toolEvents.length);
+  const body = await tool.locator(".tool-body").innerText();
+  const shown = { engine, body: body.split("\n").at(-1), status: await tool.getAttribute("data-status"), facts: await work.locator(".work-facts").innerText() };
+  assert.match(body, /FINAL canonical result/, `the open tool shows its execution's result, not the final one: ${body}`);
+  assert(!body.includes("before message_end"));
+  assert.equal(shown.status, "done");
+  assert.equal(await work.locator('[data-tool="fixture-fail"]').getAttribute("data-status"), "error");
+  assert.equal(await work.locator('[data-tool="fixture-fail"] .tool-state').innerText(), "failed");
+  assert.equal(shown.facts, "2 tool calls · 1 failed");
+  assert.equal(await tool.getAttribute("data-kept"), "1", "the open tool was redrawn");
+  assert.equal(await tool.evaluate((el) => el.open), true);
+  assert.equal(await tool.locator("summary").evaluate((el) => document.activeElement === el), true, "focus left the tool");
+  // A worker start an extension fails did not start a worker.
+  await emit({ type: "message_end", message: { role: "assistant", timestamp: 1_794_655_000_010, stopReason: "toolUse", content: [{ type: "toolCall", id: "start", name: "yesman_worker_start", arguments: { name: "w2" } }] } });
+  await emit({ type: "tool_execution_start", toolCallId: "start", toolName: "yesman_worker_start", args: { name: "w2" } });
+  await emit({ type: "tool_execution_end", toolCallId: "start", toolName: "yesman_worker_start", result: { content: [{ type: "text", text: "started" }] }, isError: false });
+  await frame();
+  assert.equal(await work.locator(".work-facts").innerText(), "3 tool calls · 1 failed · 1 worker started");
+  await emit({ type: "message_end", message: { role: "toolResult", timestamp: 1_794_655_000_011, toolCallId: "start", toolName: "yesman_worker_start", isError: true, content: [{ type: "text", text: "refused by a hook" }] } });
+  await frame();
+  assert.equal(await work.locator(".work-facts").innerText(), "3 tool calls · 2 failed");
+  // A late execution record does not undo the final result.
+  await emit({ type: "tool_execution_end", toolCallId: "fixture-call", toolName: "fixture_tool", result: { content: [{ type: "text", text: "before message_end" }] }, isError: false });
+  await frame();
+  assert.match(await tool.locator(".tool-body").innerText(), /FINAL canonical result/);
+  await emit({ type: "message_end", message: { role: "assistant", timestamp: 1_794_655_000_020, stopReason: "stop", content: [{ type: "text", text: "Fixture complete" }] } });
+  await emit({ type: "agent_settled" });
+  await page.evaluate(() => window.fixture.status("lead", "idle"));
+  const live = await summaries(page);
+  // History reads the same.
+  await page.reload();
+  await page.locator('[data-agent="alice/lead"]').first().click();
+  await page.locator("#thread > .work").first().waitFor();
+  await page.waitForTimeout(100);
+  assert.deepEqual(await summaries(page), live);
+  const again = page.locator("#thread > .work").last();
+  await again.locator(":scope > summary").click();
+  await again.locator('[data-tool="fixture-call"] > summary').click();
+  assert.match(await again.locator('[data-tool="fixture-call"] .tool-body').innerText(), /FINAL canonical result/);
+  assert.deepEqual(errors, []);
+  await page.close();
+  return shown;
+}
+
 const results = {};
-for (const [engine, type] of Object.entries({ chromium, webkit })) {
+const engines = process.env.YESMAN_TEST_ENGINES?.split(",") ?? ["chromium", "webkit"];
+for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) => engines.includes(e))) {
   const browser = await type.launch({ headless: true });
   try {
     if (before) {
@@ -333,7 +438,8 @@ for (const [engine, type] of Object.entries({ chromium, webkit })) {
     await dark.page.locator("#scroll").evaluate((el) => (el.scrollTop = 0));
     await shot(dark.page, "dark-narrow", engine);
     assert.deepEqual(dark.errors, []);
-    console.log(engine, "folded work/people and replies in full/receipts/keyboard/live/steering/scroll/agents/reload/i18n/dark/narrow PASS");
+    results[`${engine}-hooked-tools`] = await hookedTools(browser, engine);
+    console.log(engine, "folded work/people and replies in full/receipts/keyboard/live/steering/scroll/agents/reload/i18n/dark/narrow/final tool results PASS");
   } finally {
     await browser.close();
   }

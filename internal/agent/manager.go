@@ -143,7 +143,6 @@ type Manager struct {
 	closed          bool              // StopAll permanently prevents further starts; guarded by mu
 	worktreeCleanup map[string]bool   // reservations preventing owner startup/input during final removal
 	shutdown        chan struct{}     // closed by StopAll to wake pending report retries
-	origins         originClaims      // prompts in flight, for PromptOrigin
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
 }
@@ -525,6 +524,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 // record handles one record of an agent's process. It runs on the
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
+	raw = p.origins.observe(kind, raw)
 	m.observeDelivery(a, p, kind, raw)
 	m.follow(a, p, kind, raw)
 	switch kind {
@@ -786,14 +786,18 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 			err = m.bindDelivery(a, p, messageID)
 		}
 		if err == nil {
-			// Who wrote it is known only while pi has not answered: its input
-			// handlers, which record the origin, run before the answer.
-			release := m.claim(p, text, images, origin)
+			// pi's answer, read in order with its records, says what became
+			// of the prompt; see originTracker.
+			p.origins.sent()
+			answered := false
 			_, err = p.callObserved(context.Background(), cmd, func(r response) {
-				release()
+				answered = true
+				p.origins.answered(origin, behavior, &r)
 				m.deliveryResponse(a, p, messageID, behavior, r)
 			})
-			release()
+			if !answered {
+				p.origins.answered(origin, behavior, nil)
+			}
 		}
 		a.modelMu.Lock()
 		m.mu.Lock()
@@ -831,7 +835,22 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	if !wasRunning {
 		defer func() { go m.closeIfFinished(a, p, time.Time{}) }()
 	}
-	_, _ = p.modelState(ctx, func(s modelState) { m.deliverySessionChanged(a, p, s.SessionID) })
+	var session string
+	_, _ = p.modelState(ctx, func(s modelState) {
+		session = s.SessionID
+		m.deliverySessionChanged(a, p, s.SessionID)
+	})
+	// Origins recorded before this process are in the session's entries,
+	// read once per session; the reader adds later ones.
+	p.origins.scanMu.Lock()
+	if p.origins.needsScan(session) {
+		r, err := p.call(ctx, map[string]any{"type": "get_entries"})
+		if err != nil {
+			r.Data = nil
+		}
+		p.origins.indexEntries(session, r.Data)
+	}
+	p.origins.scanMu.Unlock()
 	// pi answers after emitting every earlier event, and the reader numbers
 	// those first. Capture the reply in progress and the last number on the
 	// reader as the answer arrives: events it handles next are not in the
@@ -856,7 +875,7 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	if err := json.Unmarshal(r.Data, &data); err != nil {
 		return Conversation{}, err
 	}
-	conv.Messages = data.Messages
+	conv.Messages = p.origins.project(data.Messages)
 	return conv, nil
 }
 

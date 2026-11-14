@@ -130,9 +130,9 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 	}
 }
 
-// origin tells yesman's extension who wrote the input pi is handling: the
-// prompt in flight to that agent whose text and images have this fingerprint.
-// The extension asks before pi answers the prompt, on every input, so this
+// origin tells yesman's extension who wrote the user message pi is ending,
+// so that it can record that in pi's session beside the message. The app
+// decided it from pi's records of the prompt (see agent.originTracker); this
 // reads only the credential and memory, never the workspace.
 func (s *Server) origin(w http.ResponseWriter, r *http.Request) {
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -145,14 +145,15 @@ func (s *Server) origin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Fingerprint string `json:"fingerprint"`
+		Timestamp float64 `json:"timestamp"`
+		Digest    string  `json:"digest"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
 		return
 	}
 	out := map[string]any{}
-	if o, ok := s.Agents.PromptOrigin(token, req.Fingerprint); ok {
+	if o, ok := s.Agents.MessageOrigin(r.Context(), token, req.Timestamp, req.Digest); ok {
 		out["origin"] = o
 	}
 	w.Header().Set("Content-Type", "application/json")

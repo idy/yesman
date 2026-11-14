@@ -2,9 +2,10 @@
 // them, with the work in between folded into one line each time. This module
 // only projects data; app.js draws it, live and from history alike.
 //
-// Who wrote a user message comes from its "yesman" field, which yesman's
-// extension records from what the app knew while the prompt was in flight
-// (internal/agent/origin.go). Text is never used to decide who wrote a
+// Who wrote a user message comes from its "yesman" field, which the app adds
+// to the messages it serves, from pi's own records of each prompt
+// (internal/agent/origin.go); pi's messages, and so the model, never carry
+// it. Text is never used to decide who wrote a
 // message: a message without the field, such as one from before it existed,
 // is shown as it was written, as a person's.
 

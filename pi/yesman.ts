@@ -7,9 +7,9 @@
 // and tools to check repositories out of the pool, keep the board and, for
 // a lead, to run workers. Its shell tool sets the user's secrets and
 // variables in every command, asking the app for them each time, and what
-// tools return hides the secrets' values from the model. It also records on
-// each user message who wrote it, as the app knows (trackOrigins). Everything
-// is done by the yesman app; this file only forwards.
+// tools return hides the secrets' values from the model. It also records in
+// the session who wrote each user message, as the app knows (trackOrigins).
+// Everything is done by the yesman app; this file only forwards.
 //
 // A lead delegates, so that it is always free to talk: it has no shell and
 // writes only Knowledge notes and the task log. Its tools are narrowed when
@@ -183,37 +183,12 @@ function boardText(board: any): string {
 }
 
 // Who wrote a user message: the user, the agent's lead, or yesman telling a
-// lead about its workers. pi's user messages have no such field, and all of
-// them reach pi as ordinary prompts, so the app knows it only while the prompt
-// command is in flight. See Origin in internal/agent/origin.go.
+// lead about its workers. See Origin in internal/agent/origin.go.
 type Origin = { source: "user" | "lead" | "yesman"; kind?: string; worker?: string; submission?: string };
-// An input pi has received and not yet turned into a user message.
-type Input = { text: string; images: number; behavior: "idle" | "steer" | "followUp"; origin?: Origin };
 
 const SOURCES = new Set(["user", "lead", "yesman"]);
-const MAX_INPUTS = 64;
-
-// promptFingerprint is the app's receipt fingerprint (deliveryFingerprint):
-// SHA-256 over length-prefixed text and image fields and the image count.
-function promptFingerprint(text: string, images: readonly { type?: string; mimeType?: string; data?: string }[] = []): string {
-	const h = createHash("sha256");
-	const size = Buffer.alloc(8);
-	const field = (s: string) => {
-		const bytes = Buffer.from(s, "utf8");
-		size.writeBigUInt64BE(BigInt(bytes.length));
-		h.update(size);
-		h.update(bytes);
-	};
-	field(text);
-	size.writeBigUInt64BE(BigInt(images.length));
-	h.update(size);
-	for (const image of images) {
-		field(image.type ?? "");
-		field(image.mimeType ?? "");
-		field(image.data ?? "");
-	}
-	return h.digest("hex");
-}
+// The custom entry type origins are recorded under (originEntry in Go).
+const ORIGIN_ENTRY = "yesman-origin";
 
 // validOrigin keeps only the bounded fields the window reads.
 function validOrigin(o: any): Origin | undefined {
@@ -228,81 +203,28 @@ function validOrigin(o: any): Origin | undefined {
 	return out;
 }
 
-const sameOrigin = (a?: Origin, b?: Origin) => !!a && !!b && a.source === b.source && a.kind === b.kind && a.worker === b.worker;
-
-// trackOrigins records who wrote each user message, from what the app knows
-// of its prompt while that is in flight, under the message's "yesman" field.
-// The text, images and other input handlers are left alone, and pi keeps
-// the field in the session but never sends it to a model.
-//
-// An input becomes a message later, queued or after other handlers: pi's own
-// queue removes a delivered message by its text, steering before follow-ups,
-// and this follows the same order. When inputs waiting with the same text
-// disagree on who wrote them, the message gets no origin; a submission ID is
-// recorded only when one input could be it. Unknown is shown as a person's.
+// trackOrigins records in pi's session who wrote each user message, so the
+// window can still tell after a restart. The app decides it from pi's own
+// records of the prompt, in order, never from the text; this asks it as the
+// message ends, identifying the message by its timestamp and the digest of its
+// JSON, and appends the answer as a custom entry, which pi keeps beside the
+// message and never puts in a model's context. The message itself, its text,
+// images and every other extension's input, context and provider hooks are
+// left alone. When the app does not know, nothing is recorded, and the window
+// shows the message as a person's.
 function trackOrigins(pi: ExtensionAPI) {
-	let inputs: Input[] = [];
-	pi.on("session_start", () => {
-		inputs = [];
-	});
-	pi.on("agent_settled", (_event, ctx) => {
-		// Inputs another handler took or transformed never became messages.
-		if (!ctx.hasPendingMessages()) inputs = [];
-	});
-	pi.on("input", async (event) => {
-		let origin: Origin | undefined;
-		if (event.source === "rpc") {
-			try {
-				const r = await call("POST", "/v1/origin", { fingerprint: promptFingerprint(event.text, event.images ?? []) }, AbortSignal.timeout(2000));
-				origin = validOrigin(r?.origin);
-			} catch {}
-		}
-		inputs.push({ text: event.text, images: event.images?.length ?? 0, behavior: event.streamingBehavior ?? "idle", origin });
-		if (inputs.length > MAX_INPUTS) inputs.shift();
-	});
-	pi.on("message_end", (event) => {
+	pi.on("message_end", async (event) => {
 		const message = event.message as any;
-		if (message.role !== "user" || message.yesman !== undefined) return;
-		const blocks: any[] = typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content ?? [];
-		const text = blocks.find((b) => b?.type === "text")?.text ?? "";
-		const images = blocks.filter((b) => b?.type === "image").length;
-		// pi may append notes about resized or unreadable images to the text.
-		const candidates = inputs.filter((i) =>
-			i.images === 0 ? images === 0 && text === i.text : images <= i.images && (text === i.text || text.startsWith(`${i.text}\n\n`)),
-		);
-		if (!candidates.length) return;
-		const rank = { idle: 0, steer: 1, followUp: 2 };
-		const taken = candidates.reduce((best, i) => (rank[i.behavior] < rank[best.behavior] ? i : best));
-		inputs = inputs.filter((i) => i !== taken);
-		if (candidates.length > 1) {
-			// Whichever of them this is, the others keep only what they share.
-			const agreed = candidates.every((i) => sameOrigin(i.origin, taken.origin));
-			for (const i of candidates) {
-				if (!agreed) i.origin = undefined;
-				else if (i.origin) delete i.origin.submission;
-			}
-			if (!agreed) return;
-		}
-		if (!taken.origin) return;
-		return { message: { ...message, yesman: { ...taken.origin } } };
-	});
-	// Providers build their requests from each message's role and content;
-	// one that sends pi's own messages (the pi-messages API) gets them as they
-	// were, without the field.
-	const strip = (messages: unknown) =>
-		Array.isArray(messages) && messages.some((m) => m?.role === "user" && m.yesman !== undefined)
-			? messages.map((m) => {
-					if (m?.role !== "user" || m.yesman === undefined) return m;
-					const { yesman: _, ...rest } = m;
-					return rest;
-				})
-			: undefined;
-	pi.on("before_provider_request", (event) => {
-		const payload = event.payload as any;
-		const inContext = strip(payload?.context?.messages);
-		if (inContext) return { ...payload, context: { ...payload.context, messages: inContext } };
-		const inMessages = strip(payload?.messages);
-		if (inMessages) return { ...payload, messages: inMessages };
+		if (message?.role !== "user" || typeof message.timestamp !== "number") return;
+		let origin: Origin | undefined;
+		try {
+			const digest = createHash("sha256").update(JSON.stringify(message)).digest("hex");
+			const r = await call("POST", "/v1/origin", { timestamp: message.timestamp, digest }, AbortSignal.timeout(3000));
+			origin = validOrigin(r?.origin);
+		} catch {}
+		// pi appends the message right after its message_end handlers, so this
+		// entry is the message's parent in the session.
+		if (origin) pi.appendEntry(ORIGIN_ENTRY, { timestamp: message.timestamp, origin });
 	});
 }
 
