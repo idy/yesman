@@ -209,6 +209,10 @@ export function createPalette({ shortcuts, items = () => [], fail = () => {}, pl
   }
 
   function onClose() {
+    // The close event comes a task later: one that arrives once the palette
+    // has opened again belongs to the earlier opening, and must not undo
+    // where this one gives focus back to.
+    if (dialog.open) return;
     // A run restored focus already; Esc and clicks outside restore it here,
     // unless something else has taken it since.
     if (dialog.returnValue !== 'run') restore();

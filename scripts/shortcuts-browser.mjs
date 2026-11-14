@@ -276,7 +276,11 @@ async function palette(x, check) {
   await page.keyboard.press('Enter');
   await x.palette.waitFor({ state: 'hidden' });
   assert.deepEqual(await x.callsOf('Abort'), [['Abort', 'alice/lead']]);
-  assert.equal(await page.evaluate(() => document.activeElement === document.querySelector('#dock textarea')), true);
+  const focusAfterStop = await page.evaluate(() => {
+    const el = document.activeElement;
+    return { composer: el === document.querySelector('#dock textarea'), tag: el?.tagName, cls: String(el?.className ?? ''), label: el?.getAttribute?.('aria-label') };
+  });
+  assert.equal(focusAfterStop.composer, true, JSON.stringify(focusAfterStop));
   assert.equal(await x.textarea.inputValue(), 'draft');
   await page.evaluate(() => setStatus('alice/lead', 'idle'));
   check('the palette follows status changes; Stop runs once on the shown agent; focus returns to its redrawn composer');
