@@ -237,9 +237,9 @@ func (a *app) agentsChanged(list []agent.Info) {
 		}
 		switch {
 		case i.Status == agent.Waiting:
-			notes = append(notes, note{i.ID, tr("%s needs you", i.Yesman), tr("It asked a question and is waiting for your answer.")})
+			notes = append(notes, note{i.ID, tr("%s needs you", a.yesmanLabel(i.Yesman)), tr("It asked a question and is waiting for your answer.")})
 		case i.Status == agent.Failed:
-			notes = append(notes, note{i.ID, tr("%s stopped", i.Yesman), i.Detail})
+			notes = append(notes, note{i.ID, tr("%s stopped", a.yesmanLabel(i.Yesman)), i.Detail})
 		}
 	}
 	if working > 0 && a.release == nil {
@@ -264,12 +264,19 @@ func (a *app) agentsChanged(list []agent.Info) {
 	// yesman has stayed settled for a moment.
 	a.completions.update(list, func(i agent.Info) {
 		if a.yesmanSettled(i.Yesman) {
-			a.notify(i.ID, i.Yesman, tr("Finished and waiting for you."))
+			a.notify(i.ID, a.yesmanLabel(i.Yesman), tr("Finished and waiting for you."))
 		}
 	})
 	for _, n := range notes {
 		a.notify(n.id, n.title, n.body)
 	}
+}
+
+func (a *app) yesmanLabel(name string) string {
+	if y, err := a.yesmen.Get(name); err == nil {
+		return y.Label()
+	}
+	return name
 }
 
 // settleGrace is how long a yesman stays settled before the user hears it
