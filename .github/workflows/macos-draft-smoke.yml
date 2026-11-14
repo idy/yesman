@@ -1,7 +1,7 @@
 name: macOS draft startup
 
-# Publication gate: run this on the immutable tag after all draft assets exist.
-# It downloads the final archives; it does not rebuild or publish anything.
+# Publication gate: run on main after the immutable tag and draft assets exist.
+# Download jobs never execute repository/app code; startup jobs remain read-only.
 on:
   workflow_dispatch:
     inputs:
@@ -14,7 +14,77 @@ permissions:
   contents: read
 
 jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Actual GITHUB_TOKEN contents:read gets 403 for unpublished releases and
+      # assets. This GET-only job needs write scope; macOS jobs do not receive it.
+      contents: write
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      source: ${{ steps.download.outputs.source }}
+    steps:
+      - name: Validate release tag before resolving any ref
+        id: validate
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          tag = os.environ['RELEASE_TAG']
+          assert re.fullmatch(r'v0\.1\.(0|[1-9][0-9]*)', tag), 'Expected a canonical v0.1.x release tag'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('tag=' + tag + '\n')
+          PY
+      - name: Download the exact draft archives
+        id: download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.validate.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess
+          tag, repo = os.environ['RELEASE_TAG'], os.environ['GITHUB_REPOSITORY']
+          def gh(*args):
+              return json.loads(subprocess.check_output(['gh', *args]))
+          def tag_commit():
+              obj = gh('api', f'repos/{repo}/git/ref/tags/{tag}')['object']
+              for _ in range(8):
+                  assert re.fullmatch(r'[0-9a-f]{40}', obj['sha']), 'Invalid object ID'
+                  if obj['type'] == 'commit': return obj['sha']
+                  assert obj['type'] == 'tag', 'Release ref is not a commit or annotated tag'
+                  obj = gh('api', f'repos/{repo}/git/tags/{obj["sha"]}')['object']
+              raise AssertionError('Tag chain is too deep')
+          source = tag_commit() # Explicit refs/tags lookup: never a branch or moving main.
+          meta = gh('release', 'view', tag, '--repo', repo, '--json', 'databaseId,tagName,isDraft,assets')
+          assert meta['isDraft'] and meta['tagName'] == tag, 'Expected the requested unpublished draft'
+          folder = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft-download'
+          folder.mkdir()
+          for arch in ('arm64', 'amd64'):
+              name = f'yesman-{tag[1:]}-darwin-{arch}.tar.gz'
+              matches = [a for a in meta['assets'] if a['name'] == name]
+              assert len(matches) == 1, 'Expected one exact architecture archive'
+              asset = matches[0]
+              subprocess.run(['gh', 'release', 'download', tag, '--repo', repo, '--pattern', name, '--dir', str(folder)], check=True)
+              digest = hashlib.sha256((folder / name).read_bytes()).hexdigest()
+              assert asset.get('digest') == 'sha256:' + digest, 'Draft asset digest differs'
+              assert (folder / name).stat().st_size == asset['size'] > 0
+              (folder / f'draft-asset-{arch}.json').write_text(json.dumps({'tag': tag, 'arch': arch, 'source': source, 'releaseID': meta['databaseId'], 'asset': asset, 'sha256': digest}, indent=2))
+          assert tag_commit() == source, 'Release tag moved during download'
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('source=' + source + '\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-draft-download
+          path: ${{ runner.temp }}/draft-download
+          if-no-files-found: error
+
   startup:
+    needs: download # Neither matrix job can bypass tag validation/download.
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -26,41 +96,45 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ needs.download.outputs.source }}
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Download the exact draft archive
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-draft-download
+          path: ${{ runner.temp }}/draft-download
+      - name: Recheck and extract the selected archive
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ needs.download.outputs.tag }}
+          RELEASE_SOURCE: ${{ needs.download.outputs.source }}
           TARGET_ARCH: ${{ matrix.arch }}
         run: |
           python3 - <<'PY'
-          import hashlib, json, os, pathlib, re, subprocess, tarfile
-          tag = os.environ['RELEASE_TAG']
-          assert re.fullmatch(r'v0\.1\.[0-9]+', tag), 'Expected a patch release tag'
-          repo = os.environ['GITHUB_REPOSITORY']
-          meta = json.loads(subprocess.check_output(['gh', 'release', 'view', tag, '--repo', repo, '--json', 'tagName,isDraft,assets']))
-          assert meta['isDraft'] and meta['tagName'] == tag, 'This gate verifies an unpublished draft'
-          name = f"yesman-{tag[1:]}-darwin-{os.environ['TARGET_ARCH']}.tar.gz"
-          asset = next(a for a in meta['assets'] if a['name'] == name)
-          folder = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft'
-          folder.mkdir()
-          subprocess.run(['gh', 'release', 'download', tag, '--repo', repo, '--pattern', name, '--dir', str(folder)], check=True)
-          digest = hashlib.sha256((folder / name).read_bytes()).hexdigest()
-          assert asset.get('digest') == 'sha256:' + digest, 'Draft asset digest differs'
+          import hashlib, json, os, pathlib, shutil, subprocess, tarfile
+          tag, source, arch = os.environ['RELEASE_TAG'], os.environ['RELEASE_SOURCE'], os.environ['TARGET_ARCH']
+          folder = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft-download'
+          proof = json.loads((folder / f'draft-asset-{arch}.json').read_text())
+          name = f'yesman-{tag[1:]}-darwin-{arch}.tar.gz'
+          assert (proof['tag'], proof['source'], proof['arch'], proof['asset']['name']) == (tag, source, arch, name)
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip() == source
+          assert 'sha256:' + hashlib.sha256((folder / name).read_bytes()).hexdigest() == proof['asset']['digest'] == 'sha256:' + proof['sha256']
+          target = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft'
+          target.mkdir()
           with tarfile.open(folder / name) as archive:
-              archive.extractall(folder, filter='data')
+              archive.extractall(target, filter='data')
           evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'startup-evidence'
           evidence.mkdir()
-          (evidence / 'draft-asset.json').write_text(json.dumps({'tag': tag, 'asset': asset, 'sha256': digest, 'source': subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()}, indent=2))
+          shutil.copyfile(folder / f'draft-asset-{arch}.json', evidence / 'draft-asset.json')
           PY
       - name: Verify unchanged final app startup
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: python3 scripts/check_macos_startup.py "$RUNNER_TEMP/draft/yesman.app" web "$RUNNER_TEMP/startup-evidence"
+          RELEASE_TAG: ${{ needs.download.outputs.tag }}
+          RELEASE_SOURCE: ${{ needs.download.outputs.source }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: python3 scripts/check_macos_startup.py "$RUNNER_TEMP/draft/yesman.app" web "$RUNNER_TEMP/startup-evidence" --release-tag "$RELEASE_TAG" --arch "$TARGET_ARCH" --source "$RELEASE_SOURCE"
       - name: Save the draft gate evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

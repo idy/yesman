@@ -6,6 +6,7 @@ Phase 1 checks the embedded frontend's native window. Phase 2 serves byte-
 identical production web files through the existing YESMAN_WEB_DIR override,
 with one appended read-only driver; the real WebKit and Go bridge run normally.
 """
+import argparse
 import hashlib
 import http.server
 import json
@@ -19,7 +20,7 @@ import tempfile
 import threading
 import time
 import uuid
-from check_macos_bundle import inspect
+from check_macos_bundle import inspect, release_arguments
 
 
 def require_hosted_runner():
@@ -35,9 +36,15 @@ def require_hosted_runner():
 
 def main():
     require_hosted_runner()
-    app, web, evidence = [pathlib.Path(arg).resolve() for arg in sys.argv[1:4]]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('app')
+    parser.add_argument('web')
+    parser.add_argument('evidence')
+    release_arguments(parser)
+    args = parser.parse_args()
+    app, web, evidence = [pathlib.Path(value).resolve() for value in (args.app, args.web, args.evidence)]
     evidence.mkdir(parents=True, exist_ok=True)
-    bundle = inspect(app)
+    bundle = inspect(app, args.release_tag, args.arch, args.source)
     (evidence / 'bundle.json').write_text(json.dumps(bundle, indent=2))
     executable = app / 'Contents/MacOS' / bundle['info']['CFBundleExecutable']
     binary = executable.read_bytes()
