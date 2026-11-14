@@ -89,8 +89,9 @@ func main() {
 	a.keychain = appKeychain()
 	go a.unlockFromKeychain() // the system may ask the user first
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
-		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) },
-		Secrets:      a.vault, Variables: a.variables, Crew: a.leadCrew}
+		BoardChanged:  func(yesman string) { _ = boardEvent.Broadcast(yesman) },
+		TopicsChanged: a.topicsChanged,
+		Secrets:       a.vault, Variables: a.variables, Crew: a.leadCrew}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}

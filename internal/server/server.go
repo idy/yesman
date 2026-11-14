@@ -36,6 +36,8 @@ type Server struct {
 	Changed func()
 	// BoardChanged is told when a yesman's board changes.
 	BoardChanged func(yesman string)
+	// TopicsChanged is told when the lead changes a yesman's topics.
+	TopicsChanged func(yesman string)
 	// AddRepo, when set, clones a GitHub repository into the pool in place
 	// of resolving and cloning it here, so the app can show it cloning.
 	AddRepo func(ctx context.Context, repo string) (pool.Repo, error)
@@ -86,6 +88,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/workers/answer", s.handle(s.answerWorker))
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
+	mux.HandleFunc("GET /v1/topics", s.handle(s.topics))
+	mux.HandleFunc("POST /v1/topics", s.handle(s.changeTopics))
 	return mux
 }
 
@@ -463,6 +467,10 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, error) {
 	board, _ := s.Yesmen.Board(c.yesman.Name)
 	text := BuildContext(ctx, s.Pool, s.Agents, c.yesman, c.agent, board) + s.envContext(c.agent.Role == agent.RoleLead)
+	if c.agent.Role == agent.RoleLead {
+		topics, err := s.Yesmen.Topics(c.yesman.Name, c.yesman.HiredAt)
+		text += TopicsContext(topics, err)
+	}
 	if c.agent.Role == agent.RoleLead && s.Crew != nil {
 		text += CrewContext(s.Crew(ctx), c.agent)
 	}

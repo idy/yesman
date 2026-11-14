@@ -180,6 +180,24 @@ function boardText(board: any): string {
 	return parts.join("\n\n");
 }
 
+function topicText(t: any): string {
+	const lines = [`${t.id} [${t.status}] ${t.title} (revision ${t.revision}, updated ${t.updatedAt}${t.updatedBy ? ` by ${t.updatedBy}` : ""})`];
+	if (t.summary) lines.push(`Summary:\n  ${String(t.summary).replace(/\n/g, "\n  ")}`);
+	const items = (label: string, list: any[]) => lines.push(`${label} (${list?.length ?? 0}):${list?.length ? "\n" + list.map((i) => `- ${i.id} ${String(i.text).replace(/\n/g, "\n  ")}`).join("\n") : " none"}`);
+	items("Confirmed conclusions", t.conclusions);
+	items("Open questions", t.questions);
+	if (t.sources?.length) {
+		lines.push("Sources:\n" + t.sources.map((s: any) => `- ${s.id} ${s.kind}${s.ref ? ` ${s.ref}` : ""}${s.agent ? ` ${s.agent}` : ""}${s.role ? ` ${s.role} message` : ""}${s.label ? ` (${s.label})` : ""}`).join("\n"));
+	}
+	if (t.sends?.length) lines.push(`Messages the user sent from this topic: ${t.sends.length}, the last at ${t.sends[t.sends.length - 1].at}. They are in your conversation.`);
+	return lines.join("\n");
+}
+
+function topicIndex(topics: any[]): string {
+	if (!topics.length) return "No topics yet.";
+	return topics.map((t) => `- ${t.id} [${t.status}] ${t.title} (revision ${t.revision}${t.questions?.length ? `, ${t.questions.length} open question${t.questions.length === 1 ? "" : "s"}` : ""})`).join("\n");
+}
+
 export default function yesman(pi: ExtensionAPI) {
 	if (!API || !TOKEN || !AGENT) return; // not started by yesman
 
@@ -403,6 +421,63 @@ export default function yesman(pi: ExtensionAPI) {
 	});
 
 	if (ROLE !== "lead") return;
+
+
+	const itemEdits = Type.Array(Type.Object({ id: Type.String({ description: "The item's ID, such as c2 or q3" }), text: Type.String() }));
+	pi.registerTool({
+		name: "yesman_topics",
+		label: "yesman: topics",
+		description:
+			"Read or keep this yesman's topics: the user's questions and discussions worth finding again, each with a summary, the conclusions the user confirmed, the questions still open and its sources. action list (default) lists them, read shows one, create adds one, update changes one at its current revision (only the fields given change; archive or restore it). A conclusion is only what the user agreed; put unconfirmed suggestions under questions or the summary. Not for task status (board), history (task log) or rules (Knowledge), and not for every notification or report.",
+		parameters: Type.Object({
+			action: Type.Optional(Type.String({ description: "list, read, create or update" })),
+			id: Type.Optional(Type.String({ description: "The topic's ID, such as tp3, for read and update" })),
+			revision: Type.Optional(Type.Number({ description: "For update: the revision you read. If the topic changed since, nothing is saved: read it again and apply your change to that" })),
+			title: Type.Optional(Type.String({ description: "A short title, up to 120 characters" })),
+			summary: Type.Optional(Type.String({ description: "What the question or discussion is about, in Markdown, up to 4000 characters" })),
+			status: Type.Optional(Type.String({ description: "open or resolved" })),
+			addConclusions: Type.Optional(Type.Array(Type.String(), { description: "Conclusions the user confirmed" })),
+			updateConclusions: Type.Optional(itemEdits),
+			removeConclusions: Type.Optional(Type.Array(Type.String(), { description: "IDs of conclusions to remove" })),
+			addQuestions: Type.Optional(Type.Array(Type.String(), { description: "Questions still open" })),
+			updateQuestions: Type.Optional(itemEdits),
+			removeQuestions: Type.Optional(Type.Array(Type.String(), { description: "IDs of questions to remove, such as one now answered" })),
+			addSources: Type.Optional(Type.Array(Type.Object({
+				kind: Type.String({ description: "task (ref t3), knowledge (ref a note's path under .yesman/knowledge), link (ref an http(s) URL), worker (agent: a worker whose report it came from), or conversation (this conversation, when no exact message is known)" }),
+				ref: Type.Optional(Type.String()),
+				agent: Type.Optional(Type.String({ description: "An agent's name, for worker and conversation" })),
+				label: Type.Optional(Type.String({ description: "A few words shown with it" })),
+			}))),
+			removeSources: Type.Optional(Type.Array(Type.String(), { description: "IDs of sources to remove" })),
+			archive: Type.Optional(Type.Boolean({ description: "Archive the topic; it can be restored" })),
+			restore: Type.Optional(Type.Boolean({ description: "Restore an archived topic" })),
+		}),
+		async execute(_id, params, signal) {
+			const action = (params.action ?? (params.id ? (params.revision === undefined ? "read" : "update") : "list")).toLowerCase();
+			if (action === "list") {
+				const r = await call("GET", "/v1/topics", undefined, signal);
+				return result(topicIndex(r.topics ?? []), r);
+			}
+			if (action === "read") {
+				if (!params.id) throw new Error("read needs id");
+				const t = await call("GET", `/v1/topics?id=${encodeURIComponent(params.id)}`, undefined, signal);
+				return result(topicText(t), t);
+			}
+			const { action: _a, id, revision, ...fields } = params as any;
+			const set = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined && !(Array.isArray(v) && !v.length)));
+			if (action === "create") {
+				const create = { title: set.title ?? "", summary: set.summary, status: set.status, conclusions: set.addConclusions, questions: set.addQuestions, sources: set.addSources };
+				const t = await call("POST", "/v1/topics", { create }, signal);
+				return result(`Created ${t.id}.\n\n${topicText(t)}`, t);
+			}
+			if (action === "update") {
+				if (!id || typeof revision !== "number") throw new Error("update needs id and the revision you read");
+				const t = await call("POST", "/v1/topics", { id, patch: { revision, ...set } }, signal);
+				return result(`Saved ${t.id} at revision ${t.revision}.\n\n${topicText(t)}`, t);
+			}
+			throw new Error(`unknown action ${action}: use list, read, create or update`);
+		},
+	});
 
 	pi.registerTool({
 		name: "yesman_worker_start",

@@ -8,6 +8,7 @@
 //	    yesman.json        when it was hired, and the model its lead starts as
 //	    workers.json       the workers its lead started
 //	    board.json         the task board its agents keep
+//	    topics.json        questions and discussions worth keeping (topics.go)
 //	    knowledge/         durable guidance shared by every agent; INDEX.md lists it
 //	    task-log.md        task and PR history, maintained by the lead
 //	    sessions/<agent>/  each agent's pi session log
@@ -127,6 +128,8 @@ type Store struct {
 
 	lmu   sync.Mutex
 	locks map[string]*sync.RWMutex // per yesman: Use reads, Archive writes
+	// topicLocks serialize each workspace's topic file; guarded by lmu.
+	topicLocks map[string]chan struct{}
 }
 
 // New returns the store of workspaces under root, archiving into archive.

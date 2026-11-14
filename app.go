@@ -49,6 +49,8 @@ type app struct {
 	agents  *agent.Manager
 	pi      string
 	piErr   error
+	// onTopics, when set, replaces broadcasting topic changes, for tests.
+	onTopics func(yesman string)
 	// runPi runs a pi command for the user, outside any workspace.
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs
