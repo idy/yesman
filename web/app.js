@@ -2565,7 +2565,8 @@ const actionHost = {
   composer: () => (state.view.kind === 'agent' ? $('#dock textarea') : null),
   abort: (a) => call('Abort', a.id),
   sleep: (a) => call('Stop', a.id),
-  dialogOpen: () => !!document.querySelector('dialog[open]'),
+  // Another dialog than the palette, which closes before an action runs.
+  dialogOpen: () => !!document.querySelector('dialog[open]:not(.palette-dialog)'),
   showSettings(page) {
     showSettings(page ?? state.settingsPage);
     // The page replaced what had focus: Settings › Shortcuts focuses its
