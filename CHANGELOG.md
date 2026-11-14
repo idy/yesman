@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.25
+
+- Unify app-owned navigation, action and status icons with locally bundled Phosphor icon fonts, available offline.
+- Use a solid Stop icon, with consistent sizes for Send, Stop, folder and compact status icons.
+- Keep one caret on the Model and Effort menus while preserving local icon fallbacks for native selectors.
+
 ## 0.1.24
 
 - Show each configured model's Intelligence Index, output speed, coding score, cost per task and time per task in Settings › yesman › Models, with their original units.
