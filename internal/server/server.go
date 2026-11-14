@@ -516,8 +516,8 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
 
 	if me.Role == agent.RoleLead {
-		w("You are the lead of the yesman named %q. You talk with the user, plan, keep the board and this yesman's knowledge, and get the work delivered by workers.\n\n", y.Label())
-		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are knowledge notes. Read files only to answer a quick question, not to investigate. ")
+		w("You are the lead of the yesman named %q. You talk with the user, plan, keep the board, Knowledge and task log, and get the work delivered by workers.\n\n", y.Label())
+		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are Knowledge notes under .yesman/knowledge/ and the task log at .yesman/task-log.md. Read files only to answer a quick question or maintain these shared documents from worker reports, not to investigate. ")
 		w("Hand everything else to workers with yesman_worker_start (changes, commands, tests, research across many files, reviews, releases), each with a title naming its subject, then end your run. Each worker is its own pi agent in this workspace; several can run at once. ")
 		w("Keep every run short: answer, delegate, end.\n")
 		w("Never sleep, poll or read session logs to wait for a worker: end your run, and its report arrives as a new message that starts your next one. You also hear when a worker's run was stopped by the user or failed.\n")
@@ -577,13 +577,26 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 
 	rel := ".yesman/knowledge"
 	w("\n## Knowledge\n\n")
-	w("Every agent of this yesman shares %s/. Read a note when it bears on your work. When you learn something durable about this project (a decision, how something is built or released, a pitfall, the user's preference), write it down: one note per file, then add one line for it to %s/INDEX.md. Update a note rather than duplicating it.\n", rel, rel)
+	w("Every agent of this yesman shares %s/. Read a note when it bears on your work. Knowledge holds reusable development conventions, user preferences, architecture decisions and known pitfalls. Good: 'Use the project's Phosphor icon helper and local font assets'; 'Keep stable internal IDs when display names change.' Bad: 'PR #42 at head abc123 passed CI'; a release timeline or temporary blocker. Those belong in the task log or board. Finishing a task alone is not a reason to add Knowledge. Keep one note per topic, update rather than duplicate it, and keep %s/INDEX.md a concise catalog of durable notes. Keep secrets out of both stores.\n", rel, rel)
+	if me.Role == agent.RoleLead {
+		w("Maintain Knowledge from reusable discoveries in worker reports; do not turn handoffs into notes.\n")
+	} else {
+		w("Report reusable discoveries to your lead, which coordinates Knowledge updates.\n")
+	}
 	if data, err := os.ReadFile(filepath.Join(y.KnowledgeDir(), "INDEX.md")); err == nil {
 		text := strings.TrimSpace(string(data))
 		if len(text) > knowledgeLimit {
 			text = text[:knowledgeLimit] + "\n… (truncated; read the file for the rest)"
 		}
 		w("\n%s/INDEX.md:\n\n%s\n", rel, text)
+	}
+
+	w("\n## Task log\n\n")
+	w("The task log is .yesman/task-log.md. It records dated historical facts, not current instructions: task/PR links, changes and reasons, commit/head hashes, CI and validation results, release timelines, outcomes and follow-up work or temporary blockers at the time. Use the board for current status. Read relevant entries on demand; the full history is not included in this context or the Knowledge index. Keep reusable rules such as the icon policy in Knowledge instead of repeating them in every log entry.\n")
+	if me.Role == agent.RoleLead {
+		w("You coordinate and append task-log entries from worker reports. Preserve existing history; do not have multiple workers rewrite this shared file. Use a date/task heading, then Changes, PR, Validation, Outcome and Follow-up. This document maintenance does not permit doing code work yourself.\n")
+	} else {
+		w("Report task results, PR/commit links, validation, outcomes and follow-up work to your lead, which appends the task log. Keep your board task current; do not rewrite the shared task log alongside other workers.\n")
 	}
 
 	w("\n## Board\n\n")

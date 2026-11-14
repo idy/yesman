@@ -585,6 +585,7 @@ async function openAgentMenu(e, a) {
         break;
       case 'reveal': await call('Reveal', workspace.path); break;
       case 'knowledge': await call('Reveal', `${workspace.path}/.yesman/knowledge/INDEX.md`); break;
+      case 'task-log': await call('Reveal', `${workspace.path}/.yesman/task-log.md`); break;
       case 'logs': await call('Reveal', `${workspace.path}/.yesman/sessions/${a.name}`); break;
       case 'abort': await call('Abort', a.id); break;
       case 'sleep': await call('Stop', a.id); break;
@@ -2069,6 +2070,7 @@ const info = createInfo({
   isOpen: () => state.panelOpen,
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
+  openTaskLog: () => files.openTaskLog(),
   openWorktree: (dir, show) => files.openWorktree(dir, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
