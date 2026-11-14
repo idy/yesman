@@ -64,3 +64,4 @@ jobs:
           for f in web/*.js; do
             node --check "$f"
           done
+          node --test scripts/*.test.mjs
