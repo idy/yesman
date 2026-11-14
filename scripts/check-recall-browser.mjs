@@ -138,7 +138,7 @@ try{for(const[name,engine]of selectedEngines)for(const language of ['en','zh-Han
   assert.equal(await page.locator('.composer-image').count(),2);
   assert.equal(await page.locator('.composer-image img').first().getAttribute('src'),`data:image/png;base64,${bytes.toString('base64')}`);
   await control('ReleaseProvider');
-  const nativeCopy = page.locator('#thread > .msg-user .message-copy, #thread > .msg-delivery[data-bound="true"] > .message-actions > .message-copy');
+  const nativeCopy = page.locator('#thread > .msg-user .message-copy, #thread > .msg-delivery[data-bound="true"] > .message-footer > .message-actions > .message-copy');
   await nativeCopy.first().waitFor();
   await nativeCopy.first().click();assert.equal(await page.evaluate(()=>window.copied.at(-1)),'hold');
   assert.equal(await page.locator('#thread > .msg-user .message-recall, #thread > .msg-delivery[data-bound="true"] .message-recall').count(),0);

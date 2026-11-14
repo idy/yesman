@@ -116,8 +116,11 @@ draining native input. It prepares that claimed input without repeating input
 hooks/template expansion, and reuses the original retry/compaction/settle driver.
 Abort invalidates admission and can stop a claimed input during preparation before
 any model request. A stopped process has no queue authority and cannot be resumed
-by this operation. Desktop Send now/footer and final receipt grouping remain
-separate UI integration work.
+by this operation. The message footer offers **Send now** only for a confirmed
+follow-up whose live runtime admits promotion. Already-steering messages show
+that they are waiting for an input checkpoint. A pending action reserves that
+item in the page, so repeated clicks cannot issue another mutation; generation
+checks discard late responses after switching to a replacement agent.
 
 Input identity is carried by batch position and host event envelopes, never on
 AgentMessage. A same-object duplicate has distinct occurrences. After recording a
@@ -227,7 +230,26 @@ restored drafts have the same in-memory lifetime as other composer drafts.
 
 ## User behavior
 
-Reliable pending human receipt rows show **Cancel and edit**. Consumed, historical,
+Reliable pending human receipt rows show **Cancel and edit**. Their footer uses
+**Waiting · follow-up** or **Steering · waiting for input checkpoint**, never
+Sending after native acceptance. Pending/failure visibility does not depend on
+the eight-entry `Convo.sent` display cache or a later submitted ID. Current
+failures stay visible for their agent generation. Earlier nonactionable unbound
+receipts fold into one default-collapsed group from PR67; they never grant queue
+actions. Receipt binding uses only an explicit recorded submission identity,
+including identical text/images, so late events and reloading do not add a second
+bubble. A recorded message shows **Taken by pi**, which does not promise provider
+execution has finished.
+
+`SubmissionPayload` reads complete text/images from the existing bounded volatile
+Go cache, without changing native membership. A visible unbound row may hydrate
+from it after display-cache eviction or page reload. Only that DOM row holds the
+result; there is no additional full-payload map or disk image store. Missing
+payloads stay previews with an image count. The read rejects retired/sealed
+owners, old generations and worktree cleanup. Full-app restarts cannot restore
+payloads that no longer exist.
+
+Consumed, historical,
 unknown and unsupported-runtime messages offer Copy only. A nonempty draft or
 attachments block recall before any native mutation, with an explanation to send
 or clear that draft first. While waiting, only that agent's empty composer is

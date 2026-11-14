@@ -79,7 +79,7 @@ func TestCancelledReceiptRestartAndFloor(t *testing.T) {
 	now := time.Now()
 	id := deliveryTestID(13000)
 	path := filepath.Join(t.TempDir(), "delivery.json")
-	d := Delivery{ID: id, State: "cancelled", Text: "preview", CanCancel: true, CanRestore: true, OriginalText: true, NativePending: true}
+	d := Delivery{ID: id, State: "cancelled", Text: "preview", CanCancel: true, CanRestore: true, OriginalText: true, OriginalPayload: true, NativePending: true}
 	fingerprint := deliveryFingerprint("complete", nil)
 	disk := deliveryDisk{Version: 2, Records: []storedDelivery{{Delivery: d, Fingerprint: fingerprint, Created: now.UnixMilli(), Expires: now.Add(time.Minute).UnixMilli()}}}
 	bytes, _ := json.Marshal(disk)
@@ -91,7 +91,7 @@ func TestCancelledReceiptRestartAndFloor(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := records[id]
-	if got.State != "cancelled" || got.CanCancel || got.CanRestore || got.NativePending || got.OriginalText {
+	if got.State != "cancelled" || got.CanCancel || got.CanRestore || got.NativePending || got.OriginalText || got.OriginalPayload {
 		t.Fatalf("restart invented capabilities: %+v", got)
 	}
 	pruneDeliveryRecords(records, &floor, now.Add(time.Hour))

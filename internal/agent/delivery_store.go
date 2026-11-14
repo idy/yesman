@@ -309,7 +309,7 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 		d.Error, _ = deliveryClip(d.Error, maxDeliveryError)
 		d.Session, _ = deliveryClip(d.Session, 160)
 		d.Images = nil
-		d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote = false, false, false, false, false
+		d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload = false, false, false, false, false, false
 		if pendingDelivery(d.State) {
 			d.State, d.Error = "interrupted", ""
 			d.expires = now.Add(deliveryRetention).UnixMilli()

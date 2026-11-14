@@ -45,9 +45,11 @@ export function project(convo, agent = {}) {
   const rows = [];
   const seen = new Map();
   const bound = new Set();
+  const submissions = new Set();
   let work = null;
   const keyFor = (m) => {
-    const base = `${m?.role}:${m?.timestamp ?? ''}`;
+    const submission = originOf(m)?.submission;
+    const base = submission ? `submission:${submission}` : `${m?.role}:${m?.timestamp ?? ''}`;
     const n = seen.get(base) ?? 0;
     seen.set(base, n + 1);
     return n ? `${base}#${n}` : base;
@@ -65,6 +67,10 @@ export function project(convo, agent = {}) {
     switch (m?.role) {
       case 'user': {
         const origin = originOf(m);
+        if (origin?.submission) {
+          if (submissions.has(origin.submission)) return;
+          submissions.add(origin.submission);
+        }
         if (origin?.source === 'yesman') step({ type: 'notice', key, message: m, origin });
         else if (origin?.source === 'lead') main({ type: 'lead', key, message: m, origin });
         else {
@@ -152,7 +158,12 @@ export function project(convo, agent = {}) {
   // Those the server has not answered for yet were sent after all it has.
   const made = (d) => (d.revision > 0 ? (d.order ?? 0) : Infinity);
   const receipts = all.filter((d) => !bound.has(d.id)).sort((a, b) => made(a) - made(b) || 0);
-  const own = (d) => !FINISHED.has(d.state) || convo.sent?.has(d.id) || (d === latest && !settled(d));
+  const currentFailure = (d) => (d.state === 'failed' || d.state === 'interrupted' || !!d.error) &&
+    (convo.submitted?.has(d.id) || (d.agentSince && d.agentSince === agent.since));
+  // Display caches and the last submitted ID cannot revoke native membership
+  // or hide a failure from this agent generation. They never grant actions.
+  const own = (d) => d.nativePending || d.canRestore || currentFailure(d) ||
+    !FINISHED.has(d.state) || convo.sent?.has(d.id) || (d === latest && !settled(d));
   const earlier = receipts.filter((d) => !own(d));
   if (earlier.length) rows.push({ type: 'receipts', key: 'd:earlier', deliveries: earlier });
   for (const d of receipts) if (own(d)) rows.push({ type: 'receipt', key: `d:${d.id}`, delivery: d, sent: convo.sent?.get(d.id) });
@@ -161,10 +172,10 @@ export function project(convo, agent = {}) {
 
 // The states after which nothing more is known about a submission. Any
 // other, or one this page does not know, keeps its row.
-export const FINISHED = new Set(['unconfirmed', 'failed', 'interrupted', 'handled']);
+export const FINISHED = new Set(['unconfirmed', 'failed', 'interrupted', 'handled', 'dispatched', 'cancelled']);
 
 // settled is a finished receipt that needs nothing more: accepted with nothing
 // more pi can say, or handled by an extension. pi never says which message it
 // took, so this is not a claim that it was. A failure, an interruption or an
 // error stays in view while it is the latest submission.
-const settled = (d) => d.revision > 0 && !d.error && (d.state === 'unconfirmed' || d.state === 'handled');
+const settled = (d) => d.revision > 0 && !d.error && ['unconfirmed', 'handled', 'dispatched', 'cancelled'].includes(d.state);

@@ -148,6 +148,14 @@ func TestRecallBrowserBridge(t *testing.T) {
 					return
 				}
 			}
+		case "PromoteSubmission":
+			var since time.Time
+			_ = json.Unmarshal(req.Args[2], &since)
+			value, callErr = svc.PromoteSubmission(r.Context(), text(0), text(1), since)
+		case "SubmissionPayload":
+			var since time.Time
+			_ = json.Unmarshal(req.Args[2], &since)
+			value, callErr = svc.SubmissionPayload(text(0), text(1), since)
 		case "SubmissionText":
 			var since time.Time
 			_ = json.Unmarshal(req.Args[2], &since)

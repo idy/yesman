@@ -31,6 +31,9 @@ type promotionFixture struct {
 }
 
 func newPromotionFixture(t *testing.T) *promotionFixture {
+	return newPromotionFixtureWithEvents(t, nil)
+}
+func newPromotionFixtureWithEvents(t *testing.T, onEvent func(Event)) *promotionFixture {
 	t.Helper()
 	runtime := os.Getenv("YESMAN_TEST_RUNTIME")
 	if runtime == "" {
@@ -77,6 +80,9 @@ func newPromotionFixture(t *testing.T) *promotionFixture {
 		return writeDeliveryFile(path, data)
 	}
 	f.cfg.OnEvent = func(e Event) {
+		if onEvent != nil {
+			onEvent(e)
+		}
 		var wire struct {
 			Type    string       `json:"type"`
 			Pending pendingQueue `json:"pending"`

@@ -89,6 +89,8 @@ class Convo {
     this.receiptsOpen = false; // the earlier submissions' row is open
     this.tools = new Map(); // toolCallId -> { args, status, result }
     this.recalled = new Set();
+    this.submitted = new Set(); // bounded receipt IDs, never original payloads or queue authority
+    this.actions = new Set(); // in-flight exact-item actions
     this.deliveries = new Map(); // message ID -> server receipt (or local Sending only)
     // message ID -> { text, images } this window submitted, shown as sent until
     // a message is tied to it. Only in memory; see holdSent.
@@ -128,7 +130,7 @@ function pruneCaches() {
 // Records that arrive while the history loads are queued, then replayed on
 // top of it, skipping messages the history already has, so a turn in
 // progress keeps streaming and none shows twice.
-const messageKey = (m) => `${m?.role}:${m?.timestamp}`;
+const messageKey = (m) => originOf(m)?.submission ? `submission:${originOf(m).submission}` : `${m?.role}:${m?.timestamp}`;
 
 const DELIVERY_LABELS = {
   sending: 'Sending…', accepted: 'Accepted · delivery unconfirmed',
@@ -136,16 +138,16 @@ const DELIVERY_LABELS = {
   unconfirmed: 'Delivery unconfirmed', failed: 'Not sent', interrupted: 'Delivery interrupted',
   handled: 'Handled by an extension', dispatched: 'Taken by pi', cancelled: 'Recalled',
 };
-const deliveryLabel = (d) => d.nativePending ? (d.state === 'queued' ? 'Queued for follow-up' : 'Queued for steering') : DELIVERY_LABELS[d.state];
+const deliveryLabel = (d) => d.nativePending ? (d.state === 'queued' ? 'Waiting · follow-up' : 'Steering · waiting for input checkpoint') : DELIVERY_LABELS[d.state];
 
-// pi cannot say whether a receipt's message was taken. A message yesman's
-// extension tied to its receipt is in the conversation, so it was.
-const BOUND_DELIVERY = 'Delivered';
+// Only an explicit recorded submission identity can bind a receipt.
+const BOUND_DELIVERY = 'Taken by pi';
 
 function pruneDeliveryRows(c, ids) {
   let changed = false;
   for (const id of ids ?? []) {
     c.recalled.delete(id);
+    c.submitted.delete(id);
     c.sent.delete(id);
     changed = c.deliveries.delete(id) || changed;
   }
@@ -178,15 +180,36 @@ function updateDelivery(c, d) {
 function copyActions(text, c = null, d = null) {
   const eligible = (d?.canCancel || d?.canRestore) && !c?.recalled.has(d.id);
   const actions = messageActions({ text,
-    loadText: d?.originalText ? () => call('SubmissionText', c.id, d.id, d.agentSince) : null,
+    loadText: text == null && d?.originalText ? () => call('SubmissionText', c.id, d.id, d.agentSince) : null,
     copy: (value) => call('CopyValue', value), done: () => toast(t('Copied.')), fail,
-    recall: eligible ? () => recallMessage(c, d.id) : null, restoring: d?.canRestore });
+    recall: eligible ? () => recallMessage(c, d.id) : null, restoring: d?.canRestore,
+    promote: d?.canPromote && d.nativePending && d.state === 'queued' ? () => promoteMessage(c, d.id) : null,
+    busy: c?.actions.has(d?.id) });
   actions._copyText = text;
   actions._recall = `${!!d?.canCancel}:${!!d?.canRestore}:${!!d?.originalText}`;
   return actions;
 }
 
 function refreshDelivery(c, d) { if (d) schedulePatch(c, { frame: true }); }
+
+async function promoteMessage(c, id) {
+  const a = selectedAgent();
+  const receipt = c.deliveries.get(id);
+  if (!a || keyOf(a) !== c.key || !receipt?.nativePending || !receipt.canPromote || receipt.state !== 'queued' || c.actions.has(id)) return;
+  c.actions.add(id);
+  schedulePatch(c);
+  const current = () => state.convos.get(c.key) === c && keyOf(agentById(a.id) ?? {}) === c.key;
+  try {
+    const result = await call('PromoteSubmission', a.id, id, a.since);
+    if (!current()) return;
+    updateDelivery(c, result.delivery);
+  } catch (error) {
+    if (current() && keyOf(selectedAgent() ?? {}) === c.key) fail(t(errorText(error)));
+  } finally {
+    c.actions.delete(id);
+    if (current()) schedulePatch(c);
+  }
+}
 
 async function recallMessage(c, id) {
   const a = selectedAgent();
@@ -196,7 +219,9 @@ async function recallMessage(c, id) {
   if (!attachments || attachments.sending || attachments.reading || attachments.recalling) return;
   if ((state.drafts.get(key) ?? '') !== '' || attachments.items.length) return fail(t('Send or clear the current draft before recalling a message.'));
   const receipt = c.deliveries.get(id);
-  if ((!receipt?.canCancel && !receipt?.canRestore) || c.recalled.has(id)) return;
+  if ((!receipt?.canCancel && !receipt?.canRestore) || c.recalled.has(id) || c.actions.has(id)) return;
+  c.actions.add(id);
+  schedulePatch(c);
   attachments.recalling = true;
   let focusAllowed = true;
   const movedFocus = (event) => { if (!event.target.matches('.composer textarea')) focusAllowed = false; };
@@ -225,6 +250,8 @@ async function recallMessage(c, id) {
   } finally {
     document.removeEventListener('focusin', movedFocus);
     attachments.recalling = false;
+    c.actions.delete(id);
+    if (current()) schedulePatch(c);
     if (current() && keyOf(selectedAgent() ?? {}) === key) renderDock({ focusComposer: focusAllowed });
   }
 }
@@ -232,8 +259,13 @@ async function recallMessage(c, id) {
 // deliveryStatus is a receipt's state, lightly, under the message it is for.
 function deliveryStatus(d, bound) {
   const label = bound ? BOUND_DELIVERY : deliveryLabel(d);
-  return h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite', 'data-state': bound ? 'delivered' : d.state,
-    hidden: !label, title: bound ? t('pi took this message into the conversation.') : d.error || (d.state === 'sending' ? null : t('pi has not reported whether this particular message was taken for processing.')) },
+  const title = bound ? t('pi took this message into the conversation.')
+    : d.state === 'dispatched' ? t('pi took this input for processing.')
+      : d.nativePending ? (d.state === 'queued' ? t('This input is still in pi’s follow-up queue.') : t('Steering is read at the next eligible input checkpoint, after the current response and tool batch.'))
+      : d.state === 'cancelled' ? t('This input was removed from the queue.')
+        : d.error || (d.state === 'sending' ? null : t('pi has not reported whether this particular message was taken for processing.'));
+  return h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite', 'data-state': bound ? 'dispatched' : d.state,
+    hidden: !label, title },
   label ? t(label) : '');
 }
 
@@ -246,9 +278,30 @@ const receiptForm = (d, sent, line) => `${line ? 'line' : sent ? 'sent' : 'kept'
 
 function receiptEl(c, d, { sent, line = false } = {}) {
   const el = line ? receiptLine(d) : receiptBody(d, sent);
-  if (!line) el.append(copyActions(sent?.text ?? receiptText(d), c, d));
+  if (!line) {
+    const status = el.querySelector('.delivery-status');
+    status.remove();
+    el.append(h('div', { class: 'message-footer' }, status, copyActions(sent?.text ?? receiptText(d), c, d)));
+    if (!sent && d.originalPayload) hydrateReceipt(c, el, d);
+  }
   el._variant = receiptForm(d, sent, line);
   return el;
+}
+
+// A visible row can retrieve originals from the Manager's bounded memory.
+// Keep them only in this row, never another persistent or conversation cache.
+async function hydrateReceipt(c, el, d) {
+  el._hydration = true;
+  try {
+    const payload = await call('SubmissionPayload', c.id, d.id, d.agentSince);
+    const current = c.deliveries.get(d.id);
+    if (!el.isConnected || state.convos.get(c.key) !== c || keyOf(selectedAgent() ?? {}) !== c.key || !current?.originalPayload || typeof payload?.text !== 'string' || !Array.isArray(payload.images)) return;
+    el._payload = payload;
+    el.querySelector('.msg-user').replaceWith(userBubble({ content: [{ type: 'text', text: payload.text }, ...payload.images] }));
+    el.querySelector('.delivery-image-count')?.remove();
+    el.querySelector('.message-actions')?.replaceWith(copyActions(payload.text, c, current));
+    el.dataset.original = 'true';
+  } catch { /* Missing after intake/retirement stays an honest bounded preview. */ }
 }
 
 const imageNote = (n) => h('div', { class: 'delivery-image-count' }, tn(n, '{n} image submitted', '{n} images submitted'));
@@ -279,13 +332,16 @@ function updateReceipt(c, el, d, options = {}) {
   if (el._variant === receiptForm(d, options.sent, options.line) && !d.images?.length) {
     el.dataset.sending = String(!options.line && d.state === 'sending');
     el.querySelector('.delivery-status').replaceWith(deliveryStatus(d, false));
-    if (!options.line) el.querySelector(':scope > .message-actions')?.replaceWith(copyActions(options.sent?.text ?? receiptText(d), c, d));
+    if (!options.line) {
+      el.querySelector('.message-actions')?.replaceWith(copyActions(el._payload?.text ?? options.sent?.text ?? receiptText(d), c, d));
+      if (!options.sent && d.originalPayload && !el._hydration) hydrateReceipt(c, el, d);
+    }
     return el;
   }
   return receiptEl(c, d, options);
 }
 
-const receiptSig = (d, sent) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}`;
+const receiptSig = (d, sent) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}:${!!d.originalPayload}:${!!d.canPromote}:${!!d.canCancel}:${!!d.canRestore}`;
 
 // The earlier submissions no message is tied to, folded into one line. Opened,
 // each is one light line with what yesman kept of it and its state.
@@ -518,7 +574,8 @@ function userRowEl(row, c) {
   if (legacy) return legacy;
   const bubble = userBubble(row.message);
   if (!row.delivery) { bubble.append(copyActions(textOf(row.message.content))); return bubble; }
-  return h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble, deliveryStatus(row.delivery, true), copyActions(textOf(row.message.content), c, row.delivery));
+  return h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble,
+    h('div', { class: 'message-footer' }, deliveryStatus(row.delivery, true), copyActions(textOf(row.message.content))));
 }
 
 function leadRowEl(row) {
@@ -685,7 +742,7 @@ function rowEl(c, row) {
 
 function rowSig(row) {
   switch (row.type) {
-    case 'user': return row.delivery ? `bound:${row.delivery.id}` : '';
+    case 'user': return row.delivery ? `bound:${row.delivery.id}:${row.delivery.revision}` : '';
     case 'text': return row.live ? `l:${row.text}` : 'f';
     case 'receipt': return receiptSig(row.delivery, row.sent);
     default: return 'f';
@@ -713,7 +770,7 @@ function patchThread(c) {
   if (rows.length) thread.querySelector('.thread-empty')?.remove();
   patchChildren(thread, 'data-row', rows, {
     make: (row) => rowEl(c, row),
-    sig: rowSig,
+    sig: (row) => `${rowSig(row)}:${c.actions.has(row.delivery?.id)}`,
     update: (el, row) => {
       if (row.type === 'work') return updateWork(c, el, row);
       if (row.type === 'receipts') return updateReceipts(c, el, row);
@@ -922,7 +979,10 @@ function applyEvent(c, e, replaying,seq = 0) {
           for (const key of [...c.workOpen]) if (key.startsWith(before)) { c.workOpen.delete(key); c.workOpen.add(after + key.slice(before.length)); }
         }
       }
-      c.messages.push(m);
+      const submission = originOf(m)?.submission;
+      const existing = submission ? c.messages.findIndex(old => originOf(old)?.submission === submission) : -1;
+      if (existing >= 0) c.messages[existing] = m;
+      else c.messages.push(m);
       if (m.role === 'assistant') c.live = null;
       break;
     }
@@ -1517,6 +1577,7 @@ async function sendMessage(a, textarea, submitter = null) {
       const excess = [...c.deliveries.keys()].slice(0,Math.max(0,c.deliveries.size-256));
       pruneDeliveryRows(c,excess);
     }
+    c.submitted.add(messageID);
     holdSent(c, messageID, attachments.submission);
     c.lastSent = messageID;
     schedulePatch(c);

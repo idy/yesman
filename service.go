@@ -259,6 +259,9 @@ func (s *service) PromoteSubmission(ctx context.Context, id, messageID string, s
 	return s.app.agents.PromoteSubmission(ctx, id, messageID, since)
 }
 
+func (s *service) SubmissionPayload(id, messageID string, since time.Time) (agent.RecallPayload, error) {
+	return s.app.agents.SubmissionPayload(id, messageID, since)
+}
 func (s *service) SubmissionText(id, messageID string, since time.Time) (string, error) {
 	return s.app.agents.SubmissionText(id, messageID, since)
 }

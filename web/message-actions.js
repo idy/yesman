@@ -11,7 +11,7 @@ export function receiptText(receipt) {
   return !receipt.preview && typeof receipt.text === 'string' ? receipt.text : null;
 }
 
-export function messageActions({ text, loadText, copy, done, fail, recall, restoring = false }) {
+export function messageActions({ text, loadText, copy, done, fail, recall, promote, busy = false, restoring = false }) {
   const available = typeof text === 'string' || typeof loadText === 'function';
   const hasText = !!loadText || !!text?.length;
   const label = !available ? t('Full message text is unavailable') : hasText ? t('Copy message text') : t('This message has no text to copy');
@@ -39,7 +39,12 @@ export function messageActions({ text, loadText, copy, done, fail, recall, resto
   const recallLabel = restoring ? t('Return recalled message to input') : t('Cancel and edit');
   const recallButton = recall ? h('button', {
     class: 'message-copy message-recall', type: 'button', title: recallLabel, 'aria-label': recallLabel,
-    onclick: recall,
+    onclick: recall, disabled: busy, 'aria-busy': busy ? 'true' : null,
   }, icon('arrowLeft')) : null;
-  return h('div', { class: 'message-actions' }, button, recallButton);
+  const promoteLabel = t('Send now');
+  const promoteButton = promote ? h('button', {
+    class: 'message-copy message-promote', type: 'button', title: t('Move to steering for the next input checkpoint'), 'aria-label': promoteLabel,
+    onclick: promote, disabled: busy, 'aria-busy': busy ? 'true' : null,
+  }, icon('send'), h('span', null, promoteLabel)) : null;
+  return h('div', { class: 'message-actions' }, button, promoteButton, recallButton);
 }

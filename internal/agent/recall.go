@@ -81,6 +81,7 @@ func (m *Manager) clearRecallLocked(a *agent) {
 func (a *agent) deliveryView(d Delivery) Delivery {
 	payload, hasPayload := a.recallPayloads[d.ID]
 	d.OriginalText = hasPayload && payload.Text != ""
+	d.OriginalPayload = hasPayload && !a.retiring && !a.removing && !a.deliverySealed
 	d.NativePending = d.queueID != "" && d.queueEpoch == a.nativeQueue.Epoch && a.nativeQueue.supported() && a.proc != nil && !a.retiring && !a.removing && !a.deliverySealed
 	d.CanPromote = d.NativePending && d.State == "queued" && a.nativeQueue.supportsPromotion() && a.nativeQueue.PromoteAllowed
 	d.CanCancel = hasPayload && d.NativePending
@@ -304,6 +305,22 @@ func (m *Manager) CancelSubmission(ctx context.Context, agentID, id string, sinc
 func (m *Manager) recallOwnerLocked(a *agent, since, hiredAt time.Time) bool {
 	return m.agents[a.info.ID] == a && !m.closed && !a.retiring && !a.removing && !a.deliverySealed &&
 		a.info.Since.Equal(since) && a.workspaceSince.Equal(hiredAt) && !m.worktreeCleanup[a.info.ID]
+}
+
+// SubmissionPayload reads the existing bounded volatile original for display.
+// It grants no queue authority and cannot restore a missing/retired payload.
+func (m *Manager) SubmissionPayload(agentID, id string, since time.Time) (RecallPayload, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a := m.agents[agentID]
+	if a == nil || m.closed || !a.info.Since.Equal(since) || a.retiring || a.removing || a.deliverySealed || m.worktreeCleanup[agentID] {
+		return RecallPayload{}, errStopped
+	}
+	payload, ok := a.recallPayloads[id]
+	if !ok {
+		return RecallPayload{}, errors.New("the full original message is no longer available for editing")
+	}
+	return RecallPayload{payload.Text, slices.Clone(payload.Images)}, nil
 }
 
 func (m *Manager) SubmissionText(agentID, id string, since time.Time) (string, error) {

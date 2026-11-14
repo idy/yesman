@@ -29,6 +29,7 @@ type Delivery struct {
 	CanCancel           bool      `json:"canCancel,omitempty"` // view only; never persisted as authority
 	CanRestore          bool      `json:"canRestore,omitempty"`
 	OriginalText        bool      `json:"originalText,omitempty"`
+	OriginalPayload     bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
 	NativePending       bool      `json:"nativePending,omitempty"`
 	CanPromote          bool      `json:"canPromote,omitempty"` // live native membership/admission only
 	queueRevision       uint64
@@ -73,7 +74,7 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 	if !pendingDelivery(d.State) && (pendingDelivery(previous.State) || d.expires == 0) {
 		d.expires = time.Now().Add(deliveryRetention).UnixMilli()
 	}
-	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote = false, false, false, false, false
+	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload = false, false, false, false, false, false
 	if d.State == "dispatched" || d.State == "failed" || d.State == "handled" || d.State == "interrupted" || d.State == "accepted" {
 		d.queueID = ""
 		m.forgetRecallLocked(a, d.ID)
