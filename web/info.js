@@ -153,8 +153,8 @@ export function createInfo(host) {
     const current = shown?.yesman === y.name && isTaskLog(shown.path);
     return h('section', { class: 'info-section info-section--link' },
       h('button', { class: 'info-link', type: 'button', 'aria-current': current ? 'page' : null, onclick: () => host.openTaskLog(),
-        title: t('Read task and PR history in the files pane') },
-      h('span', { class: 'info-link-label' }, t('Task log')),
+        title: t('Read the working log in the files pane') },
+      h('span', { class: 'info-link-label' }, t('Working log')),
       icon('chevron', 'mds-icon info-chevron')));
   }
 

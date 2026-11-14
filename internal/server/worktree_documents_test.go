@@ -39,12 +39,12 @@ func TestContextDocumentsAndWorktreePoliciesTogether(t *testing.T) {
 			}
 		}
 		if me.Role == agent.RoleLead {
-			for _, want := range []string{"one batch cleanup worker", "handoff", "You coordinate and append task-log", "only files you may write are Knowledge notes"} {
+			for _, want := range []string{"one batch cleanup worker", "handoff", "You coordinate and append Working log", "only files you may write are Knowledge notes"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("lead lacks %q", want)
 				}
 			}
-		} else if !strings.Contains(text, "your lead, which maintains the task-log TOC") {
+		} else if !strings.Contains(text, "your lead, which maintains the Working log TOC") {
 			t.Error("worker task-log responsibility changed")
 		}
 	}

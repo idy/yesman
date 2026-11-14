@@ -51,6 +51,21 @@ func TestLosslessMigrationAndIdempotence(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
+		// Windows Stat can resolve file identity lazily through its old path.
+		// Compare against a handle while that path still names the source,
+		// then close it before rename; the retained-ID assertion stays real.
+		opened, e := os.Open(filepath.Join(ws, TOC))
+		if e != nil {
+			t.Fatal(e)
+		}
+		stable, e := opened.Stat()
+		if e != nil || !os.SameFile(before, stable) {
+			_ = opened.Close()
+			t.Fatal("could not capture original identity", e)
+		}
+		if e = opened.Close(); e != nil {
+			t.Fatal(e)
+		}
 		m, e := Run(ws, Options{Action: "dry-run"})
 		if e != nil {
 			t.Fatal(e)

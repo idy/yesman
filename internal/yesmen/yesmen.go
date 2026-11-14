@@ -189,8 +189,8 @@ is not a reason to add a note.
 Good notes: "Use the project's Phosphor icon helper and local font assets";
 "Keep stable internal IDs when display names change."
 Task and PR history, commit/head hashes, CI and validation results, release
-timelines and temporary blockers belong in the task log or board, not here.
-The task log's short TOC is separate from this index at ` + "`.yesman/task-log.md`" + `,
+timelines and temporary blockers belong in the working log or board, not here.
+The working log's short TOC is separate from this index at ` + "`.yesman/task-log.md`" + `,
 linking to per-task/PR/release details in ` + "`.yesman/task-log/`" + `.
 Read only relevant detail files on demand; the lead alone maintains history.
 `
@@ -203,7 +203,7 @@ func ensureTaskLog(y Yesman) error {
 	return tasklog.Bootstrap(y.Path)
 }
 
-// EnsureTaskLogs adds the task log to existing workspaces on app startup.
+// EnsureTaskLogs adds the working log to existing workspaces on app startup.
 // It never rewrites Knowledge or other metadata, and repeated calls are safe.
 func (s *Store) EnsureTaskLogs() error {
 	ys, err := s.List()
@@ -213,7 +213,7 @@ func (s *Store) EnsureTaskLogs() error {
 	var errs []error
 	for _, y := range ys {
 		if err := s.Use(y.Name, ensureTaskLog); err != nil {
-			errs = append(errs, fmt.Errorf("%s task log: %w", y.Name, err))
+			errs = append(errs, fmt.Errorf("%s working log: %w", y.Name, err))
 		}
 	}
 	return errors.Join(errs...)

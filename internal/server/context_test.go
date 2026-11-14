@@ -110,7 +110,7 @@ func TestContextSharedDocumentsAreReadOnDemand(t *testing.T) {
 				t.Fatalf("history inflated context: %d bytes", len(text))
 			}
 			if role == agent.RoleLead {
-				for _, want := range []string{"only files you may write are Knowledge notes", "coordinate and append task-log entries from worker reports", "never do the work yourself", "does not permit doing code work yourself"} {
+				for _, want := range []string{"only files you may write are Knowledge notes", "coordinate and append Working log entries from worker reports", "never do the work yourself", "does not permit doing code work yourself"} {
 					if !strings.Contains(text, want) {
 						t.Errorf("lead context lacks %q", want)
 					}

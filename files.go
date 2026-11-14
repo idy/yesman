@@ -240,7 +240,7 @@ func (s *service) WriteFile(yesman, file, text, base string) (FileView, error) {
 	defer root.Close()
 	file = cleanRel(file)
 	if tasklog.IsPath(file) {
-		return FileView{}, errors.New("task history is read-only; the lead maintains its Markdown records")
+		return FileView{}, errors.New("working history is read-only; the lead maintains its Markdown records")
 	}
 	if file == "." {
 		return FileView{}, errors.New("no file named")

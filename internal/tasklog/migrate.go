@@ -92,7 +92,7 @@ func read(root *os.Root, path string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if !before.ModTime().Equal(after.ModTime()) || before.Size() != after.Size() || after.Size() != int64(len(b)) {
-		return nil, errors.New("file changed while reading task-log snapshot")
+		return nil, errors.New("file changed while reading working-log snapshot")
 	}
 	return b, nil
 }
@@ -192,7 +192,7 @@ func mkdir(root *os.Root, path string) error {
 // put installs complete derived content exclusively. An interrupted temporary
 // file is retained, never mistaken for complete output. Existing output must
 // match exactly; unknown same-name files are never overwritten.
-func put(root *os.Root, path string, b []byte) error {
+func put(root *os.Root, path string, b []byte, source string, inject func(string) error) error {
 	if _, err := root.Lstat(path); err == nil {
 		existing, err := read(root, path, maxSource+1<<20)
 		if err != nil {
@@ -220,11 +220,33 @@ func put(root *os.Root, path string, b []byte) error {
 	if err = errors.Join(writeErr, syncErr, closeErr); err != nil {
 		return err
 	}
+	intent := installIntent{Version: 1, Source: source, Target: path, Temporary: tmp, SHA256: digest(b), Bytes: len(b)}
+	if err = saveIntent(root, intent); err != nil {
+		return err
+	}
+	if inject != nil {
+		if err = inject("install-prepared:" + path); err != nil {
+			return err
+		}
+	}
 	// Link is exclusive even on Windows; Rename would replace an unknown file.
 	if err = root.Link(tmp, path); err != nil {
 		return err
 	}
-	return root.Remove(tmp) // only our private temporary name; installed file stays
+	if inject != nil {
+		if err = inject("install-linked:" + path); err != nil {
+			return err
+		}
+	}
+	if err = root.Remove(tmp); err != nil {
+		return err
+	}
+	if inject != nil {
+		if err = inject("install-unlinked:" + path); err != nil {
+			return err
+		}
+	}
+	return recoverInstall(root, source)
 }
 
 func loadMarker(root *os.Root) (Manifest, error) {
@@ -237,7 +259,7 @@ func loadMarker(root *os.Root) (Manifest, error) {
 		return m, err
 	}
 	if m.Version != 1 || len(m.SHA256) != 64 {
-		return m, errors.New("invalid task-log migration marker")
+		return m, errors.New("invalid working-log migration marker")
 	}
 	if _, err = hex.DecodeString(m.SHA256); err != nil {
 		return m, err
@@ -294,7 +316,7 @@ func Run(workspace string, o Options) (Manifest, error) {
 	if o.Action != "dry-run" && o.Action != "apply" && o.Action != "verify" && o.Action != "rollback" {
 		return Manifest{}, errors.New("unknown action")
 	}
-	if (o.Action == "apply" || o.Action == "rollback") && (!o.Offline || o.Expect == "") {
+	if (o.Action == "apply" || o.Action == "rollback") && (!o.Offline || !validExpectedSource(o.Expect)) {
 		return Manifest{}, errors.New("stop the app and all history writers, then supply --offline and --expect-sha256 from dry-run")
 	}
 	if o.Action == "apply" || o.Action == "rollback" {
@@ -312,6 +334,9 @@ func Run(workspace string, o Options) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("another migration holds the lock: %w", err)
 		}
 		defer unlock()
+		if err = recoverInstall(root, o.Expect); err != nil {
+			return Manifest{}, err
+		}
 	}
 	marker, markerErr := loadMarker(root)
 	hasMarker := markerErr == nil
@@ -353,7 +378,7 @@ func Run(workspace string, o Options) (Manifest, error) {
 		}
 		prepared, toc := plan(snapshot)
 		prepared.SourceModTime = marker.SourceModTime
-		e = rollback(root, prepared, toc, b) // restore the retained inode's latest bytes, including late appends
+		e = rollback(root, prepared, toc, b, o) // restore the retained inode's latest bytes, including late appends
 		prepared.RestoredSHA256 = digest(b)
 		return prepared, e
 	}
@@ -399,7 +424,7 @@ func Run(workspace string, o Options) (Manifest, error) {
 		return m, nil
 	}
 	if o.Action == "rollback" {
-		return m, rollback(root, m, toc, b)
+		return m, rollback(root, m, toc, b, o)
 	}
 	if o.Action == "verify" {
 		if !hasMarker {
@@ -420,7 +445,7 @@ func Run(workspace string, o Options) (Manifest, error) {
 	// Fresh migration refuses any same-name existing parts, even matching bytes.
 	if !hasMarker {
 		reservation := Manifest{Version: m.Version, SHA256: m.SHA256, SourceModTime: m.SourceModTime, Bytes: m.Bytes}
-		if err = put(root, Marker, manifestBytes(reservation)); err != nil {
+		if err = put(root, Marker, manifestBytes(reservation), m.SHA256, o.Hook); err != nil {
 			return m, err
 		}
 	}
@@ -434,12 +459,12 @@ func Run(workspace string, o Options) (Manifest, error) {
 		return m, err
 	}
 	for _, p := range m.Parts {
-		if err = put(root, p.Path, b[p.Start:p.End]); err != nil {
+		if err = put(root, p.Path, b[p.Start:p.End], m.SHA256, o.Hook); err != nil {
 			return m, err
 		}
 	}
 	for path, data := range outputs(m, b, toc) {
-		if err = put(root, path, data); err != nil {
+		if err = put(root, path, data, m.SHA256, o.Hook); err != nil {
 			return m, err
 		}
 	}
@@ -488,7 +513,7 @@ func Run(workspace string, o Options) (Manifest, error) {
 	if !bytes.Equal(moved, b) || !os.SameFile(sourceInfo, movedInfo) || !sourceInfo.ModTime().Equal(movedInfo.ModTime()) {
 		return m, errors.New("concurrent append retained in recovery/source.md; reconcile it before continuing")
 	}
-	if err = put(root, TOC, toc); err != nil {
+	if err = put(root, TOC, toc, m.SHA256, o.Hook); err != nil {
 		return m, err
 	}
 	if err = hook(o, "installed"); err != nil {
@@ -508,12 +533,12 @@ func Run(workspace string, o Options) (Manifest, error) {
 	return m, verify(root, m, toc, b)
 }
 
-func rollback(root *os.Root, m Manifest, toc, b []byte) error {
+func rollback(root *os.Root, m Manifest, toc, b []byte, o Options) error {
 	// Preserve any post-migration edits, refusing an automatic rollback if the
 	// TOC changed. Historical parts/manifest are always retained.
 	current, err := read(root, TOC, maxSource)
 	if errors.Is(err, os.ErrNotExist) {
-		return put(root, TOC, b)
+		return put(root, TOC, b, m.SHA256, o.Hook)
 	}
 	if err != nil {
 		return err
@@ -525,7 +550,7 @@ func rollback(root *os.Root, m Manifest, toc, b []byte) error {
 		return errors.New("TOC changed; preserve/reconcile newer entries before rollback")
 	}
 	path := generation(m.SHA256) + "/rollback-toc.md"
-	if err = put(root, path, current); err != nil {
+	if err = put(root, path, current, m.SHA256, o.Hook); err != nil {
 		return err
 	}
 	// A private directory gives the rename a new destination on every attempt,
@@ -537,5 +562,5 @@ func rollback(root *os.Root, m Manifest, toc, b []byte) error {
 	if err = root.Rename(TOC, saved+"/toc.md"); err != nil {
 		return err
 	}
-	return put(root, TOC, b)
+	return put(root, TOC, b, m.SHA256, o.Hook)
 }

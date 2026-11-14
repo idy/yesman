@@ -11,7 +11,7 @@
 // done by the yesman app; this file only forwards.
 //
 // A lead delegates, so that it is always free to talk: it has no shell and
-// writes only Knowledge notes and the task log. Its tools are narrowed when
+// writes only Knowledge notes and the working log. Its tools are narrowed when
 // its session starts, and any call outside them is refused.
 import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -75,7 +75,7 @@ function writableTaskLog(path: string): boolean {
 	}
 }
 
-// The Knowledge exception is unchanged. The task log has a narrower file set.
+// The Knowledge exception is unchanged. The working log has a narrower file set.
 function sharedDocumentPath(path: unknown): boolean {
 	if (typeof path !== "string" || !path || !WORKSPACE) return false;
 	const input = path.replace(/^@/, "");
@@ -216,7 +216,7 @@ export default function yesman(pi: ExtensionAPI) {
 				return { block: true, reason: "The lead has no shell, to stay free for the user. Hand this to a worker with yesman_worker_start." };
 			}
 			if (LEAD_WRITES.includes(event.toolName) && !sharedDocumentPath((event.input as { path?: unknown } | undefined)?.path)) {
-				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/, the TOC .yesman/task-log.md and flat Markdown records .yesman/task-log/<name>.md in this workspace; linked task-log files or parents are not writable. Hand code and other changes to a worker with yesman_worker_start." };
+				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/, the Working log TOC .yesman/task-log.md and flat Markdown records .yesman/task-log/<name>.md in this workspace; linked Working log files or parents are not writable. Hand code and other changes to a worker with yesman_worker_start." };
 			}
 		});
 	}
@@ -371,7 +371,7 @@ export default function yesman(pi: ExtensionAPI) {
 				head: Type.String({ description: "Exact full HEAD; review must match the original checkout" }),
 				outcome: Type.String({ description: "pass, findings-handed-off, waiting-release, audit-complete; or done for a finished author/release task" }),
 				ref: Type.String({ description: "Reviewed PR/ref; author/release cleanup requires the merged https://github.com/owner/repo/pull/number URL" }),
-				evidence: Type.String({ description: "Saved conclusion/handoff and evidence outside this tree (board/session/task log), including reconstruction details" }),
+				evidence: Type.String({ description: "Saved conclusion/handoff and evidence outside this tree (board/session/Working log), including reconstruction details" }),
 				unused: Type.Boolean({ description: "True after stopping tree processes and confirming no other agent/task uses it" }),
 			})),
 			handoff: Type.Optional(Type.String({ description: "Lead only: name of the cleanup worker to delegate this verified resource to; saves permission without removal" })),

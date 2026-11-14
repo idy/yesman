@@ -30,7 +30,7 @@ func IsPath(path string) bool {
 	return ok && partName.MatchString(name)
 }
 
-const Template = `# Task log
+const Template = `# Working log
 
 <!-- yesman-task-log-toc v1 -->
 
@@ -68,15 +68,15 @@ func Check(root *os.Root, path string, missing bool) error {
 			return err
 		}
 		if st.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("linked task-log path: %s", p)
+			return fmt.Errorf("linked working log path: %s", p)
 		}
 		if i < len(parts)-1 {
 			if !st.IsDir() {
-				return fmt.Errorf("not a task-log directory: %s", p)
+				return fmt.Errorf("not a working log directory: %s", p)
 			}
 		} else {
 			if !st.Mode().IsRegular() {
-				return fmt.Errorf("not a regular task-log file: %s", p)
+				return fmt.Errorf("not a regular working log file: %s", p)
 			}
 			f, err := root.Open(p)
 			if err != nil {
@@ -89,7 +89,7 @@ func Check(root *os.Root, path string, missing bool) error {
 				return err
 			}
 			if n != 1 || !os.SameFile(st, actual) {
-				return fmt.Errorf("aliased task-log file: %s", p)
+				return fmt.Errorf("aliased working log file: %s", p)
 			}
 		}
 	}

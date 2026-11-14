@@ -1,6 +1,6 @@
-# Offline task-log migration
+# Offline Working log migration
 
-Existing single-file logs remain readable. The app never migrates them automatically. Use the utility from the reviewed source commit, first on a temporary copy. It reads only the selected workspace's task log, writes only derived task-log/recovery paths, and prints metadata rather than historical text.
+Existing single-file logs remain readable. The app never migrates them automatically. Use the utility from the reviewed source commit, first on a temporary copy. It reads only the selected workspace's working log, writes only derived task-log/recovery paths, and prints metadata rather than historical text.
 
 The lead coordinates one curator/history writer. **Stop the app, its lead/workers and all other history writers before apply or rollback.** Install/start a version that understands TOC + records before resuming agents. An old version's prompt still tells its lead to append to the single file; allowing that writer to resume would grow the TOC again. A dry-run may run while the app is open, but its hash is a snapshot: obtain a fresh one after stopping writers.
 
@@ -32,6 +32,7 @@ The layout for snapshot `HASH` is:
 | `.yesman/task-log-recovery/HASH/manifest.json` | Snapshot byte length/hash/mtime, ordered part byte ranges/hashes, original and TOC hash. |
 | `.yesman/task-log-recovery/HASH/toc.md` | Exact generated TOC, kept for verification/recovery. |
 | `.yesman/task-log-recovery/HASH/source.md` | Original source **inode**, retained at the switch. A writer already holding that file open will append here, preserving its late bytes. |
+| `.yesman/task-log-install.json` | One controlled exclusive-install intent: expected source/content hashes and the exact target/temporary names. It is cleared only after a verified installation; ordinary lead writes exclude it. |
 | `.yesman/task-log-migration.json` | Preparation marker; suppresses startup initialization if a crash leaves the compatibility path temporarily absent. |
 
 All complete output is written and synced through private temporary files and installed exclusively, then read back and hash/reconstruction checked **before** the original is moved. The source is retained by rename and rechecked before a complete TOC is installed exclusively. The exclusive install uses a same-filesystem hard link followed by removal of only the utility's temporary name, avoiding Windows rename-overwrite behavior. If the filesystem does not support this operation or Windows denies a rename because a writer is still open, apply fails safely; leave recovery files intact and use rollback after closing writers. Unknown occupied outputs, directories, symlink/dangling/hard-link targets and linked parents are refused. The workspace prefix itself may be a canonical alias. The utility never recursively overwrites/deletes a directory or deletes the original source.
@@ -42,7 +43,7 @@ Relative links in legacy slices and the complete original are interpreted from t
 
 ## Interrupted apply, conflict or rollback
 
-Keep every recovery file and stop writers. Repeating the **same apply command/hash** resumes after marker creation, output preparation, source retention or TOC installation. It validates known outputs and refuses mismatches. A completed apply is idempotent, retaining later TOC entries and never duplicating slices. Private `.tasklog-*.tmp` files left by failed I/O/crashes are preserved rather than mistaken for completed output; inspect them before any separate cleanup.
+Keep every recovery file and stop writers. Repeating the **same apply command/hash** resumes after marker creation, output preparation, source retention or TOC installation. It validates known outputs and refuses mismatches. A completed apply is idempotent, retaining later TOC entries and never duplicating slices. Private `.tasklog-*.tmp` files left before an intent is recorded are preserved rather than mistaken for completed output. A valid registered intent allows apply/rollback to recover the precise Link→unlink window **before** the ordinary single-link checks: target/temporary must stay in the derived file set, match the agreed source/content hashes and size, have ordinary parents, and be either the exact same inode with exactly two links or the expected completed single-link state. An extra alias, mismatched/tampered intent or unknown temporary name stays protected. Verify/dry-run do not perform this cleanup. An interrupted/failed intent write happens before Link; if its JSON is incomplete, preserve that specific intent file under a separate archival name after inspecting the unchanged original/recovery files, then retry. There is no automatic deletion based only on a filename prefix.
 
 If a conflict reports a late append, the authoritative latest bytes are at `source.md` when retention happened, or still at `task-log.md` when it did not. The archived original/parts remain the exact prepared snapshot. Rollback restores **all latest retained source bytes**, including late appends, while preserving generated TOCs and parts:
 

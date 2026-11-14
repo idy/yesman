@@ -27,14 +27,14 @@ func TestHireInitializesSharedDocuments(t *testing.T) {
 	if got := y.TaskLogPath(); got != filepath.Join(y.MetaDir(), "task-log.md") {
 		t.Fatalf("task log path = %q", got)
 	}
-	if got := readDocument(t, y.TaskLogPath()); got != taskLogTemplate || !strings.HasPrefix(got, "# Task log\n") {
+	if got := readDocument(t, y.TaskLogPath()); got != taskLogTemplate || !strings.HasPrefix(got, "# Working log\n") {
 		t.Fatalf("new task log = %q", got)
 	}
 	if st, err := os.Lstat(filepath.Join(y.MetaDir(), "task-log")); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		t.Fatalf("record directory not initialized: %v", err)
 	}
 	index := readDocument(t, filepath.Join(y.KnowledgeDir(), "INDEX.md"))
-	for _, want := range []string{"Durable guidance", "Phosphor", "Finishing a task alone", "task log or board"} {
+	for _, want := range []string{"Durable guidance", "Phosphor", "Finishing a task alone", "working log or board"} {
 		if !strings.Contains(index, want) {
 			t.Errorf("new index lacks %q", want)
 		}
@@ -194,8 +194,9 @@ func TestEnsureTaskLogReturnsFilesystemErrors(t *testing.T) {
 				t.Fatalf("fixture did not produce a filesystem error: %v", openErr)
 			}
 			for range 2 {
-				if err := ensureTaskLog(y); !errors.Is(err, pathErr.Err) {
-					t.Fatalf("filesystem error lost: got %v, want %v", err, pathErr.Err)
+				err := ensureTaskLog(y)
+				if err == nil || kind == "missing parent" && !errors.Is(err, pathErr.Err) {
+					t.Fatalf("filesystem failure lost: got %v, original open error %v", err, pathErr.Err)
 				}
 			}
 			if kind == "parent is a file" {

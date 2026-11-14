@@ -14,7 +14,7 @@ window.calls=[];window.menuAction='';window.delayed={};window.releases={};
 const handlers={}; const toc='.yesman/task-log.md';
 const hash='a'.repeat(64); const legacy='.yesman/task-log/legacy-'+hash+'-0001.md';
 window.filesFixture={
- [toc]:'# Task log\\n\\n<!-- yesman-task-log-toc v1 -->\\n\\n[Picker](task-log/2026-01-15-t3-picker.md#validation)\\n\\n[Legacy](task-log/legacy-'+hash+'-0001.md)\\n\\n[Original](task-log/legacy-'+hash+'-original.md)\\n\\n[Empty](task-log/empty.md)\\n\\n[Missing](task-log/missing.md)\\n\\n[Large](task-log/large.md)\\n',
+ [toc]:'# Working log\\n\\n<!-- yesman-task-log-toc v1 -->\\n\\n[Picker](task-log/2026-01-15-t3-picker.md#validation)\\n\\n[Legacy](task-log/legacy-'+hash+'-0001.md)\\n\\n[Original](task-log/legacy-'+hash+'-original.md)\\n\\n[Empty](task-log/empty.md)\\n\\n[Missing](task-log/missing.md)\\n\\n[Large](task-log/large.md)\\n',
  '.yesman/task-log/2026-01-15-t3-picker.md':'# Picker detail\\n\\n[Contents](../task-log.md)\\n\\n[Jump](#validation)\\n\\n[Plain](../../notes.md)\\n\\n[Backup](../../notes.md.bak)\\n\\n## Validation\\n\\nFull ref c1047a2a8e338698e96c31fd5dd41dc569475539\\n\\n[External](https://example.com/evidence)\\n',
  [legacy]:'# Legacy slice\\n\\n[Knowledge](knowledge/rules.md#durable)\\n',
  ['.yesman/task-log/legacy-'+hash+'-original.md']:'# Legacy original\\n\\n## Old heading\\n\\nOriginal evidence and [Knowledge](knowledge/rules.md#durable)\\n',
@@ -25,6 +25,9 @@ window.filesFixture={
  'notes.md':'# Plain file\\nEdit me',
  'notes.md.bak':'backup text'
 };
+const recordPath='.yesman/task-log/2026-01-15-t3-picker.md';
+const nl=String.fromCharCode(10);
+filesFixture[recordPath]=filesFixture[recordPath].replace('## Validation',('Synthetic historical paragraph'+nl+nl).repeat(160)+'## Validation')+nl+nl+'[Top](#picker-detail)'+nl;
 const agents=['alice','bob'].map(name=>({id:name+'/lead',name:'lead',yesman:name,role:'lead',status:'idle'}));
 window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...args)=>{
  const m=method.replace('Yesman.','');calls.push([m,...args]);
@@ -78,7 +81,7 @@ try {
    await page.goto(url);
    await page.locator('[data-agent="alice/lead"]').click();
    const files=page.locator('#files');
-   await page.getByRole('button',{name:'Task log',exact:true}).click();
+   await page.getByRole('button',{name:'Working log',exact:true}).click();
    await files.getByRole('link',{name:'Picker',exact:true}).waitFor();
    assert.equal(await files.getByRole('button',{name:'Source',exact:true}).count(),0);
    assert.equal(await files.getByText('<!-- yesman-task-log-toc v1 -->',{exact:true}).count(),0);
@@ -106,13 +109,23 @@ try {
    await page.goForward();await files.locator('#validation').waitFor();
    await page.reload();await files.locator('#validation').waitFor();
    assert.equal(await page.evaluate(()=>document.activeElement.id),'validation');
+   const assertHeadingVisible = async (id) => {
+    const heading=await files.locator('#'+id).boundingBox();const view=await files.locator('#files-view').boundingBox();
+    assert.ok(heading.y>=view.y-1&&heading.y<view.y+view.height,JSON.stringify({id,heading,view}));
+   };
+   await files.getByRole('link',{name:'Top',exact:true}).click();
+   await assertHeadingVisible('picker-detail');
+   await files.getByRole('link',{name:'Jump',exact:true}).click();
+   await assertHeadingVisible('validation');
+   await page.goBack();await assertHeadingVisible('picker-detail');
+   await page.goForward();await assertHeadingVisible('validation');
    await files.getByRole('button',{name:'Reload',exact:true}).click();
    await files.getByRole('link',{name:'Contents',exact:true}).click();
    await files.getByRole('link',{name:'Legacy',exact:true}).click();
    await files.getByRole('link',{name:'Knowledge',exact:true}).click();
    await files.locator('#durable').waitFor();
    assert.equal(await page.evaluate(()=>calls.filter(c=>c[0]==='ReadFile').at(-1)[2]),'.yesman/knowledge/rules.md');
-   await page.getByRole('button',{name:'Task log',exact:true}).click();
+   await page.getByRole('button',{name:'Working log',exact:true}).click();
    await files.getByRole('link',{name:'Picker',exact:true}).click();
    await files.getByRole('link',{name:'Plain',exact:true}).click();
    await files.getByRole('button',{name:'Source',exact:true}).click();
@@ -120,13 +133,13 @@ try {
    await files.locator('.cm-content').fill('# Edited plain');
    await page.keyboard.press(process.platform==='darwin'?'Meta+s':'Control+s');
    await page.waitForFunction(()=>calls.some(c=>c[0]==='WriteFile'&&c[2]==='notes.md'&&c[3].includes('Edited plain')));
-   await page.getByRole('button',{name:'Task log',exact:true}).click();
+   await page.getByRole('button',{name:'Working log',exact:true}).click();
    await files.getByRole('link',{name:'Picker',exact:true}).click();
    await files.getByRole('link',{name:'Backup',exact:true}).click();
    await files.locator('.cm-content').waitFor();await files.locator('.cm-content').fill('edited backup');
    await page.keyboard.press(process.platform==='darwin'?'Meta+s':'Control+s');
    await page.waitForFunction(()=>calls.some(c=>c[0]==='WriteFile'&&c[2]==='notes.md.bak'&&c[3]==='edited backup'));
-   await page.getByRole('button',{name:'Task log',exact:true}).click();
+   await page.getByRole('button',{name:'Working log',exact:true}).click();
    await files.getByRole('link',{name:'Empty',exact:true}).click();
    await files.locator('article.md').waitFor();assert.equal(await files.locator('article.md').innerText(),'');
    assert.equal(await files.getByRole('button',{name:'Source',exact:true}).count(),0);
@@ -139,7 +152,7 @@ try {
    await files.getByRole('link',{name:'Picker',exact:true}).click();
    await page.waitForFunction(()=>releases['alice:.yesman/task-log/2026-01-15-t3-picker.md']);
    await page.locator('[data-agent="bob/lead"]').click();
-   await page.getByRole('button',{name:'Task log',exact:true}).click();
+   await page.getByRole('button',{name:'Working log',exact:true}).click();
    await files.getByText('Only Bob',{exact:true}).waitFor();
    await page.evaluate(()=>{delayed['alice:.yesman/task-log/2026-01-15-t3-picker.md']=false;releases['alice:.yesman/task-log/2026-01-15-t3-picker.md']();});
    assert.equal(await files.getByText('Only Bob',{exact:true}).count(),1);
@@ -149,13 +162,13 @@ try {
    await page.goBack();await files.getByRole('link',{name:'Plain',exact:true}).waitFor();
    await page.goForward();await files.getByText('Only Bob',{exact:true}).waitFor();
    await page.locator('[data-agent="alice/lead"]').click();
-   await page.getByRole('button',{name:'Task log',exact:true}).click();
+   await page.getByRole('button',{name:'Working log',exact:true}).click();
    // Old TOC anchors receive a visible path to the unmodified original.
    await page.goto(url+'/#task-log='+encodeURIComponent(JSON.stringify({name:'alice',path:'.yesman/task-log.md',anchor:'old-heading'})));
    await files.getByRole('button',{name:'Complete original',exact:true}).click();
    await files.locator('#old-heading').waitFor();
    await files.getByRole('button',{name:'Close the files',exact:true}).click();
-   await page.getByRole('button',{name:'Task log',exact:true}).click();
+   await page.getByRole('button',{name:'Working log',exact:true}).click();
    await files.getByRole('link',{name:'Picker',exact:true}).waitFor();
    await page.evaluate(()=>menuAction='reveal');await files.getByRole('button',{name:'More',exact:true}).click();
    await page.waitForFunction(()=>calls.some(c=>c[0]==='Reveal'&&c[1]==='/synthetic/alice'));
@@ -163,6 +176,8 @@ try {
     await page.setViewportSize({width,height:850});
     await page.evaluate(({locale,dark})=>{document.documentElement.dataset.theme=dark?'dark':'light';window.setFixtureLocale(locale);}, {locale,dark});
     assert.equal(await page.locator('html').getAttribute('lang'), locale);
+    assert.equal(await page.getByRole('button',{name:locale==='zh-Hans'?'工作日志':'Working log',exact:true}).count(),1);
+    assert.equal(await page.getByRole('button',{name:'Task log',exact:true}).count(),0);
     const reload = files.getByRole('button',{name:locale==='zh-Hans'?'重新载入':'Reload',exact:true});
     await reload.focus(); assert.equal(await reload.evaluate(e=>e===document.activeElement),true);
     const bounds = await files.locator('article.md').boundingBox();

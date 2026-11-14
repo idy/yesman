@@ -1,5 +1,7 @@
 # Workspace documents
 
+The user-facing log is **Working log／工作日志**. Its stable compatibility paths remain `.yesman/task-log.md` and `.yesman/task-log/`; existing API, command and URL identifiers retain `task-log`. This display-name change does not rename files, rewrite historical wording or change Board task identities.
+
 Each yesman keeps two kinds of shared documents. The board tracks current work; these files keep evidence and reusable guidance across restarts.
 
 | Document | Contents |
@@ -40,7 +42,7 @@ The lead's pi `write`/`edit` exception accepts `.yesman/task-log.md` and **flat*
 
 This is a pi tool hook checked before execution, **not an OS sandbox**: third-party tools/extensions and external filesystem writers retain their own permissions. Code work still goes to workers. The Go files reader confines paths using `os.Root`; history reads additionally validate ordinary parents/regular files and reject hard links. The app's `WriteFile` refuses task-history files, while ordinary documents and `.bak` files retain editing. These checks do not make filesystem operations transactional against a hostile concurrent OS writer.
 
-Open Task log from the info panel, the files scope menu or **More → Open Task Log**. TOC links open one detail through the existing workspace file reader; Contents returns to the TOC. Anchors, browser Back/Forward and refresh retain the workspace/path/anchor in the URL, without embedding document content. All log pages are rendered read-only with no Source/Save. Non-log relative files and external URLs use the normal file/external handlers. More → Reveal remains associated with the workspace scope; the sidebar's Reveal Task Log locates the compatibility TOC.
+Open Working log from the info panel, the files scope menu or **More → Open Working log**. TOC links open one detail through the existing workspace file reader; Contents returns to the TOC. Anchors, browser Back/Forward and refresh retain the workspace/path/anchor in the URL, without embedding document content. All log pages are rendered read-only with no Source/Save. Non-log relative files and external URLs use the normal file/external handlers. More → Reveal remains associated with the workspace scope; the sidebar's Reveal Working log locates the compatibility TOC.
 
 ## Explicit legacy migration
 

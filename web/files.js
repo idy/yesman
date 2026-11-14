@@ -92,12 +92,13 @@ export function createFiles(host) {
   const restoreRoute = () => {
     const route = logRoute();
     const y = host.yesman();
-    if (!route || route.name !== y?.name) return;
+    if (!route || route.name !== y?.name) return false;
     const key = `${y.name}\u0001${location.hash}`;
-    if (restoredRoute === key) return;
+    if (restoredRoute === key) return false;
     restoredRoute = key;
     scopes.delete(y.name);
     open(route.path, true, route.anchor, false);
+    return true;
   };
   window.addEventListener('popstate', () => {
     restoredRoute = null;
@@ -113,7 +114,7 @@ export function createFiles(host) {
   const scopeKey = (sc) => (sc.kind === 'worktree' ? `worktree:${sc.dir}` : sc.kind);
   const rootOf = (sc) => (sc.kind === 'knowledge' ? KNOWLEDGE : sc.kind === 'worktree' ? sc.dir : '.');
   const within = (rel, root) => root === '.' || rel === root || rel.startsWith(`${root}/`);
-  // Knowledge and the task log read as rendered pages.
+  // Knowledge and the working log read as rendered pages.
   const locked = (p, rel = p.active) => p.scope.kind === 'knowledge' || isTaskLog(rel);
   // A worktree's pane shows its files, or its changes.
   const isChanges = (p) => p?.scope.kind === 'worktree' && p.show === 'changes';
@@ -361,6 +362,7 @@ export function createFiles(host) {
         p.tabs.push(tab);
       }
     }
+    const sameAnchorPage = p.active === rel && isTaskLog(rel) && Boolean(anchor);
     p.active = rel;
     p.taskAnchor = anchor;
     p.pendingAnchor = isTaskLog(rel);
@@ -369,8 +371,10 @@ export function createFiles(host) {
     if (!host.isOpen()) host.setOpen(true);
     // A file the editor has open may have changed while nothing watched
     // it: refresh reconciles it, keeping unsaved changes as a conflict.
-    if (editor?.has(keyOf(p, rel))) refresh(p, rel);
-    else loadView(p, rel);
+    if (!(sameAnchorPage && p.views.get(rel)?.kind === 'text')) {
+      if (editor?.has(keyOf(p, rel))) refresh(p, rel);
+      else loadView(p, rel);
+    }
     for (const dir of p.expanded) if (!p.dirs.has(dir)) loadDir(p, dir);
     render();
   }
@@ -443,7 +447,7 @@ export function createFiles(host) {
     if (!p.tabs.length && Array.isArray(entries) && entries.some((e) => e.path === KNOWLEDGE_INDEX)) open(KNOWLEDGE_INDEX, true);
   }
 
-  // Task log always opens its TOC; detail links and browser Back keep their route.
+  // Working log always opens its TOC; detail links and browser Back keep their route.
   function openTaskLog() {
     if (setScope(WORKSPACE)) open(TASK_LOG, true);
   }
@@ -497,7 +501,7 @@ export function createFiles(host) {
   // ---------- Rendering ----------
 
   function render() {
-    restoreRoute();
+    if (restoreRoute()) return;
     const aside = $('#files');
     const p = current();
     aside.hidden = !p;
@@ -515,7 +519,7 @@ export function createFiles(host) {
     closeMenu();
     if (diff) changes.ensure(p);
     else if (!p.dirs.has(p.root)) loadDir(p, p.root);
-    const keep = scrolls();
+    const keep = scrolls(Boolean(p.pendingAnchor));
     aside.toggleAttribute('data-has-file', hasView);
     const mode = hasView ? 'file' : 'tree';
     const fixed = wide && hasView;
@@ -540,17 +544,17 @@ export function createFiles(host) {
 
   // scrolls keeps where the view and tree were scrolled, and the focused
   // row, across a render.
-  function scrolls() {
+  function scrolls(navigating = false) {
     const viewPath = $('#files-view')?.dataset.path;
     const view = $('#files-view')?.scrollTop ?? 0;
     const list = $('#files-tree-list')?.scrollTop ?? 0;
     const focused = document.activeElement?.closest?.('#files [data-path], #files input')?.dataset?.path ?? document.activeElement?.id;
     return () => {
       const v = $('#files-view');
-      if (v && v.dataset.path === viewPath) v.scrollTop = view;
+      if (!navigating && v && v.dataset.path === viewPath) v.scrollTop = view;
       const l = $('#files-tree-list');
       if (l) l.scrollTop = list;
-      if (!focused) return;
+      if (navigating || !focused) return;
       const again = document.getElementById(focused) ?? $(`#files [data-path="${CSS.escape(focused)}"]`);
       again?.focus({ preventScroll: true });
     };
@@ -614,6 +618,7 @@ export function createFiles(host) {
     }
     p.active = tab.path;
     p.taskAnchor = '';
+    p.pendingAnchor = false;
     if (!p.views.has(tab.path)) loadView(p, tab.path);
     render();
   }
@@ -688,7 +693,7 @@ export function createFiles(host) {
     const kind = p.scope.kind;
     return h('button', {
       class: 'files-crumb files-crumb--scope', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
-      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, Knowledge, the task log or another worktree'),
+      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, Knowledge, the working log or another worktree'),
       onclick: (e) => scopeMenu(e.currentTarget, p),
     }, icon(kind === 'worktree' ? 'branch' : kind === 'knowledge' ? 'book' : 'folder', 'mds-icon files-crumb-icon'), h('span', null, scopeLabel(p)));
   }
@@ -916,9 +921,9 @@ export function createFiles(host) {
     const items = [
       item(WORKSPACE, 'folder', y.displayName || y.name, h('span', { class: 'files-menu-aside' }, t('All files')), y.path),
       item({ kind: 'knowledge' }, 'book', t('Knowledge'), null, KNOWLEDGE),
-      // Task log is a shortcut to a file in the workspace, not another scope.
+      // Working log is a shortcut to a file in the workspace, not another scope.
       h('button', { class: 'files-menu-item', type: 'button', role: 'menuitem', title: TASK_LOG,
-        onclick: () => { closeMenu(); openTaskLog(); } }, icon('fileText'), h('span', null, t('Task log'))),
+        onclick: () => { closeMenu(); openTaskLog(); } }, icon('fileText'), h('span', null, t('Working log'))),
     ];
     const wts = host.worktrees?.(y) ?? [];
     if (wts.length) items.push(h('p', { class: 'files-menu-heading', role: 'presentation' }, t('Worktrees')));
