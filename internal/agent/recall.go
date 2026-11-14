@@ -39,7 +39,8 @@ type pendingQueue struct {
 	IdleResume        bool          `json:"idleResume"`
 }
 
-func (q pendingQueue) supported() bool { return q.Capability >= 1 && q.Capability <= 3 }
+func (q pendingQueue) supportsPromotion() bool { return q.Capability == 2 || q.Capability == 3 }
+func (q pendingQueue) supported() bool         { return q.Capability >= 1 && q.Capability <= 3 }
 
 type RecallResult struct {
 	Delivery Delivery      `json:"delivery"`
@@ -81,7 +82,7 @@ func (a *agent) deliveryView(d Delivery) Delivery {
 	payload, hasPayload := a.recallPayloads[d.ID]
 	d.OriginalText = hasPayload && payload.Text != ""
 	d.NativePending = d.queueID != "" && d.queueEpoch == a.nativeQueue.Epoch && a.nativeQueue.supported() && a.proc != nil && !a.retiring && !a.removing && !a.deliverySealed
-	d.CanPromote = d.NativePending && d.State == "queued" && a.nativeQueue.Capability >= 2 && a.nativeQueue.PromoteAllowed
+	d.CanPromote = d.NativePending && d.State == "queued" && a.nativeQueue.supportsPromotion() && a.nativeQueue.PromoteAllowed
 	d.CanCancel = hasPayload && d.NativePending
 	d.CanRestore = hasPayload && d.State == "cancelled" && !a.retiring && !a.removing
 	return d
@@ -157,7 +158,7 @@ func (m *Manager) applyPendingLocked(a *agent, p *proc, q pendingQueue) []Event 
 	return events
 }
 func pendingStatus(q pendingQueue) QueueStatus {
-	status := QueueStatus{Known: q.supported(), RecallSupported: q.supported(), PromoteSupported: q.Capability >= 2}
+	status := QueueStatus{Known: q.supported(), RecallSupported: q.supported(), PromoteSupported: q.supportsPromotion()}
 	for _, item := range q.Items {
 		if item.Kind == "steer" {
 			status.Steering++
@@ -247,8 +248,16 @@ func (m *Manager) CancelSubmission(ctx context.Context, agentID, id string, sinc
 		if err = json.Unmarshal(response.Data, &result); err != nil {
 			return RecallResult{}, err
 		}
-		if result.Outcome != "cancelled" {
-			return RecallResult{}, errors.New("pi already took this message; it was not recalled")
+		switch result.Outcome {
+		case "cancelled":
+		case "stale_item":
+			return RecallResult{}, errors.New("this queued message changed; refresh its status and try again")
+		case "stale":
+			return RecallResult{}, errors.New("the pi queue was replaced; refresh this conversation")
+		case "not_pending":
+			return RecallResult{}, errors.New("this message is no longer pending in pi; it was not recalled")
+		default:
+			return RecallResult{}, errors.New("cancellation could not be confirmed")
 		}
 	}
 	active, commitRelease, err := m.cfg.Yesmen.BeginUse(info.Yesman)

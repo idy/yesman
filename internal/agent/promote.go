@@ -41,7 +41,7 @@ func (m *Manager) PromoteSubmission(ctx context.Context, agentID, id string, sin
 	}
 	d, exists := a.deliveries[id]
 	p := a.proc
-	if !exists || p == nil || a.nativeQueue.Capability < 2 || !a.deliveryView(d).NativePending || d.Session != p.deliverySession() {
+	if !exists || p == nil || !a.nativeQueue.supportsPromotion() || !a.deliveryView(d).NativePending || d.Session != p.deliverySession() {
 		m.mu.Unlock()
 		return PromotionResult{}, errors.New("this message has no supported native pending occurrence")
 	}

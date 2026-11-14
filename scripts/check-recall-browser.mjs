@@ -71,6 +71,8 @@ try{for(const[name,engine]of selectedEngines)for(const language of ['en','zh-Han
   const first=await submit(text,2),id=first.args[1];
   const row=id=>page.locator(`[data-delivery="${id}"]`);
   await row(id).locator('.message-recall').waitFor();
+  await page.waitForFunction(()=>document.querySelector('.pi-queue-status'));
+  assert.equal(await page.locator('.pi-queue-status').innerText().then(s=>/Individual recall is unavailable|无法逐条撤回/.test(s)),false,'managed capability falsely reports recall unavailable');
   assert.equal(await row(id).locator('.message-recall').getAttribute('aria-label'),language==='en'?'Cancel and edit':'撤回并编辑');
   if(out)await page.screenshot({path:`${out}/${name}-${language}-queued.png`});
   await row(id).locator('.message-copy:not(.message-recall)').click();

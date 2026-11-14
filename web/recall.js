@@ -2,6 +2,9 @@
 // no message text, queue count or history entry is used to infer eligibility.
 import { IMAGE_TYPES, MAX_IMAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES } from './images.js';
 
+export function supportsRecall(capability) { return capability === 1 || capability === 2 || capability === 3; }
+export function supportsPromotion(capability) { return capability === 2 || capability === 3; }
+
 export function restoredImages(images) {
   if (!Array.isArray(images) || images.length > MAX_IMAGES) throw new Error('The original image payload is unavailable');
   let total = 0;

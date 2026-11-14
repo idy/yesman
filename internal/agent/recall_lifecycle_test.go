@@ -78,6 +78,18 @@ func fakeRecallLifecyclePi() {
 				event = "test_promote_received"
 			}
 			write(map[string]string{"type": event, "queueId": c.QueueID})
+		case "test_promote_now":
+			for i := range pending {
+				if pending[i].QueueID == c.QueueID {
+					pending[i].Kind = "steer"
+					pending[i].ItemRevision++
+					revision++
+					q := snapshot()
+					write(map[string]any{"type": "queue_update", "pending": q})
+					break
+				}
+			}
+			reply(c, nil)
 		case "test_release_cancels", "test_release_mutations":
 			for _, h := range held {
 				outcome := "not_pending"
@@ -100,8 +112,20 @@ func fakeRecallLifecyclePi() {
 							break
 						}
 					}
-				} else if remove(h.QueueID, "cancelled") {
-					outcome = "cancelled"
+				} else {
+					stale := false
+					if promotion {
+						for _, item := range pending {
+							if item.QueueID == h.QueueID && item.ItemRevision != h.ExpectedRevision {
+								stale = true
+							}
+						}
+					}
+					if stale {
+						outcome = "stale_item"
+					} else if remove(h.QueueID, "cancelled") {
+						outcome = "cancelled"
+					}
 				}
 				b, _ := json.Marshal(snapshot())
 				data := map[string]any{}

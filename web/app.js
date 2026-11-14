@@ -6,7 +6,7 @@
 
 import { orderWorkers } from './sidebar.js';
 import { messageActions, messageText, receiptText } from './message-actions.js';
-import { mayRecallWithArrow, restoredImages } from './recall.js';
+import { mayRecallWithArrow, restoredImages, supportsRecall } from './recall.js';
 import { renderMarkdown } from './markdown.js';
 import { project } from './conversation.js';
 import { $, h, icon } from './dom.js';
@@ -777,7 +777,7 @@ function onAgentEvent(ev) {
   if (e.type === 'queue_update' || e.type === 'delivery_queue') {
     if (ev.seq <= c.queueSeq) return;
     c.queueSeq = ev.seq;
-    c.piQueue = e.type === 'delivery_queue' ? e.queue : { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: [1, 2, 3].includes(e.pending?.capability) };
+    c.piQueue = e.type === 'delivery_queue' ? e.queue : { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: supportsRecall(e.pending?.capability) };
     if (keyOf(selectedAgent() ?? {}) === c.key) {
       const scroller = $('#scroll');
       if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
@@ -804,7 +804,7 @@ function applyEvent(c, e, replaying,seq = 0) {
       if (visible) renderQueue(c);
       return;
     case 'queue_update':
-      c.piQueue = { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: [1, 2, 3].includes(e.pending?.capability) };
+      c.piQueue = { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: supportsRecall(e.pending?.capability) };
       if (visible) renderQueue(c);
       return;
     case 'delivery_retained':
