@@ -575,12 +575,20 @@ export function createTopics(host) {
       ed.form.addSources.push({ kind: 'message', agent: 'lead', since: lead?.since, role: m.role, timestamp: m.timestamp, label: excerpt(textOf(m.content), 120) });
       render();
     });
+    // What is being typed here lives in the edit, not the controls, so a
+    // redraw (a topic or conversation update) does not lose it.
+    ed.pick ??= { kind: 'task', ref: '' };
     const kind = h('select', { class: 'mds-select', 'data-key': 'pick-kind', 'aria-label': t('Kind of source') },
       h('option', { value: 'task' }, t('Task')), h('option', { value: 'link' }, t('Link')), h('option', { value: 'knowledge' }, t('Knowledge note')));
+    kind.value = ed.pick.kind;
+    kind.addEventListener('change', () => { ed.pick.kind = kind.value; });
     const ref = h('input', { class: 'mds-input', 'data-key': 'pick-ref', 'aria-label': t('Task ID, link or note'), placeholder: 't3 · https://… · note.md', autocomplete: 'off', spellcheck: 'false' });
+    ref.value = ed.pick.ref;
+    ref.addEventListener('input', () => { ed.pick.ref = ref.value; });
     const add = h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-key': 'pick-add', onclick: () => {
-      if (!ref.value.trim()) return;
-      ed.form.addSources.push({ kind: kind.value, ref: ref.value.trim() });
+      if (!ed.pick.ref.trim()) return;
+      ed.form.addSources.push({ kind: ed.pick.kind, ref: ed.pick.ref.trim() });
+      ed.pick.ref = '';
       render();
     } }, t('Add'));
     return h('div', { class: 'topic-source-picker' }, messageSelect, h('div', { class: 'topic-source-ref' }, kind, ref, add));

@@ -188,6 +188,21 @@ async function run(engine, launcher) {
         assert.deepEqual(saved, { summary: 'typed during save', revision: 3 }, 'saved at the revision the first save made, without a conflict');
         assert.equal(await page.locator('#topics .topic-notice[data-tone="warn"]').count(), 0);
       });
+      await check(engine, 'a source being typed survives redraws', async () => {
+        await page.click('#topics [data-key="edit"]');
+        await page.selectOption('#topics [data-key="pick-kind"]', 'link');
+        await page.fill('#topics [data-key="pick-ref"]', 'https://example.com/half-typed');
+        await page.evaluate((s) => fx.send('alice', 'tp2', s, '[Topic tp2: Beta]'), S('e4'));
+        await settle(page);
+        await page.click('#topics [data-key="edit-questions-add"]');
+        await frame(page);
+        assert.deepEqual(await page.evaluate(() => ({ kind: document.querySelector('#topics [data-key="pick-kind"]').value, ref: document.querySelector('#topics [data-key="pick-ref"]').value })),
+          { kind: 'link', ref: 'https://example.com/half-typed' });
+        await page.click('#topics [data-key="pick-add"]');
+        assert.equal(await page.locator('#topics .topic-edit-source', { hasText: 'example.com' }).count(), 1);
+        assert.equal(await page.inputValue('#topics [data-key="pick-ref"]'), '', 'cleared once added');
+        await page.click('#topics [data-key="edit-cancel"]');
+      });
       await check(engine, 'a save typed over nothing ends the edit and focuses Edit', async () => {
         await page.click('#topics [data-key="edit"]');
         await page.fill('#topics [data-key="edit-title"]', 'Alpha renamed');
