@@ -49,7 +49,8 @@ function writableTaskLog(path: string): boolean {
 		for (const root of roots) {
 			const candidate = relative(fold(root), fold(target)).replace(/\\/g, "/");
 			const name = candidate.slice(".yesman/task-log/".length);
-			const record = candidate.startsWith(".yesman/task-log/") && /^[a-z0-9][a-z0-9._-]*\.md$/i.test(name) && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
+			const frozen = /^legacy-[0-9a-f]{64}-(?:original|[0-9]{4}|index-[0-9]{4})\.md$/i.test(name);
+			const record = candidate.startsWith(".yesman/task-log/") && /^[a-z0-9][a-z0-9._-]*\.md$/i.test(name) && !frozen && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
 			if (candidate === ".yesman/task-log.md" || record) {
 				rel = relative(root, target).replace(/\\/g, "/");
 				break;
@@ -216,7 +217,7 @@ export default function yesman(pi: ExtensionAPI) {
 				return { block: true, reason: "The lead has no shell, to stay free for the user. Hand this to a worker with yesman_worker_start." };
 			}
 			if (LEAD_WRITES.includes(event.toolName) && !sharedDocumentPath((event.input as { path?: unknown } | undefined)?.path)) {
-				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/, the Working log TOC .yesman/task-log.md and flat Markdown records .yesman/task-log/<name>.md in this workspace; linked Working log files or parents are not writable. Hand code and other changes to a worker with yesman_worker_start." };
+				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/, the Working log TOC .yesman/task-log.md and flat Markdown records .yesman/task-log/<name>.md in this workspace; linked Working log files or parents and frozen legacy snapshots are not writable. Hand code and other changes to a worker with yesman_worker_start." };
 			}
 		});
 	}

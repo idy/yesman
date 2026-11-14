@@ -202,6 +202,21 @@ test('canonical and workspace-alias record paths stay in this workspace', async 
   assert.equal((await gate({ toolName: 'write', input: { path: join(root, 'bob', '.yesman', 'task-log', 'new.md') } }))?.block, true);
 });
 
+test('the working-log path exception excludes migration snapshots and bounded catalogs', async (t) => {
+  const { workspace } = fixture(t);
+  const dir = join(workspace, '.yesman', 'task-log');
+  mkdirSync(dir);
+  const gate = extension('lead', workspace).handlers.get('tool_call')[0];
+  for (const suffix of ['original', '0001', 'index-0001']) {
+    const file = join(dir, `legacy-${'a'.repeat(64)}-${suffix}.md`);
+    for (const toolName of ['write', 'edit']) assert.equal((await gate({ toolName, input: { path: file } }))?.block, true);
+    writeFileSync(file, '# Frozen original evidence\n');
+    for (const toolName of ['write', 'edit']) assert.equal((await gate({ toolName, input: { path: file } }))?.block, true);
+    assert.equal(readFileSync(file, 'utf8'), '# Frozen original evidence\n');
+  }
+  assert.equal(await gate({ toolName: 'write', input: { path: join(dir, '2026-01-15-t3-correction.md') } }), undefined);
+});
+
 test('lead tool narrowing still removes the shell and workers retain their tools', async () => {
   const lead = extension('lead', resolve('workspace'));
   // The first hook narrows tools; the second fetches context and is not used.
