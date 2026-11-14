@@ -126,8 +126,9 @@ type Store struct {
 	mu            sync.Mutex
 	metaMu        sync.Mutex // serialize metadata reads with atomic replacement on Windows
 
-	lmu   sync.Mutex
-	locks map[string]*sync.RWMutex // per yesman: Use reads, Archive writes
+	lmu    sync.Mutex
+	locks  map[string]*sync.RWMutex // per yesman: Use reads, Archive writes
+	hlocks map[string]*sync.Mutex   // per yesman: its handoffs, in turn
 }
 
 // New returns the store of workspaces under root, archiving into archive.

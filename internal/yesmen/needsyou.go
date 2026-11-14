@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -72,7 +73,20 @@ func (h Handoff) Open() bool { return h.ClosedAt.IsZero() }
 type Handoffs struct {
 	Items []Handoff `json:"items"`
 	Next  int       `json:"next"`
-	extra map[string]json.RawMessage
+	// trimmed remembers the tool calls of closed handoffs trimmed from
+	// Items, so that the same call cannot register one again; see trim.
+	// trimmedBefore is when the latest forgotten one was registered.
+	trimmed       []trimmedCall
+	trimmedBefore time.Time
+	extra         map[string]json.RawMessage
+}
+
+// trimmedCall is the tool call of a handoff no longer kept.
+type trimmedCall struct {
+	ToolCall  string    `json:"toolCall"`
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"createdAt"`
+	extra     map[string]json.RawMessage
 }
 
 // Open returns the handoffs still waiting on the user, oldest first.
@@ -96,8 +110,11 @@ func (hs Handoffs) Find(id string) (Handoff, bool) {
 }
 
 const (
-	maxOpenHandoffs   = 50
+	maxOpenHandoffs = 50
+	// keptClosed closed handoffs are kept as history, the most recently
+	// closed; keptCalls bounds the tool calls of older ones remembered.
 	keptClosed        = 30
+	keptCalls         = 1000
 	maxHandoffTitle   = 200
 	maxHandoffDetail  = 4000
 	maxHandoffNote    = 2000
@@ -109,19 +126,35 @@ func (y Yesman) HandoffsFile() string { return filepath.Join(y.MetaDir(), "needs
 
 // Handoffs returns a yesman's handoffs. A missing file is an empty list; an
 // unreadable one is an error, and is never overwritten.
+//
+// Each yesman's handoffs are read and changed in turn under a lock of its
+// own, never the Store's: a slow or damaged file holds up only its yesman.
+// (Windows needs the reads in turn too: a file open for reading cannot be
+// replaced.)
 func (s *Store) Handoffs(name string) (Handoffs, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.handoffs(name)
-}
-
-func (s *Store) handoffs(name string) (Handoffs, error) {
+	l := s.handoffLock(name)
+	l.Lock()
+	defer l.Unlock()
 	f, hs, err := s.openHandoffs(name)
 	if err != nil {
 		return Handoffs{}, err
 	}
 	f.close()
 	return hs, nil
+}
+
+func (s *Store) handoffLock(name string) *sync.Mutex {
+	s.lmu.Lock()
+	defer s.lmu.Unlock()
+	if s.hlocks == nil {
+		s.hlocks = map[string]*sync.Mutex{}
+	}
+	l := s.hlocks[name]
+	if l == nil {
+		l = &sync.Mutex{}
+		s.hlocks[name] = l
+	}
+	return l
 }
 
 func (s *Store) openHandoffs(name string) (*handoffsFile, Handoffs, error) {
@@ -134,10 +167,22 @@ func (s *Store) openHandoffs(name string) (*handoffsFile, Handoffs, error) {
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-// AddHandoff registers a handoff and returns it, and whether it is new. A
-// handoff registered by the same tool call again is returned as it is,
-// without a second one.
+// AddHandoff is AddHandoffBy for a caller whose process start is unknown.
 func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
+	return s.AddHandoffBy(name, h, time.Time{})
+}
+
+// AddHandoffBy registers a handoff and returns it, and whether it is new.
+// started is when the process that made h.ToolCall started, or zero.
+//
+// A tool call registers one handoff, ever: the same call again returns that
+// handoff, without a second one, or, once the handoff was closed and trimmed
+// from the history, an error. The tool calls of trimmed handoffs are
+// remembered up to a bound; past it, the oldest are forgotten, and a call
+// from a process started before the latest forgotten one was registered is
+// refused, since it might repeat it. A process started later cannot have
+// made a forgotten call.
+func (s *Store) AddHandoffBy(name string, h Handoff, started time.Time) (Handoff, bool, error) {
 	h.Type = strings.TrimSpace(h.Type)
 	if !slices.Contains(HandoffTypes, h.Type) {
 		return Handoff{}, false, fmt.Errorf("type must be one of %s", strings.Join(HandoffTypes, ", "))
@@ -159,8 +204,9 @@ func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 	if len(h.ToolCall) > maxHandoffToolLen {
 		return Handoff{}, false, errors.New("the tool call ID is too long")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	l := s.handoffLock(name)
+	l.Lock()
+	defer l.Unlock()
 	f, hs, err := s.openHandoffs(name)
 	if err != nil {
 		return Handoff{}, false, err
@@ -170,30 +216,18 @@ func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 		if i := slices.IndexFunc(hs.Items, func(x Handoff) bool { return x.ToolCall == h.ToolCall }); i >= 0 {
 			return hs.Items[i], false, nil
 		}
+		if i := slices.IndexFunc(hs.trimmed, func(c trimmedCall) bool { return c.ToolCall == h.ToolCall }); i >= 0 {
+			return Handoff{}, false, fmt.Errorf("tool call %s already registered handoff %s, which was closed since; nothing was added", h.ToolCall, hs.trimmed[i].ID)
+		}
+		if !hs.trimmedBefore.IsZero() && !started.After(hs.trimmedBefore) {
+			return Handoff{}, false, errors.New("this lead registered too many handoffs since it started to tell a repeated call from a new one; nothing was added. Restart the lead to add more")
+		}
 	}
 	if len(hs.Open()) >= maxOpenHandoffs {
 		return Handoff{}, false, fmt.Errorf("%d handoffs already wait on the user: resolve some first", maxOpenHandoffs)
 	}
-	if h.Task = strings.TrimSpace(h.Task); h.Task != "" {
-		h.Task = TaskID(h.Task)
-		b, err := s.board(name)
-		if err != nil {
-			return Handoff{}, false, err
-		}
-		if !slices.ContainsFunc(b.Tasks, func(t Task) bool { return t.ID == h.Task }) {
-			return Handoff{}, false, fmt.Errorf("the board has no task %s", h.Task)
-		}
-	}
-	if h.Worker != "" {
-		ws, err := s.workers(name)
-		if err != nil {
-			return Handoff{}, false, err
-		}
-		i := slices.IndexFunc(ws, func(w Worker) bool { return w.Name == h.Worker })
-		if i < 0 {
-			return Handoff{}, false, fmt.Errorf("%s has no worker named %s", name, h.Worker)
-		}
-		h.WorkerSince = ws[i].StartedAt
+	if err := s.checkHandoffLinks(name, &h); err != nil {
+		return Handoff{}, false, err
 	}
 	hs.Next = max(hs.Next, highestHandoff(hs.Items)) + 1
 	h.ID = "n" + strconv.Itoa(hs.Next)
@@ -204,6 +238,39 @@ func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 		return Handoff{}, false, err
 	}
 	return h, true, nil
+}
+
+// checkHandoffLinks checks the task and worker a handoff names, reading the
+// board and workers under the Store's lock, which their writers take.
+func (s *Store) checkHandoffLinks(name string, h *Handoff) error {
+	h.Task = strings.TrimSpace(h.Task)
+	if h.Task == "" && h.Worker == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if h.Task != "" {
+		h.Task = TaskID(h.Task)
+		b, err := s.board(name)
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(b.Tasks, func(t Task) bool { return t.ID == h.Task }) {
+			return fmt.Errorf("the board has no task %s", h.Task)
+		}
+	}
+	if h.Worker != "" {
+		ws, err := s.workers(name)
+		if err != nil {
+			return err
+		}
+		i := slices.IndexFunc(ws, func(w Worker) bool { return w.Name == h.Worker })
+		if i < 0 {
+			return fmt.Errorf("%s has no worker named %s", name, h.Worker)
+		}
+		h.WorkerSince = ws[i].StartedAt
+	}
+	return nil
 }
 
 // highestHandoff guards against a hand-edited Next going backwards.
@@ -233,8 +300,9 @@ func (s *Store) CloseHandoff(name, id, resolution, by, note string) (Handoff, er
 	if utf8.RuneCountInString(note) > maxHandoffNote {
 		return Handoff{}, fmt.Errorf("the note is longer than %d characters", maxHandoffNote)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	l := s.handoffLock(name)
+	l.Lock()
+	defer l.Unlock()
 	f, hs, err := s.openHandoffs(name)
 	if err != nil {
 		return Handoff{}, err
@@ -250,23 +318,48 @@ func (s *Store) CloseHandoff(name, id, resolution, by, note string) (Handoff, er
 	h := &hs.Items[i]
 	h.ClosedAt, h.Resolution, h.ClosedBy, h.Note = time.Now().UTC(), resolution, by, note
 	closed := *h
-	// Keep the most recent closed handoffs as history, and every open one.
-	var keep []Handoff
-	kept := 0
-	for j := len(hs.Items) - 1; j >= 0; j-- {
-		x := hs.Items[j]
-		if !x.Open() {
-			if kept >= keptClosed {
-				continue
-			}
-			kept++
-		}
-		keep = append(keep, x)
-	}
-	slices.Reverse(keep)
-	hs.Items = keep
+	hs.trim()
 	if err := f.write(hs); err != nil {
 		return Handoff{}, err
 	}
 	return closed, nil
+}
+
+// trim keeps every open handoff and the keptClosed most recently closed,
+// in their order, and remembers the tool calls of the others, forgetting
+// the oldest past keptCalls.
+func (hs *Handoffs) trim() {
+	var closed []int
+	for i, h := range hs.Items {
+		if !h.Open() {
+			closed = append(closed, i)
+		}
+	}
+	if len(closed) <= keptClosed {
+		return
+	}
+	slices.SortStableFunc(closed, func(a, b int) int { return hs.Items[b].ClosedAt.Compare(hs.Items[a].ClosedAt) })
+	drop := map[int]bool{}
+	for _, i := range closed[keptClosed:] {
+		drop[i] = true
+	}
+	keep := make([]Handoff, 0, len(hs.Items)-len(drop))
+	for i, h := range hs.Items {
+		switch {
+		case !drop[i]:
+			keep = append(keep, h)
+		case h.ToolCall != "":
+			hs.trimmed = append(hs.trimmed, trimmedCall{ToolCall: h.ToolCall, ID: h.ID, CreatedAt: h.CreatedAt})
+		}
+	}
+	hs.Items = keep
+	if n := len(hs.trimmed) - keptCalls; n > 0 {
+		slices.SortStableFunc(hs.trimmed, func(a, b trimmedCall) int { return a.CreatedAt.Compare(b.CreatedAt) })
+		for _, c := range hs.trimmed[:n] {
+			if c.CreatedAt.After(hs.trimmedBefore) {
+				hs.trimmedBefore = c.CreatedAt
+			}
+		}
+		hs.trimmed = slices.Clone(hs.trimmed[n:])
+	}
 }

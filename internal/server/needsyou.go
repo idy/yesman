@@ -126,7 +126,7 @@ func (s *Server) changeNeedsYou(_ context.Context, c caller, r *http.Request) (a
 		// still holds its credential, and Stop waits for it.
 		return s.Agents.CallerOperation(c.token, c.agent, func() error {
 			var err error
-			out, added, err = s.commitNeedsYou(y, req)
+			out, added, err = s.commitNeedsYou(y, c.agent, req)
 			return err
 		})
 	})
@@ -139,16 +139,18 @@ func (s *Server) changeNeedsYou(_ context.Context, c caller, r *http.Request) (a
 	return out, nil
 }
 
-// commitNeedsYou makes one change, inside the caller's operation, and returns
-// the result and the handoff it added, if it added one.
-func (s *Server) commitNeedsYou(y yesmen.Yesman, req NeedsYouChange) (any, *yesmen.Handoff, error) {
+// commitNeedsYou makes one change for lead, inside its operation, and
+// returns the result and the handoff it added, if it added one.
+func (s *Server) commitNeedsYou(y yesmen.Yesman, lead agent.Info, req NeedsYouChange) (any, *yesmen.Handoff, error) {
 	switch {
 	case req.Add != nil:
-		h, created, err := s.Yesmen.AddHandoff(y.Name, yesmen.Handoff{
+		// The lead's process start bounds which of its tool calls were
+		// seen before; see AddHandoffBy.
+		h, created, err := s.Yesmen.AddHandoffBy(y.Name, yesmen.Handoff{
 			Type: req.Add.Type, Title: req.Add.Title, Detail: req.Add.Detail,
 			Task: req.Add.Task, Worker: strings.TrimSpace(req.Add.Worker),
 			ToolCall: req.ToolCall,
-		})
+		}, lead.StartedAt)
 		if err != nil {
 			return nil, nil, err
 		}

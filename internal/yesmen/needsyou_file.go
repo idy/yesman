@@ -33,9 +33,9 @@ const (
 	maxHandoffsBytes = 16 << 20
 )
 
-// handoffFault, set only by tests, fails a step of writing ("write",
-// "rename") to check the file read is kept.
-var handoffFault func(step string) error
+// handoffFault, set only by tests, fails or holds up a step of reading
+// ("read") or writing ("write", "rename") the file at path.
+var handoffFault func(step, path string) error
 
 // handoffsFile is a handoffs file opened for reading and, maybe, replacing.
 type handoffsFile struct {
@@ -114,6 +114,11 @@ func (f *handoffsFile) read() (Handoffs, error) {
 	} else if n != 1 {
 		return Handoffs{}, errors.New("it has other hard links")
 	}
+	if handoffFault != nil {
+		if err := handoffFault("read", f.path); err != nil {
+			return Handoffs{}, err
+		}
+	}
 	data, err := io.ReadAll(io.LimitReader(file, maxHandoffsBytes+1))
 	if err != nil {
 		return Handoffs{}, err
@@ -162,7 +167,7 @@ func (f *handoffsFile) replace(hs Handoffs) error {
 	}()
 	_, err = file.Write(data)
 	if err == nil && handoffFault != nil {
-		err = handoffFault("write")
+		err = handoffFault("write", f.path)
 	}
 	if err == nil {
 		err = file.Sync()
@@ -180,7 +185,7 @@ func (f *handoffsFile) replace(hs Handoffs) error {
 		return err
 	}
 	if handoffFault != nil {
-		if err := handoffFault("rename"); err != nil {
+		if err := handoffFault("rename", f.path); err != nil {
 			return err
 		}
 	}
@@ -224,6 +229,13 @@ func (f *handoffsFile) close() {
 var (
 	handoffID   = regexp.MustCompile(`^n[1-9][0-9]{0,9}$`)
 	handoffKeys = jsonKeys(reflect.TypeFor[Handoff]())
+	trimmedKeys = jsonKeys(reflect.TypeFor[trimmedCall]())
+)
+
+// The file's own keys besides "items" and "next".
+const (
+	trimmedKey       = "trimmedCalls"
+	trimmedBeforeKey = "trimmedCallsBefore"
 )
 
 func jsonKeys(t reflect.Type) []string {
@@ -273,9 +285,12 @@ func decodeHandoffs(data []byte) (Handoffs, error) {
 	if err := json.Unmarshal(rawItems, &items); err != nil || items == nil {
 		return Handoffs{}, errors.New(`"items" is not a list`)
 	}
-	hs := Handoffs{Items: make([]Handoff, 0, len(items)), extra: unknownFields(top, "items", "next")}
+	hs := Handoffs{Items: make([]Handoff, 0, len(items)), extra: unknownFields(top, "items", "next", trimmedKey, trimmedBeforeKey)}
 	if err := json.Unmarshal(rawNext, &hs.Next); err != nil || hs.Next < 0 {
 		return Handoffs{}, errors.New(`"next" is not a count`)
+	}
+	if err := decodeTrimmed(top, &hs); err != nil {
+		return Handoffs{}, err
 	}
 	seen := map[string]bool{}
 	for i, raw := range items {
@@ -298,6 +313,35 @@ func decodeHandoffs(data []byte) (Handoffs, error) {
 		hs.Items = append(hs.Items, h)
 	}
 	return hs, nil
+}
+
+// decodeTrimmed reads the tool calls of trimmed handoffs, which files older
+// than them do not have.
+func decodeTrimmed(top map[string]json.RawMessage, hs *Handoffs) error {
+	if raw, ok := top[trimmedBeforeKey]; ok {
+		if err := json.Unmarshal(raw, &hs.trimmedBefore); err != nil {
+			return fmt.Errorf("%q is not a time", trimmedBeforeKey)
+		}
+	}
+	raw, ok := top[trimmedKey]
+	if !ok {
+		return nil
+	}
+	var calls []json.RawMessage
+	if err := json.Unmarshal(raw, &calls); err != nil || calls == nil {
+		return fmt.Errorf("%q is not a list", trimmedKey)
+	}
+	for i, raw := range calls {
+		var obj map[string]json.RawMessage
+		var c trimmedCall
+		if json.Unmarshal(raw, &obj) != nil || obj == nil || json.Unmarshal(raw, &c) != nil ||
+			c.ToolCall == "" || len(c.ToolCall) > maxHandoffToolLen || !handoffID.MatchString(c.ID) || c.CreatedAt.IsZero() {
+			return fmt.Errorf("%s item %d is not a trimmed tool call", trimmedKey, i+1)
+		}
+		c.extra = unknownFields(obj, trimmedKeys...)
+		hs.trimmed = append(hs.trimmed, c)
+	}
+	return nil
 }
 
 // valid checks what every stored handoff has.
@@ -336,6 +380,32 @@ func encodeHandoffs(hs Handoffs) ([]byte, error) {
 	}
 	b.WriteString(`],"next":`)
 	b.WriteString(strconv.Itoa(hs.Next))
+	if len(hs.trimmed) > 0 {
+		b.WriteString(`,"` + trimmedKey + `":[`)
+		for i, c := range hs.trimmed {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			known, err := json.Marshal(c)
+			if err != nil {
+				return nil, err
+			}
+			b.Write(known[:len(known)-1])
+			if err := writeFields(&b, c.extra); err != nil {
+				return nil, err
+			}
+			b.WriteByte('}')
+		}
+		b.WriteByte(']')
+	}
+	if !hs.trimmedBefore.IsZero() {
+		at, err := json.Marshal(hs.trimmedBefore)
+		if err != nil {
+			return nil, err
+		}
+		b.WriteString(`,"` + trimmedBeforeKey + `":`)
+		b.Write(at)
+	}
 	if err := writeFields(&b, hs.extra); err != nil {
 		return nil, err
 	}

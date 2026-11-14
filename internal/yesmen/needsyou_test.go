@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -276,7 +277,7 @@ func TestHandoffsFailedWriteKeepsTheFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			kept, _ := os.ReadFile(y.HandoffsFile())
-			handoffFault = func(at string) error {
+			handoffFault = func(at, _ string) error {
 				switch {
 				case step == "replaced" && at == "write":
 					// Another process swaps in a file of its own while the
@@ -376,5 +377,185 @@ func TestHandoffsMalformedFileKept(t *testing.T) {
 				t.Errorf("rewritten: %s", data)
 			}
 		})
+	}
+}
+
+// The history keeps the most recently closed handoffs, and a tool call that
+// registered a handoff never registers another, even once it was trimmed
+// from the history, and after a restart.
+func TestHandoffsHistoryAndRepeatedCalls(t *testing.T) {
+	s := handoffStore(t)
+	y, _ := s.Get("alice")
+	first, _, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "old open", ToolCall: "original-call"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeNewer := func(n int, prefix string) {
+		t.Helper()
+		for i := range n {
+			h, _, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "step", ToolCall: prefix + strconv.Itoa(i)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.CloseHandoff("alice", h.ID, HandoffDone, "user", ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	closeNewer(keptClosed, "a")
+	// Closed last, it is the most recent history, though created first.
+	if _, err := s.CloseHandoff("alice", first.ID, HandoffDone, "user", ""); err != nil {
+		t.Fatal(err)
+	}
+	hs, _ := s.Handoffs("alice")
+	if h, ok := hs.Find(first.ID); !ok || h.Open() || len(hs.Items) != keptClosed {
+		t.Fatalf("kept %d, %s: %+v %v", len(hs.Items), first.ID, h, ok)
+	}
+	if h, created, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "old open", ToolCall: "original-call"}); err != nil || created || h.ID != first.ID {
+		t.Fatalf("repeat while kept = %+v %v %v", h, created, err)
+	}
+	// Now trimmed: a repeat is refused rather than registered again.
+	closeNewer(keptClosed, "b")
+	hs, _ = s.Handoffs("alice")
+	if _, ok := hs.Find(first.ID); ok {
+		t.Fatalf("%s still kept", first.ID)
+	}
+	for _, store := range []*Store{s, New(filepath.Dir(y.Path), filepath.Join(t.TempDir(), "archive"))} {
+		h, created, err := store.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "old open", ToolCall: "original-call"})
+		if err == nil || created || !strings.Contains(err.Error(), first.ID) {
+			t.Fatalf("repeat after trimming = %+v %v %v", h, created, err)
+		}
+		if _, _, err := store.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "step", ToolCall: "a3"}); err == nil {
+			t.Fatal("an older trimmed call registered again")
+		}
+		hs, _ := store.Handoffs("alice")
+		if len(hs.Open()) != 0 || len(hs.Items) != keptClosed {
+			t.Fatalf("after repeats: %d open of %d", len(hs.Open()), len(hs.Items))
+		}
+	}
+	// A new call still registers.
+	if h, created, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "new", ToolCall: "new-call"}); err != nil || !created {
+		t.Fatalf("new call = %+v %v %v", h, created, err)
+	}
+}
+
+// Past keptCalls the oldest calls are forgotten; a process that might have
+// made one is refused, a process started later is not.
+func TestHandoffsForgottenCalls(t *testing.T) {
+	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	hs := Handoffs{Items: []Handoff{}, Next: 0}
+	for i := range keptCalls + keptClosed + 3 {
+		at := base.Add(time.Duration(i) * time.Minute)
+		hs.Next++
+		hs.Items = append(hs.Items, Handoff{ID: "n" + strconv.Itoa(hs.Next), Type: HandoffManual, Title: "x", ToolCall: "c" + strconv.Itoa(i), CreatedAt: at, ClosedAt: at.Add(time.Second), Resolution: HandoffDone, ClosedBy: "user"})
+	}
+	hs.trim()
+	if len(hs.Items) != keptClosed || len(hs.trimmed) != keptCalls {
+		t.Fatalf("kept %d items, %d calls", len(hs.Items), len(hs.trimmed))
+	}
+	forgotten := base.Add(2 * time.Minute) // c0, c1 and c2 were forgotten
+	if !hs.trimmedBefore.Equal(forgotten) || hs.trimmed[0].ToolCall != "c3" {
+		t.Fatalf("trimmedBefore %v, oldest kept %s", hs.trimmedBefore, hs.trimmed[0].ToolCall)
+	}
+	s := handoffStore(t)
+	y, _ := s.Get("alice")
+	data, err := encodeHandoffs(hs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(y.HandoffsFile(), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read, err := s.Handoffs("alice")
+	if err != nil || len(read.trimmed) != keptCalls || !read.trimmedBefore.Equal(forgotten) {
+		t.Fatalf("read back %d calls, %v, %v", len(read.trimmed), read.trimmedBefore, err)
+	}
+	for _, c := range []struct {
+		call    string
+		started time.Time
+		ok      bool
+	}{
+		{"c1", time.Time{}, false},              // forgotten, from a process of unknown start
+		{"c1", forgotten, false},                // from a process that might have made it
+		{"c9", forgotten.Add(time.Hour), false}, // remembered
+		{"fresh", forgotten.Add(-time.Hour), false},
+		{"fresh", forgotten.Add(time.Second), true},
+	} {
+		_, created, err := s.AddHandoffBy("alice", Handoff{Type: HandoffManual, Title: "again", ToolCall: c.call}, c.started)
+		if (err == nil) != c.ok || created != c.ok {
+			t.Errorf("%s from %v: created %v, %v", c.call, c.started, created, err)
+		}
+	}
+	// Without a tool call there is nothing to repeat.
+	if _, created, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "by hand"}); err != nil || !created {
+		t.Fatalf("without a call: %v %v", created, err)
+	}
+}
+
+// A file that is slow to read holds up its own yesman only: another
+// yesman's handoffs, and the Store, go on.
+func TestHandoffsSlowFileHoldsUpOnlyItsYesman(t *testing.T) {
+	s := handoffStore(t)
+	if _, err := s.Hire("bob"); err != nil {
+		t.Fatal(err)
+	}
+	alice, _ := s.Get("alice")
+	if _, _, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	handoffFault = func(step, path string) error {
+		if step == "read" && path == alice.HandoffsFile() {
+			once.Do(func() { close(entered) })
+			<-release
+		}
+		return nil
+	}
+	t.Cleanup(func() { handoffFault = nil })
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if _, err := s.Handoffs("alice"); err != nil {
+			t.Error(err)
+		}
+	})
+	<-entered
+	sameYesman := make(chan error, 1)
+	wg.Go(func() {
+		_, _, err := s.AddHandoff("alice", Handoff{Type: HandoffManual, Title: "b"})
+		sameYesman <- err
+	})
+	others := make(chan error, 1)
+	go func() {
+		_, _, err := s.AddHandoff("bob", Handoff{Type: HandoffManual, Title: "c"})
+		if err == nil {
+			_, err = s.Handoffs("bob")
+		}
+		if err == nil {
+			_, err = s.Board("alice")
+		}
+		others <- err
+	}()
+	select {
+	case err := <-others:
+		if err != nil {
+			t.Error(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("another yesman waited on alice's file")
+	}
+	select {
+	case err := <-sameYesman:
+		t.Errorf("alice's change did not wait for her read: %v", err)
+		sameYesman <- nil
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	wg.Wait()
+	if err := <-sameYesman; err != nil {
+		t.Error(err)
+	}
+	if hs, _ := s.Handoffs("alice"); len(hs.Open()) != 2 {
+		t.Errorf("alice has %d open", len(hs.Open()))
 	}
 }
