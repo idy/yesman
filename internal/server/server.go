@@ -86,6 +86,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/env", s.handle(s.env))
 	mux.HandleFunc("GET /v1/env/describe", s.handle(s.describeEnv))
 	mux.HandleFunc("POST /v1/workers/answer", s.handle(s.answerWorker))
+	mux.HandleFunc("POST /v1/origin", s.origin)
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
 	mux.HandleFunc("GET /v1/topics", s.handle(s.topics))
@@ -131,6 +132,36 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	}
+}
+
+// origin tells yesman's extension who wrote the user message pi is ending,
+// so that it can record that in pi's session beside the message. The app
+// decided it from pi's records of the prompt (see agent.originTracker); this
+// reads only the credential and memory, never the workspace.
+func (s *Server) origin(w http.ResponseWriter, r *http.Request) {
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		writeError(w, http.StatusUnauthorized, errors.New("no agent credential"))
+		return
+	}
+	if _, err := s.Agents.Authenticate(token); err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+	var req struct {
+		Timestamp float64 `json:"timestamp"`
+		Digest    string  `json:"digest"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
+		return
+	}
+	out := map[string]any{}
+	if o, ok := s.Agents.MessageOrigin(r.Context(), token, req.Timestamp, req.Digest); ok {
+		out["origin"] = o
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func writeError(w http.ResponseWriter, code int, err error) {
@@ -388,7 +419,7 @@ func (s *Server) sendWorker(_ context.Context, c caller, r *http.Request) (any, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := s.Agents.Prompt(ctx, id, "[from your lead] "+req.Message); err != nil {
+	if err := s.Agents.PromptFromLead(ctx, id, "[from your lead] "+req.Message); err != nil {
 		return nil, err
 	}
 	return map[string]bool{"sent": true}, nil
@@ -552,6 +583,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are Knowledge notes under .yesman/knowledge/ and the task log at .yesman/task-log.md. Read files only to answer a quick question or maintain these shared documents from worker reports, not to investigate. ")
 		w("Hand everything else to workers with yesman_worker_start (changes, commands, tests, research across many files, reviews, releases), each with a title naming its subject, then end your run. Each worker is its own pi agent in this workspace; several can run at once. ")
 		w("Keep every run short: answer, delegate, end.\n")
+		w("Your text is what the user reads. The window folds your thinking, tool calls, board changes, worker reports and yesman's notices into a collapsed work log, so write text for the user: answers, results, questions and decisions for them, and progress that tells them something new. Do not narrate routine steps such as reading files, checking the board or starting a worker, and do not restate a worker's report: say what it means for the user.\n")
 		w("Never sleep, poll or read session logs to wait for a worker: end your run, and its report arrives as a new message that starts your next one. You also hear when a worker's run was stopped by the user or failed.\n")
 		w("\n## Seeing it through\n\n")
 		w("You answer for this yesman: what you take on, you see through to the end. The user should not have to look after the workers. ")

@@ -219,7 +219,7 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	m.mu.Unlock()
 	// Only the private receipt ID crosses this Go call. The pi command and
 	// user text remain byte-for-byte the same as the original submission path.
-	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, images...)
+	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, Origin{Source: OriginUser, Submission: messageID}, images...)
 	m.mu.Lock()
 	current := a.deliveries[messageID]
 	if !a.deliverySealed && err != nil && (current.State == "sending" || current.State == "interrupted" && current.Session == "") {

@@ -14,6 +14,7 @@ import { renderMarkdown } from './markdown.js';
 import { t, tn, formatNumber } from './i18n.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
 import { DELIVERY_LABELS, newSubmissionID, sameSubmissionImages, topicMarker, isCommand, parseTopicMarker } from './submission.js';
+import { originOf } from './conversation.js';
 
 const STATUS = { open: 'Open', resolved: 'Resolved', archived: 'Archived' };
 const FILTERS = [['open', 'Open'], ['resolved', 'Resolved'], ['archived', 'Archived'], ['all', 'All']];
@@ -275,30 +276,39 @@ export function createTopics(host) {
 
   // ---------- The conversation ----------
 
-  // Messages in the lead's loaded history that carry this topic's line, and
-  // the messages sent from it with what their receipts say.
+  // The lead's messages about this topic: those the app recorded as sent from
+  // it (each native message's origin names its submission), and any other
+  // carrying its visible line. Then the submissions the topic recorded, with
+  // what their receipts say, each tied to its message when the history has it.
   function conversation(y, x, lead) {
     const convo = host.leadConvo(y);
+    const sendIDs = new Set(x.sends.map((s) => s.id));
+    const native = new Map(); // submission ID -> message
     const rows = [];
-    if (convo) {
-      for (const m of convo.messages ?? []) {
-        if (m.role !== 'user') continue;
-        const marker = parseTopicMarker(textOf(m.content));
-        if (marker?.id !== x.id) continue;
-        rows.push(h('li', { class: 'topic-message' },
-          h('button', { class: 'mds-link-button', type: 'button', 'data-key': `msg-${m.timestamp}`, onclick: () => host.showMessage(y, { kind: 'message', agent: 'lead', role: 'user', timestamp: m.timestamp, since: lead?.since }) },
-            excerpt(marker.rest) || t('Attached images')),
-          h('span', { class: 'topic-meta' }, when(m.timestamp))));
-      }
+    for (const m of convo?.messages ?? []) {
+      if (m.role !== 'user') continue;
+      const origin = originOf(m);
+      if (origin?.source && origin.source !== 'user') continue; // a lead's task or yesman's notice
+      const marker = parseTopicMarker(textOf(m.content));
+      const exact = origin?.submission && sendIDs.has(origin.submission);
+      if (exact) native.set(origin.submission, m);
+      if (!exact && marker?.id !== x.id) continue;
+      const text = marker ? marker.rest : textOf(m.content);
+      rows.push(h('li', { class: 'topic-message' },
+        h('button', { class: 'mds-link-button', type: 'button', 'data-key': `msg-${m.timestamp}`, onclick: () => locate(y, { kind: 'message', agent: 'lead', role: 'user', timestamp: m.timestamp, since: lead?.since }) },
+          excerpt(text) || t('Attached images')),
+        h('span', { class: 'topic-meta' }, when(m.timestamp))));
     }
     const sends = [...x.sends].reverse();
     const sendRows = sends.slice(0, 10).map((s) => {
       const live = convo?.deliveries?.get?.(s.id);
       const state = live?.state ?? s.state;
       const label = live ? DELIVERY_LABELS[state] : state === 'failed' ? 'Not sent' : state ? 'Submitted · delivery unconfirmed' : '';
+      const m = native.get(s.id);
       return h('li', { class: 'topic-send', 'data-state': state ?? '' },
         h('span', { class: 'topic-send-text' }, excerpt(s.preview) || t('Attached images'), s.truncated ? '…' : ''),
-        h('span', { class: 'topic-meta' }, [when(s.at), s.imageCount ? tn(s.imageCount, '{n} image', '{n} images') : null, label ? t(label) : null].filter(Boolean).join(' · ')));
+        h('span', { class: 'topic-meta' }, [when(s.at), s.imageCount ? tn(s.imageCount, '{n} image', '{n} images') : null, m ? t('In the conversation') : label ? t(label) : null].filter(Boolean).join(' · ')),
+        m ? h('button', { class: 'mds-link-button', type: 'button', 'data-key': `send-${s.id}`, onclick: () => locate(y, { kind: 'message', agent: 'lead', role: 'user', timestamp: m.timestamp, since: lead?.since }) }, t('Show in the conversation')) : null);
     });
     const content = [];
     if (rows.length) content.push(h('ul', { class: 'topic-messages' }, rows));
@@ -313,6 +323,9 @@ export function createTopics(host) {
     content.push(h('button', { class: 'mds-link-button topic-open-convo', type: 'button', 'data-key': 'open-convo', disabled: !lead, onclick: () => host.openLead(y) }, t('Open the conversation with {name}', { name: y.displayName || y.name })));
     return section(t('In the conversation'), ...content);
   }
+
+  // locate shows a message and says when it cannot.
+  const locate = (y, source) => openSource(y, source);
 
   // ---------- Sending ----------
 

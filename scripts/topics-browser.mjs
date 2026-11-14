@@ -217,16 +217,16 @@ async function run(engineName, engine) {
     // After a reload the native history still names each topic; a chip opens it.
     await page.reload();
     await page.locator('.agent-row--yesman').first().click();
-    await page.waitForFunction(() => document.querySelectorAll('#thread > .msg-user--topic').length === 2, null, { timeout: 30000 });
-    const chips = await page.$$eval('#thread > .msg-user--topic .topic-chip', (els) => els.map((e) => e.innerText.replace(/\s+/g, ' ')));
+    await page.waitForFunction(() => document.querySelectorAll('#thread .msg-user--topic').length === 2, null, { timeout: 30000 });
+    const chips = await page.$$eval('#thread .msg-user--topic .topic-chip', (els) => els.map((e) => e.innerText.replace(/\s+/g, ' ')));
     assert.match(chips[0], /tp1/);
     assert.match(chips[1], /tp2/);
-    assert.equal(await page.locator('#thread > .msg-user--topic img').count(), 1, 'the image stays with topic B');
-    await page.locator('#thread > .msg-user--topic .topic-chip', { hasText: 'tp2' }).click();
+    assert.equal(await page.locator('#thread .msg-user--topic img').count(), 1, 'the image stays with topic B');
+    await page.locator('#thread .msg-user--topic .topic-chip', { hasText: 'tp2' }).click();
     await page.locator('#topics h3.topic-title', { hasText: 'Image limits' }).waitFor();
     // Its conversation lists the native message, and shows it exactly.
     await page.locator('#topics .topic-message button').first().click();
-    await page.locator('#thread > .msg-user--topic.msg-found').waitFor();
+    await page.locator('#thread .msg-found:is(.msg-user--topic, :has(.msg-user--topic))').waitFor();
 
     // Sources: a picked message is shown exactly; one not in history says so.
     await page.click('#topics [data-key="edit"]');

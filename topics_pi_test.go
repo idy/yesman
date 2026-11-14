@@ -179,6 +179,7 @@ func TestTopicsWithLocalPi(t *testing.T) {
 		t.Fatalf("lead tool change: %+v", gotA)
 	}
 
+	var sentFrom map[string]map[string]bool
 	checkHistory := func(m *agent.Manager, label string) {
 		t.Helper()
 		conv, err := m.Messages(ctx, lead)
@@ -186,6 +187,10 @@ func TestTopicsWithLocalPi(t *testing.T) {
 		var msgs []struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
+			Yesman  *struct {
+				Source     string `json:"source"`
+				Submission string `json:"submission"`
+			} `json:"yesman"`
 		}
 		must(t, json.Unmarshal(conv.Messages, &msgs))
 		byTopic := map[string][]string{}
@@ -201,6 +206,13 @@ func TestTopicsWithLocalPi(t *testing.T) {
 			}
 			byTopic[key] = append(byTopic[key], text)
 			images[key] += n
+			// The app's recorded origin ties each topic message to a
+			// submission of that topic, never of another or of the main line.
+			if key != "none" && label == "live" {
+				if msg.Yesman == nil || msg.Yesman.Source != "user" || !sentFrom[key][msg.Yesman.Submission] {
+					t.Fatalf("%s: %s message %q has origin %+v", label, key, text, msg.Yesman)
+				}
+			}
 		}
 		if len(byTopic["tp1"]) != 3 || len(byTopic["tp2"]) != 1 || images["tp2"] != 1 || images["tp1"] != 0 {
 			t.Fatalf("%s: topic messages %q images %v", label, byTopic, images)
@@ -215,6 +227,13 @@ func TestTopicsWithLocalPi(t *testing.T) {
 		}
 		if len(byTopic["none"]) != 2 {
 			t.Fatalf("%s: main line and worker report: %q", label, byTopic["none"])
+		}
+	}
+	sentFrom = map[string]map[string]bool{"tp1": {}, "tp2": {}}
+	for _, id := range []string{tpA.ID, tpB.ID} {
+		tp, _ := store.Topic("alice", y.HiredAt, id)
+		for _, s := range tp.Sends {
+			sentFrom[id][s.ID] = true
 		}
 	}
 	checkHistory(agents, "live")
