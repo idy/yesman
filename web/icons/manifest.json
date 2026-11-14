@@ -262,6 +262,10 @@
     "question": {
       "name": "question",
       "codepoint": "e3e8"
+    },
+    "keyboard": {
+      "name": "keyboard",
+      "codepoint": "e2d8"
     }
   },
   "fonts": {

@@ -87,6 +87,7 @@ export const ICONS = Object.freeze({
   archive: '\ue00c', // archive
   undo: '\ue038', // arrow-counter-clockwise
   question: '\ue3e8', // question
+  keyboard: '\ue2d8', // keyboard
 });
 
 export function icon(name, cls = 'mds-icon') {

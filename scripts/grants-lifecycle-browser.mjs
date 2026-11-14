@@ -23,6 +23,7 @@ async function bridge(method, args) {
     case 'Update': return {enabled:false};
     case 'TakeFocus': return '';
     case 'Crew': return {members:[],models:[],date:'2026-11-14',top:100};
+    case 'Shortcuts': return {}; // no keys changed from their defaults, as Go says
     case 'Grants': {
       reads++;
       const snapshot = structuredClone(data);

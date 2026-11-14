@@ -75,7 +75,7 @@ The context meter beside these choices opens pi's estimated current context usag
 
 The app keeps running in the tray with its window closed. Agents are child processes of the app, so quitting it stops them; they resume from their sessions next time.
 
-The files pane, opened from the titlebar, shows the workspace of the yesman you are talking to as a tree, and opens its files in tabs: text and code in an editor with syntax highlighting that saves with Cmd/Ctrl+S or by itself as you type, Markdown rendered, images shown. It follows changes as agents make them, and never saves over a file that changed on disk since it was opened without asking. Large files stay quick: the editor draws only the lines in view, and files over 5 MB open read-only at their first 512 KB. Each folder in the path above a file opens a list of that folder. Cmd/Ctrl+P goes to a file by name, and its menu checks out repositories, opens Knowledge or the task log and dismisses the yesman. Its edges can be dragged.
+The files pane, opened from the titlebar, shows the workspace of the yesman you are talking to as a tree, and opens its files in tabs: text and code in an editor with syntax highlighting that saves with Cmd/Ctrl+S or by itself as you type, Markdown rendered, images shown. It follows changes as agents make them, and never saves over a file that changed on disk since it was opened without asking. Large files stay quick: the editor draws only the lines in view, and files over 5 MB open read-only at their first 512 KB. Each folder in the path above a file opens a list of that folder. Cmd/Ctrl+P (by default) goes to a file by name, and its menu checks out repositories, opens Knowledge or the task log and dismisses the yesman. Its edges can be dragged.
 
 The info panel sits between the conversation and the files, and shows the yesman you are talking to at a glance; the titlebar hides or shows it. Knowledge and Task log open their documents in the files pane, rendered and read-only; Board and Topics, with their open counts, open those panes beside the conversation. Storage folds into one row with the disk the workspace takes; open, it shows a bar of its largest parts (each worktree, the conversations, the knowledge, the rest of `.yesman`) and sums the others. Git's objects stay in the shared pool and are not counted. Worktrees lists the workspace's worktrees, each with the lines it changed against the remote's default branch, counting edits not committed yet and new files, or, when its branch is in a pull request, that pull request: its number, title, state, size and checks. Worktrees whose pull request is merged fold into one row at the end of the list, which opens them. yesman finds pull requests through the GitHub CLI, which also sees private repositories and checks, or else GitHub's public API, in the repository and, for a fork, in its upstream.
 
@@ -93,13 +93,49 @@ Every change is made at the revision it was read at. When the user and the lead 
 
 A topic's composer sends a message about it to the yesman's lead, into its one conversation, through the same submission receipts, retries and queue as the conversation's composer, with images too. The message begins with a visible line naming the topic, `[Topic tp3: title]`, shown before sending; the conversation shows it as a chip that opens the topic. The chip, and the topic's list of its messages, come from the app's record of what it sent from the topic, never from a message's text: the same line typed or pasted anywhere else names no topic, and a message whose origin is unknown belongs to none. Text beginning with `/` (pi commands, skills and templates) is sent as typed, without that line. The topic records each submission before it is sent, but not which reply answered it: pi does not say, so replies stay in the conversation and the lead brings conclusions back to the topic. The file holds at most 300 topics in 4 MiB; one that cannot be read, is not a topics file yesman wrote, is larger, or is a link leading out of the workspace, is left as it is and reported.
 
-Settings, at the foot of the sidebar, has ten pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and the language), Grant (the current application’s OS permissions, below), yesman (the crew, above, and what new yesmen run as, kept in `settings.json` too), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), Secrets and Variables (the environment variables of agents' commands, below), Storage (where yesman keeps its data, below), pi (pi's packages, below), Import and export (below), and About (the versions yesman runs with, and updates).
+Settings, at the foot of the sidebar, has eleven pages: General (light, dark or the system's appearance, kept in `settings.json` in the data directory, and the language), Shortcuts (the keyboard shortcuts, below), Grant (the current application’s OS permissions, below), yesman (the crew, above, and what new yesmen run as, kept in `settings.json` too), Repositories (the repo pool: name a GitHub user or organization to tick several of its repositories, or add one by `owner/repo`; they clone in the background, three at a time, and a clone that fails stays listed with its error until you try it again or dismiss it; Fetch all fetches the pool, and it can fetch by itself every 1 to 60 minutes), Secrets and Variables (the environment variables of agents' commands, below), Storage (where yesman keeps its data, below), pi (pi's packages, below), Import and export (below), and About (the versions yesman runs with, and updates).
 
 yesman is written in English and translated to Simplified Chinese. General › Language chooses one, or Match the system, the default, which shows the first of them among the languages of the system's settings, else English. The window, its menus, the tray and notifications change at once; MyGo keeps the choice (`App.SetLocale`): on macOS as the app's language in System Settings, which AppKit and WebKit also say their own texts in from the next launch, elsewhere in its `locale` file. The page translates itself in [`web/i18n.js`](web/i18n.js), with each message's English as its key in [`web/locales/zh-Hans.js`](web/locales/zh-Hans.js); Go translates its menus, tray, notifications and dialogs with `tr` in [`i18n.go`](i18n.go). A message without a translation shows in English.
 
 The pi page manages [pi packages](https://pi.dev/packages): the extensions, skills, prompt templates and themes pi loads. It has three tabs. Info shows the pi every agent runs, a summary of the installed packages, pi's own settings file and what pi installs npm packages with (its `npmCommand` setting, npm unless set). Installed lists the packages pi's user settings install, with their version, source and what they provide; each can be updated, unless pinned to a version, or removed, and an npm package whose registry has a newer version says so. Browse searches the npm packages tagged `pi-package`, which is what pi's gallery lists, most popular first; a package's details show its README, links and preview, and install it. Install from source takes anything `pi install` does: `npm:name[@version]`, a git repository or URL, or a local path.
 
 Packages are installed for the user, in pi's agent directory (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`), so they load into every yesman agent and into pi wherever you run it. yesman changes them only by running `pi install`, `pi update` and `pi remove`, one at a time in the background; a change that fails stays listed with pi's or npm's error until you try it again or dismiss it. pi loads packages when it starts, so agents already running keep the packages they started with: the page says which, and puts the idle ones to sleep on request, to load the change when they next start.
+
+### Keyboard shortcuts
+
+The window has keyboard shortcuts for its common actions, a command palette, and Settings › Shortcuts to change them. They work while yesman's window has focus. There are no global shortcuts, and they need no Accessibility or Input Monitoring permission.
+
+**Show all commands** (⌘K on macOS, Ctrl+K on Windows and Linux) opens the command palette. Search the window's actions, yesmen and workers by name, keyword or keys; ↑ and ↓ choose, Enter runs, and Esc or the same keys close it. Each action shows its keys. An action that cannot run now stays listed and says why. An action from the palette does what its button or menu does, with the same confirmations, on the agent shown. A dialog it opens, or a conversation it shows, keeps the focus.
+
+| Action | macOS | Windows and Linux |
+| --- | --- | --- |
+| Show all commands | ⌘K, ⇧⌘P | Ctrl+K, Ctrl+Shift+P |
+| Go to Settings | ⌘, | Ctrl+, |
+| Open keyboard shortcuts | ⌘/ | Ctrl+/ |
+| Hire a yesman… | ⌘N | Ctrl+N |
+| Focus the message box | ⌘L | Ctrl+L |
+| Stop the current run | ⌘. | Ctrl+. |
+| Next / previous conversation | ⌥⌘↓ / ⌥⌘↑ | Ctrl+PgDn / Ctrl+PgUp |
+| Go to yesman 1–9, in the sidebar's order | ⌘1–⌘9 | Ctrl+1–Ctrl+9 |
+| Show or hide the files | ⇧⌘E | Ctrl+Shift+E |
+| Show or hide the board | ⇧⌘B | Ctrl+Shift+B |
+| Go to a file… | ⌘P | Ctrl+P |
+| Show or hide the file tree | ⇧⌘Y | Ctrl+Shift+Y |
+
+These actions have no keys by default; they are in the palette and can be given keys in Settings: put this agent to sleep, go to this yesman's lead, go to the yesman that needs you, show or hide the topics, show or hide the info, open Knowledge, open the task log, check out a repository, rename this yesman, remove this worker, dismiss this yesman, add repositories, fetch all repositories, and open each Settings page. Some keys keep their jobs and cannot be changed: Enter sends a message or steers the run under way, Shift+Enter starts a new line, ⌘S (Ctrl+S) saves the open file, Esc closes a dialog, a menu or the palette, and Shift+F10 opens a sidebar entry's menu.
+
+Keys are kept portably: `Mod` is ⌘ on macOS and Ctrl on Windows and Linux, so keys chosen on one computer mean the same on another. Ctrl (a Mac's Control key), Alt (Option on a Mac) and Shift are modifiers of their own. A key can be a letter, a digit, punctuation, F1–F24, an arrow, Page Up or Down, Home or End. Letters follow the keyboard layout's letter (on a non-Latin layout, the key's place), digits the number row, and punctuation the character it types. The Windows or Super key cannot be part of a shortcut.
+
+What comes first:
+
+- In a text field, the message box or the file editor, only shortcuts with ⌘ (Ctrl on Windows and Linux) or a function key work; other keys type. Keys the editor or the message box use themselves stay theirs, such as the editor's ⌘/ (Ctrl+/), which comments a line.
+- An open dialog, menu or list, and the palette itself, keep every key. While an input method composes, and for the characters AltGr or Option type, keys stay text.
+- A shortcut whose action cannot run now, such as Stop with nothing running, is left to the page and the system; only a shortcut that runs is taken from them. Held down, a shortcut runs once, except next and previous conversation, which repeat.
+- Esc never stops a run.
+
+Settings › Shortcuts lists every action with its keys, searchable by name or by keys. **Add** records new keys: the field shows the keys as you hold them, Esc cancels, and recording never runs the action. It refuses, and says why, keys that type text, move the caret or edit (copy, paste, cut, undo, select all), keys the system or yesman's menus take (such as ⌘Q, ⌘W, ⌘H, ⌘M and ⌘R on macOS, Alt+F4 and F10 on Windows), AltGr's characters and an input method's keys. Keys another action has can be moved to this one in a single change. An action has up to four keys: remove one with its ×, remove them all to turn the action's keys off, reset one action to its defaults, or reset all after confirming. The page also notes keys an AltGr keyboard may type with, and keys the file editor uses. Changes are saved at once, one after another, and kept across restarts: a change made while another is saving builds on it, and one that fails leaves the keys as last saved, with the reason on its action. The titlebar's buttons and the files menu show the keys in use.
+
+Changed keys are kept in `settings.json` as `shortcuts`, by stable action ID, and only those that differ from the defaults (`[]` for none). Saving other settings keeps them, and action IDs this version does not know are kept for a version that does. Keys a computer cannot use, such as ones carried from another platform, show in Settings with the reason and do not run.
 
 ### Grant
 
@@ -126,7 +162,7 @@ Neither page has a backup of its own: Settings › Import and export backs both 
 
 ### Import and export
 
-Import and export saves yesman's configuration as a TOML file, to back it up or carry it to another computer: the appearance, the fetch schedule, the pool's GitHub repositories as `owner/repo`, the variables, and the secrets: the vault's key file and secrets file as they are, encrypted, with the password from the credential store. With the password in it the file opens the secrets, so it is written readable only by you; keep it private. Importing its secrets where none are set up sets them up as they are and keeps the password in the credential store; where there are secrets, the file's are opened with its password and merged or replaced into them. A name both variables and secrets would set stops the import before anything changes. A file without variables or secrets, such as one of version 1, leaves those here alone, replacing too. Workspaces, their knowledge and conversations stay out, as does where yesman keeps its data. Importing a file first shows what it would change, then either merges it, which clones the repositories it lists that the pool lacks and changes the settings it sets, or replaces with it, which also resets the settings it leaves out and removes the pool repositories it does not list. Replace keeps a repository that work depends on, one with a worktree checked out of it (in a workspace or the archive) or a branch with commits no remote has, and says why. It also stops the clones of repositories the file leaves out, except one an agent is waiting for.
+Import and export saves yesman's configuration as a TOML file, to back it up or carry it to another computer: the appearance, the fetch schedule, the pool's GitHub repositories as `owner/repo`, the variables, and the secrets: the vault's key file and secrets file as they are, encrypted, with the password from the credential store. With the password in it the file opens the secrets, so it is written readable only by you; keep it private. Importing its secrets where none are set up sets them up as they are and keeps the password in the credential store; where there are secrets, the file's are opened with its password and merged or replaced into them. A name both variables and secrets would set stops the import before anything changes. A file without variables or secrets, such as one of version 1, leaves those here alone, replacing too. The file also carries the keyboard shortcuts changed from their defaults, as `[shortcuts]`: merging takes the file's keys for the actions it lists and keeps the rest, and replacing makes the file's list the whole set of changes, so the other actions return to their defaults. A file without `[shortcuts]` leaves the shortcuts alone, replacing too. Workspaces, their knowledge and conversations stay out, as does where yesman keeps its data. Importing a file first shows what it would change, then either merges it, which clones the repositories it lists that the pool lacks and changes the settings it sets, or replaces with it, which also resets the settings it leaves out and removes the pool repositories it does not list. Replace keeps a repository that work depends on, one with a worktree checked out of it (in a workspace or the archive) or a branch with commits no remote has, and says why. It also stops the clones of repositories the file leaves out, except one an agent is waiting for.
 
 ```toml
 version = 2
@@ -138,6 +174,11 @@ repos = ["idy/yesman", "idy/magpie"]
 name = "DEPLOY_REGION"
 value = "eu-west-1"
 description = "AWS region the deploy scripts use"
+
+[shortcuts]           # keys changed from their defaults; Mod is ⌘ on macOS, Ctrl elsewhere
+"pane.info" = ["Mod+Alt+E"]
+"palette.open" = ["Mod+K"]
+"agent.sleep" = []
 
 [secrets]
 password = "…"        # from the credential store
@@ -204,6 +245,8 @@ Topics have two optional checks that run your installed pi with yesman's extensi
 
 The optional browser checks for creation and renaming use the full production page in Chromium and WebKit. Install Playwright and its browsers outside the repository, then run `YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs node scripts/hire-browser.mjs` or `node scripts/rename-browser.mjs` with the same environment variable. Creation uses the actual Go service and a temporary data directory behind a controlled bridge; neither check touches your workspaces or settings.
 
+`node scripts/shortcuts-browser.mjs`, with the same variable, checks keyboard shortcuts on the production page in Chromium and WebKit, as on macOS and as on Windows: the palette, Settings › Shortcuts (recording, conflicts, removing, resetting, keys kept across a reload and an import), keys in context (fields, the message box, the editor, menus, dialogs, input methods, AltGr and Option), changes made while another is saving or after one fails, and search with a browser that follows Turkish case rules. A controlled bridge stands in for MyGo, says which platform it is, and keeps the keys in the page's storage. The Windows runs check the page's Windows rules in a browser on the computer you run them on; they are not WebView2 on Windows, and text editing keys stay that computer's. `YESMAN_SHORTCUTS_GROUPS`, `YESMAN_SHORTCUTS_ENGINES` and `YESMAN_SHORTCUTS_PLATFORMS` choose what runs, and `YESMAN_SHORTCUTS_OUT` names a folder for results and screenshots.
+
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) vets, builds and tests on Linux, macOS and Windows for every pull request and every push to `main`. It does not start the app's window or real pi agents.
 
 The end-to-end test starts real pi agents and calls your configured model:
@@ -248,6 +291,8 @@ The builds are not yet signed for other machines: macOS apps are signed ad hoc, 
 | `secrets.go`, `internal/secrets`, `web/env.js` | Settings › Secrets and Variables: the sops and age format, the vault, the variables file, and their pages |
 | `update.go` | Checking for and installing new versions |
 | `files.go`, `files_menu.go` | Listing, reading, finding and watching a workspace's files, and the files pane's menus |
+| `shortcuts.go`, `web/keys.js`, `web/shortcuts.js`, `web/actions.js` | Keyboard shortcuts: the keys kept in `settings.json`; reading keys, platforms and keycaps; the actions, their default keys and where keys go first |
+| `web/palette.js`, `web/shortcuts-page.js` | The command palette and Settings › Shortcuts |
 | `web/files.js`, `web/editor.js`, `web/code.js` | The files pane, its editor, and the language of each file |
 | `web/board.js` | The board pane |
 | `topics.go`, `internal/yesmen/topics.go`, `internal/server/topics.go`, `web/topics.js`, `web/submission.js` | Topics: their file, the lead's API and context, sending from a topic, and the Topics pane |
