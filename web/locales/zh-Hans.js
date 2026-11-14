@@ -695,6 +695,7 @@ export default {
   "{size}. Open it with another app to see it.": "{size}。请用其他应用打开查看。",
   "{status} from {path}": "{status}，来自 {path}",
   "{used} of {limit} tokens, {percent}%": "已用 {used} / {limit} 个 token，{percent}%",
+  "{value} (source record; actual time unverified)": "{value}（来源记录，实际耗时未确认）",
   "{variables} now": "现在有 {variables}",
   "{version} available": "可更新到 {version}",
   "{version} is installed": "{version} 已安装",

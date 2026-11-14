@@ -200,8 +200,11 @@ export function createCrew({ call, fail, shown, rerender, openPage, preferenceRo
     return h('dl', { class: 'crew-metrics', role: 'group', 'aria-label': t('Scores for {model}', { model: optionName(m) }) }, FIELDS.map((f) => {
       const value = m.score[f.key];
       const available = typeof value === 'number' && Number.isFinite(value);
+      const formatted = available ? `${formatNumber(value, { maximumSignificantDigits: 4 })}${f.unit ? ` ${f.unit}` : ''}` : null;
+      // The source records a zero, but carries no confirmation of actual zero elapsed time.
+      const sourceZeroTime = m.source === 'aa' && f.key === 'minutesPerTask' && value === 0;
       return h('div', null, h('dt', null, t(f.label)), h('dd', null, available
-        ? `${formatNumber(value, { maximumSignificantDigits: 4 })}${f.unit ? ` ${f.unit}` : ''}`
+        ? sourceZeroTime ? t('{value} (source record; actual time unverified)', { value: formatted }) : formatted
         : [h('span', { 'aria-hidden': 'true' }, '—'), h('span', { class: 'mds-visually-hidden' }, t('Not available'))]));
     }));
   }
