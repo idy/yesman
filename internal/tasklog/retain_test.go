@@ -28,6 +28,22 @@ func TestRetainNeverReplacesLateOccupant(t *testing.T) {
 	}
 }
 
+func TestRetainExclusiveLinkRejectsLastMomentOccupant(t *testing.T) {
+	b := []byte("# Preserve source and target\n")
+	ws := fixture(t, b)
+	m, _ := Run(ws, Options{Action: "dry-run"})
+	sentinel := []byte("appeared immediately before Link\n")
+	_, err := Run(ws, Options{Action: "apply", Offline: true, Expect: m.SHA256, Hook: func(stage string) error {
+		if stage == "retain-before-link" {
+			return os.WriteFile(filepath.Join(ws, m.Retained), sentinel, 0o600)
+		}
+		return nil
+	}})
+	if err == nil || !bytes.Equal(file(t, ws, TOC), b) || !bytes.Equal(file(t, ws, m.Retained), sentinel) {
+		t.Fatal("exclusive source Link replaced an unknown target")
+	}
+}
+
 func TestPreparedSourceIdentitySurvivesRestart(t *testing.T) {
 	b := []byte("# Same bytes and mtime, different inode\n")
 	ws := fixture(t, b)

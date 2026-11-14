@@ -91,6 +91,9 @@ func recoverRetain(root *os.Root, m Manifest, o Options) error {
 			if attempt != 0 {
 				return errors.New("source paths changed repeatedly during retention")
 			}
+			if err = hook(o, "retain-before-link"); err != nil {
+				return err
+			}
 			if err = root.Link(TOC, m.Retained); err != nil {
 				return err
 			}
