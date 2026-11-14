@@ -167,6 +167,8 @@ The delivery check uses your installed pi with isolated configuration and a loca
 node scripts/check-delivery-pi.mjs
 ```
 
+Submission receipts retain metadata only: a 512-byte text preview, image count, bounded error/session fields, and a private payload fingerprint. Each agent keeps at most 256 records in a 2 MiB file, with at most 64 active submissions. Terminal records expire after 24 hours on access. Pending records remain until a real status boundary; reaching the active limit rejects new submissions without changing pi's queue. Timestamped IDs and a persisted eviction watermark reject unknown expired/evicted retries rather than dispatch them again. Initial registration is durable before RPC dispatch; later states use one coalescing background writer per agent. Legacy image-bearing files are compacted outside the manager lock, with a 32 MiB migration read limit that fails closed without overwriting an oversized file.
+
 With Playwright and its Chromium/WebKit browsers installed, `node scripts/check-delivery-browser.mjs` checks the production page against a controlled bridge. If Playwright is installed elsewhere, set `YESMAN_TEST_PLAYWRIGHT_MODULE` to its absolute `index.mjs` path.
 
 The optional browser checks for renaming use synthetic data with the full page in Chromium and WebKit. Install Playwright and its browsers outside the repository, then run `YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs node scripts/rename-browser.mjs`.

@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // Separate RPC acceptance, native queue snapshots, actual user events, and
@@ -87,6 +89,9 @@ func fakeDeliveryPi() {
 				write(map[string]any{"type": "message_start", "message": message})
 				write(map[string]any{"type": "message_end", "message": message})
 				messages = append(messages, message)
+				if os.Getenv("FAKE_PI_EXIT_AFTER_USER") != "" {
+					return
+				}
 				if os.Getenv("FAKE_PI_DELIVERY_LATE_ACK") != "" {
 					response(q, map[string]any{"disposition": "queued"})
 				}
@@ -113,6 +118,8 @@ func fakeDeliveryPi() {
 		}
 	}
 }
+
+func deliveryTestID(n int) string { return fmt.Sprintf("%012x%036x", time.Now().UnixMilli(), n) }
 
 func deliveryState(t *testing.T, m *Manager, id, messageID, want string) Delivery {
 	t.Helper()
@@ -160,14 +167,15 @@ func TestDeliveryAcceptanceNeverClaimsConsumption(t *testing.T) {
 				}
 			}
 			id := "alice/lead"
-			ids := []string{strings.Repeat("1", 48), strings.Repeat("2", 48), strings.Repeat("3", 48)}
+			ids := []string{deliveryTestID(1), deliveryTestID(2), deliveryTestID(3)}
 			state := map[string]string{"steer": "steering", "followUp": "queued", "started": "accepted"}[mode]
 			behavior := "steer"
 			if mode == "followUp" {
 				behavior = "followUp"
 			}
+			originalText := strings.Repeat("同文🌱", 200)
 			for i, messageID := range ids {
-				text := "same"
+				text := originalText
 				if i == 2 {
 					text = ""
 				}
@@ -175,6 +183,9 @@ func TestDeliveryAcceptanceNeverClaimsConsumption(t *testing.T) {
 				d, err := m.submit(ctx, id, messageID, text, images, behavior)
 				if err != nil || d.State != state {
 					t.Fatalf("submit %+v %v", d, err)
+				}
+				if len(d.Text) > maxDeliveryPreview || !utf8.ValidString(d.Text) || d.ImageCount != 2 || len(d.Images) != 0 {
+					t.Fatal("receipt retained the original input payload")
 				}
 				got := <-received
 				if got.Text != text || got.Behavior != behavior || !reflect.DeepEqual(got.Images, images) {
@@ -206,7 +217,7 @@ func TestDeliveryAcceptanceNeverClaimsConsumption(t *testing.T) {
 				t.Fatalf("invented transcript identity: %s", conv.Messages)
 			}
 			// A retried bridge request returns the original receipt, without dispatch.
-			d, err := m.Submit(ctx, id, ids[0], "same", []Image{testImage(), testImage()})
+			d, err := m.Submit(ctx, id, ids[0], originalText, []Image{testImage(), testImage()})
 			if err != nil || d.State != state {
 				t.Fatalf("duplicate: %+v %v", d, err)
 			}
@@ -246,7 +257,7 @@ func TestDeliveryLateAckExitRefreshAndIsolation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	m, store := newTestManager(t, 0, "FAKE_PI_DELIVERIES=1", "FAKE_PI_DELIVERY_MODE=steer", "FAKE_PI_DELIVERY_LATE_ACK=1")
-	id, messageID := "alice/lead", strings.Repeat("a", 48)
+	id, messageID := "alice/lead", deliveryTestID(10)
 	done := make(chan Delivery, 1)
 	go func() { d, _ := m.Submit(ctx, id, messageID, "same", nil); done <- d }()
 	waitStatus(t, m, id, Idle)
@@ -280,7 +291,7 @@ func TestDeliveryLateAckExitRefreshAndIsolation(t *testing.T) {
 func TestDeliveryRejectedHandledSessionAndStaleAgent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	id, messageID := "alice/lead", strings.Repeat("d", 48)
+	id, messageID := "alice/lead", deliveryTestID(14)
 	for _, mode := range []string{"handled", "steer"} {
 		t.Run(mode, func(t *testing.T) {
 			m, _ := newTestManager(t, 0, "FAKE_PI_DELIVERIES=1", "FAKE_PI_DELIVERY_MODE="+mode)
@@ -315,7 +326,7 @@ func TestDeliveryRejectedHandledSessionAndStaleAgent(t *testing.T) {
 	if err != nil || d.State != "failed" || !strings.Contains(d.Error, "rejected") {
 		t.Fatalf("rejection %+v %v", d, err)
 	}
-	retry, err := rejected.Submit(ctx, id, strings.Repeat("e", 48), "retry", nil)
+	retry, err := rejected.Submit(ctx, id, deliveryTestID(15), "retry", nil)
 	if err != nil || retry.ID == d.ID || retry.State != "failed" {
 		t.Fatalf("retry %+v %v", retry, err)
 	}

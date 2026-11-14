@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 )
@@ -17,16 +15,22 @@ import (
 // Therefore no receipt claims that its message was consumed. Native transcript
 // messages remain independent, including transformed inputs and identical text.
 type Delivery struct {
-	ID         string    `json:"id"`
-	Session    string    `json:"session"`
-	Revision   uint64    `json:"revision"`
-	State      string    `json:"state"`
-	Text       string    `json:"text"`
-	Images     []Image   `json:"images,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	Order      uint64    `json:"order"`
-	AgentSince time.Time `json:"agentSince,omitzero"`
-	boundSeq   uint64
+	ID          string    `json:"id"`
+	Session     string    `json:"session"`
+	Revision    uint64    `json:"revision"`
+	State       string    `json:"state"`
+	Text        string    `json:"text"`
+	Images      []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
+	ImageCount  int       `json:"imageCount"`
+	Preview     bool      `json:"preview,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	Order       uint64    `json:"order"`
+	AgentSince  time.Time `json:"agentSince,omitzero"`
+	boundSeq    uint64
+	fingerprint string
+	created     int64
+	expires     int64
+	registered  uint64
 }
 
 // QueueStatus describes the whole native pi queue, not receipt membership.
@@ -39,50 +43,8 @@ type QueueStatus struct {
 
 var deliveryID = regexp.MustCompile(`^[a-f0-9]{48}$`)
 
-func (a *agent) loadDeliveries() {
-	if a.deliveries != nil {
-		return
-	}
-	a.deliveries = map[string]Delivery{}
-	data, err := os.ReadFile(a.deliveryFile())
-	if err != nil {
-		return
-	}
-	var receipts []Delivery
-	if json.Unmarshal(data, &receipts) != nil {
-		return
-	}
-	for _, d := range receipts {
-		if !deliveryID.MatchString(d.ID) {
-			continue
-		}
-		if pendingDelivery(d.State) {
-			d.State, d.Error = "interrupted", ""
-			d.Revision++
-		}
-		a.deliveries[d.ID] = d
-	}
-}
-
 func pendingDelivery(state string) bool {
 	return state == "sending" || state == "accepted" || state == "steering" || state == "queued"
-}
-func (a *agent) deliveryFile() string {
-	return filepath.Join(a.dir, ".yesman", "sessions", a.info.Name, "delivery.json")
-}
-func (a *agent) saveDeliveries() error {
-	data, err := json.Marshal(a.deliverySnapshot())
-	if err != nil {
-		return err
-	}
-	path := a.deliveryFile()
-	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	if err = os.WriteFile(path+".tmp", data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(path+".tmp", path)
 }
 func (a *agent) deliverySnapshot() []Delivery {
 	receipts := make([]Delivery, 0, len(a.deliveries))
@@ -95,14 +57,27 @@ func (a *agent) deliverySnapshot() []Delivery {
 // Revisions and snapshot sequence numbers protect the page from bridge
 // notifications delivered late or out of order. State changes never resubmit.
 func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
+	previous := a.deliveries[d.ID]
+	if !pendingDelivery(d.State) && (pendingDelivery(previous.State) || d.expires == 0) {
+		d.expires = time.Now().Add(deliveryRetention).UnixMilli()
+	}
 	d.Revision++
+	d.Error, _ = deliveryClip(d.Error, maxDeliveryError)
+	d.Session, _ = deliveryClip(d.Session, 160)
 	a.deliveries[d.ID] = d
-	_ = a.saveDeliveries() // initial durable registration is checked by Submit
+	removed := m.pruneDeliveriesLocked(a)
+	m.persistDeliveriesLocked(a)
 	a.seq++
+	retained := make([]string, 0, len(a.deliveries))
+	for id := range a.deliveries {
+		retained = append(retained, id)
+	}
 	raw, _ := json.Marshal(struct {
 		Type     string   `json:"type"`
 		Delivery Delivery `json:"delivery"`
-	}{"delivery_update", d})
+		Removed  []string `json:"removed,omitempty"`
+		Retained []string `json:"retained"`
+	}{"delivery_update", d, removed, retained})
 	return Event{Agent: a.info.ID, AgentSince: a.info.Since, Seq: a.seq, Data: raw}
 }
 
@@ -135,35 +110,75 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	if err != nil {
 		return Delivery{}, err
 	}
+	fingerprint := deliveryFingerprint(text, images)
 	m.mu.Lock()
 	a := m.agents[id]
 	if a == nil {
 		a = &agent{info: info, dir: y.Path}
 		m.agents[id] = a
 	}
-	a.loadDeliveries()
+	m.mu.Unlock()
+	if err = m.ensureDeliveries(a, filepath.Join(y.Path, ".yesman", "sessions", info.Name, "delivery.json")); err != nil {
+		return Delivery{}, err
+	}
+	m.mu.Lock()
+	if m.agents[id] != a {
+		m.mu.Unlock()
+		return Delivery{}, errors.New("the agent was replaced; reopen its conversation before sending")
+	}
 	if d, ok := a.deliveries[messageID]; ok {
-		if !d.AgentSince.Equal(info.Since) || d.Text != text || !slices.Equal(d.Images, images) {
+		if !d.AgentSince.Equal(info.Since) || d.fingerprint != fingerprint {
 			m.mu.Unlock()
 			return Delivery{}, errors.New("this message ID belongs to another submission")
 		}
+		writer, registered := a.deliveryWriter, d.registered
+		waitRegistration := d.State == "sending" && d.Session == ""
 		m.mu.Unlock()
+		if waitRegistration {
+			if err = writer.wait(ctx, registered, m.shutdown); err != nil {
+				if ctx.Err() != nil {
+					return Delivery{}, ctx.Err()
+				}
+				return m.failInitialDelivery(a, messageID, err), nil
+			}
+			m.mu.Lock()
+			d = a.deliveries[messageID]
+			m.mu.Unlock()
+		}
 		return d, nil
 	}
 	if m.closed {
 		m.mu.Unlock()
 		return Delivery{}, errStopped
 	}
-	d := Delivery{ID: messageID, State: "sending", Text: text, Images: append([]Image(nil), images...), Order: uint64(len(a.deliveries) + 1), AgentSince: info.Since}
-	a.deliveries[messageID] = d
-	if err = a.saveDeliveries(); err != nil {
-		delete(a.deliveries, messageID)
+	if err = newDeliveryIDAllowed(messageID, a.deliveryFloor, time.Now()); err != nil {
 		m.mu.Unlock()
 		return Delivery{}, err
 	}
+	pending := 0
+	for _, receipt := range a.deliveries {
+		if pendingDelivery(receipt.State) {
+			pending++
+		}
+	}
+	if pending >= maxPendingDeliveries {
+		m.mu.Unlock()
+		return Delivery{}, errors.New("too many pending submissions; wait for the current run before sending more")
+	}
+	preview, truncated := deliveryClip(text, maxDeliveryPreview)
+	a.deliveryOrder++
+	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, fingerprint: fingerprint, created: deliveryTimestamp(messageID)}
+	a.deliveries[messageID] = d
 	ev := m.deliveryLocked(a, d)
+	registered := a.deliveryVersion
+	d = a.deliveries[messageID]
+	d.registered = registered
+	a.deliveries[messageID] = d
 	m.mu.Unlock()
 	m.cfg.OnEvent(ev)
+	if err = a.deliveryWriter.wait(context.Background(), registered, m.shutdown); err != nil {
+		return m.failInitialDelivery(a, messageID, err), nil
+	}
 	m.unnudge(id)
 	// Only the private receipt ID crosses this Go call. The pi command and
 	// user text remain byte-for-byte the same as the original submission path.
@@ -188,6 +203,22 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	return d, nil
 }
 
+func (m *Manager) failInitialDelivery(a *agent, id string, err error) Delivery {
+	m.mu.Lock()
+	d := a.deliveries[id]
+	var ev Event
+	if d.State == "sending" && d.Session == "" {
+		d.State, d.Error = "failed", err.Error()
+		ev = m.deliveryLocked(a, d)
+		d = a.deliveries[id]
+	}
+	m.mu.Unlock()
+	if ev.Seq != 0 {
+		m.cfg.OnEvent(ev)
+	}
+	return d
+}
+
 func (m *Manager) bindDelivery(a *agent, p *proc, id string) error {
 	if id == "" {
 		return nil
@@ -202,7 +233,7 @@ func (m *Manager) bindDelivery(a *agent, p *proc, id string) error {
 	if !ok || !d.AgentSince.Equal(info.Since) {
 		return errors.New("the agent was replaced; reopen its conversation before sending")
 	}
-	if a.proc != p {
+	if a.proc != p || d.State != "sending" {
 		return errStopped
 	}
 	d.Session, d.boundSeq = p.deliverySession(), a.seq
@@ -298,7 +329,7 @@ func (m *Manager) interruptDeliveriesLocked(a *agent) []Event {
 	}{"delivery_queue", a.queue})
 	events := []Event{{Agent: a.info.ID, AgentSince: a.info.Since, Seq: a.seq, Data: raw}}
 	for _, d := range a.deliveries {
-		if pendingDelivery(d.State) {
+		if d.Session != "" && pendingDelivery(d.State) {
 			d.State, d.Error = "interrupted", ""
 			events = append(events, m.deliveryLocked(a, d))
 		}

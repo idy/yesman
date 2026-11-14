@@ -6,9 +6,34 @@ const { chromium, webkit } = await import(
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 const root = fileURLToPath(new URL("../web", import.meta.url));
+const fixtureDir = await mkdtemp(`${tmpdir()}/yesman-delivery-browser-`);
+const fixturePath = `${fixtureDir}/go-dto.json`;
+const generated = spawnSync(
+  "go",
+  [
+    "test",
+    "./internal/agent",
+    "-run",
+    "^TestDeliveryBridgeFixture$",
+    "-count=1",
+  ],
+  {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    env: { ...process.env, YESMAN_TEST_DELIVERY_DTO: fixturePath },
+    encoding: "utf8",
+  },
+);
+assert.equal(generated.status, 0, generated.stderr || generated.stdout);
+const bridgeDTO = JSON.parse(await readFile(fixturePath, "utf8"));
+assert.deepEqual(Object.keys(bridgeDTO.images[0]), [
+  "type",
+  "data",
+  "mimeType",
+]);
 const server = createServer(async (req, res) => {
   try {
     const p = new URL(req.url, "http://localhost").pathname;
@@ -35,7 +60,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     });
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
-    await page.addInitScript(() => {
+    await page.addInitScript((bridgeDTO) => {
       localStorage.setItem("yesman.info", "hidden");
       const agents = ["lead", "worker"].map((name) => ({
         id: `alice/${name}`,
@@ -54,6 +79,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
         receipts: {},
         messages: {},
         queues: {},
+        inputs: {},
         dispatches: 0,
       };
       const pending = {};
@@ -62,6 +88,8 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       const save = () =>
         sessionStorage.setItem("fixture", JSON.stringify(saved));
       const emit = (agent, data) => {
+        if (data.type === "delivery_update" && !data.retained)
+          data.retained = Object.keys(saved.receipts[agent] ?? {});
         window.events["agent-event"]?.({ agent, seq: ++saved.seq, data });
         save();
       };
@@ -73,6 +101,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
         return d;
       };
       window.fixture = {
+        goDTO: bridgeDTO,
         saved,
         emit,
         update,
@@ -92,7 +121,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
           pending[id]?.reject(new Error("network unavailable"));
         },
         consume(agent, id) {
-          const d = saved.receipts[agent][id];
+          const d = saved.inputs[agent][id];
           const m = {
             role: "user",
             timestamp: 123,
@@ -135,13 +164,17 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
               if (saved.receipts[agent][id])
                 return { ...saved.receipts[agent][id] };
               saved.dispatches++;
+              saved.inputs[agent] ??= {};
+              saved.inputs[agent][id] = { text, images };
               const d = {
+                ...bridgeDTO.receipt,
                 id,
                 session: "fixture",
                 revision: 1,
                 state: "sending",
-                text,
-                images,
+                text: text.slice(0, 512),
+                imageCount: images.length,
+                preview: text.length > 512,
                 order: saved.dispatches,
               };
               saved.receipts[agent][id] = d;
@@ -162,7 +195,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
           }
         },
       };
-    });
+    }, bridgeDTO);
     await page.goto(`http://127.0.0.1:${server.address().port}`);
     const input = page.getByRole("textbox", { name: "Message", exact: true });
     await input.waitFor();
@@ -279,10 +312,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     assert.equal(await page.locator(".pi-queue-status").count(), 0);
     await input.fill("worker draft");
     await page.locator('[data-agent="alice/lead"]').click();
-    const png = Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg==",
-      "base64",
-    );
+    const png = Buffer.from(bridgeDTO.images[0].data, "base64");
     await page.locator("input[type=file]").setInputFiles([
       { name: "one.png", mimeType: "image/png", buffer: png },
       { name: "two.png", mimeType: "image/png", buffer: png },
@@ -296,7 +326,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
         window.sent.filter((s) => s.method === "Yesman.Submit").length === 1,
     );
     const imageID = await idAt(0);
-    assert.equal(await row(imageID).locator("img").count(), 2);
+    assert.match(await row(imageID).innerText(), /2 images submitted/);
     await ack(imageID);
     assert.equal(await page.locator(".composer-image").count(), 0);
     await page.evaluate(
@@ -390,6 +420,128 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await ack(newID);
     assert.equal(await input.inputValue(), "");
     assert.equal(await page.locator(".composer-image").count(), 0);
+    // A compacted receipt cannot be resurrected by an unseen older notification.
+    await page.evaluate((id) => {
+      const d = window.fixture.saved.receipts["alice/lead"][id];
+      delete window.fixture.saved.receipts["alice/lead"][id];
+      const lateSeq = ++window.fixture.saved.seq;
+      window.fixture.emit("alice/lead", {
+        type: "delivery_retained",
+        retained: Object.keys(window.fixture.saved.receipts["alice/lead"]),
+        removed: [id],
+      });
+      window.events["agent-event"]({
+        agent: "alice/lead",
+        seq: lateSeq,
+        data: { type: "delivery_update", delivery: { ...d, revision: 99 } },
+      });
+    }, rejectedID);
+    assert.equal(await row(rejectedID).count(), 0);
+    // Use real Go-serialized Image field order, a bridge error after a native
+    // user event, then repeated interrupted checks with the unchanged image.
+    const unknownText = "image retry";
+    await input.fill(unknownText);
+    await page.locator("input[type=file]").setInputFiles({
+      name: "unknown.png",
+      mimeType: "image/png",
+      buffer: png,
+    });
+    await page.waitForFunction(
+      () => document.querySelectorAll(".composer-image").length === 1,
+    );
+    await input.press("Enter");
+    await page.waitForFunction(
+      () => document.querySelector(".composer textarea").readOnly,
+    );
+    const unknownID = await page.evaluate(
+      () =>
+        window.sent.filter((s) => s.method === "Yesman.Submit").at(-1).args[1],
+    );
+    const nativeBefore = await page.locator("#thread > .msg-user").count();
+    await page.evaluate((id) => {
+      const d = window.fixture.saved.receipts["alice/lead"][id];
+      d.images = window.fixture.goDTO.images;
+      d.revision++;
+      window.fixture.emit("alice/lead", {
+        type: "delivery_update",
+        delivery: { ...d },
+      });
+      window.fixture.consume("alice/lead", id);
+      window.fixture.update("alice/lead", id, "interrupted");
+      window.fixture.reject(id);
+    }, unknownID);
+    await page.waitForFunction(
+      () => !document.querySelector(".composer textarea").readOnly,
+    );
+    const unknownDispatches = await page.evaluate(
+      () => window.fixture.saved.dispatches,
+    );
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const requests = await page.evaluate(() => window.sent.length);
+      await input.press("Enter");
+      await page.waitForFunction((n) => window.sent.length > n, requests);
+      await page.waitForFunction(
+        () => !document.querySelector(".composer textarea").readOnly,
+      );
+      assert.equal(
+        await page.evaluate(() => window.sent.at(-1).args[1]),
+        unknownID,
+      );
+      assert.equal(
+        await page.evaluate(() => window.fixture.saved.dispatches),
+        unknownDispatches,
+      );
+      assert.equal(await input.inputValue(), unknownText);
+      assert.equal(await page.locator(".composer-image").count(), 1);
+      assert.equal(
+        await page.locator("#thread > .msg-user").count(),
+        nativeBefore + 1,
+      );
+    }
+    // A duplicate "sending" receipt is not pi acceptance. A later rejection
+    // must still leave the full image draft available for an explicit new ID.
+    await input.fill("late rejection");
+    await input.press("Enter");
+    await page.waitForFunction(
+      () => document.querySelector(".composer textarea").readOnly,
+    );
+    const lateID = await page.evaluate(() => window.sent.at(-1).args[1]);
+    await page.evaluate((id) => window.fixture.reject(id), lateID);
+    await page.waitForFunction(
+      () => !document.querySelector(".composer textarea").readOnly,
+    );
+    const lateCount = await page.evaluate(
+      () => window.fixture.saved.dispatches,
+    );
+    await input.press("Enter");
+    await page.waitForFunction(
+      () => !document.querySelector(".composer textarea").readOnly,
+    );
+    assert.equal(await page.evaluate(() => window.sent.at(-1).args[1]), lateID);
+    assert.equal(
+      await page.evaluate(() => window.fixture.saved.dispatches),
+      lateCount,
+    );
+    assert.equal(await input.inputValue(), "late rejection");
+    assert.equal(await page.locator(".composer-image").count(), 1);
+    await page.evaluate(
+      (id) => window.fixture.update("alice/lead", id, "failed"),
+      lateID,
+    );
+    await input.press("Enter");
+    await page.waitForFunction(
+      () => !document.querySelector(".composer textarea").readOnly,
+    );
+    assert.equal(await input.inputValue(), "late rejection");
+    assert.equal(await page.locator(".composer-image").count(), 1);
+    await input.press("Enter");
+    await page.waitForFunction(
+      () => document.querySelector(".composer textarea").readOnly,
+    );
+    const lateRetryID = await page.evaluate(() => window.sent.at(-1).args[1]);
+    assert.notEqual(lateRetryID, lateID);
+    await ack(lateRetryID);
+    assert.equal(await page.locator(".composer-image").count(), 0);
     await page.evaluate(() => {
       const thread = document.querySelector("#thread");
       for (let i = 0; i < 70; i++) {
@@ -442,6 +594,26 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     });
     await page.locator('[data-agent="alice/worker"]').click();
     assert.equal(await input.inputValue(), "worker draft");
+    await input.fill("/receipt-only");
+    await input.press("Enter");
+    await page.waitForFunction(
+      () => !document.querySelector(".composer textarea").readOnly,
+    );
+    await page.reload();
+    await input.waitFor();
+    await page.locator('[data-agent="alice/worker"]').click();
+    await page.waitForFunction(
+      () => document.querySelectorAll("#thread .msg-delivery").length === 1,
+    );
+    assert.equal(await page.locator("#thread > .msg-user").count(), 0);
+    assert.equal(await page.locator("#thread .thread-empty").count(), 0);
+    await page.evaluate(() =>
+      window.events["mygo:locale"]({ locale: "zh-Hans" }),
+    );
+    assert.equal(await page.locator("#thread .thread-empty").count(), 0);
+    await page.locator('[data-agent="alice/lead"]').click();
+    await page.locator('[data-agent="alice/worker"]').click();
+    assert.equal(await page.locator("#thread .thread-empty").count(), 0);
     assert.deepEqual(errors, []);
     console.log(
       name,
@@ -452,3 +624,4 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
   }
 }
 server.close();
+await rm(fixtureDir, { recursive: true, force: true });

@@ -510,6 +510,8 @@ export default {
   "Accepted for follow-up · delivery unconfirmed": "已接受后续请求 · 交付尚未确认",
   "Submission: {text}": "提交记录：{text}",
   "Attached images": "已附加的图片",
+  "{n} image submitted": "已提交 {n} 张图片",
+  "{n} images submitted": "已提交 {n} 张图片",
   "pi has not reported whether this particular message was taken for processing.": "pi 尚未报告这条消息是否已被取走处理。",
   "These counts describe pi’s whole queue, not an individual submission.": "这些数量表示 pi 的整个队列，不代表某一条提交记录。",
   "pi queue: {steering} steering · {followUp} follow-up": "pi 队列：{steering} 条引导 · {followUp} 条后续消息",

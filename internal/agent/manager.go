@@ -128,6 +128,8 @@ type Config struct {
 	// wait for the UI thread while that thread waits for Stop; bursts of
 	// changes are coalesced into one call with the latest agents.
 	OnChange func([]Info)
+	// deliveryWrite is a controllable atomic writer for persistence tests.
+	deliveryWrite func(string, []byte) error
 }
 
 // Manager runs agents.
@@ -150,20 +152,25 @@ type agent struct {
 	prompts int
 	// reports counts worker handoffs being read or delivered to the lead,
 	// registered before the worker becomes idle; guarded by the manager's mu.
-	reports         int
-	info            Info
-	proc            *proc
-	token           string
-	seq             uint64        // the last event's number
-	turn            []Event       // the events of the assistant message in progress
-	starting        chan struct{} // closed when a start finishes, nil otherwise
-	stopping        bool
-	dir             string   // the workspace, to show paths in it relative to it
-	tools           []string // the tool calls running, oldest first
-	labels          map[string]string
-	deliveries      map[string]Delivery // receipts only; pi owns scheduling
-	queue           QueueStatus
-	deliverySettled uint64 // sequence of last observed settled boundary
+	reports                        int
+	info                           Info
+	proc                           *proc
+	token                          string
+	seq                            uint64        // the last event's number
+	turn                           []Event       // the events of the assistant message in progress
+	starting                       chan struct{} // closed when a start finishes, nil otherwise
+	stopping                       bool
+	dir                            string   // the workspace, to show paths in it relative to it
+	tools                          []string // the tool calls running, oldest first
+	labels                         map[string]string
+	deliveries                     map[string]Delivery // bounded receipt metadata; pi owns scheduling
+	deliveryOnce                   sync.Once
+	deliveryErr                    error
+	deliveryWriter                 *deliveryWriter
+	deliveryFloor                  int64
+	deliveryVersion, deliveryOrder uint64
+	queue                          QueueStatus
+	deliverySettled                uint64 // sequence of last observed settled boundary
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
 	nudged bool
@@ -360,7 +367,13 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		}
 		a.dir = y.Path
 		a.info.Since = since
-		a.loadDeliveries()
+		if a.deliveries == nil {
+			m.mu.Unlock()
+			if err := m.ensureDeliveries(a, filepath.Join(y.Path, ".yesman", "sessions", name, "delivery.json")); err != nil {
+				return nil, nil, err
+			}
+			continue
+		}
 		if a.proc != nil {
 			p := a.proc
 			select {
@@ -766,9 +779,13 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	var conv Conversation
 	r, err := p.callAt(ctx, map[string]any{"type": "get_messages"}, func() {
 		m.mu.Lock()
+		pruned := m.pruneDeliveryEventLocked(a)
 		conv.Live, conv.Seq = append([]Event(nil), a.turn...), a.seq
 		conv.Deliveries, conv.Queue = a.deliverySnapshot(), a.queue
 		m.mu.Unlock()
+		if pruned != nil {
+			m.cfg.OnEvent(*pruned)
+		}
 	})
 	if err != nil {
 		return Conversation{}, err
@@ -939,6 +956,22 @@ func (m *Manager) StopAll() {
 		wg.Go(func() { m.Stop(id) })
 	}
 	wg.Wait()
+	m.mu.Lock()
+	var writers []*deliveryWriter
+	for _, a := range m.agents {
+		if a.deliveryWriter != nil {
+			writers = append(writers, a.deliveryWriter)
+		}
+	}
+	m.mu.Unlock()
+	for _, writer := range writers {
+		wg.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			writer.close(ctx)
+		})
+	}
+	wg.Wait()
 }
 
 func (m *Manager) running(id string) *proc {
@@ -991,6 +1024,17 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 	}
 	id := ID(yesman, name)
 	m.Stop(id)
+	m.mu.Lock()
+	var writer *deliveryWriter
+	if a := m.agents[id]; a != nil {
+		writer = a.deliveryWriter
+	}
+	m.mu.Unlock()
+	// The name remains reserved until its old writer has finished, preventing
+	// a replacement worker from racing writes to the same receipt file.
+	if writer != nil {
+		writer.close(context.Background())
+	}
 	m.mu.Lock()
 	delete(m.agents, id)
 	m.mu.Unlock()

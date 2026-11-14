@@ -87,6 +87,8 @@ class Convo {
     this.eventSeqs = new Set();
     this.piQueue = { known: false };
     this.queueSeq = 0;
+    this.receiptSetSeq = 0;
+    this.retainedDeliveryIDs = null;
   }
 }
 
@@ -124,15 +126,39 @@ const DELIVERY_LABELS = {
   handled: 'Handled by an extension',
 };
 
+function pruneDeliveryRows(c, ids) {
+  for (const id of ids ?? []) {
+    c.deliveries.delete(id);
+    if (keyOf(selectedAgent() ?? {}) === c.key) $('#thread')?.querySelector(`[data-delivery="${CSS.escape(id)}"]`)?.remove();
+  }
+}
+
+function applyDeliveryReceipt(c,e,seq) {
+  if (Array.isArray(e.retained) && seq > c.receiptSetSeq) {
+    c.receiptSetSeq = seq;
+    c.retainedDeliveryIDs = new Set(e.retained);
+    pruneDeliveryRows(c,[...c.deliveries.values()].filter(d => d.revision > 0 && !c.retainedDeliveryIDs.has(d.id)).map(d => d.id));
+  }
+  if (e.delivery) {
+    if (c.retainedDeliveryIDs && seq <= c.receiptSetSeq && !c.retainedDeliveryIDs.has(e.delivery.id)) return;
+    updateDelivery(c,e.delivery);
+  }
+  pruneDeliveryRows(c,e.removed);
+}
+
 function updateDelivery(c, d) {
   if (d?.agentSince && `${c.id}@${d.agentSince}` !== c.key) return;
   if (!d?.id || (c.deliveries.get(d.id)?.revision ?? -1) >= d.revision) return;
   c.deliveries.set(d.id, d);
+  if (c.deliveries.size > 256) {
+    const excess = [...c.deliveries.keys()].filter(id => id !== d.id).slice(0,c.deliveries.size-256);
+    pruneDeliveryRows(c,excess);
+  }
 }
 
 function deliveryEl(c, d) {
   const bubble = messageEl(c, { role: 'user', content: [
-    { type: 'text', text: d.text }, ...(d.images ?? []),
+    { type: 'text', text: d.text ? (d.preview ? `${d.text}…` : d.text) : (d.imageCount > 0 ? t('Attached images') : '') }, ...(d.images ?? []),
   ] });
   const label = DELIVERY_LABELS[d.state];
   // An acknowledgement identifies a submission, not a transcript message.
@@ -140,9 +166,11 @@ function deliveryEl(c, d) {
   // or guessing which (possibly transformed) message pi took for processing.
   const sending = d.state === 'sending';
   const preview = d.text?.trim().replace(/\s+/g, ' ').slice(0, 60) || t('Attached images');
-  const content = sending ? bubble : h('details', { class: 'delivery-receipt' },
+  const imageCount = d.imageCount ?? d.images?.length ?? 0;
+  const imageNote = imageCount ? h('div', { class: 'delivery-image-count' }, tn(imageCount, '{n} image submitted', '{n} images submitted')) : null;
+  const content = sending ? h('div', { class: 'delivery-sending' }, bubble, imageNote) : h('details', { class: 'delivery-receipt' },
     h('summary', { title: t('pi has not reported whether this particular message was taken for processing.') }, t('Submission: {text}', { text: preview })),
-    h('div', { class: 'delivery-original' }, bubble));
+    h('div', { class: 'delivery-original' }, bubble, imageNote));
   return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(sending) }, content,
     h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite',
       hidden: !label, title: d.error || null }, label ? t(label) : ''));
@@ -199,6 +227,8 @@ async function loadConvo(c) {
     c.eventSeqs.clear();
     c.piQueue = data?.queue ?? { known: false };
     c.queueSeq = c.seq;
+    c.receiptSetSeq = c.seq;
+    c.retainedDeliveryIDs = new Set((data?.deliveries ?? []).map(d => d.id));
     c.tools.clear();
     for (const message of c.messages) indexMessage(c, message);
     c.live = null;
@@ -214,7 +244,7 @@ async function loadConvo(c) {
       if (ev.seq <= (data?.seq ?? 0) && !(e.type === 'message_end' && !seen.has(messageKey(e.message)))) continue;
       if (e.type === 'message_end' && seen.has(messageKey(e.message))) continue;
       if (c.eventSeqs.has(ev.seq)) continue;
-      applyEvent(c, e, true);
+      applyEvent(c, e, true,ev.seq);
       c.eventSeqs.add(ev.seq);
       if (e.type === 'queue_update' || e.type === 'delivery_queue') c.queueSeq = Math.max(c.queueSeq,ev.seq);
       if (e.type === 'message_end') seen.add(messageKey(e.message));
@@ -379,7 +409,7 @@ function renderThread() {
     thread.append(h('div', { class: 'note note--error' }, c.error));
   } else if (!c.loaded) {
     thread.append(h('div', { class: 'working' }, icon('spinner', 'mds-icon tool-mark'), t('Waking up…')));
-  } else if (!c.messages.length && !c.live) {
+  } else if (!c.messages.length && !c.live && !c.deliveries.size) {
     const y = yesmanOf(a.id);
     thread.append(
       a.role === 'lead'
@@ -494,12 +524,12 @@ function onAgentEvent(ev) {
     }
     return;
   }
-  if (e.type === 'delivery_update') {
-    updateDelivery(c, e.delivery);
+  if (e.type === 'delivery_update' || e.type === 'delivery_retained') {
+    applyDeliveryReceipt(c,e,ev.seq);
     if (state.view.kind === 'agent' && state.view.id === c.id) {
       const scroller = $('#scroll');
       if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
-      refreshDelivery(c, c.deliveries.get(e.delivery.id));
+      refreshDelivery(c, e.delivery && c.deliveries.get(e.delivery.id));
       scrollDown();
     }
     return;
@@ -509,7 +539,7 @@ function onAgentEvent(ev) {
 
 // applyEvent updates a conversation with one record, and the thread when it
 // is shown, unless the record is being replayed before the thread renders.
-function applyEvent(c, e, replaying) {
+function applyEvent(c, e, replaying,seq = 0) {
   const visible = !replaying && state.view.kind === 'agent' && state.view.id === c.id && $('#thread');
   const scroller = $('#scroll');
   if (visible && scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
@@ -523,9 +553,10 @@ function applyEvent(c, e, replaying) {
       c.piQueue = { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0 };
       if (visible) renderQueue(c);
       break;
+    case 'delivery_retained':
     case 'delivery_update':
-      updateDelivery(c, e.delivery);
-      if (visible) refreshDelivery(c, c.deliveries.get(e.delivery.id));
+      applyDeliveryReceipt(c,e,seq);
+      if (visible) refreshDelivery(c, e.delivery && c.deliveries.get(e.delivery.id));
       break;
     case 'message_start': {
       if (e.message?.role !== 'assistant') break;
@@ -1070,6 +1101,9 @@ function renderDock({ focusComposer = false } = {}) {
   }
 }
 
+const sameSubmissionImages = (left, right) => left.length === right.length && left.every((image, i) =>
+  image.type === right[i].type && image.mimeType === right[i].mimeType && image.data === right[i].data);
+
 async function sendMessage(a, textarea) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
@@ -1080,13 +1114,22 @@ async function sendMessage(a, textarea) {
   // Editing after an uncertain submission is a new user intent. Retrying the
   // unchanged draft reuses its receipt, even when the bridge response was lost.
   if (attachments.submissionID) {
-    const previous = c.deliveries.get(attachments.submissionID);
-    if (previous && (previous.text !== text || JSON.stringify(previous.images ?? []) !== JSON.stringify(images))) attachments.submissionID = null;
+    const previous = attachments.submission;
+    if (previous && (previous.text !== text || !sameSubmissionImages(previous.images, images))) {
+      attachments.submissionID = null;
+      attachments.submission = null;
+    }
   }
-  const messageID = attachments.submissionID ?? [...crypto.getRandomValues(new Uint8Array(24))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const messageID = attachments.submissionID ?? Date.now().toString(16).padStart(12, '0') + [...crypto.getRandomValues(new Uint8Array(18))].map((b) => b.toString(16).padStart(2, '0')).join('');
   {
     attachments.submissionID = messageID;
-    if (!c.deliveries.has(messageID)) c.deliveries.set(messageID, { id: messageID, revision: 0, state: 'sending', text, images, createdAt: Date.now() });
+    attachments.submission ??= { text, images };
+    if (!c.deliveries.has(messageID)) {
+      const preview = Array.from(text).slice(0,128).join('');
+      c.deliveries.set(messageID, { id: messageID, revision: 0, state: 'sending', text:preview, imageCount:images.length, preview:preview !== text });
+      const excess = [...c.deliveries.keys()].slice(0,Math.max(0,c.deliveries.size-256));
+      pruneDeliveryRows(c,excess);
+    }
     const scroller = $('#scroll');
     if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
     refreshDelivery(c, c.deliveries.get(messageID));
@@ -1103,11 +1146,17 @@ async function sendMessage(a, textarea) {
     const receipt = await call('Submit', a.id, messageID, text, images, a.since);
     updateDelivery(c, receipt);
     refreshDelivery(c, c.deliveries.get(messageID));
-    if (receipt.state === 'failed' || receipt.state === 'interrupted') {
-      attachments.submissionID = null;
+    // A duplicate may find registration durable while pi's response is still
+    // pending. Keep the only full draft/attachments until acceptance is known.
+    if (receipt.state === 'sending') return;
+    if (receipt.state === 'failed' || receipt.state === 'interrupted' || receipt.state === 'unconfirmed' && receipt.error) {
+      // Only a definite rejection permits a fresh ID on unchanged retry. An
+      // interrupted process may already have admitted this input before exit.
+      if (receipt.state === 'failed') { attachments.submissionID = null; attachments.submission = null; }
       throw new Error(receipt.error || t(DELIVERY_LABELS[receipt.state]));
     }
     attachments.submissionID = null;
+    attachments.submission = null;
     state.drafts.delete(key);
     attachments.items = [];
   } catch (err) {
