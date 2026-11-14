@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // LeadName is the agent name of every yesman's lead.
@@ -43,9 +45,18 @@ func ValidName(name string) error {
 
 // Yesman is a hired yesman.
 type Yesman struct {
-	Name    string    `json:"name"`
-	Path    string    `json:"path"`
-	HiredAt time.Time `json:"hiredAt,omitzero"`
+	Name        string    `json:"name"` // Stable workspace and routing identity.
+	DisplayName string    `json:"displayName,omitempty"`
+	Path        string    `json:"path"`
+	HiredAt     time.Time `json:"hiredAt,omitzero"`
+}
+
+// Label is the user-visible name, including for workspaces hired before renaming.
+func (y Yesman) Label() string {
+	if y.DisplayName != "" {
+		return y.DisplayName
+	}
+	return y.Name
 }
 
 // MetaDir is the workspace's .yesman directory.
@@ -103,6 +114,7 @@ func (w Worker) Subject(b Board) string {
 type Store struct {
 	root, archive string
 	mu            sync.Mutex
+	metaMu        sync.Mutex // serialize metadata reads with atomic replacement on Windows
 
 	lmu   sync.Mutex
 	locks map[string]*sync.RWMutex // per yesman: Use reads, Archive writes
@@ -175,6 +187,12 @@ func (s *Store) Hire(name string) (Yesman, error) {
 
 // Get returns a hired yesman.
 func (s *Store) Get(name string) (Yesman, error) {
+	s.metaMu.Lock()
+	defer s.metaMu.Unlock()
+	return s.get(name)
+}
+
+func (s *Store) get(name string) (Yesman, error) {
 	if err := ValidName(name); err != nil {
 		return Yesman{}, err
 	}
@@ -183,11 +201,47 @@ func (s *Store) Get(name string) (Yesman, error) {
 		return Yesman{}, fmt.Errorf("no yesman named %s", name)
 	}
 	var meta struct {
-		HiredAt time.Time `json:"hiredAt"`
+		HiredAt     time.Time `json:"hiredAt"`
+		DisplayName string    `json:"displayName"`
 	}
 	_ = readJSON(filepath.Join(y.MetaDir(), "yesman.json"), &meta)
 	y.HiredAt = meta.HiredAt
+	y.DisplayName = meta.DisplayName
 	return y, nil
+}
+
+// Rename changes only the visible label. Workspace paths, agent IDs and all
+// agent state keep their original identity. Duplicate labels are allowed.
+func (s *Store) Rename(name, label string) (Yesman, error) {
+	label = strings.TrimSpace(label)
+	if label == "" || !utf8.ValidString(label) || strings.IndexFunc(label, unicode.IsControl) >= 0 {
+		return Yesman{}, errors.New("enter a name without control characters")
+	}
+	var renamed Yesman
+	err := s.Use(name, func(Yesman) error {
+		s.metaMu.Lock()
+		defer s.metaMu.Unlock()
+		y, err := s.get(name)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(y.MetaDir(), "yesman.json")
+		meta := map[string]json.RawMessage{}
+		if err := readJSON(path, &meta); err != nil {
+			return err
+		}
+		if meta == nil {
+			return errors.New("invalid yesman metadata")
+		}
+		meta["displayName"], _ = json.Marshal(label)
+		if err := writeJSON(path, meta); err != nil {
+			return err
+		}
+		y.DisplayName = label
+		renamed = y
+		return nil
+	})
+	return renamed, err
 }
 
 // List returns the hired yesmen, oldest first.

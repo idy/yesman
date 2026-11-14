@@ -45,7 +45,9 @@ For a lead, the extension also takes away pi's `bash` and adds the read-only `gr
 
 Only a lead turns to you. A question a worker's tools ask (an extension dialog) goes to its lead as a message, which answers it with `yesman_worker_answer`; the worker shows as asking its yesman, and you can still answer it from its conversation. A worker's failure goes to the lead too. When the lead ends a run with board tasks still to do or in progress and no worker running, yesman reminds it of them once, until you or a worker write to it again. You are notified when a lead asks you something, fails, or finishes with its whole yesman settled.
 
-The sidebar lists each yesman's lead with its workers under it, in the order they started. Each worker has one line with its status, a number such as a1, and the subject of its work in words, its title or else its board task's title, never the commands it runs. The board uses the same numbers, and hovering a worker shows its name. A working agent shows how long its run has gone on. A done worker stays in its place, greyed; right-click the yesman to hide or show its done workers. What an agent is doing now, taken from its run's events, shows at the foot of its conversation while it works, and the lead sees it in its context.
+The sidebar lists each yesman's lead with its workers under it, in the order they started. Right-click a yesman and choose **Rename…** to change its displayed name, including to a name with spaces or Chinese characters. The label is saved in `.yesman/yesman.json`; its original workspace name, directory and agent IDs stay the same, so its running agents, conversations and tools keep working. Displayed names do not have to be unique.
+
+Each worker has one line with its status, a number such as a1, and the subject of its work in words, its title or else its board task's title, never the commands it runs. The board uses the same numbers, and hovering a worker shows its name. A working agent shows how long its run has gone on. A done worker stays in its place, greyed; right-click the yesman to hide or show its done workers. What an agent is doing now, taken from its run's events, shows at the foot of its conversation while it works, and the lead sees it in its context.
 
 The composer lets you choose the current agent's model and reasoning effort from the right side below the input box. Models come from pi's configured, authenticated catalog, grouped only when there is more than one provider; effort shows only the levels the selected model supports. Change them between runs without starting a new conversation. pi saves the selection in that agent's session once it has messages, and restores it when the agent resumes.
 
@@ -152,6 +154,8 @@ go run .
 go test ./...
 node --test scripts/images.test.mjs
 ```
+
+The optional browser checks for renaming use synthetic data with the full page in Chromium and WebKit. Install Playwright and its browsers outside the repository, then run `YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs node scripts/rename-browser.mjs`.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) vets, builds and tests on Linux, macOS and Windows for every pull request and every push to `main`. It does not start the app's window or real pi agents.
 

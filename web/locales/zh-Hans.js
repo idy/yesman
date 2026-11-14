@@ -724,5 +724,7 @@ export default {
   "{n} open": "{n} 项未完成",
   "{n}m": "{n}分",
   "{n}s": "{n}秒",
+  "Rename yesman": "重命名 yesman",
+  "Enter a name without control characters.": "请输入名称，且不要包含控制字符。",
   "{status}; {name} was told": "{status}；已告知 {name}",
 };

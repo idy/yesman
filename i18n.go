@@ -96,6 +96,7 @@ var zhHans = map[string]string{
 	// The agent menu
 	"Show Done Workers":   "显示已完成的助手",
 	"Hide Done Workers":   "隐藏已完成的助手",
+	"Rename…":             "重命名…",
 	"Open Conversation":   "打开对话",
 	"View Workspace":      "查看工作区",
 	"Reveal Workspace":    "显示工作区位置",

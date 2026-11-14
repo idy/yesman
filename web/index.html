@@ -49,6 +49,21 @@
     </form>
   </dialog>
 
+  <dialog class="mds-dialog" id="rename-dialog" aria-labelledby="rename-title">
+    <form id="rename-form">
+      <h2 class="mds-heading" id="rename-title" data-i18n>Rename yesman</h2>
+      <label class="field">
+        <span data-i18n>Name</span>
+        <input class="mds-input" name="name" required autocomplete="off" spellcheck="false" aria-describedby="rename-error">
+      </label>
+      <p class="dialog-hint" id="rename-error" role="alert" hidden></p>
+      <div class="mds-dialog-actions">
+        <button class="mds-button" type="button" id="rename-cancel" data-i18n>Cancel</button>
+        <button class="mds-button mds-button--primary" type="submit" data-i18n>Save</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="mds-dialog" id="checkout-dialog">
     <form method="dialog" id="checkout-form">
       <h2 class="mds-heading" data-i18n>Check out a repository</h2>
