@@ -4,6 +4,7 @@
 //   mygo.call("Yesman.<Method>", ...)  services in service.go
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
+import { orderWorkers } from './sidebar.js';
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
@@ -536,6 +537,7 @@ function agentRow(a, cls, label) {
   if (worker && a.status === 'failed') status = t('{status}; {name} was told', { status, name: a.yesman });
   return h('button', {
     class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': statusTone(a), 'data-done': done ? 'true' : null,
+    'data-sidebar-entry': worker ? 'worker' : cls.includes('agent-row--yesman') ? 'yesman' : 'needs-you',
     'aria-current': current ? 'page' : null, 'aria-haspopup': 'menu',
     title: `${a.id}: ${status}${a.title ? `\n${a.title}` : ''}${a.detail ? `\n${a.detail}` : ''}`,
     onclick: () => selectAgent(a.id),
@@ -590,15 +592,30 @@ async function openAgentMenu(e, a) {
       case 'hide-done':
       case 'show-done': setHideDone(a.yesman, action === 'hide-done'); break;
       default:
-        document.querySelector(`.agent-row[data-agent="${CSS.escape(a.id)}"]`)?.focus({ preventScroll: true });
+        restoreSidebarFocus(row);
     }
   } catch (err) {
     fail(err);
   }
 }
 
+// A waiting lead has two entries. Preserve the entry as well as the agent;
+// if it disappears, use the other entry, then the workspace's lead for a
+// hidden/removed worker. Keep focus unchanged when the workspace is gone.
+function restoreSidebarFocus(row) {
+  if (!row?.dataset.agent) return;
+  const list = $('#yesmen');
+  const agent = `[data-agent="${CSS.escape(row.dataset.agent)}"]`;
+  const entry = `[data-sidebar-entry="${CSS.escape(row.dataset.sidebarEntry)}"]`;
+  const lead = `${row.dataset.agent.split('/')[0]}/lead`;
+  const target = list.querySelector(agent + entry) ?? list.querySelector(agent)
+    ?? list.querySelector(`[data-agent="${CSS.escape(lead)}"][data-sidebar-entry="yesman"]`);
+  target?.focus({ preventScroll: true });
+}
+
 function renderSidebar() {
   const list = $('#yesmen');
+  const focusedRow = list.contains(document.activeElement) ? document.activeElement : null;
   list.replaceChildren();
   const waiting = state.snap.agents.filter((a) => a.status === 'waiting' && a.role === 'lead');
   if (waiting.length) {
@@ -611,14 +628,15 @@ function renderSidebar() {
     const agents = state.snap.agents.filter((a) => a.yesman === y.name);
     const lead = agents.find((a) => a.role === 'lead');
     if (lead) list.append(agentRow(lead, 'agent-row--yesman', y.name));
-    // Done workers keep their place, greyed; the yesman's menu can hide them.
-    // The one you are looking at stays.
+    // Active workers come first; preserve start order within each class.
+    // The yesman's menu can hide done workers, except the one being viewed.
     const hide = state.hideDone.has(y.name);
-    for (const w of agents.filter((a) => a.role === 'worker')) {
+    for (const w of orderWorkers(agents.filter((a) => a.role === 'worker'))) {
       if (hide && w.finishedAt && !(state.view.kind === 'agent' && state.view.id === w.id)) continue;
       list.append(agentRow(w, 'agent-row--worker', w.name));
     }
   }
+  restoreSidebarFocus(focusedRow);
   renderSideFoot();
 }
 

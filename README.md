@@ -45,7 +45,7 @@ For a lead, the extension also takes away pi's `bash` and adds the read-only `gr
 
 Only a lead turns to you. A question a worker's tools ask (an extension dialog) goes to its lead as a message, which answers it with `yesman_worker_answer`; the worker shows as asking its yesman, and you can still answer it from its conversation. A worker's failure goes to the lead too. When the lead ends a run with board tasks still to do or in progress and no worker running, yesman reminds it of them once, until you or a worker write to it again. You are notified when a lead asks you something, fails, or finishes with its whole yesman settled.
 
-The sidebar lists each yesman's lead with its workers under it, in the order they started. Each worker has one line with its status, a number such as a1, and the subject of its work in words, its title or else its board task's title, never the commands it runs. The board uses the same numbers, and hovering a worker shows its name. A working agent shows how long its run has gone on. A done worker stays in its place, greyed; right-click the yesman to hide or show its done workers. What an agent is doing now, taken from its run's events, shows at the foot of its conversation while it works, and the lead sees it in its context.
+The sidebar lists each yesman's lead with its workers under it. Active workers come first, followed by finished, stopped or failed workers; each set keeps the order they started. Each worker has one line with its status, a number such as a1, and the subject of its work in words, its title or else its board task's title, never the commands it runs. The board uses the same numbers, and hovering a worker shows its name. A working agent shows how long its run has gone on. A done worker stays listed, greyed; right-click the yesman to hide or show its done workers. What an agent is doing now, taken from its run's events, shows at the foot of its conversation while it works, and the lead sees it in its context.
 
 The crew are the models yesman runs agents as, listed in Settings › yesman: each option is one of pi's models at one reasoning effort, such as Claude Opus 5.5 at high. A new yesman's lead runs as the option chosen there for new yesmen, recorded in its `yesman.json`, so hiring asks only for a name; a lead that resumes its session keeps the model it was using. The lead runs each worker as an option it names with `yesman_worker_start`'s `crew` parameter, or else as its own model and effort, which must be an option too; with no options, no yesman can be hired and no worker started.
 
@@ -156,7 +156,7 @@ go run .
 
 ```bash
 go test ./...
-node --test scripts/images.test.mjs
+node --test scripts/*.test.mjs
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) vets, builds and tests on Linux, macOS and Windows for every pull request and every push to `main`. It does not start the app's window or real pi agents.
