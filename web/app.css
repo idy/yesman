@@ -937,3 +937,5 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
   .sched-form-row, .sched-every { grid-template-columns: minmax(0, 1fr); }
 }
 @media (pointer: coarse) { .sched-toggle { min-height: 44px; } .sched-run-action { min-height: 32px; } }
+.sched-row-side [aria-disabled="true"], .sched-run-action[aria-disabled="true"] { opacity: .55; cursor: default; }
+.mds-switch:has(input[aria-disabled="true"]) { opacity: .55; }

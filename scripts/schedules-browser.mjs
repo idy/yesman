@@ -84,6 +84,13 @@ function bridge() {
 
 const step = (name) => { results.push(name); console.log(`  ok ${name}`); };
 
+// expand opens a task's details unless they are open.
+async function expand(plan) {
+  const toggle = plan.locator('.sched-toggle');
+  if ((await toggle.getAttribute('aria-expanded')) !== 'true') await toggle.click();
+  await plan.locator('.sched-details').waitFor();
+}
+
 async function run(engineName, engine, { lang = 'en', dark = false, width = 1280 } = {}) {
   const fx = await fixture();
   const browser = await engine.launch({ headless: true });
@@ -159,12 +166,15 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
     assert.equal(await pane.locator('.sched-plan').count(), 1);
     step('once in the past refused');
 
-    // Off and on again.
-    const sw = plan.getByRole('switch');
-    await sw.uncheck();
-    await plan.locator('.sched-next').getByText(T('Off', '已关闭')).waitFor();
-    await plan.getByRole('switch').check();
+    // Off with the keyboard, on again with the mouse; focus stays on it.
+    await plan.getByRole('switch').focus();
+    await page.keyboard.press('Space');
+    await plan.locator('.sched-next').getByText(T('Turned off', '已关闭')).waitFor();
+    assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'alice/s1:switch');
+    assert.equal(await plan.getByRole('switch').isChecked(), false);
+    await plan.locator('.mds-switch-track').click();
     await plan.locator('.sched-next').getByText(T(/^Next:/, /^下次：/)).waitFor();
+    assert.equal(await plan.getByRole('switch').isChecked(), true);
     step('turn off and on');
 
     // Run now, held down: one request, one run.
@@ -176,7 +186,7 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
     await runButton.click({ force: true, trial: false }).catch(() => {});
     await page.evaluate(() => window.releaseRun());
     await page.evaluate(() => { delete window.hold.RunSchedule; });
-    await plan.locator('.sched-toggle').click();
+    await expand(plan);
     await plan.locator('.sched-run').first().getByText(/t1/).waitFor();
     const runCalls = await page.evaluate(() => window.calls.filter((c) => c[0] === 'RunSchedule'));
     assert.equal(new Set(runCalls.map((c) => c[3])).size, 1, `one click, one request ID: ${JSON.stringify(runCalls)}`);
@@ -217,6 +227,7 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
 
     // Refused by pi: not sent, sent again once it accepts.
     await fx.post('/fixture/board', { yesman: 'alice', id: 't2', status: 'done', note: '' });
+    await fx.post('/fixture/clock', { add: '1m' }); // runs claimed at one instant would tie in the history
     await fx.post('/fixture/mode', { mode: 'reject' });
     await pane.locator('.sched-plan').first().getByRole('button', { name: new RegExp(T('^Run .* now$', '^立即运行')) }).click();
     const failed = pane.locator('.sched-run[data-status="failed"]').first();
@@ -228,6 +239,7 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
 
     // A busy lead: queued as a follow-up, after a confirmation that the last
     // run is still open.
+    await fx.post('/fixture/clock', { add: '1m' });
     await fx.post('/fixture/mode', { mode: 'busy' });
     await pane.locator('.sched-plan').first().getByRole('button', { name: new RegExp(T('^Run .* now$', '^立即运行')) }).click();
     await page.locator('#confirm-dialog').getByRole('button', { name: T('Run now', '立即运行') }).click();
@@ -265,7 +277,7 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
     step('another yesman and late answers');
 
     // Archive.
-    await pane.locator('.sched-plan', { hasText: 'Late' }).locator('.sched-toggle').click();
+    await expand(pane.locator('.sched-plan', { hasText: 'Late' }));
     await pane.locator('.sched-plan', { hasText: 'Late' }).getByRole('button', { name: T('Archive…', '归档…') }).click();
     await page.locator('#confirm-dialog').getByRole('button', { name: T('Archive', '归档') }).click();
     await pane.locator('.board-done summary').getByText(T(/Archived 1/, /已归档 1/)).waitFor();
@@ -291,6 +303,16 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
 
     assert.deepEqual(errors, []);
     await context.close();
+  } catch (err) {
+    // Leave what the page showed, for whoever reads the failure.
+    const pages = browser.contexts().flatMap((c) => c.pages());
+    if (pages[0]) {
+      const dir = shots || fixtureDir;
+      await pages[0].screenshot({ path: `${dir}/failure-${engineName}-${lang}.png` }).catch(() => {});
+      const text = await pages[0].evaluate(() => ({ pane: document.querySelector('#schedules')?.innerText, calls: window.calls?.slice(-15) })).catch(() => null);
+      console.error('page at failure:', JSON.stringify(text, null, 1)?.slice(0, 4000));
+    }
+    throw err;
   } finally {
     await browser.close();
     await fx.close();

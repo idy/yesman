@@ -82,7 +82,7 @@ function weekdayName(n, width = 'short') {
 
 function list(items) {
   try {
-    return new Intl.ListFormat(locale(), { style: 'short', type: 'conjunction' }).format(items);
+    return new Intl.ListFormat(locale(), { style: 'long', type: 'conjunction' }).format(items);
   } catch {
     return items.join(', ');
   }
@@ -123,6 +123,7 @@ export function createSchedules(host) {
   const retryIDs = new Map(); // `${yesman}/${plan}` -> request ID to reuse after an uncertain failure
   const busy = new Set(); // keys of actions under way, such as `${yesman}/${run}:retry`
   let archivedOpen = false;
+  let pendingFocus = null; // { key, fallback } of the control an action under way started from
   let reveal = null; // `${yesman}/${plan}` to scroll to once shown
 
   const current = () => (host.isOpen() && host.yesman()) || null;
@@ -181,7 +182,16 @@ export function createSchedules(host) {
     if (!v && !loading.has(y.name)) load(y.name);
     const view = v?.view;
     const scroll = $('.sched-body', aside)?.scrollTop ?? 0;
-    const focused = document.activeElement?.closest?.('#schedules [data-key]')?.dataset.key;
+    // Keep focus on the control it was on, by its key, across the redraw;
+    // an action's control that went away hands it to its task's row.
+    const activeEl = document.activeElement;
+    const inPane = !!activeEl && aside.contains(activeEl);
+    let focused = inPane ? activeEl.closest('[data-key]')?.dataset.key : null;
+    let fallback = null;
+    if (pendingFocus && (inPane || !activeEl || activeEl === document.body)) {
+      focused ??= pendingFocus.key;
+      fallback = pendingFocus.fallback;
+    }
 
     const plans = view?.plans ?? [];
     const active = plans.filter((p) => p.state !== 'archived');
@@ -232,7 +242,8 @@ export function createSchedules(host) {
         reveal = null;
       }
     } else if (focused) {
-      $(`#schedules [data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+      const el = $(`#schedules [data-key="${CSS.escape(focused)}"]`) ?? (fallback ? $(`#schedules [data-key="${CSS.escape(fallback)}"]`) : null);
+      el?.focus({ preventScroll: true });
     }
   }
 
@@ -248,7 +259,7 @@ export function createSchedules(host) {
 
   function nextText(p) {
     switch (p.state) {
-      case 'off': return t('Off');
+      case 'off': return t('Turned off');
       case 'finished': return t('Finished');
       case 'archived': return t('Archived');
       case 'invalid': return t('Can’t run');
@@ -279,15 +290,21 @@ export function createSchedules(host) {
       const sw = h('input', {
         type: 'checkbox', role: 'switch', checked: p.enabled, 'data-key': `${key}:switch`,
         'aria-label': p.enabled ? t('On: {title}. Turn off', { title: p.title }) : t('Off: {title}. Turn on', { title: p.title }),
-        disabled: busy.has(`${key}:switch`),
-        onchange: (e) => setEnabled(y, p, e.target.checked, e.target),
+        'aria-disabled': busy.has(`${key}:switch`) ? 'true' : null,
+        onchange: (e) => {
+          if (busy.has(`${key}:switch`)) {
+            e.target.checked = !e.target.checked; // one change at a time
+            return;
+          }
+          setEnabled(y, p, e.target.checked);
+        },
       });
       actions.push(h('label', { class: 'mds-switch', title: p.enabled ? t('On: turn it off to stop its runs') : t('Off: turn it on to run it at its times') }, sw, h('span', { class: 'mds-switch-track' })));
       const inFlight = running.has(key) || p.sending;
       actions.push(h('button', {
         class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-key': `${key}:run`,
         title: inFlight ? t('Sending to the lead…') : t('Run now'), 'aria-label': t('Run {title} now', { title: p.title }),
-        disabled: inFlight, 'aria-busy': inFlight ? 'true' : null,
+        'aria-disabled': inFlight ? 'true' : null, 'aria-busy': inFlight ? 'true' : null,
         onclick: () => runNow(y, p),
       }, inFlight ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('play')));
     }
@@ -329,13 +346,13 @@ export function createSchedules(host) {
       : when(r.at, p.timezone);
     const action = (name, label, iconName, fn) => h('button', {
       class: 'mds-link-button sched-run-action', type: 'button', 'data-key': `${key}:${name}`,
-      disabled: busy.has(`${key}:${name}`), onclick: fn,
+      'aria-disabled': busy.has(`${key}:${name}`) ? 'true' : null, 'aria-busy': busy.has(`${key}:${name}`) ? 'true' : null, onclick: fn,
     }, icon(iconName), h('span', null, label));
     const acts = [];
     if (writable && view.owner) {
       if (r.canCatchUp) acts.push(action('catchup', t('Run it now'), 'play', () => catchUp(y, p, r)));
-      if (r.canRetry) acts.push(action('retry', t('Send again'), 'reload', () => retry(y, r)));
-      if (r.canCheck && r.status === 'unknown') acts.push(action('check', t('Check again'), 'reload', () => check(y, r)));
+      if (r.canRetry) acts.push(action('retry', t('Send again'), 'reload', () => retry(y, p, r)));
+      if (r.canCheck && r.status === 'unknown') acts.push(action('check', t('Check again'), 'reload', () => check(y, p, r)));
       if (r.canRunAgain) acts.push(action('again', t('Run again as a new run'), 'play', () => runNow(y, p, true)));
     }
     if (r.board && r.task) {
@@ -366,19 +383,31 @@ export function createSchedules(host) {
 
   // ---------- Actions ----------
 
-  async function setEnabled(y, p, on, input) {
-    const key = `${y.name}/${p.id}`;
-    busy.add(`${key}:switch`);
-    input.disabled = true;
+  // act runs one action of a control at a time, keeping focus on it (or on
+  // its task's row when it goes away) while the pane redraws.
+  async function act(busyKey, focus, fn) {
+    if (busy.has(busyKey)) return;
+    busy.add(busyKey);
+    pendingFocus = focus;
+    render();
     try {
-      const res = await host.call('SetScheduleEnabled', y.name, p.id, on, p.revision);
-      if (res.error) host.fail(res.error);
+      await fn();
     } catch (err) {
       host.fail(err);
     } finally {
-      busy.delete(`${key}:switch`);
-      await load(y.name);
+      busy.delete(busyKey);
+      const y = host.yesman();
+      if (y) await load(y.name);
+      if (pendingFocus === focus) pendingFocus = null;
     }
+  }
+
+  function setEnabled(y, p, on) {
+    const key = `${y.name}/${p.id}`;
+    return act(`${key}:switch`, { key: `${key}:switch`, fallback: `${key}:open` }, async () => {
+      const res = await host.call('SetScheduleEnabled', y.name, p.id, on, p.revision);
+      if (res.error) host.fail(translateError(res.error));
+    });
   }
 
   async function runNow(y, p, again = false) {
@@ -396,65 +425,38 @@ export function createSchedules(host) {
         t('Run again'));
       if (!ok) return;
     }
+    if (running.has(key)) return;
+    // One click is one run: the same request ID is used again only to retry
+    // a click whose answer did not arrive.
     const id = retryIDs.get(key) ?? requestID();
     running.set(key, id);
-    render();
-    try {
-      await host.call('RunSchedule', y.name, p.id, id, '');
-      retryIDs.delete(key);
-    } catch (err) {
-      // The same click may have gone through: trying again reuses its ID.
-      retryIDs.set(key, id);
-      host.fail(err);
-    } finally {
-      running.delete(key);
-      await load(y.name);
-    }
+    await act(`${key}:run`, { key: `${key}:run`, fallback: `${key}:open` }, async () => {
+      try {
+        await host.call('RunSchedule', y.name, p.id, id, '');
+        retryIDs.delete(key);
+      } catch (err) {
+        retryIDs.set(key, id);
+        throw err;
+      } finally {
+        running.delete(key);
+      }
+    });
   }
 
-  async function catchUp(y, p, r) {
-    const key = `${y.name}/${r.id}:catchup`;
-    if (busy.has(key)) return;
-    busy.add(key);
-    render();
-    try {
-      await host.call('RunSchedule', y.name, p.id, retryIDs.get(key) ?? requestID(), r.id);
-    } catch (err) {
-      host.fail(err);
-    } finally {
-      busy.delete(key);
-      await load(y.name);
-    }
+  function catchUp(y, p, r) {
+    const key = `${y.name}/${r.id}`;
+    // A missed run is caught up once, whatever the request ID.
+    return act(`${key}:catchup`, { key: `${key}:catchup`, fallback: `${y.name}/${p.id}:open` }, () => host.call('RunSchedule', y.name, p.id, requestID(), r.id));
   }
 
-  async function retry(y, r) {
-    const key = `${y.name}/${r.id}:retry`;
-    if (busy.has(key)) return;
-    busy.add(key);
-    render();
-    try {
-      await host.call('RetryScheduleRun', y.name, r.id);
-    } catch (err) {
-      host.fail(err);
-    } finally {
-      busy.delete(key);
-      await load(y.name);
-    }
+  function retry(y, p, r) {
+    const key = `${y.name}/${r.id}`;
+    return act(`${key}:retry`, { key: `${key}:retry`, fallback: `${y.name}/${p.id}:open` }, () => host.call('RetryScheduleRun', y.name, r.id));
   }
 
-  async function check(y, r) {
-    const key = `${y.name}/${r.id}:check`;
-    if (busy.has(key)) return;
-    busy.add(key);
-    render();
-    try {
-      await host.call('CheckScheduleRun', y.name, r.id);
-    } catch (err) {
-      host.fail(err);
-    } finally {
-      busy.delete(key);
-      await load(y.name);
-    }
+  function check(y, p, r) {
+    const key = `${y.name}/${r.id}`;
+    return act(`${key}:check`, { key: `${key}:check`, fallback: `${y.name}/${p.id}:open` }, () => host.call('CheckScheduleRun', y.name, r.id));
   }
 
   async function archive(y, p) {
@@ -578,6 +580,9 @@ export function createSchedules(host) {
     latest.onclick = async () => {
       if (!latestPlan) return;
       close('reload');
+      // The dialog's close event comes after close(): reopen once it came,
+      // or it would end the new editor too.
+      await done;
       openEditor(y, latestPlan);
     };
 

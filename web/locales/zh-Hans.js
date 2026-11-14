@@ -901,4 +901,5 @@ export default {
   "Scheduled tasks: requests the lead gets at times you choose": "定时任务：在你选定的时间交给主管的请求",
   "can’t read": "无法读取",
   "A run of scheduled task {id}: open it in Tasks": "定时任务 {id} 的一次运行：在定时任务中打开",
+  "Turned off": "已关闭",
 };
