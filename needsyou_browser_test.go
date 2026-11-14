@@ -175,6 +175,17 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 	if _, err := a.yesmen.ChangeBoard("alice", yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: &title}}}); err != nil {
 		t.Fatal(err)
 	}
+	// Alice keeps 15 notes, as the Info card counts them.
+	alice, err := a.yesmen.Get("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 15 {
+		note := filepath.Join(alice.KnowledgeDir(), fmt.Sprintf("note-%02d.md", i+1))
+		if err := os.WriteFile(note, []byte(fmt.Sprintf("# Note %d\n", i+1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	mux := http.NewServeMux()
 	reply := func(w http.ResponseWriter, value any, err error) {
@@ -211,6 +222,21 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 		case "Messages":
 			if err = arg(req.Args, 0, &id); err == nil {
 				value, err = s.Messages(r.Context(), id)
+			}
+		case "Info":
+			if err = arg(req.Args, 0, &id); err == nil {
+				value, err = s.Info(r.Context(), id)
+			}
+		case "ListFiles", "ReadFile":
+			var path string
+			if err = arg(req.Args, 0, &id); err == nil {
+				if err = arg(req.Args, 1, &path); err == nil {
+					if req.Method == "ListFiles" {
+						value, err = s.ListFiles(id, path)
+					} else {
+						value, err = s.ReadFile(id, path)
+					}
+				}
 			}
 		case "Answer":
 			var requestID string

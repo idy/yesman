@@ -1024,16 +1024,29 @@ function needsYouRow(item) {
   h('span', { class: 'meta' }, t(typeLabel(item))), h('span', { class: 'needs-you-what' }, requestWhat(item)));
 }
 
-function showNeedsYou(focusKey = null) {
-  state.view = { kind: 'needs-you' };
+// showNeedsYou shows what waits on the user: from every yesman, or, with a
+// scope, from one ({ yesman, hiredAt }), opened from where (from, an agent's
+// conversation to go back to).
+function showNeedsYou(focusKey = null, scope = null) {
+  state.view = scope?.yesman ? { kind: 'needs-you', yesman: scope.yesman, hiredAt: scope.hiredAt ?? '', from: scope.from ?? null } : { kind: 'needs-you' };
   state.request = null;
   render();
-  if (focusKey) ($(`#body [data-request="${CSS.escape(focusKey)}"]`) ?? $('#body .needs-you-page h1'))?.focus();
+  // The sidebar's entry keeps focus; going back to a request, or opening
+  // one yesman's, moves it to the page.
+  if (focusKey || scope?.yesman) ((focusKey && $(`#body [data-request="${CSS.escape(focusKey)}"]`)) || $('#body .needs-you-page h1'))?.focus();
+}
+
+// The yesman Needs you shows, while it is still the one it was opened for.
+function needsYouScope() {
+  const v = state.view;
+  if (v.kind !== 'needs-you' || !v.yesman) return null;
+  const y = state.snap.yesmen.find((y) => y.name === v.yesman);
+  return y && (y.hiredAt ?? '') === v.hiredAt ? y : null;
 }
 
 // Open a request where it was asked: its agent's conversation, with the
 // request found and focused there.
-function openRequest(item, back = state.view.kind === 'needs-you') {
+function openRequest(item, back = state.view.kind === 'needs-you' ? { yesman: state.view.yesman, hiredAt: state.view.hiredAt, from: state.view.from } : null) {
   if (!agentById(item.agent)) {
     toast(t('This request is no longer open.'));
     refreshSoon();
@@ -1044,23 +1057,35 @@ function openRequest(item, back = state.view.kind === 'needs-you') {
 }
 
 function renderNeedsYou(body) {
-  const items = needsYouItems(state.snap);
+  const v = state.view;
+  const scope = needsYouScope();
+  const inScope = (name) => !scope || name === scope.name;
+  const items = needsYouItems(state.snap).filter((item) => inScope(item.yesman));
   const inner = h('div', { class: 'page-inner needs-you-page' },
     h('h1', { class: 'mds-title', tabindex: '-1' }, t('Needs you')),
     h('p', { class: 'needs-you-intro' }, t('What your yesmen handed to you: their questions only you can answer, decisions, and steps only you can take. Open one to handle it in its conversation.')));
+  if (v.yesman) {
+    // Opened for one yesman: say which, or that it is gone, and offer all.
+    const from = v.from && agentById(v.from);
+    inner.append(h('div', { class: 'needs-you-scope', role: 'status' },
+      h('span', null, scope ? t('From {name} only', { name: yesmanLabel(scope.name) }) : t('{name} is no longer here; showing every yesman.', { name: v.yesman })),
+      scope ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => showNeedsYou() }, t('Show every yesman')) : null,
+      from ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => backToConversation(from.id) },
+        icon('arrowLeft'), t('Back to the conversation')) : null));
+  }
   for (const y of state.snap.yesmen) {
-    if (!y.handoffsError) continue;
+    if (!y.handoffsError || !inScope(y.name)) continue;
     inner.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
       h('strong', null, t('What {name} handed to you cannot be read', { name: y.displayName || y.name })), h('p', null, y.handoffsError))));
   }
   if (!items.length) {
     inner.append(h('div', { class: 'needs-you-empty', role: 'status' }, icon('check', 'mds-icon'),
-      h('p', null, t('Nothing needs you right now.')),
+      h('p', null, scope ? t('Nothing from {name} needs you right now.', { name: yesmanLabel(scope.name) }) : t('Nothing needs you right now.')),
       h('p', { class: 'needs-you-hint' }, t('When a yesman needs your answer, a decision or a step only you can take, it shows here.'))));
   } else {
     inner.append(h('ul', { class: 'needs-you-list', 'aria-label': t('Waiting for you') }, items.map((item) => h('li', null, requestCard(item)))));
   }
-  const closed = closedHandoffs(state.snap);
+  const closed = closedHandoffs(state.snap).filter(({ yesman }) => inScope(yesman));
   if (closed.length) {
     inner.append(h('details', { class: 'needs-you-history' },
       h('summary', null, t('Recently handled ({n})', { n: formatNumber(closed.length) })),
@@ -1074,7 +1099,7 @@ function renderNeedsYou(body) {
 
 function requestCard(item) {
   const text = requestSummary(item.summary);
-  return h('button', { class: 'needs-you-card', type: 'button', 'data-request': item.key, 'data-type': item.type, onclick: () => openRequest(item, true) },
+  return h('button', { class: 'needs-you-card', type: 'button', 'data-request': item.key, 'data-type': item.type, onclick: () => openRequest(item) },
     h('span', { class: 'needs-you-type' }, requestIcon(item), t(typeLabel(item))),
     h('span', { class: 'needs-you-title' }, requestWhat(item)),
     text ? h('span', { class: 'needs-you-summary' }, text) : null,
@@ -1151,20 +1176,27 @@ function locateRequest(dock, a) {
       r.pending = false;
       dock.prepend(h('div', { class: 'mds-notice needs-you-gone', role: 'status' }, h('div', null,
         h('p', null, t('This request is no longer open: it was answered, cancelled or timed out.')),
-        r.back ? backToNeedsYou(r.key) : null)));
+        r.back ? backToNeedsYou(r.key, r.back) : null)));
     }
     return;
   }
   target.classList.add('needs-you-target');
-  if (r.back) target.append(backToNeedsYou(r.key));
+  if (r.back) target.append(backToNeedsYou(r.key, r.back));
   if (!r.pending) return;
   r.pending = false;
   target.scrollIntoView({ block: 'nearest' });
   target.querySelector('input, textarea, button')?.focus({ preventScroll: true });
 }
 
-const backToNeedsYou = (key) => h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-back', type: 'button', onclick: () => showNeedsYou(key) },
+const backToNeedsYou = (key, scope) => h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-back', type: 'button', onclick: () => showNeedsYou(key, scope) },
   icon('arrowLeft'), t('Back to Needs you'));
+
+// backToConversation goes back to the conversation Needs you was opened
+// from, to the entry that opened it when the info panel shows.
+function backToConversation(id) {
+  selectAgent(id);
+  $('#yesman-info [data-info-entry="needs-you"]')?.focus();
+}
 
 // showToolCall finds the lead's tool call that registered a handoff in the
 // folded work log of its conversation, when the loaded history has it.
@@ -2802,6 +2834,12 @@ const info = createInfo({
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
+  // The same requests as Needs you shows, of this yesman only.
+  needsYou: (y) => ({
+    count: needsYouItems(state.snap).filter((item) => item.yesman === y.name).length,
+    error: state.snap.yesmen.find((v) => v.name === y.name)?.handoffsError ?? '',
+  }),
+  openNeedsYou: (y) => showNeedsYou(null, { yesman: y.name, hiredAt: y.hiredAt ?? '', from: state.view.kind === 'agent' ? state.view.id : null }),
   openWorktree: (dir, show) => files.openWorktree(dir, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
@@ -3011,7 +3049,10 @@ function onAgents(agents) {
   state.snap.agents = agents;
   pruneCaches();
   renderSidebar();
-  if (state.view.kind === 'needs-you' && needsYouItems(state.snap).map((item) => item.key).join() !== requests) renderBody();
+  if (needsYouItems(state.snap).map((item) => item.key).join() !== requests) {
+    if (state.view.kind === 'needs-you') renderBody();
+    info.render(); // its Needs you row counts them
+  }
   // The board links a task's owner while it is one of the agents.
   if (state.pane === 'board' && agents.map((a) => a.id).join() !== ids) board.render();
   piPage.onAgents();
