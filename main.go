@@ -15,12 +15,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/server"
 	"github.com/idy/yesman/internal/yesmen"
@@ -94,15 +96,33 @@ func main() {
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}
+	var schedules atomic.Pointer[schedule.Service]
 	a.agents = agent.New(agent.Config{
 		Pi:        a.pi,
 		Extension: extension,
 		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root},
 		Yesmen:    a.yesmen,
-		OnEvent:   func(e agent.Event) { _ = agentEvent.Broadcast(e) },
-		OnChange:  a.agentsChanged,
+		OnEvent: func(e agent.Event) {
+			_ = agentEvent.Broadcast(e)
+			if s := schedules.Load(); s != nil {
+				s.OnAgentEvent(e) // a scheduled run's receipt
+			}
+		},
+		OnChange: a.agentsChanged,
 	})
 	srv.Agents = a.agents
+	// Scheduled tasks run while the app runs, in the tray too; one app per
+	// data directory runs them.
+	a.schedules = schedule.New(schedule.Config{
+		Yesmen:       a.yesmen,
+		Agents:       a.agents,
+		LockPath:     filepath.Join(h.Runtime(), "schedules.lock"),
+		OnChange:     func(yesman string) { _ = schedulesEvent.Broadcast(yesman) },
+		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) },
+	})
+	schedules.Store(a.schedules)
+	srv.Schedules = a.schedules
+	a.schedules.Start()
 	a.catalog = newCatalog(func(ctx context.Context) ([]agent.Model, error) {
 		if a.piErr != nil {
 			return nil, a.piErr
@@ -125,7 +145,10 @@ func main() {
 	mygo.App.OnWindowAllClosed(func() {}) // keep running in the tray
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
-	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { a.agents.StopAll() })
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		a.schedules.Close() // no new run starts while the agents stop
+		a.agents.StopAll()
+	})
 	mygo.App.WhenReady(func() {
 		if err := mygo.App.Dock.SetIcon(appIcon); err != nil {
 			log.Print("dock icon: ", err)

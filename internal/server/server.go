@@ -23,6 +23,7 @@ import (
 	"github.com/idy/yesman/internal/crew"
 	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -46,6 +47,9 @@ type Server struct {
 	// Secrets and Variables, when set, are set in agents' commands.
 	Secrets   *secrets.Vault
 	Variables *secrets.Variables
+	// Schedules, when set, are the scheduled tasks a lead hears of and can
+	// list or, when the user asks it, draft.
+	Schedules Schedules
 
 	url           string
 	worktreeMu    sync.Mutex
@@ -86,7 +90,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/workers/answer", s.handle(s.answerWorker))
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
+	mux.HandleFunc("GET /v1/schedules", s.handle(s.schedules))
+	mux.HandleFunc("POST /v1/schedules/draft", s.handle(s.draftSchedule))
 	return mux
+}
+
+// Schedules is what a lead may do with the user's scheduled tasks: read
+// them, and draft one that stays off until the user turns it on.
+type Schedules interface {
+	LeadContext(yesman string) string
+	ListText(yesman string) (string, error)
+	Draft(yesman string, in schedule.PlanInput) (schedule.Plan, error)
 }
 
 // caller is the agent a request comes from.
@@ -466,7 +480,55 @@ func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, e
 	if c.agent.Role == agent.RoleLead && s.Crew != nil {
 		text += CrewContext(s.Crew(ctx), c.agent)
 	}
+	if c.agent.Role == agent.RoleLead && s.Schedules != nil {
+		text += s.Schedules.LeadContext(c.yesman.Name)
+	}
 	return text, nil
+}
+
+var errLeadSchedules = errors.New("only the yesman's lead reads or drafts scheduled tasks")
+
+// schedules lists the user's scheduled tasks and their recent runs.
+func (s *Server) schedules(_ context.Context, c caller, _ *http.Request) (any, error) {
+	if c.agent.Role != agent.RoleLead {
+		return nil, errLeadSchedules
+	}
+	if s.Schedules == nil {
+		return "Scheduled tasks are not available.", nil
+	}
+	return s.Schedules.ListText(c.yesman.Name)
+}
+
+// draftSchedule saves a plan the user asked the lead for. It is always
+// saved off: only the user turns a scheduled task on, in Tasks.
+func (s *Server) draftSchedule(_ context.Context, c caller, r *http.Request) (any, error) {
+	if c.agent.Role != agent.RoleLead {
+		return nil, errLeadSchedules
+	}
+	if s.Schedules == nil {
+		return nil, errors.New("scheduled tasks are not available")
+	}
+	var req struct {
+		Title        string `json:"title"`
+		Instructions string `json:"instructions"`
+		Kind         string `json:"kind"`
+		Date         string `json:"date"`
+		Time         string `json:"time"`
+		Days         []int  `json:"days"`
+		Every        int    `json:"every"`
+		Timezone     string `json:"timezone"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	p, err := s.Schedules.Draft(c.yesman.Name, schedule.PlanInput{
+		Title: req.Title, Instructions: req.Instructions, Timezone: req.Timezone,
+		Schedule: schedule.Spec{Kind: req.Kind, Date: req.Date, Time: req.Time, Days: req.Days, Every: req.Every},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return fmt.Sprintf("Drafted scheduled task %s %q: %s (%s). It is off: tell the user to review it and turn it on in Tasks when they want it to run.", p.ID, p.Title, p.Schedule.Describe(), p.Timezone), nil
 }
 
 const crewLimit = 40
@@ -697,6 +759,9 @@ func writeBoard(b *strings.Builder, board yesmen.Board) {
 		fmt.Fprintf(b, "- %s [%s] %s", t.ID, t.Status, oneLine(t.Title, 200))
 		if t.Owner != "" {
 			fmt.Fprintf(b, " (owner %s)", t.Owner)
+		}
+		if t.Schedule != nil {
+			fmt.Fprintf(b, " (a run of scheduled task %s)", t.Schedule.Plan)
 		}
 		if t.Note != "" {
 			fmt.Fprintf(b, ": %s", oneLine(t.Note, 160))

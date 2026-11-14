@@ -10,6 +10,7 @@ import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
 import { createInfo } from './info.js';
 import { createBoard } from './board.js';
+import { createSchedules } from './schedules.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
@@ -48,7 +49,7 @@ const state = {
   drafts: new Map(),
   attachments: new Map(),
   modelOptions: new Map(),
-  pane: null, // the pane beside the conversation: 'files', 'board' or null
+  pane: null, // the pane beside the conversation: 'files', 'board', 'tasks' or null
   hideDone: new Set(JSON.parse(localStorage.getItem('yesman.hideDone') ?? '[]')), // yesmen whose done workers are hidden
   // The info panel between the conversation and the files, open unless
   // closed, as it was last.
@@ -2338,6 +2339,9 @@ const info = createInfo({
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
+  openTasks: () => togglePane('tasks'),
+  tasksOpen: () => state.pane === 'tasks',
+  tasksSummary: (y) => schedules.summary(y),
   openWorktree: (dir, show) => files.openWorktree(dir, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
@@ -2363,6 +2367,35 @@ const board = createBoard({
   setOpen: (on) => setPane(on ? 'board' : state.pane === 'board' ? null : state.pane),
   agent: (id) => agentById(id),
   openAgent: (id) => selectAgent(id),
+  openPlan: (plan) => {
+    const y = selectedAgent() ? yesmanOf(selectedAgent().id) : null;
+    if (y) schedules.open(y.name, plan);
+  },
+});
+
+// ---------- Tasks pane ----------
+
+// Scheduled tasks share the place beside the conversation too.
+const schedules = createSchedules({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.pane === 'tasks',
+  setOpen: (on) => setPane(on ? 'tasks' : state.pane === 'tasks' ? null : state.pane),
+  openBoardTask: (id) => {
+    setPane('board');
+    board.reveal(id);
+  },
+  openLead: () => {
+    const a = selectedAgent();
+    if (a) selectAgent(`${a.yesman}/lead`);
+  },
+  openTaskLog: () => files.openTaskLog(),
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  changed: () => info.render(),
 });
 
 function setPane(pane) {
@@ -2378,6 +2411,8 @@ function togglePane(pane) {
 function renderInfo() {
   files.render();
   board.render();
+  schedules.render();
+  info.render();
 }
 
 async function openCheckout(y) {
@@ -2612,7 +2647,8 @@ async function start() {
   mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
-  mygo.on('board', (yesman) => board.onChange(yesman));
+  mygo.on('board', (yesman) => { board.onChange(yesman); schedules.onBoard(yesman); });
+  mygo.on('schedules', (yesman) => schedules.onChange(yesman));
   document.addEventListener('keydown', (e) => files.onKey(e));
   call('Update').then(onUpdate, () => {});
   mygo.on('focus-agent', (id) => {

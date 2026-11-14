@@ -15,17 +15,24 @@ import (
 // Therefore no receipt claims that its message was consumed. Native transcript
 // messages remain independent, including transformed inputs and identical text.
 type Delivery struct {
-	ID          string    `json:"id"`
-	Session     string    `json:"session"`
-	Revision    uint64    `json:"revision"`
-	State       string    `json:"state"`
-	Text        string    `json:"text"`
-	Images      []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
-	ImageCount  int       `json:"imageCount"`
-	Preview     bool      `json:"preview,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	Order       uint64    `json:"order"`
-	AgentSince  time.Time `json:"agentSince,omitzero"`
+	ID         string    `json:"id"`
+	Session    string    `json:"session"`
+	Revision   uint64    `json:"revision"`
+	State      string    `json:"state"`
+	Text       string    `json:"text"`
+	Images     []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
+	ImageCount int       `json:"imageCount"`
+	Preview    bool      `json:"preview,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	Order      uint64    `json:"order"`
+	AgentSince time.Time `json:"agentSince,omitzero"`
+	// Ack is how pi's answer accepted it (accepted, queued, steering or
+	// handled); empty until pi answered, or when it refused. It stays when
+	// the state later turns unconfirmed or interrupted.
+	Ack string `json:"ack,omitempty"`
+	// Origin marks a submission the app made for the user, such as a
+	// scheduled task; nil for what the user typed.
+	Origin      *Origin `json:"origin,omitempty"`
 	boundSeq    uint64
 	fingerprint string
 	created     int64
@@ -87,14 +94,17 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 // Submit registers a stable client ID before dispatch. Repeating an uncertain
 // bridge call returns its existing receipt and never sends the prompt twice.
 func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
-	return m.submit(ctx, id, messageID, text, images, "steer", expectedSince...)
+	return m.submit(ctx, id, messageID, text, images, "steer", nil, expectedSince...)
 }
-func (m *Manager) submit(ctx context.Context, id, messageID, text string, images []Image, behavior string, expectedSince ...time.Time) (Delivery, error) {
+func (m *Manager) submit(ctx context.Context, id, messageID, text string, images []Image, behavior string, origin *Origin, expectedSince ...time.Time) (Delivery, error) {
 	if err := ctx.Err(); err != nil {
 		return Delivery{}, err
 	}
 	if !deliveryID.MatchString(messageID) {
 		return Delivery{}, errors.New("invalid message ID")
+	}
+	if !origin.valid() {
+		return Delivery{}, errors.New("invalid submission origin")
 	}
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return Delivery{}, errors.New("empty message")
@@ -198,7 +208,7 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	}
 	preview, truncated := deliveryClip(text, maxDeliveryPreview)
 	a.deliveryOrder++
-	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, fingerprint: fingerprint, created: deliveryTimestamp(messageID)}
+	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, Origin: origin, fingerprint: fingerprint, created: deliveryTimestamp(messageID)}
 	a.deliveries[messageID] = d
 	ev := m.deliveryLocked(a, d)
 	registered := a.deliveryVersion
@@ -295,6 +305,19 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 		Disposition string `json:"disposition"`
 	}
 	_ = json.Unmarshal(r.Data, &data)
+	if r.Success {
+		// pi's answer is the one fact of acceptance a receipt has; a later
+		// settle or queue snapshot leaves it standing but proves nothing more.
+		d.Ack = "accepted"
+		switch {
+		case data.Disposition == "handled":
+			d.Ack = "handled"
+		case data.Disposition == "queued" && behavior == "followUp":
+			d.Ack = "queued"
+		case data.Disposition == "queued":
+			d.Ack = "steering"
+		}
+	}
 	switch {
 	case !r.Success:
 		d.State, d.Error = "failed", r.Error

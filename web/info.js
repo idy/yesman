@@ -21,6 +21,7 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   isOpen()               whether the panel shows
 //   files()                what the files pane shows (files.shown())
 //   openKnowledge(), openTaskLog(), openWorktree(dir, show), checkout(y)
+//   openTasks(), tasksOpen(), tasksSummary(y)   the Tasks pane and its summary
 //   openURL(url)
 export function createInfo(host) {
   const data = new Map(); // yesman name -> what was read of it
@@ -116,6 +117,7 @@ export function createInfo(host) {
     aside.replaceChildren(
       knowledge(y, d),
       taskLog(y),
+      tasks(y),
       storage(y, d),
       worktrees(y, d));
     aside.scrollTop = top;
@@ -155,6 +157,37 @@ export function createInfo(host) {
         title: t('Read task and PR history in the files pane') },
       h('span', { class: 'info-link-label' }, t('Task log')),
       icon('chevron', 'mds-icon info-chevron')));
+  }
+
+  // ---------- Tasks ----------
+
+  // Tasks: the yesman's scheduled tasks, how many are on and when the next
+  // one runs. They open in the place beside the conversation.
+  function tasks(y) {
+    const s = host.tasksSummary?.(y);
+    if (!s) return null;
+    let aside;
+    if (s.loading) aside = t('Loading…');
+    else if (s.error && s.total == null) aside = h('span', { class: 'danger', title: s.error }, t('can’t read'));
+    else if (!s.total) aside = t('None');
+    else if (!s.on) aside = t('All off');
+    else aside = s.next ? t('{n} on · next {when}', { n: formatNumber(s.on), when: nextWhen(s.next, s.zone) }) : t('{n} on', { n: formatNumber(s.on) });
+    const attention = s.attention ? h('span', { class: 'info-attention', title: tn(s.attention, '1 run needs a look', '{n} runs need a look') }, icon('alert'), h('span', { class: 'mds-visually-hidden' }, tn(s.attention, '1 run needs a look', '{n} runs need a look'))) : null;
+    return h('section', { class: 'info-section info-section--link' },
+      h('button', { class: 'info-link', type: 'button', 'aria-current': host.tasksOpen?.() ? 'page' : null, onclick: () => host.openTasks(),
+        title: t('Scheduled tasks: requests the lead gets at times you choose') },
+      h('span', { class: 'info-link-label' }, t('Tasks')),
+      icon('chevron', 'mds-icon info-chevron'),
+      h('span', { class: 'info-aside' }, attention, aside)));
+  }
+
+  // nextWhen says when the next run is, briefly: a time today, else a day.
+  function nextWhen(iso, zone) {
+    const d = new Date(iso);
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const opts = sameDay ? { hour: '2-digit', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+    return new Intl.DateTimeFormat(undefined, opts).format(d);
   }
 
   // ---------- Worktrees ----------

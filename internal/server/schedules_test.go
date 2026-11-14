@@ -1,0 +1,67 @@
+package server
+
+import (
+	"context"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/schedule"
+	"github.com/idy/yesman/internal/yesmen"
+)
+
+// Only a lead reads or drafts scheduled tasks; a draft is always off, and a
+// run's board task names its plan in the context.
+func TestSchedulesAreTheLeadsAndDraftsStayOff(t *testing.T) {
+	tmp := t.TempDir()
+	store := yesmen.New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
+	y, err := store.Hire("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := agent.New(agent.Config{Yesmen: store})
+	defer m.StopAll()
+	svc := schedule.New(schedule.Config{Yesmen: store, Agents: m})
+	defer svc.Close()
+	s := &Server{Pool: pool.New(filepath.Join(tmp, "repos")), Yesmen: store, Agents: m, Schedules: svc}
+	lead := caller{agent: agent.Info{ID: "alice/lead", Yesman: "alice", Name: "lead", Role: agent.RoleLead}, yesman: y}
+	worker := caller{agent: agent.Info{ID: "alice/w1", Yesman: "alice", Name: "w1", Role: agent.RoleWorker}, yesman: y}
+	ctx := context.Background()
+	draft := `{"title":"Morning check","instructions":"Check overnight CI.","kind":"daily","time":"09:00","timezone":"Asia/Shanghai"}`
+
+	if _, err := s.draftSchedule(ctx, worker, httptest.NewRequest("POST", "/v1/schedules/draft", strings.NewReader(draft))); err == nil {
+		t.Fatal("a worker drafted a scheduled task")
+	}
+	if _, err := s.schedules(ctx, worker, httptest.NewRequest("GET", "/v1/schedules", nil)); err == nil {
+		t.Fatal("a worker listed scheduled tasks")
+	}
+	out, err := s.draftSchedule(ctx, lead, httptest.NewRequest("POST", "/v1/schedules/draft", strings.NewReader(`{"title":"Morning check","instructions":"Check overnight CI.","kind":"daily","time":"09:00","timezone":"Asia/Shanghai","enabled":true}`)))
+	if err != nil || !strings.Contains(out.(string), "It is off") {
+		t.Fatalf("draft: %v %v", out, err)
+	}
+	v, err := svc.View("alice")
+	if err != nil || len(v.Plans) != 1 || v.Plans[0].Enabled || v.Plans[0].CreatedBy != "lead" {
+		t.Fatalf("view: %+v %v", v, err)
+	}
+	list, err := s.schedules(ctx, lead, httptest.NewRequest("GET", "/v1/schedules", nil))
+	if err != nil || !strings.Contains(list.(string), `s1 "Morning check": every day at 09:00 (Asia/Shanghai), off, drafted by you`) {
+		t.Fatalf("list: %v %v", list, err)
+	}
+	if _, err := s.draftSchedule(ctx, lead, httptest.NewRequest("POST", "/v1/schedules/draft", strings.NewReader(`{"title":"Bad","instructions":"x","kind":"daily","time":"9","timezone":"Asia/Shanghai"}`))); err == nil {
+		t.Fatal("an invalid draft was saved")
+	}
+
+	if _, _, err := store.AddScheduledTask("alice", yesmen.TaskSchedule{Plan: "s1", Run: "s1-m-0123456789abcdef"}, "Morning check", "detail"); err != nil {
+		t.Fatal(err)
+	}
+	board, _ := store.Board("alice")
+	text := BuildContext(ctx, s.Pool, m, y, lead.agent, board) + svc.LeadContext("alice")
+	for _, want := range []string{"- t1 [todo] Morning check (a run of scheduled task s1)", "## Scheduled tasks", "Never draft one on your own", `- s1 "Morning check": every day at 09:00 (Asia/Shanghai), off`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the lead's context lacks %q:\n%s", want, text)
+		}
+	}
+}

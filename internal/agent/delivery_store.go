@@ -289,13 +289,18 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 	}
 	for _, stored := range disk.Records {
 		d := stored.Delivery
-		if !deliveryID.MatchString(d.ID) || len(stored.Fingerprint) != 64 || d.ImageCount < 0 || d.ImageCount > 4 {
+		if !deliveryID.MatchString(d.ID) || len(stored.Fingerprint) != 64 || d.ImageCount < 0 || d.ImageCount > 4 || !d.Origin.valid() {
 			return nil, 0, errors.New("invalid delivery metadata")
 		}
 		switch d.State {
 		case "sending", "accepted", "steering", "queued", "unconfirmed", "failed", "interrupted", "handled":
 		default:
 			return nil, 0, errors.New("invalid delivery state")
+		}
+		switch d.Ack {
+		case "", "accepted", "steering", "queued", "handled":
+		default:
+			return nil, 0, errors.New("invalid delivery acknowledgment")
 		}
 		if _, err := hex.DecodeString(stored.Fingerprint); err != nil {
 			return nil, 0, errors.New("invalid delivery fingerprint")

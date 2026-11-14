@@ -83,6 +83,11 @@ export const ICONS = Object.freeze({
   circle: '\ue18a', // circle
   record: '\ue3ee', // record
   pencil: '\ue3b4', // pencil-simple
+  clock: '\ue19a', // clock
+  play: '\ue3d0', // play
+  archive: '\ue00c', // archive
+  history: '\ue1a0', // clock-counter-clockwise
+  calendar: '\ue108', // calendar
 });
 
 export function icon(name, cls = 'mds-icon') {

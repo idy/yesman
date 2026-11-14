@@ -13,6 +13,7 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/server"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -111,6 +112,11 @@ func (s *service) Dismiss(name string) (string, error) {
 	var archivedSince time.Time
 	dest, err := a.yesmen.Archive(name, func(y yesmen.Yesman) error {
 		archivedSince = y.HiredAt
+		// No scheduled run starts for it from now; one on its way finds the
+		// workspace gone and writes nothing into the archive.
+		if a.schedules != nil {
+			a.schedules.RetireYesman(name, y.HiredAt)
+		}
 		if err := a.agents.StopYesmanContext(ctx, name); err != nil {
 			return err
 		}
@@ -211,6 +217,77 @@ func (s *service) Checkout(yesman string, req server.CheckoutRequest) (pool.Work
 		s.app.notifyChanged()
 	}
 	return wt, err
+}
+
+// Schedules returns a yesman's scheduled tasks (Tasks) and their runs.
+func (s *service) Schedules(yesman string) (schedule.View, error) {
+	return s.app.schedules.View(yesman)
+}
+
+// ScheduleSummary is what the info panel shows of a yesman's Tasks.
+func (s *service) ScheduleSummary(yesman string) (schedule.Summary, error) {
+	return s.app.schedules.Summarize(yesman)
+}
+
+// ScheduleSave is the outcome of saving a plan: the plan, or the field the
+// form should mark, or a conflict with a newer version.
+type ScheduleSave struct {
+	Plan     *schedule.Plan `json:"plan,omitempty"`
+	Field    string         `json:"field,omitempty"`
+	Error    string         `json:"error,omitempty"`
+	Conflict bool           `json:"conflict,omitempty"`
+}
+
+// SaveSchedule creates a plan, or changes the one at the revision given.
+// Saving it on is the user's authorization to send its request at its times.
+func (s *service) SaveSchedule(yesman string, in schedule.PlanInput) (ScheduleSave, error) {
+	p, err := s.app.schedules.Save(yesman, in)
+	var fe *schedule.FieldError
+	switch {
+	case errors.As(err, &fe):
+		return ScheduleSave{Field: fe.Field, Error: fe.Message}, nil
+	case errors.Is(err, schedule.ErrConflict):
+		return ScheduleSave{Conflict: true, Error: err.Error()}, nil
+	case err != nil:
+		return ScheduleSave{}, err
+	}
+	return ScheduleSave{Plan: &p}, nil
+}
+
+// SetScheduleEnabled turns a plan on or off. Off stops future runs only.
+func (s *service) SetScheduleEnabled(yesman, id string, enabled bool, revision int) (ScheduleSave, error) {
+	p, err := s.app.schedules.SetEnabled(yesman, id, enabled, revision)
+	var fe *schedule.FieldError
+	switch {
+	case errors.As(err, &fe):
+		return ScheduleSave{Field: fe.Field, Error: fe.Message}, nil
+	case errors.Is(err, schedule.ErrConflict):
+		return ScheduleSave{Conflict: true, Error: err.Error()}, nil
+	case err != nil:
+		return ScheduleSave{}, err
+	}
+	return ScheduleSave{Plan: &p}, nil
+}
+
+// ArchiveSchedule puts a plan away, keeping its history.
+func (s *service) ArchiveSchedule(yesman, id string, revision int) error {
+	return s.app.schedules.Archive(yesman, id, revision)
+}
+
+// RunSchedule runs a plan now, or catches up a missed run (from). requestID
+// names the click, so a repeated request returns the same run.
+func (s *service) RunSchedule(yesman, id, requestID, from string) (schedule.Run, error) {
+	return s.app.schedules.RunNow(yesman, id, requestID, from)
+}
+
+// RetryScheduleRun sends again a run that was definitely not sent.
+func (s *service) RetryScheduleRun(yesman, runID string) (schedule.Run, error) {
+	return s.app.schedules.Retry(yesman, runID)
+}
+
+// CheckScheduleRun reads a run's delivery receipt again, sending nothing.
+func (s *service) CheckScheduleRun(yesman, runID string) (schedule.Run, error) {
+	return s.app.schedules.Check(yesman, runID)
 }
 
 // Board returns a yesman's task board, which its agents keep.

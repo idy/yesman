@@ -40,6 +40,15 @@ type Task struct {
 	Note      string    `json:"note,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+	// Schedule links a task that tracks one run of a scheduled task to it.
+	// Only the scheduler sets it; board changes keep it as it is.
+	Schedule *TaskSchedule `json:"schedule,omitempty"`
+}
+
+// TaskSchedule names the scheduled task (plan) and run a board task tracks.
+type TaskSchedule struct {
+	Plan string `json:"plan"`
+	Run  string `json:"run"`
 }
 
 // Open reports whether the task still needs work.
@@ -126,6 +135,46 @@ func (s *Store) ChangeBoard(name string, c BoardChange) (Board, error) {
 		return Board{}, err
 	}
 	return b, nil
+}
+
+// AddScheduledTask adds the board task that tracks a run of a scheduled
+// task, or returns the one added for that run before, so that a run retried
+// or recovered after a crash never gets a second task. added reports whether
+// this call added it.
+func (s *Store) AddScheduledTask(name string, link TaskSchedule, title, detail string) (task Task, added bool, err error) {
+	if link.Plan == "" || link.Run == "" {
+		return Task{}, false, errors.New("a scheduled task's board task needs its plan and run")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.board(name)
+	if err != nil {
+		return Task{}, false, err
+	}
+	for _, t := range b.Tasks {
+		if t.Schedule != nil && t.Schedule.Run == link.Run {
+			return t, false, nil
+		}
+	}
+	title = clipRunes(strings.Join(strings.Fields(title), " "), maxTitleLen)
+	detail = clipRunes(detail, maxDetailLen)
+	if err := b.apply(BoardChange{Add: []TaskEdit{{Title: &title, Detail: &detail}}}, time.Now().UTC()); err != nil {
+		return Task{}, false, err
+	}
+	i := len(b.Tasks) - 1
+	b.Tasks[i].Schedule = &TaskSchedule{Plan: link.Plan, Run: link.Run}
+	y, _ := s.Get(name)
+	if err := writeJSON(y.BoardFile(), b); err != nil {
+		return Task{}, false, err
+	}
+	return b.Tasks[i], true, nil
+}
+
+func clipRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
 }
 
 // TaskID reads the ID of a task as agents may write it: t3, T3, #3 or 3.

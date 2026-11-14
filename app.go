@@ -13,6 +13,7 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/home"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -35,6 +36,9 @@ var (
 	fetchesEvent = mygo.NewEvent[FetchState]("fetches")
 	// boardEvent names a yesman whose board changed.
 	boardEvent = mygo.NewEvent[string]("board")
+	// schedulesEvent names a yesman whose scheduled tasks or their runs
+	// changed.
+	schedulesEvent = mygo.NewEvent[string]("schedules")
 	// piJobsEvent carries the changes to pi's packages under way, whenever
 	// one starts, finishes or fails.
 	piJobsEvent = mygo.NewEvent[PiJobs]("pi-packages")
@@ -47,8 +51,10 @@ type app struct {
 	fetcher *fetcher
 	yesmen  *yesmen.Store
 	agents  *agent.Manager
-	pi      string
-	piErr   error
+	// schedules runs the scheduled tasks (Tasks) while the app runs.
+	schedules *schedule.Service
+	pi        string
+	piErr     error
 	// runPi runs a pi command for the user, outside any workspace.
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs

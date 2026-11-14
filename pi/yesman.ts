@@ -2,8 +2,8 @@
 // (`pi -e`), with the address of its local API in the environment.
 //
 // It gives the agent its yesman's context before every run (workspace,
-// worktrees, the repo pool, Knowledge, the task-log path, the board and other
-// agents)
+// worktrees, the repo pool, Knowledge, the task-log path, the board, other
+// agents and, for a lead, the scheduled tasks)
 // and tools to check repositories out of the pool, keep the board and, for
 // a lead, to run workers. Its shell tool sets the user's secrets and
 // variables in every command, asking the app for them each time, and what
@@ -169,6 +169,7 @@ function boardText(board: any): string {
 	const line = (t: any) => {
 		let s = `- ${t.id} [${t.status}] ${t.title}`;
 		if (t.owner) s += ` (owner ${t.owner})`;
+		if (t.schedule?.plan) s += ` (a run of scheduled task ${t.schedule.plan})`;
 		if (t.note) s += `\n  note: ${String(t.note).replace(/\n/g, "\n  ")}`;
 		if (t.detail) s += `\n  detail: ${String(t.detail).replace(/\n/g, "\n  ")}`;
 		return s;
@@ -455,6 +456,34 @@ export default function yesman(pi: ExtensionAPI) {
 		async execute(_id, params, signal) {
 			await call("POST", "/v1/workers/answer", params, signal);
 			return result(`Answered ${params.name}.`);
+		},
+	});
+
+	pi.registerTool({
+		name: "yesman_schedules",
+		label: "yesman: scheduled tasks",
+		description:
+			"List this yesman's scheduled tasks: requests the user saved in Tasks that come due at their times, with their recent runs and board tasks. A due run reaches you by itself as a [yesman] Scheduled task message naming its board task. Only when the user explicitly asks you to schedule something, give draft to save it as a plan; it is saved turned off, and runs only once the user reviews it and turns it on in Tasks. Never draft one on your own initiative, or to get work done now.",
+		parameters: Type.Object({
+			draft: Type.Optional(
+				Type.Object(
+					{
+						title: Type.String({ description: "A short title, up to 120 characters" }),
+						instructions: Type.String({ description: "What to ask each time, in the user's words, up to 4000 characters" }),
+						kind: Type.String({ description: "once, daily, weekly or interval" }),
+						date: Type.Optional(Type.String({ description: "once: the date, YYYY-MM-DD" })),
+						time: Type.Optional(Type.String({ description: "once, daily, weekly: the time, HH:MM, 24-hour, in timezone" })),
+						days: Type.Optional(Type.Array(Type.Integer(), { description: "weekly: days, 0 Sunday to 6 Saturday" })),
+						every: Type.Optional(Type.Integer({ description: "interval: minutes, 15 to 10080" })),
+						timezone: Type.String({ description: "The IANA time zone the user means, such as Asia/Shanghai; ask if unclear" }),
+					},
+					{ description: "A plan the user asked for, saved turned off for them to review" },
+				),
+			),
+		}),
+		async execute(_id, params, signal) {
+			const text = params.draft ? await call("POST", "/v1/schedules/draft", params.draft, signal) : await call("GET", "/v1/schedules", undefined, signal);
+			return result(String(text));
 		},
 	});
 
