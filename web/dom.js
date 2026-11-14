@@ -86,6 +86,8 @@ export const ICONS = Object.freeze({
   clock: '\ue19a', // clock
   play: '\ue3d0', // play
   archive: '\ue00c', // archive
+  keyboard: '\ue2d8', // keyboard
+  chart: '\ue150', // chart-bar
 });
 
 export function icon(name, cls = 'mds-icon') {

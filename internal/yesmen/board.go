@@ -43,6 +43,12 @@ type Task struct {
 	// Schedule links a task that tracks one run of a scheduled task to it.
 	// Only the scheduler sets it; board changes keep it as it is.
 	Schedule *TaskSchedule `json:"schedule,omitempty"`
+	// DoneAt is when the task was last marked done, and DoneOwner the agent
+	// that owned it then, for counting tasks done by model. Both are kept
+	// while it stays done and cleared when it is reopened or dropped. Tasks
+	// done before yesman recorded this have neither.
+	DoneAt    time.Time `json:"doneAt,omitzero"`
+	DoneOwner string    `json:"doneOwner,omitempty"`
 }
 
 // TaskSchedule names the scheduled task (plan) and run a board task tracks.
@@ -192,7 +198,9 @@ func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task
 			return b.Tasks[i], false, fmt.Errorf("status %q is not one of %s", t.Status, strings.Join(TaskStatuses, ", "))
 		}
 		t.Schedule = b.Tasks[i].Schedule
-		t.UpdatedAt = time.Now().UTC()
+		now := time.Now().UTC()
+		markDone(&t, b.Tasks[i].Status == TaskDone, now)
+		t.UpdatedAt = now
 		b.Tasks[i] = t
 		y, _ := s.Get(name)
 		if err := writeJSON(y.BoardFile(), b); err != nil {
@@ -235,10 +243,12 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 			return fmt.Errorf("no task %q", e.ID)
 		}
 		t := work.Tasks[i]
+		wasDone := t.Status == TaskDone
 		if err := edit(&t, e); err != nil {
 			return fmt.Errorf("task %s: %w", t.ID, err)
 		}
 		t.UpdatedAt = now
+		markDone(&t, wasDone, now)
 		work.Tasks[i] = t
 	}
 	for _, id := range c.Remove {
@@ -260,6 +270,7 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 		if err := edit(&t, e); err != nil {
 			return fmt.Errorf("new task %q: %w", *e.Title, err)
 		}
+		markDone(&t, false, now)
 		work.Tasks = append(work.Tasks, t)
 	}
 	if len(work.Tasks) > maxTasks {
@@ -288,6 +299,19 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 	}
 	*b = work
 	return nil
+}
+
+// markDone records when a task became done and who owned it then, and
+// forgets both once it is not done. A task that stays done keeps them,
+// even when its owner changes; one done before they were recorded is not
+// given a time it was not done at.
+func markDone(t *Task, wasDone bool, now time.Time) {
+	switch {
+	case t.Status != TaskDone:
+		t.DoneAt, t.DoneOwner = time.Time{}, ""
+	case !wasDone:
+		t.DoneAt, t.DoneOwner = now, t.Owner
+	}
 }
 
 func edit(t *Task, e TaskEdit) error {
