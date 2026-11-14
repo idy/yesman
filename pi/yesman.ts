@@ -193,6 +193,19 @@ function topicText(t: any): string {
 	return lines.join("\n");
 }
 
+// What a tool result keeps of a topic: its content, not the app's records of
+// submissions (their IDs and receipts are not for the model or other hooks).
+function topicDetails(t: any) {
+	if (!t || typeof t !== "object") return t;
+	const items = (list: any[]) => (list ?? []).map((i) => ({ id: i.id, text: i.text }));
+	return {
+		id: t.id, title: t.title, status: t.status, summary: t.summary ?? "", revision: t.revision, updatedAt: t.updatedAt, updatedBy: t.updatedBy,
+		conclusions: items(t.conclusions), questions: items(t.questions),
+		sources: (t.sources ?? []).map((s: any) => ({ id: s.id, kind: s.kind, ref: s.ref, agent: s.agent, role: s.role, label: s.label })),
+		sendCount: Array.isArray(t.sends) ? t.sends.length : 0,
+	};
+}
+
 function topicIndex(topics: any[]): string {
 	if (!topics.length) return "No topics yet.";
 	return topics.map((t) => `- ${t.id} [${t.status}] ${t.title} (revision ${t.revision}${t.questions?.length ? `, ${t.questions.length} open question${t.questions.length === 1 ? "" : "s"}` : ""})`).join("\n");
@@ -456,24 +469,24 @@ export default function yesman(pi: ExtensionAPI) {
 			const action = (params.action ?? (params.id ? (params.revision === undefined ? "read" : "update") : "list")).toLowerCase();
 			if (action === "list") {
 				const r = await call("GET", "/v1/topics", undefined, signal);
-				return result(topicIndex(r.topics ?? []), r);
+				return result(topicIndex(r.topics ?? []), { topics: (r.topics ?? []).map(topicDetails) });
 			}
 			if (action === "read") {
 				if (!params.id) throw new Error("read needs id");
 				const t = await call("GET", `/v1/topics?id=${encodeURIComponent(params.id)}`, undefined, signal);
-				return result(topicText(t), t);
+				return result(topicText(t), topicDetails(t));
 			}
 			const { action: _a, id, revision, ...fields } = params as any;
 			const set = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined && !(Array.isArray(v) && !v.length)));
 			if (action === "create") {
 				const create = { title: set.title ?? "", summary: set.summary, status: set.status, conclusions: set.addConclusions, questions: set.addQuestions, sources: set.addSources };
 				const t = await call("POST", "/v1/topics", { create }, signal);
-				return result(`Created ${t.id}.\n\n${topicText(t)}`, t);
+				return result(`Created ${t.id}.\n\n${topicText(t)}`, topicDetails(t));
 			}
 			if (action === "update") {
 				if (!id || typeof revision !== "number") throw new Error("update needs id and the revision you read");
 				const t = await call("POST", "/v1/topics", { id, patch: { revision, ...set } }, signal);
-				return result(`Saved ${t.id} at revision ${t.revision}.\n\n${topicText(t)}`, t);
+				return result(`Saved ${t.id} at revision ${t.revision}.\n\n${topicText(t)}`, topicDetails(t));
 			}
 			throw new Error(`unknown action ${action}: use list, read, create or update`);
 		},

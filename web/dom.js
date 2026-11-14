@@ -83,6 +83,10 @@ export const ICONS = Object.freeze({
   circle: '\ue18a', // circle
   record: '\ue3ee', // record
   pencil: '\ue3b4', // pencil-simple
+  topics: '\ue17e', // chats-circle
+  archive: '\ue00c', // archive
+  undo: '\ue038', // arrow-counter-clockwise
+  question: '\ue3e8', // question
 });
 
 export function icon(name, cls = 'mds-icon') {

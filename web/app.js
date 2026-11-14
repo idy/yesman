@@ -17,6 +17,8 @@ import { createCrew } from './crew.js';
 import { createEnvPage } from './env.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
+import { DELIVERY_LABELS, newSubmissionID, sameSubmissionImages, parseTopicMarker } from './submission.js';
+import { createTopics } from './topics.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, formatNumber, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
@@ -48,7 +50,7 @@ const state = {
   drafts: new Map(),
   attachments: new Map(),
   modelOptions: new Map(),
-  pane: null, // the pane beside the conversation: 'files', 'board' or null
+  pane: null, // the pane beside the conversation: 'files', 'board', 'topics' or null
   hideDone: new Set(JSON.parse(localStorage.getItem('yesman.hideDone') ?? '[]')), // yesmen whose done workers are hidden
   // The info panel between the conversation and the files, open unless
   // closed, as it was last.
@@ -119,12 +121,6 @@ function pruneCaches() {
 // progress keeps streaming and none shows twice.
 const messageKey = (m) => `${m?.role}:${m?.timestamp}`;
 
-const DELIVERY_LABELS = {
-  sending: 'Sending…', accepted: 'Accepted · delivery unconfirmed',
-  steering: 'Accepted for steering · delivery unconfirmed', queued: 'Accepted for follow-up · delivery unconfirmed',
-  unconfirmed: 'Delivery unconfirmed', failed: 'Not sent', interrupted: 'Delivery interrupted',
-  handled: 'Handled by an extension',
-};
 
 function pruneDeliveryRows(c, ids) {
   for (const id of ids ?? []) {
@@ -359,6 +355,18 @@ function messageEl(c, m) {
       const notice = text.match(/^\[yesman\] ([\s\S]*)$/);
       if (notice) return h('div', { class: 'note note--quiet' }, h('div', { class: 'md', html: renderMarkdown(notice[1]) }));
       const images = Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image' && imageURL(b)) : [];
+      // A message sent from a topic begins with a visible line naming it.
+      const marker = parseTopicMarker(text);
+      if (marker) {
+        const y = yesmanOf(c.id);
+        const title = (y && topics.title(y, marker.id)) || marker.title;
+        return h('div', { class: 'msg-user msg-user--topic' },
+          h('button', { class: 'topic-chip', type: 'button', title: t('Open topic {id}', { id: marker.id }),
+            onclick: () => y && topics.open(y, marker.id) }, icon('topics', 'mds-icon topic-chip-mark'), h('span', null, t('Topic {id}', { id: marker.id })), h('span', { class: 'topic-chip-title' }, title)),
+          marker.rest ? h('div', { class: 'msg-user-text' }, marker.rest) : null,
+          images.length ? h('div', { class: 'message-images' }, images.map((image) =>
+            h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
+      }
       return h('div', { class: 'msg-user' }, text,
         images.length ? h('div', { class: 'message-images' }, images.map((image) =>
           h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
@@ -420,7 +428,9 @@ function renderThread() {
   } else {
     for (const m of c.messages) {
       const el = messageEl(c, m);
-      if (el) thread.append(el);
+      if (!el) continue;
+      if ((m.role === 'user' || m.role === 'assistant') && m.timestamp) el.dataset.msgKey = messageKey(m);
+      thread.append(el);
     }
     if (c.live) {
       // Rebuild the streaming message: deltas that arrived while another
@@ -526,6 +536,7 @@ function onAgentEvent(ev) {
   }
   if (e.type === 'delivery_update' || e.type === 'delivery_retained') {
     applyDeliveryReceipt(c,e,ev.seq);
+    if (state.pane === 'topics' && agent?.role === 'lead') topics.rerender();
     if (state.view.kind === 'agent' && state.view.id === c.id) {
       const scroller = $('#scroll');
       if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
@@ -842,6 +853,7 @@ function renderBarActions() {
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
     a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }) : null,
     a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }) : null,
+    a ? button('topics', state.pane === 'topics' ? t('Hide the topics') : t('Show the topics'), () => togglePane('topics'), { 'aria-pressed': String(state.pane === 'topics') }) : null,
     a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }) : null,
   ].filter(Boolean));
 }
@@ -1172,9 +1184,6 @@ function renderDock({ focusComposer = false } = {}) {
   }
 }
 
-const sameSubmissionImages = (left, right) => left.length === right.length && left.every((image, i) =>
-  image.type === right[i].type && image.mimeType === right[i].mimeType && image.data === right[i].data);
-
 async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
@@ -1191,7 +1200,7 @@ async function sendMessage(a, textarea, submitter = null) {
       attachments.submission = null;
     }
   }
-  const messageID = attachments.submissionID ?? Date.now().toString(16).padStart(12, '0') + [...crypto.getRandomValues(new Uint8Array(18))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const messageID = attachments.submissionID ?? newSubmissionID();
   {
     attachments.submissionID = messageID;
     attachments.submission ??= { text, images };
@@ -2338,6 +2347,9 @@ const info = createInfo({
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
+  pane: () => state.pane,
+  openBoard: () => setPane('board'),
+  openTopics: () => setPane('topics'),
   openWorktree: (dir, show) => files.openWorktree(dir, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
@@ -2365,6 +2377,78 @@ const board = createBoard({
   openAgent: (id) => selectAgent(id),
 });
 
+// ---------- Topics pane ----------
+
+// The topics share the place beside the conversation with the board and the
+// files. A topic's messages go to its yesman's lead, into its conversation.
+const leadOf = (y) => y && agentById(`${y.name}/lead`);
+const topics = createTopics({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.pane === 'topics',
+  setOpen: (on) => setPane(on ? 'topics' : state.pane === 'topics' ? null : state.pane),
+  lead: (y) => leadOf(y),
+  leadConvo: (y) => {
+    const lead = leadOf(y);
+    const c = lead && state.convos.get(keyOf(lead));
+    return c?.loaded ? c : null;
+  },
+  openLead: (y) => { const lead = leadOf(y); if (lead) selectAgent(lead.id); },
+  showMessage: (y, source) => showMessage(y, source),
+  agent: (id) => agentById(id),
+  openAgent: (id) => selectAgent(id),
+  openBoard: () => setPane('board'),
+  openKnowledge: (path) => {
+    const y = selectedAgent() && yesmanOf(selectedAgent().id);
+    if (path && y && files.openPath(`${y.path}/.yesman/knowledge/${path}`)) return;
+    files.openKnowledge();
+  },
+  openURL: (url) => call('OpenURL', url).catch(fail),
+  track: (y, id, text, imageCount) => {
+    const lead = leadOf(y);
+    if (!lead) return;
+    const c = convo(lead);
+    if (!c.deliveries.has(id)) {
+      const preview = Array.from(text).slice(0, 128).join('');
+      c.deliveries.set(id, { id, revision: 0, state: 'sending', text: preview, imageCount, preview: preview !== text });
+    }
+    if (c.loaded) refreshDelivery(c, c.deliveries.get(id));
+  },
+  receipt: (y, d, id) => {
+    const lead = leadOf(y);
+    if (!lead) return;
+    const c = convo(lead);
+    if (d) updateDelivery(c, d);
+    else if (id && c.deliveries.get(id)?.revision === 0) c.deliveries.get(id).state = 'unconfirmed';
+    if (c.loaded) refreshDelivery(c, c.deliveries.get(d?.id ?? id));
+  },
+});
+
+// showMessage shows one message of a yesman's lead conversation, found by
+// its exact role and pi timestamp, and says whether it did.
+async function showMessage(y, source) {
+  const lead = leadOf(y);
+  if (!lead || (source.agent && source.agent !== 'lead')) return 'other';
+  if (source.since && lead.since && source.since !== lead.since) return 'other';
+  selectAgent(lead.id);
+  const c = convo(lead);
+  await c.loading;
+  const key = `${source.role}:${source.timestamp}`;
+  const matches = c.messages.filter((m) => messageKey(m) === key).length;
+  if (matches !== 1) return matches ? 'ambiguous' : 'missing';
+  const el = $(`#thread [data-msg-key="${CSS.escape(key)}"]`);
+  if (!el) return 'missing';
+  $('#scroll') && ($('#scroll').dataset.stick = 'false');
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('msg-found');
+  setTimeout(() => el.classList.remove('msg-found'), 2400);
+  return 'shown';
+}
+
 function setPane(pane) {
   state.pane = pane;
   renderInfo();
@@ -2378,6 +2462,8 @@ function togglePane(pane) {
 function renderInfo() {
   files.render();
   board.render();
+  topics.render();
+  info.render();
 }
 
 async function openCheckout(y) {
@@ -2612,7 +2698,8 @@ async function start() {
   mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
-  mygo.on('board', (yesman) => board.onChange(yesman));
+  mygo.on('board', (yesman) => { board.onChange(yesman); info.onBoard?.(yesman); });
+  mygo.on('topics', (yesman) => { topics.onChange(yesman); info.onBoard?.(yesman); });
   document.addEventListener('keydown', (e) => files.onKey(e));
   call('Update').then(onUpdate, () => {});
   mygo.on('focus-agent', (id) => {
