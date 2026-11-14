@@ -164,6 +164,16 @@ go test ./...
 node --test scripts/*.test.mjs
 ```
 
+The delivery check uses your installed pi with isolated configuration and a local deterministic provider, without calling a real model:
+
+```bash
+node scripts/check-delivery-pi.mjs
+```
+
+Submission receipts retain metadata only: a 512-byte text preview, image count, bounded error/session fields, and a private payload fingerprint. Each agent keeps at most 256 records in a 2 MiB file, with at most 64 active submissions. Terminal records expire after 24 hours on access. Pending records remain until a real status boundary; reaching the active limit rejects new submissions without changing pi's queue. Timestamped IDs and a persisted eviction watermark reject unknown expired/evicted retries rather than dispatch them again. Initial registration is durable before RPC dispatch; later states use one coalescing background writer per agent. Workspace use remains leased through initialization and durable registration, then releases before the RPC wait. Dismissal stops processes, seals final receipt state, and joins every writer before renaming; failed drains leave the original workspace in place. Same-name hires use a fresh generation, and old callbacks cannot restart or write into it. Legacy image-bearing files are compacted outside the manager lock, with a 32 MiB migration read limit that fails closed without overwriting an oversized file.
+
+With Playwright and its Chromium/WebKit browsers installed, `node scripts/check-delivery-browser.mjs` checks the production page against a controlled bridge. If Playwright is installed elsewhere, set `YESMAN_TEST_PLAYWRIGHT_MODULE` to its absolute `index.mjs` path.
+
 The optional browser checks for renaming use synthetic data with the full page in Chromium and WebKit. Install Playwright and its browsers outside the repository, then run `YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs node scripts/rename-browser.mjs`.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) vets, builds and tests on Linux, macOS and Windows for every pull request and every push to `main`. It does not start the app's window or real pi agents.

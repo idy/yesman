@@ -82,6 +82,13 @@ class Convo {
     this.error = null;
     this.live = null; // { message, el, blocks: Map(index -> el) }
     this.tools = new Map(); // toolCallId -> { args, status, result }
+    this.deliveries = new Map(); // message ID -> server receipt (or local Sending only)
+    this.seq = 0;
+    this.eventSeqs = new Set();
+    this.piQueue = { known: false };
+    this.queueSeq = 0;
+    this.receiptSetSeq = 0;
+    this.retainedDeliveryIDs = null;
   }
 }
 
@@ -112,11 +119,116 @@ function pruneCaches() {
 // progress keeps streaming and none shows twice.
 const messageKey = (m) => `${m?.role}:${m?.timestamp}`;
 
+const DELIVERY_LABELS = {
+  sending: 'Sending…', accepted: 'Accepted · delivery unconfirmed',
+  steering: 'Accepted for steering · delivery unconfirmed', queued: 'Accepted for follow-up · delivery unconfirmed',
+  unconfirmed: 'Delivery unconfirmed', failed: 'Not sent', interrupted: 'Delivery interrupted',
+  handled: 'Handled by an extension',
+};
+
+function pruneDeliveryRows(c, ids) {
+  for (const id of ids ?? []) {
+    c.deliveries.delete(id);
+    if (keyOf(selectedAgent() ?? {}) === c.key) $('#thread')?.querySelector(`[data-delivery="${CSS.escape(id)}"]`)?.remove();
+  }
+}
+
+function applyDeliveryReceipt(c,e,seq) {
+  if (Array.isArray(e.retained) && seq > c.receiptSetSeq) {
+    c.receiptSetSeq = seq;
+    c.retainedDeliveryIDs = new Set(e.retained);
+    pruneDeliveryRows(c,[...c.deliveries.values()].filter(d => d.revision > 0 && !c.retainedDeliveryIDs.has(d.id)).map(d => d.id));
+  }
+  if (e.delivery) {
+    if (c.retainedDeliveryIDs && seq <= c.receiptSetSeq && !c.retainedDeliveryIDs.has(e.delivery.id)) return;
+    updateDelivery(c,e.delivery);
+  }
+  pruneDeliveryRows(c,e.removed);
+}
+
+function updateDelivery(c, d) {
+  if (d?.agentSince && `${c.id}@${d.agentSince}` !== c.key) return;
+  if (!d?.id || (c.deliveries.get(d.id)?.revision ?? -1) >= d.revision) return;
+  c.deliveries.set(d.id, d);
+  if (c.deliveries.size > 256) {
+    const excess = [...c.deliveries.keys()].filter(id => id !== d.id).slice(0,c.deliveries.size-256);
+    pruneDeliveryRows(c,excess);
+  }
+}
+
+function deliveryEl(c, d) {
+  const bubble = messageEl(c, { role: 'user', content: [
+    { type: 'text', text: d.text ? (d.preview ? `${d.text}…` : d.text) : (d.imageCount > 0 ? t('Attached images') : '') }, ...(d.images ?? []),
+  ] });
+  const label = DELIVERY_LABELS[d.state];
+  // An acknowledgement identifies a submission, not a transcript message.
+  // Keep its original input available without duplicating a native user bubble
+  // or guessing which (possibly transformed) message pi took for processing.
+  const sending = d.state === 'sending';
+  const preview = d.text?.trim().replace(/\s+/g, ' ').slice(0, 60) || t('Attached images');
+  const imageCount = d.imageCount ?? d.images?.length ?? 0;
+  const imageNote = imageCount ? h('div', { class: 'delivery-image-count' }, tn(imageCount, '{n} image submitted', '{n} images submitted')) : null;
+  const content = sending ? h('div', { class: 'delivery-sending' }, bubble, imageNote) : h('details', { class: 'delivery-receipt' },
+    h('summary', { title: t('pi has not reported whether this particular message was taken for processing.') }, t('Submission: {text}', { text: preview })),
+    h('div', { class: 'delivery-original' }, bubble, imageNote));
+  return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(sending) }, content,
+    h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite',
+      hidden: !label, title: d.error || null }, label ? t(label) : ''));
+}
+
+function renderQueue(c) {
+  const thread = $('#thread');
+  if (!thread || keyOf(selectedAgent() ?? {}) !== c.key) return;
+  thread.querySelector('.pi-queue-status')?.remove();
+  const q = c.piQueue;
+  if (q.known && q.steering + q.followUp > 0) {
+    const el = h('div', { class: 'pi-queue-status note note--quiet', role: 'status', 'aria-live': 'polite',
+      title: t('These counts describe pi’s whole queue, not an individual submission.') },
+      t('pi queue: {steering} steering · {followUp} follow-up', { steering: q.steering, followUp: q.followUp }));
+    const working = thread.querySelector('.working-live');
+    working ? working.before(el) : thread.append(el);
+  }
+}
+
+function refreshDelivery(c, d) {
+  if (!d) return;
+  const thread = $('#thread');
+  if (!thread || keyOf(selectedAgent() ?? {}) !== c.key) return;
+  const old = thread.querySelector(`[data-delivery="${CSS.escape(d.id)}"]`);
+  if (old && old.dataset.sending !== String(d.state === 'sending')) { old.replaceWith(deliveryEl(c,d)); return; }
+  if (old) {
+    const status = old.querySelector('.delivery-status');
+    const label = DELIVERY_LABELS[d.state];
+    status.hidden = !label;
+    status.textContent = label ? t(label) : '';
+    status.title = d.error || '';
+  } else {
+    const el = deliveryEl(c, d);
+    thread.querySelector('.thread-empty')?.remove();
+    const working = thread.querySelector('.working-live');
+    working ? working.before(el) : thread.append(el);
+  }
+}
+
 async function loadConvo(c) {
   c.queue = [];
   try {
     const data = await call('Messages', c.id);
     c.messages = data?.messages ?? [];
+    const local = [...c.deliveries.values()].filter((d) => d.revision === 0);
+    c.deliveries = new Map();
+    for (const d of data?.deliveries ?? []) updateDelivery(c,d);
+    for (const d of local) if (!c.deliveries.has(d.id)) {
+      const request = state.attachments.get(c.key);
+      const sending = request?.sending && request.submissionID === d.id;
+      c.deliveries.set(d.id, { ...d, state: sending ? 'sending' : 'unconfirmed' });
+    }
+    c.seq = data?.seq ?? 0;
+    c.eventSeqs.clear();
+    c.piQueue = data?.queue ?? { known: false };
+    c.queueSeq = c.seq;
+    c.receiptSetSeq = c.seq;
+    c.retainedDeliveryIDs = new Set((data?.deliveries ?? []).map(d => d.id));
     c.tools.clear();
     for (const message of c.messages) indexMessage(c, message);
     c.live = null;
@@ -127,11 +239,14 @@ async function loadConvo(c) {
     // ...then what arrived since. An event numbered at or before the
     // history is in it, except a message that ended in between.
     const seen = new Set(c.messages.map(messageKey));
-    for (const ev of c.queue) {
+    for (const ev of c.queue.sort((a,b) => a.seq-b.seq)) {
       const e = ev.data;
       if (ev.seq <= (data?.seq ?? 0) && !(e.type === 'message_end' && !seen.has(messageKey(e.message)))) continue;
       if (e.type === 'message_end' && seen.has(messageKey(e.message))) continue;
-      applyEvent(c, e, true);
+      if (c.eventSeqs.has(ev.seq)) continue;
+      applyEvent(c, e, true,ev.seq);
+      c.eventSeqs.add(ev.seq);
+      if (e.type === 'queue_update' || e.type === 'delivery_queue') c.queueSeq = Math.max(c.queueSeq,ev.seq);
       if (e.type === 'message_end') seen.add(messageKey(e.message));
     }
   } catch (err) {
@@ -294,7 +409,7 @@ function renderThread() {
     thread.append(h('div', { class: 'note note--error' }, c.error));
   } else if (!c.loaded) {
     thread.append(h('div', { class: 'working' }, icon('spinner', 'mds-icon tool-mark'), t('Waking up…')));
-  } else if (!c.messages.length && !c.live) {
+  } else if (!c.messages.length && !c.live && !c.deliveries.size) {
     const y = yesmanOf(a.id);
     thread.append(
       a.role === 'lead'
@@ -322,7 +437,11 @@ function renderThread() {
       thread.append(c.live.el);
     }
   }
+  if (c.loaded) {
+    for (const d of [...c.deliveries.values()].sort((a,b) => (a.order ?? 0) - (b.order ?? 0))) thread.append(deliveryEl(c,d));
+  }
   renderWorking();
+  renderQueue(c);
   scrollDown(true);
 }
 
@@ -373,6 +492,8 @@ function workingLabel(a) {
 // Live records from an agent's pi process.
 function onAgentEvent(ev) {
   const { agent: id, data: e } = ev;
+  const agent = agentById(id);
+  if (ev.agentSince && agent && `${id}@${ev.agentSince}` !== keyOf(agent)) return;
   info.onAgentEvent(ev);
   if (e.type === 'extension_ui_request' && e.method === 'notify') {
     toast(`${id}: ${e.message}`);
@@ -382,7 +503,6 @@ function onAgentEvent(ev) {
     toast(t('{agent}: extension error: {error}', { agent: id, error: e.error }), { duration: 6000 });
     return;
   }
-  const agent = agentById(id);
   if (contextEvents.has(e.type)) contextViewer.refresh(agent);
   const c = agent && state.convos.get(keyOf(agent));
   if (!c) return;
@@ -390,17 +510,54 @@ function onAgentEvent(ev) {
     c.queue?.push(ev);
     return;
   }
+  if (ev.seq <= c.seq || c.eventSeqs.has(ev.seq)) return;
+  c.eventSeqs.add(ev.seq);
+  if (e.type === 'queue_update' || e.type === 'delivery_queue') {
+    if (ev.seq <= c.queueSeq) return;
+    c.queueSeq = ev.seq;
+    c.piQueue = e.type === 'delivery_queue' ? e.queue : { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0 };
+    if (keyOf(selectedAgent() ?? {}) === c.key) {
+      const scroller = $('#scroll');
+      if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
+      renderQueue(c);
+      scrollDown();
+    }
+    return;
+  }
+  if (e.type === 'delivery_update' || e.type === 'delivery_retained') {
+    applyDeliveryReceipt(c,e,ev.seq);
+    if (state.view.kind === 'agent' && state.view.id === c.id) {
+      const scroller = $('#scroll');
+      if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
+      refreshDelivery(c, e.delivery && c.deliveries.get(e.delivery.id));
+      scrollDown();
+    }
+    return;
+  }
   applyEvent(c, e, false);
 }
 
 // applyEvent updates a conversation with one record, and the thread when it
 // is shown, unless the record is being replayed before the thread renders.
-function applyEvent(c, e, replaying) {
+function applyEvent(c, e, replaying,seq = 0) {
   const visible = !replaying && state.view.kind === 'agent' && state.view.id === c.id && $('#thread');
   const scroller = $('#scroll');
   if (visible && scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
 
   switch (e.type) {
+    case 'delivery_queue':
+      c.piQueue = e.queue;
+      if (visible) renderQueue(c);
+      break;
+    case 'queue_update':
+      c.piQueue = { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0 };
+      if (visible) renderQueue(c);
+      break;
+    case 'delivery_retained':
+    case 'delivery_update':
+      applyDeliveryReceipt(c,e,seq);
+      if (visible) refreshDelivery(c, e.delivery && c.deliveries.get(e.delivery.id));
+      break;
     case 'message_start': {
       if (e.message?.role !== 'assistant') break;
       c.live = { message: { ...e.message, content: [] }, el: h('div', { class: 'msg-assistant' }), blocks: new Map() };
@@ -952,12 +1109,40 @@ function renderDock({ focusComposer = false } = {}) {
   }
 }
 
+const sameSubmissionImages = (left, right) => left.length === right.length && left.every((image, i) =>
+  image.type === right[i].type && image.mimeType === right[i].mimeType && image.data === right[i].data);
+
 async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
   const text = textarea.value.trim();
   if ((!text && !attachments?.items.length) || attachments?.reading || attachments?.sending || state.modelOptions.get(key)?.busy) return;
   const images = imagePayload(attachments?.items ?? []);
+  const c = convo(a);
+  // Editing after an uncertain submission is a new user intent. Retrying the
+  // unchanged draft reuses its receipt, even when the bridge response was lost.
+  if (attachments.submissionID) {
+    const previous = attachments.submission;
+    if (previous && (previous.text !== text || !sameSubmissionImages(previous.images, images))) {
+      attachments.submissionID = null;
+      attachments.submission = null;
+    }
+  }
+  const messageID = attachments.submissionID ?? Date.now().toString(16).padStart(12, '0') + [...crypto.getRandomValues(new Uint8Array(18))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  {
+    attachments.submissionID = messageID;
+    attachments.submission ??= { text, images };
+    if (!c.deliveries.has(messageID)) {
+      const preview = Array.from(text).slice(0,128).join('');
+      c.deliveries.set(messageID, { id: messageID, revision: 0, state: 'sending', text:preview, imageCount:images.length, preview:preview !== text });
+      const excess = [...c.deliveries.keys()].slice(0,Math.max(0,c.deliveries.size-256));
+      pruneDeliveryRows(c,excess);
+    }
+    const scroller = $('#scroll');
+    if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
+    refreshDelivery(c, c.deliveries.get(messageID));
+    scrollDown();
+  }
   // SubmitEvent retains the activated Send button even after WebKit's mouse
   // default action blurs the textarea without focusing the button. Use that
   // submission intent only for the initial render; subsequent renders follow
@@ -967,12 +1152,27 @@ async function sendMessage(a, textarea, submitter = null) {
   attachments.sending = true;
   renderDock({ focusComposer });
   try {
-    if (images.length) await call('SendImages', a.id, text, images);
-    else await call('Send', a.id, text);
+    const receipt = await call('Submit', a.id, messageID, text, images, a.since);
+    updateDelivery(c, receipt);
+    refreshDelivery(c, c.deliveries.get(messageID));
+    // A duplicate may find registration durable while pi's response is still
+    // pending. Keep the only full draft/attachments until acceptance is known.
+    if (receipt.state === 'sending') return;
+    if (receipt.state === 'failed' || receipt.state === 'interrupted' || receipt.state === 'unconfirmed' && receipt.error) {
+      // Only a definite rejection permits a fresh ID on unchanged retry. An
+      // interrupted process may already have admitted this input before exit.
+      if (receipt.state === 'failed') { attachments.submissionID = null; attachments.submission = null; }
+      throw new Error(receipt.error || t(DELIVERY_LABELS[receipt.state]));
+    }
+    attachments.submissionID = null;
+    attachments.submission = null;
     state.drafts.delete(key);
     attachments.items = [];
   } catch (err) {
-    // Keep both text and images for retry if pi rejects the prompt.
+    // Keep both text and images for retry if pi rejects the prompt. An
+    // uncertain bridge failure keeps the same ID, so retry cannot duplicate it.
+    const d = c.deliveries.get(messageID);
+    if (d?.revision === 0) { d.state = 'unconfirmed'; refreshDelivery(c,d); }
     fail(err);
   } finally {
     attachments.sending = false;

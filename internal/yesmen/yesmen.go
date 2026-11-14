@@ -150,17 +150,30 @@ func (s *Store) lockFor(name string) *sync.RWMutex {
 // Work that writes into a workspace, such as a checkout or starting an
 // agent, runs inside Use so that it cannot outlive a dismissal.
 func (s *Store) Use(name string, fn func(Yesman) error) error {
-	if err := ValidName(name); err != nil {
-		return err
-	}
-	l := s.lockFor(name)
-	l.RLock()
-	defer l.RUnlock()
-	y, err := s.Get(name)
+	y, release, err := s.BeginUse(name)
 	if err != nil {
 		return err
 	}
+	defer release()
 	return fn(y)
+}
+
+// BeginUse protects a multi-phase workspace operation until release. The
+// release function is idempotent so callers can end the lease before waiting
+// for an RPC response while still deferring cleanup of early-return paths.
+func (s *Store) BeginUse(name string) (Yesman, func(), error) {
+	if err := ValidName(name); err != nil {
+		return Yesman{}, nil, err
+	}
+	l := s.lockFor(name)
+	l.RLock()
+	y, err := s.Get(name)
+	if err != nil {
+		l.RUnlock()
+		return Yesman{}, nil, err
+	}
+	var once sync.Once
+	return y, func() { once.Do(l.RUnlock) }, nil
 }
 
 const indexTemplate = `# Knowledge

@@ -37,7 +37,7 @@ type waiter struct {
 	ch chan response
 	// at runs on the reader when the response arrives, before any later
 	// record is handled.
-	at func()
+	at func(response)
 }
 
 // errExited is returned for commands to a pi process that has exited.
@@ -50,9 +50,11 @@ type proc struct {
 	stdin io.WriteCloser
 	wmu   sync.Mutex
 
-	mu      sync.Mutex
-	pending map[string]waiter
-	seq     atomic.Int64
+	mu        sync.Mutex
+	pending   map[string]waiter
+	seq       atomic.Int64
+	session   string       // opaque process incarnation; never an authentication token
+	piSession atomic.Value // string, from get_state
 
 	done   chan struct{}
 	err    error // why it exited, set before done closes
@@ -66,7 +68,7 @@ func startProc(s spec, onRecord func(p *proc, kind string, raw json.RawMessage))
 	cmd.Dir = s.Dir
 	cmd.Env = s.Env
 	setProcessGroup(cmd)
-	p := &proc{cmd: cmd, pending: map[string]waiter{}, done: make(chan struct{})}
+	p := &proc{cmd: cmd, pending: map[string]waiter{}, done: make(chan struct{}), session: newToken()}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -80,6 +82,7 @@ func startProc(s spec, onRecord func(p *proc, kind string, raw json.RawMessage))
 		return nil, fmt.Errorf("start pi: %w", err)
 	}
 	p.stdin = stdin
+	p.piSession.Store("")
 	go p.read(stdout, onRecord)
 	return p, nil
 }
@@ -129,7 +132,7 @@ func (p *proc) handle(line []byte, onRecord func(*proc, string, json.RawMessage)
 			p.mu.Unlock()
 			if ok {
 				if w.at != nil {
-					w.at()
+					w.at(r)
 				}
 				w.ch <- r
 				return
@@ -139,6 +142,8 @@ func (p *proc) handle(line []byte, onRecord func(*proc, string, json.RawMessage)
 	onRecord(p, head.Type, json.RawMessage(line))
 }
 
+func (p *proc) deliverySession() string { return p.session + ":" + p.piSession.Load().(string) }
+
 // call sends a command and waits for its response.
 func (p *proc) call(ctx context.Context, cmd map[string]any) (response, error) {
 	return p.callAt(ctx, cmd, nil)
@@ -147,6 +152,15 @@ func (p *proc) call(ctx context.Context, cmd map[string]any) (response, error) {
 // callAt is call with at run on the reader as the response arrives, to
 // capture state that later records would change.
 func (p *proc) callAt(ctx context.Context, cmd map[string]any, at func()) (response, error) {
+	return p.callObserved(ctx, cmd, func(response) {
+		if at != nil {
+			at()
+		}
+	})
+}
+
+// callObserved observes the response on the reader before subsequent events.
+func (p *proc) callObserved(ctx context.Context, cmd map[string]any, at func(response)) (response, error) {
 	id := "y" + strconv.FormatInt(p.seq.Add(1), 10)
 	cmd["id"] = id
 	ch := make(chan response, 1)

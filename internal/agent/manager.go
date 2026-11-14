@@ -90,7 +90,8 @@ type Info struct {
 
 // Event is one record an agent's pi process emitted.
 type Event struct {
-	Agent string `json:"agent"`
+	Agent      string    `json:"agent"`
+	AgentSince time.Time `json:"agentSince,omitzero"`
 	// Seq numbers an agent's events in order, across its restarts.
 	Seq  uint64          `json:"seq"`
 	Data json.RawMessage `json:"data"`
@@ -101,9 +102,11 @@ type Event struct {
 // hold yet. Seq is the last event it reflects: a client that queued
 // events while loading it replays only later ones.
 type Conversation struct {
-	Messages json.RawMessage `json:"messages"`
-	Live     []Event         `json:"live"`
-	Seq      uint64          `json:"seq"`
+	Messages   json.RawMessage `json:"messages"`
+	Live       []Event         `json:"live"`
+	Seq        uint64          `json:"seq"`
+	Deliveries []Delivery      `json:"deliveries"`
+	Queue      QueueStatus     `json:"queue"`
 }
 
 // Config configures a Manager.
@@ -125,6 +128,9 @@ type Config struct {
 	// wait for the UI thread while that thread waits for Stop; bursts of
 	// changes are coalesced into one call with the latest agents.
 	OnChange func([]Info)
+	// deliveryWrite is a controllable atomic writer for persistence tests.
+	deliveryWrite func(string, []byte) error
+	deliveryRead  func(string, time.Time) (map[string]Delivery, int64, error)
 }
 
 // Manager runs agents.
@@ -147,17 +153,28 @@ type agent struct {
 	prompts int
 	// reports counts worker handoffs being read or delivered to the lead,
 	// registered before the worker becomes idle; guarded by the manager's mu.
-	reports  int
-	info     Info
-	proc     *proc
-	token    string
-	seq      uint64        // the last event's number
-	turn     []Event       // the events of the assistant message in progress
-	starting chan struct{} // closed when a start finishes, nil otherwise
-	stopping bool
-	dir      string   // the workspace, to show paths in it relative to it
-	tools    []string // the tool calls running, oldest first
-	labels   map[string]string
+	reports                        int
+	info                           Info
+	proc                           *proc
+	token                          string
+	seq                            uint64        // the last event's number
+	turn                           []Event       // the events of the assistant message in progress
+	starting                       chan struct{} // closed when a start finishes, nil otherwise
+	stopping                       bool
+	dir                            string   // the workspace, to show paths in it relative to it
+	tools                          []string // the tool calls running, oldest first
+	labels                         map[string]string
+	deliveries                     map[string]Delivery // bounded receipt metadata; pi owns scheduling
+	deliveryOnce                   sync.Once
+	deliveryErr                    error
+	deliveryWriter                 *deliveryWriter
+	deliveryFloor                  int64
+	deliveryVersion, deliveryOrder uint64
+	workspaceSince                 time.Time
+	retiring, deliverySealed       bool
+	removing                       bool
+	queue                          QueueStatus
+	deliverySettled                uint64 // sequence of last observed settled boundary
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
 	nudged bool
@@ -260,7 +277,7 @@ func (m *Manager) Get(id string) (Info, error) {
 // record; a lead's record holds only when it was hired.
 func (m *Manager) infoLocked(id, role string, w yesmen.Worker, subject string) Info {
 	i := Info{ID: id, Status: Stopped}
-	if a := m.agents[id]; a != nil {
+	if a := m.agents[id]; a != nil && (a.info.Since.Equal(w.StartedAt) || a.info.Since.IsZero() && !a.retiring) {
 		i = a.info
 	}
 	i.Yesman, i.Name, _ = SplitID(id)
@@ -304,6 +321,10 @@ func (m *Manager) setStatus(a *agent, p *proc, s Status, detail string) {
 
 // ensure starts the agent unless it runs.
 func (m *Manager) ensure(id string) (*agent, *proc, error) {
+	return m.ensureScoped(id, nil, "", nil)
+}
+
+func (m *Manager) ensureScoped(id string, owner *agent, messageID string, scope *time.Time) (*agent, *proc, error) {
 	ys, name, err := SplitID(id)
 	if err != nil {
 		return nil, nil, err
@@ -315,6 +336,18 @@ func (m *Manager) ensure(id string) (*agent, *proc, error) {
 	// Starting inside Use keeps a dismissal from archiving the workspace
 	// under a starting agent, or an agent from starting in an archived one.
 	err = m.cfg.Yesmen.Use(ys, func(y yesmen.Yesman) error {
+		if scope != nil && !y.HiredAt.Equal(*scope) {
+			return errStopped
+		}
+		if owner != nil {
+			m.mu.Lock()
+			d, ok := owner.deliveries[messageID]
+			current := m.agents[id] == owner && !owner.retiring && ok && d.State == "sending"
+			m.mu.Unlock()
+			if !current {
+				return errStopped
+			}
+		}
 		var err error
 		a, p, err = m.ensureIn(y, id, name)
 		return err
@@ -325,12 +358,16 @@ func (m *Manager) ensure(id string) (*agent, *proc, error) {
 func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, error) {
 	ys := y.Name
 	role := RoleLead
+	since := y.HiredAt
 	if name != yesmen.LeadName {
 		role = RoleWorker
 		ws, _ := m.cfg.Yesmen.Workers(ys)
 		found := false
 		for _, w := range ws {
-			found = found || w.Name == name
+			if w.Name == name {
+				found = true
+				since = w.StartedAt
+			}
 		}
 		if !found {
 			return nil, nil, fmt.Errorf("%s has no worker named %s", ys, name)
@@ -343,12 +380,18 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			m.mu.Unlock()
 			return nil, nil, errStopped
 		}
-		a := m.agents[id]
-		if a == nil {
-			a = &agent{info: Info{ID: id, Yesman: ys, Name: name, Role: role, Status: Stopped}}
-			m.agents[id] = a
+		a, err := m.workspaceAgentLocked(y, Info{ID: id, Yesman: ys, Name: name, Role: role, Status: Stopped, Since: since})
+		if err != nil {
+			m.mu.Unlock()
+			return nil, nil, err
 		}
-		a.dir = y.Path
+		if a.deliveries == nil {
+			m.mu.Unlock()
+			if err := m.ensureDeliveries(a, filepath.Join(y.Path, ".yesman", "sessions", name, "delivery.json")); err != nil {
+				return nil, nil, err
+			}
+			continue
+		}
 		if a.proc != nil {
 			p := a.proc
 			select {
@@ -400,6 +443,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			return nil, nil, err
 		}
 		a.proc = p
+		p.piSession.Store(state.SessionID)
 		a.info.StartedAt = started
 		a.info.Status, a.info.Model, a.info.UpdatedAt = Idle, state.Model.ID, time.Now()
 		a.info.Provider, a.info.Effort, a.info.EffortLevels = state.Model.Provider, state.ThinkingLevel, nil
@@ -475,6 +519,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 // record handles one record of an agent's process. It runs on the
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
+	m.observeDelivery(a, p, kind, raw)
 	m.follow(a, p, kind, raw)
 	switch kind {
 	case "agent_start":
@@ -489,8 +534,8 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			m.mu.Unlock()
 			break
 		}
-		worker, stopping := a.info.Role == RoleWorker, a.stopping
-		handoff := worker && (!e.Aborted || !stopping)
+		worker, stopping, retiring := a.info.Role == RoleWorker, a.stopping, a.retiring
+		handoff := worker && !retiring && (!e.Aborted || !stopping)
 		if handoff {
 			// The worker is still busy until its report reaches the lead.
 			// Reserve this before publishing Idle, without waiting on RPC.
@@ -507,7 +552,7 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			defer a.modelMu.Unlock()
 			_, _ = m.syncModel(ctx, a, p)
 		}()
-		if !worker && !e.Aborted {
+		if !worker && !e.Aborted && !retiring {
 			go m.followThrough(a, p)
 		} else if handoff {
 			go func() {
@@ -575,7 +620,7 @@ func (m *Manager) number(a *agent, kind string, raw json.RawMessage) Event {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a.seq++
-	ev := Event{Agent: a.info.ID, Seq: a.seq, Data: raw}
+	ev := Event{Agent: a.info.ID, AgentSince: a.info.Since, Seq: a.seq, Data: raw}
 	switch {
 	case kind == "message_start" && role == "assistant":
 		a.turn = []Event{ev}
@@ -633,6 +678,10 @@ func (m *Manager) PromptImages(ctx context.Context, id, text string, images []Im
 }
 
 func (m *Manager) prompt(ctx context.Context, id, text, behavior string, images ...Image) error {
+	return m.promptDelivery(ctx, id, text, behavior, "", nil, nil, images...)
+}
+
+func (m *Manager) promptDelivery(ctx context.Context, id, text, behavior, messageID string, owner *agent, scope *time.Time, images ...Image) error {
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return errors.New("empty message")
 	}
@@ -642,7 +691,7 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string, images 
 	)
 	for {
 		var err error
-		if a, p, err = m.ensure(id); err != nil {
+		if a, p, err = m.ensureScoped(id, owner, messageID, scope); err != nil {
 			return err
 		}
 		// Register before dispatch, under the same lock as configuration's
@@ -655,7 +704,7 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string, images 
 			return err
 		}
 		m.mu.Lock()
-		current := a.proc == p
+		current := a.proc == p && !a.retiring
 		m.mu.Unlock()
 		select {
 		case <-p.done:
@@ -667,6 +716,12 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string, images 
 		}
 		// Put to sleep or closed as finished while this waited: start again.
 		a.modelMu.Unlock()
+		m.mu.Lock()
+		retiring := a.retiring
+		m.mu.Unlock()
+		if retiring {
+			return errStopped
+		}
 	}
 	m.mu.Lock()
 	a.prompts++
@@ -674,19 +729,23 @@ func (m *Manager) prompt(ctx context.Context, id, text, behavior string, images 
 	m.mu.Unlock()
 	if a.info.Role == RoleWorker {
 		// A message gives a finished worker work again.
-		if reopened, err := m.cfg.Yesmen.ReopenWorker(a.info.Yesman, a.info.Name); err != nil {
+		if reopened, err := m.reopenWorkerInScope(a); err != nil {
 			log.Printf("yesman: reopen %s: %v", id, err)
 		} else if reopened {
 			m.changed()
 		}
 	}
 	a.modelMu.Unlock()
-	return m.sendPrompt(ctx, a, p, text, behavior, images...)
+	return m.sendPromptDelivery(ctx, a, p, text, behavior, messageID, images...)
 }
 
 // sendPrompt dispatches a prompt already registered under modelMu and mu.
 // No manager lock is held while sending or waiting for pi's answer.
 func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behavior string, images ...Image) error {
+	return m.sendPromptDelivery(ctx, a, p, text, behavior, "", images...)
+}
+
+func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, text, behavior, messageID string, images ...Image) error {
 	done := make(chan error, 1)
 	go func() {
 		// Cancelling the caller does not cancel the RPC already sent to pi.
@@ -696,7 +755,18 @@ func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behav
 		if len(images) > 0 {
 			cmd["images"] = images
 		}
-		_, err := p.call(context.Background(), cmd)
+		m.mu.Lock()
+		retiring := a.retiring || a.proc != p
+		m.mu.Unlock()
+		var err error
+		if retiring {
+			err = errStopped
+		} else {
+			err = m.bindDelivery(a, p, messageID)
+		}
+		if err == nil {
+			_, err = p.callObserved(context.Background(), cmd, func(r response) { m.deliveryResponse(a, p, messageID, behavior, r) })
+		}
 		a.modelMu.Lock()
 		m.mu.Lock()
 		a.prompts--
@@ -733,6 +803,7 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	if !wasRunning {
 		defer func() { go m.closeIfFinished(a, p, time.Time{}) }()
 	}
+	_, _ = p.modelState(ctx, func(s modelState) { m.deliverySessionChanged(a, p, s.SessionID) })
 	// pi answers after emitting every earlier event, and the reader numbers
 	// those first. Capture the reply in progress and the last number on the
 	// reader as the answer arrives: events it handles next are not in the
@@ -740,8 +811,13 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	var conv Conversation
 	r, err := p.callAt(ctx, map[string]any{"type": "get_messages"}, func() {
 		m.mu.Lock()
+		pruned := m.pruneDeliveryEventLocked(a)
 		conv.Live, conv.Seq = append([]Event(nil), a.turn...), a.seq
+		conv.Deliveries, conv.Queue = a.deliverySnapshot(), a.queue
 		m.mu.Unlock()
+		if pruned != nil {
+			m.cfg.OnEvent(*pruned)
+		}
 	})
 	if err != nil {
 		return Conversation{}, err
@@ -864,6 +940,13 @@ func (m *Manager) clearLocked(a *agent, p *proc) {
 		a.proc = nil
 	}
 	a.turn = nil
+	if events := m.interruptDeliveriesLocked(a); len(events) > 0 {
+		go func() {
+			for _, ev := range events {
+				m.cfg.OnEvent(ev)
+			}
+		}()
+	}
 	a.endRun()
 	if a.token != "" {
 		delete(m.tokens, a.token)
@@ -877,17 +960,6 @@ func newToken() string {
 	return hex.EncodeToString(b)
 }
 
-// StopYesman stops every agent of a yesman.
-func (m *Manager) StopYesman(name string) {
-	var wg sync.WaitGroup
-	for _, i := range m.List() {
-		if i.Yesman == name {
-			wg.Go(func() { m.Stop(i.ID) })
-		}
-	}
-	wg.Wait()
-}
-
 // StopAll permanently closes the manager and stops every agent, for quitting.
 func (m *Manager) StopAll() {
 	m.mu.Lock()
@@ -898,11 +970,46 @@ func (m *Manager) StopAll() {
 	ids := make([]string, 0, len(m.agents))
 	for id := range m.agents {
 		ids = append(ids, id)
+		a := m.agents[id]
+		a.retiring = true
 	}
 	m.mu.Unlock()
+	// Initializers already published their agent before leaving the manager
+	// lock. Join them before collecting writers; none may appear after close.
+	for _, id := range ids {
+		m.mu.Lock()
+		a := m.agents[id]
+		var path string
+		if a != nil && a.dir != "" && a.deliveries == nil {
+			path = filepath.Join(a.dir, ".yesman", "sessions", a.info.Name, "delivery.json")
+		}
+		m.mu.Unlock()
+		if path != "" {
+			_ = m.ensureDeliveries(a, path)
+		}
+	}
 	var wg sync.WaitGroup
 	for _, id := range ids {
 		wg.Go(func() { m.Stop(id) })
+	}
+	wg.Wait()
+	m.mu.Lock()
+	var writers []*deliveryWriter
+	for _, a := range m.agents {
+		if a.deliveryWriter != nil {
+			if !a.deliverySealed {
+				m.sealDeliveriesLocked(a)
+			}
+			writers = append(writers, a.deliveryWriter)
+		}
+	}
+	m.mu.Unlock()
+	for _, writer := range writers {
+		wg.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			writer.close(ctx)
+		})
 	}
 	wg.Wait()
 }
@@ -955,14 +1062,68 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 	if name == yesmen.LeadName {
 		return errors.New("the lead cannot be removed")
 	}
+	y, release, err := m.cfg.Yesmen.BeginUse(yesman)
+	if err != nil {
+		return err
+	}
+	defer release()
 	id := ID(yesman, name)
-	m.Stop(id)
 	m.mu.Lock()
-	delete(m.agents, id)
+	a := m.agents[id]
+	if a != nil {
+		if a.removing {
+			m.mu.Unlock()
+			return errStopped
+		}
+		a.retiring, a.removing = true, true
+	}
 	m.mu.Unlock()
-	err := m.cfg.Yesmen.RemoveWorker(yesman, name)
+	fail := func(err error) error {
+		m.mu.Lock()
+		if a != nil {
+			a.removing = false
+		}
+		m.mu.Unlock()
+		return err
+	}
+	if a != nil {
+		if err := m.ensureDeliveries(a, filepath.Join(y.SessionDir(name), "delivery.json")); err != nil {
+			return fail(err)
+		}
+	}
+	m.Stop(id)
+	if a != nil {
+		m.mu.Lock()
+		var writer *deliveryWriter
+		var events []Event
+		if a.deliveryWriter != nil {
+			if a.deliveryWriter.finished() {
+				a.deliverySealed = false
+				a.deliveryWriter = newDeliveryWriter(filepath.Join(y.SessionDir(name), "delivery.json"), m.cfg.deliveryWrite)
+			}
+			events = m.sealDeliveriesLocked(a)
+			writer = a.deliveryWriter
+		}
+		m.mu.Unlock()
+		for _, event := range events {
+			m.cfg.OnEvent(event)
+		}
+		if writer != nil {
+			if err := writer.close(context.Background()); err != nil {
+				return fail(err)
+			}
+		}
+	}
+	if err = m.cfg.Yesmen.RemoveWorker(yesman, name); err != nil {
+		return fail(err)
+	}
+	m.mu.Lock()
+	if a != nil && m.agents[id] == a {
+		delete(m.agents, id)
+	}
+	m.mu.Unlock()
 	m.changed()
-	return err
+	return nil
 }
 
 // handoffDone releases the report reservation after delivery and closing.
@@ -972,7 +1133,7 @@ func (m *Manager) handoffDone(a *agent) {
 	a.reports--
 	lead := m.agents[ID(a.info.Yesman, yesmen.LeadName)]
 	var p *proc
-	if lead != nil {
+	if !a.retiring && lead != nil && lead.workspaceSince.Equal(a.workspaceSince) {
 		p = lead.proc
 	}
 	m.mu.Unlock()
@@ -1016,23 +1177,32 @@ func (m *Manager) closeIfFinished(a *agent, p *proc, finishedAt time.Time) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
-	idle := a.proc == p && a.starting == nil && a.info.Status == Idle && a.prompts == 0
+	idle := !a.retiring && a.proc == p && a.starting == nil && a.info.Status == Idle && a.prompts == 0
 	yesman, name := a.info.Yesman, a.info.Name
 	m.mu.Unlock()
 	if !idle {
 		return
 	}
-	if finishedAt.IsZero() {
-		ws, err := m.cfg.Yesmen.Workers(yesman)
-		if err != nil || !slices.ContainsFunc(ws, func(w yesmen.Worker) bool { return w.Name == name && !w.FinishedAt.IsZero() }) {
-			return
+	_ = m.cfg.Yesmen.Use(yesman, func(y yesmen.Yesman) error {
+		m.mu.Lock()
+		active := !a.retiring && a.workspaceSince.Equal(y.HiredAt)
+		m.mu.Unlock()
+		if !active {
+			return errStopped
 		}
-	} else if err := m.cfg.Yesmen.FinishWorker(yesman, name, finishedAt); err != nil {
-		log.Printf("yesman: finish %s: %v", a.info.ID, err)
-		return
-	}
-	// Prompts wait for modelMu, held here, and start it again once it closed.
-	m.Stop(a.info.ID)
+		if finishedAt.IsZero() {
+			ws, err := m.cfg.Yesmen.Workers(yesman)
+			if err != nil || !slices.ContainsFunc(ws, func(w yesmen.Worker) bool { return w.Name == name && !w.FinishedAt.IsZero() }) {
+				return err
+			}
+		} else if err := m.cfg.Yesmen.FinishWorker(yesman, name, finishedAt); err != nil {
+			log.Printf("yesman: finish %s: %v", a.info.ID, err)
+			return err
+		}
+		// Prompts wait for modelMu, held here, and start it again once closed.
+		m.Stop(a.info.ID)
+		return nil
+	})
 }
 
 const titleLimit = 80
@@ -1050,6 +1220,10 @@ func (m *Manager) tellLead(a *agent, msg string) {
 // tellLeadWithin tries a few times; a message that cannot be delivered is
 // shown on the worker, for the user.
 func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, msg string) error {
+	scope, active := m.reportScope(a)
+	if !active {
+		return errStopped
+	}
 	lead := ID(a.info.Yesman, yesmen.LeadName)
 	m.unnudge(lead)
 	var err error
@@ -1061,7 +1235,10 @@ func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, msg string) erro
 			return ctx.Err()
 		default:
 		}
-		if err = m.prompt(ctx, lead, msg, "followUp"); err == nil {
+		if _, active := m.reportScope(a); !active {
+			return errStopped
+		}
+		if err = m.promptDelivery(ctx, lead, msg, "followUp", "", nil, &scope); err == nil {
 			return nil
 		}
 		select {

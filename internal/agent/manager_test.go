@@ -30,6 +30,10 @@ func TestMain(m *testing.M) {
 }
 
 func fakePi() {
+	if os.Getenv("FAKE_PI_DELIVERIES") != "" {
+		fakeDeliveryPi()
+		return
+	}
 	if os.Getenv("FAKE_PI_DEAF") != "" {
 		time.Sleep(time.Hour)
 		return
