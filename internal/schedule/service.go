@@ -56,6 +56,9 @@ type Config struct {
 	// writeRun is asked before a run record or pruned.json is written: an
 	// error fails the write, as a crash would; nil lets it go on.
 	writeRun func(path string, data []byte) error
+	// writePlans is asked before plans.json is written, once the change was
+	// made from the file read: an error fails the write; nil lets it go on.
+	writePlans func(path string, data []byte) error
 	// plansLimit replaces maxPlansFile, the most of plans.json read and
 	// written, so tests can check the bound with small files.
 	plansLimit int64
@@ -135,6 +138,10 @@ type space struct {
 	// and then nothing is pruned and no click is taken for a new run.
 	pruned    prunedFile
 	prunedErr error
+	// disk is the version of plans.json that plans was read from or written
+	// as; reread makes the next load read the file whatever its stamp.
+	disk   fileVersion
+	reread bool
 
 	retired atomic.Bool
 }
@@ -356,13 +363,15 @@ func (s *Service) loadLocked(sp *space, y yesmen.Yesman) {
 		defer dir.Close()
 	}
 	st := stampIn(dir, "plans.json")
-	if sp.loaded && st == sp.stamp && sp.err == nil && err == nil {
+	if sp.loaded && !sp.reread && st == sp.stamp && sp.err == nil && err == nil {
 		return
 	}
+	sp.reread = false
 	dirErr := err
 	var data []byte
+	var disk fileVersion
 	if dir != nil {
-		data, err = readIn(dir, "plans.json", s.cfg.plansLimit)
+		data, disk, err = readVersionIn(dir, "plans.json", s.cfg.plansLimit)
 	}
 	var f plansFile
 	if err == nil && data != nil {
@@ -377,7 +386,8 @@ func (s *Service) loadLocked(sp *space, y yesmen.Yesman) {
 			sp.plans = plansFile{Version: plansVersion}
 		}
 	} else {
-		sp.plans = f
+		// What is saved next must replace this very file and content.
+		sp.plans, sp.disk = f, disk
 	}
 	// The runs are read once, and again while they could not be: until
 	// then nothing is claimed, saved or sent for the workspace.
@@ -416,7 +426,8 @@ var errTasksTooLarge = errors.New("the tasks file would be larger than yesman re
 
 // writePlansLocked replaces plans.json with f, within the size it is read
 // at. A file that would be larger is not written: the one on disk, and what
-// is known of it here, stay as they were.
+// is known of it here, stay as they were. So is a file changed on disk since
+// it was read (errChangedOnDisk, an ErrConflict), which the next load reads.
 func (s *Service) writePlansLocked(sp *space, y yesmen.Yesman, f plansFile) error {
 	data, err := f.encode()
 	if err != nil {
@@ -430,10 +441,19 @@ func (s *Service) writePlansLocked(sp *space, y yesmen.Yesman, f plansFile) erro
 		return err
 	}
 	defer dir.Close()
-	if err := writeIn(dir, "plans.json", data); err != nil {
+	if s.cfg.writePlans != nil {
+		if err := s.cfg.writePlans(plansPath(y), data); err != nil {
+			return err
+		}
+	}
+	written, err := writeIn(dir, "plans.json", data, &sp.disk)
+	if err != nil {
+		if errors.Is(err, errChangedOnDisk) {
+			sp.reread = true
+		}
 		return err
 	}
-	sp.plans, sp.stamp = f, stampIn(dir, "plans.json")
+	sp.plans, sp.disk, sp.stamp = f, written, written.stamp()
 	return nil
 }
 
@@ -469,7 +489,8 @@ func (s *Service) writeRunLocked(y yesmen.Yesman, r *record) error {
 		return err
 	}
 	defer rd.Close()
-	return writeIn(rd, r.ID+".json", data)
+	_, err = writeIn(rd, r.ID+".json", data, nil)
+	return err
 }
 
 // claimLocked creates a run's record, which must not exist yet.
@@ -1035,7 +1056,8 @@ func (s *Service) writePrunedLocked(y yesmen.Yesman, f prunedFile) error {
 		return err
 	}
 	defer dir.Close()
-	return writeIn(dir, "pruned.json", data)
+	_, err = writeIn(dir, "pruned.json", data, nil)
+	return err
 }
 
 // retainedCount counts a plan's runs that stay whatever their age.
