@@ -47,7 +47,7 @@ export const ICONS = Object.freeze({
   'caret-down': '\ue136', // caret-down
   spinner: '\ueb44', // circle-notch
   send: '\ue08e', // arrow-up
-  stop: '\ue46c', // stop
+  stop: '\ue46c', // stop, Fill weight (solid rounded square)
   folder: '\ue24a', // folder
   panel: '\ueab6', // sidebar
   power: '\ue3da', // power
@@ -87,5 +87,5 @@ export const ICONS = Object.freeze({
 
 export function icon(name, cls = 'mds-icon') {
   if (!ICONS[name]) throw new Error(`Unknown UI icon: ${name}`);
-  return h('span', { class: cls, 'aria-hidden': 'true', 'data-icon': name, 'data-glyph': ICONS[name] });
+  return h('span', { class: cls, 'aria-hidden': 'true', 'data-icon': name, 'data-glyph': ICONS[name], 'data-icon-weight': name === 'stop' ? 'fill' : null });
 }

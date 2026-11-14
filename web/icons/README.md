@@ -1,13 +1,18 @@
 # Interface icons
 
-yesman's app-owned navigation, action and status icons use **Phosphor Regular**
-through `icon(name)` in `web/dom.js`. There is no separate “Phor” dependency in
+yesman's app-owned navigation, action and status icons use **Phosphor** through
+`icon(name)` in `web/dom.js`: **Regular** by default and the official **Fill**
+weight for the solid rounded Stop square. There is no separate “Phor” dependency in
 this repository; the existing Magpie icon manifest names Phosphor explicitly.
 
 The local `phosphor-regular.woff2` is the same file already shipped by the website
 SDK, byte for byte. It matches `src/regular/Phosphor.woff2` from
-`@phosphor-icons/web@2.1.2`. `manifest.json` records the upstream archive, npm
-integrity, font SHA-256 and semantic alias → upstream name/codepoint mapping.
+`@phosphor-icons/web@2.1.2`. The accompanying `phosphor-fill.woff2` comes from
+`src/fill/Phosphor-Fill.woff2` in that same archive; only `stop` selects this
+weight, explicitly via `data-icon-weight="fill"`. This preserves its solid
+rounded-square meaning without custom geometry. `manifest.json` records the
+upstream archive, npm integrity, each font's SHA-256 and semantic alias →
+upstream name/codepoint/weight mapping.
 The upstream MIT license is in `LICENSE`. Go's `//go:embed all:web` packages the
 font, mapping and license, so the desktop app never needs a font CDN or npm at
 runtime. `web/icons.css` loads the font and overrides Magpie's app controls
@@ -37,6 +42,10 @@ status/dirty dots. Those app-owned icons now use the local font.
 - Native HTML selects keep Magpie's local Phosphor SVG caret as their fallback;
   CSS pseudo-elements cannot be placed inside a native select reliably. The
   composer's enhanced select caret and selected-option check use the font.
+  Both the custom Model picker and enhanced Effort select render exactly one
+  decorative font caret. SVG backgrounds are suppressed only on controls
+  explicitly marked `mds-select--font-caret`; unconverted/native controls keep
+  their existing fallback.
   Unused Magpie sprite/standalone assets remain intact for vendor compatibility.
 - The context usage ring is a quantitative chart with a live fraction, not an
   interchangeable icon. Storage bars are charts too.

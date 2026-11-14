@@ -911,6 +911,7 @@ function renderDock({ focusComposer = false } = {}) {
   });
   dock.append(form);
   composerSelects.push(...[...form.querySelectorAll('select')].map((el) => {
+    el.classList.add('mds-select--font-caret');
     const select = initSelect(el);
     select.trigger.title = el.title;
     select.trigger.parentElement.append(icon('caret-down', 'mds-icon mds-select-caret'));

@@ -6,6 +6,14 @@
   font-display: block;
   src: url("./icons/phosphor-regular.woff2") format("woff2");
 }
+@font-face {
+  font-family: "yesman Phosphor Fill";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("./icons/phosphor-fill.woff2") format("woff2");
+}
+.mds-icon[data-icon-weight="fill"] { font-family: "yesman Phosphor Fill" !important; }
 .mds-icon, .mds-spinner, .mds-dot,
 .mds-select-option::before, .mds-select-caret {
   font-family: "yesman Phosphor" !important;
@@ -41,7 +49,8 @@
 /* initSelect wraps the composer's selects. Its trigger gets a font caret while
    native selects retain Magpie's Phosphor SVG fallback. */
 .mds-select-control { position: relative; }
-.mds-select-trigger { background-image: none; }
+.mds-select--font-caret { background-image: none; }
+.composer-model { position: relative; }
 .mds-select-caret {
   pointer-events: none; position: absolute;
   right: 9px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; font-size: 14px;

@@ -1,11 +1,10 @@
 {
   "package": "@phosphor-icons/web",
   "version": "2.1.2",
-  "weight": "regular",
+  "weight": "regular (default), fill (stop)",
   "license": "MIT",
   "source": "https://registry.npmjs.org/@phosphor-icons/web/-/web-2.1.2.tgz",
   "integrity": "sha512-rPAR9o/bEcp4Cw4DEeZHXf+nlGCMNGkNDRizYHM47NLxz9vvEHp/Tt6FMK1NcWadzw/pFDPnRBGi/ofRya958A==",
-  "fontSHA256": "c2ea45ea05ff5c7df1936770c104725f2a68f43fd343f35f3da23a30b27de32a",
   "icons": {
     "link": {
       "name": "link",
@@ -105,7 +104,8 @@
     },
     "stop": {
       "name": "stop",
-      "codepoint": "e46c"
+      "codepoint": "e46c",
+      "weight": "fill"
     },
     "folder": {
       "name": "folder",
@@ -246,6 +246,16 @@
     "pencil": {
       "name": "pencil-simple",
       "codepoint": "e3b4"
+    }
+  },
+  "fonts": {
+    "regular": {
+      "file": "phosphor-regular.woff2",
+      "sha256": "c2ea45ea05ff5c7df1936770c104725f2a68f43fd343f35f3da23a30b27de32a"
+    },
+    "fill": {
+      "file": "phosphor-fill.woff2",
+      "sha256": "660bd6045c0e0d9756cddb8ba2ece3aad855df7d4a170ef23f7b1c0bf511c430"
     }
   }
 }
