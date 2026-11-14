@@ -96,7 +96,7 @@ func TestContextSharedDocumentsAreReadOnDemand(t *testing.T) {
 				".yesman/knowledge/", ".yesman/task-log.md", "Icon policy",
 				"Phosphor icon helper and local font assets", "head abc123 passed CI",
 				"Finishing a task alone is not a reason to add Knowledge",
-				"historical facts, not current instructions", "Read relevant entries on demand",
+				"historical facts, not current instructions", "only relevant detail files on demand", ".yesman/task-log/",
 				"release timelines", "temporary blockers", "Use the board for current status",
 			} {
 				if !strings.Contains(text, want) {
@@ -112,12 +112,12 @@ func TestContextSharedDocumentsAreReadOnDemand(t *testing.T) {
 				t.Fatalf("history inflated context: %d bytes", len(text))
 			}
 			if role == agent.RoleLead {
-				for _, want := range []string{"only files you may write are Knowledge notes", "coordinate and append task-log entries from worker reports", "never do the work yourself", "does not permit doing code work yourself"} {
+				for _, want := range []string{"only files you may write are Knowledge notes", "coordinate and append Working log entries from worker reports", "never do the work yourself", "does not permit doing code work yourself"} {
 					if !strings.Contains(text, want) {
 						t.Errorf("lead context lacks %q", want)
 					}
 				}
-			} else if !strings.Contains(text, "Report task results, PR/commit links") || !strings.Contains(text, "do not rewrite the shared task log") || !strings.Contains(text, "Report reusable discoveries to your lead") {
+			} else if !strings.Contains(text, "Report task results, PR/commit links") || !strings.Contains(text, "do not rewrite shared history") || !strings.Contains(text, "Report reusable discoveries to your lead") {
 				t.Error("worker has incorrect document responsibilities")
 			}
 		})

@@ -11,6 +11,7 @@
 import { $, h, icon } from './dom.js';
 import { counts, formatSize } from './diff.js';
 import { t, tn, formatNumber } from './i18n.js';
+import { isTaskLog } from './task-log.js';
 
 // How long each part is kept before the panel asks again by itself.
 const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
@@ -149,11 +150,11 @@ export function createInfo(host) {
 
   function taskLog(y) {
     const shown = host.files();
-    const current = shown?.yesman === y.name && shown.path === '.yesman/task-log.md';
+    const current = shown?.yesman === y.name && isTaskLog(shown.path);
     return h('section', { class: 'info-section info-section--link' },
       h('button', { class: 'info-link', type: 'button', 'aria-current': current ? 'page' : null, onclick: () => host.openTaskLog(),
-        title: t('Read task and PR history in the files pane') },
-      h('span', { class: 'info-link-label' }, t('Task log')),
+        title: t('Read the working log in the files pane') },
+      h('span', { class: 'info-link-label' }, t('Working log')),
       icon('chevron', 'mds-icon info-chevron')));
   }
 

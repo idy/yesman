@@ -60,7 +60,7 @@ func main() {
 
 	a := &app{home: h, storage: storage, pool: pool.New(h.Repos()), yesmen: yesmen.New(h.Yesmen(), h.Archive())}
 	if err := a.yesmen.EnsureTaskLogs(); err != nil {
-		log.Print("workspace task logs: ", err)
+		log.Print("workspace working logs: ", err)
 	}
 	a.pi, a.piErr = findPi()
 	a.runPi = runPi(a.pi, h.Runtime())

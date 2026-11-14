@@ -9,7 +9,8 @@
 //	    workers.json       the workers its lead started
 //	    board.json         the task board its agents keep
 //	    knowledge/         durable guidance shared by every agent; INDEX.md lists it
-//	    task-log.md        task and PR history, maintained by the lead
+//	    task-log.md        short history TOC, maintained by the lead
+//	    task-log/          dated per-task/PR/release Markdown details
 //	    sessions/<agent>/  each agent's pi session log
 //	  <repo>--<topic>/     worktrees
 package yesmen
@@ -25,10 +26,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/idy/yesman/internal/tasklog"
 )
 
 // LeadName is the agent name of every yesman's lead.
@@ -187,63 +189,21 @@ is not a reason to add a note.
 Good notes: "Use the project's Phosphor icon helper and local font assets";
 "Keep stable internal IDs when display names change."
 Task and PR history, commit/head hashes, CI and validation results, release
-timelines and temporary blockers belong in the task log or board, not here.
-The task log is separate from this index at ` + "`.yesman/task-log.md`" + `.
+timelines and temporary blockers belong in the working log or board, not here.
+The working log's short TOC is separate from this index at ` + "`.yesman/task-log.md`" + `,
+linking to per-task/PR/release details in ` + "`.yesman/task-log/`" + `.
+Read only relevant detail files on demand; the lead alone maintains history.
 `
 
-const taskLogTemplate = `# Task log
-
-Entries are appended below; a new workspace starts without task history.
-
-The lead appends dated entries here from worker reports; workers keep their
-board tasks current and report results to the lead instead of rewriting this
-shared file. Record historical facts, not current instructions. Consult the
-board for current status and Knowledge for reusable rules. Keep secrets out.
-
-Entry template (copy for each task; omit fields that do not apply):
-
-` + "```markdown" + `
-## YYYY-MM-DD — Task title (board ID)
-
-- Task: goal and relevant task/issue links.
-- Changes: what changed and why.
-- PR: repository, branch, PR link and commit/head, when applicable.
-- Validation: checks run and their results.
-- Outcome: result, including release date/version when applicable.
-- Follow-up: remaining work or blockers at the time, or none.
-` + "```" + `
-`
-
-// taskLogPathOccupied recognizes an exclusive-create collision. Go on Windows
-// reports EISDIR for a write open of an existing directory, even with O_EXCL.
-// Verify that path without following links; permission and I/O errors must
-// still reach the caller, even when something occupies the path.
-func taskLogPathOccupied(path string, err error) bool {
-	if errors.Is(err, os.ErrExist) {
-		return true
-	}
-	if !errors.Is(err, syscall.EISDIR) {
-		return false
-	}
-	info, statErr := os.Lstat(path)
-	return statErr == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0)
-}
+const taskLogTemplate = tasklog.Template
 
 // ensureTaskLog creates only a missing log. Exclusive creation also leaves
 // user-owned files, directories and symbolic links at this path untouched.
 func ensureTaskLog(y Yesman) error {
-	f, err := os.OpenFile(y.TaskLogPath(), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if taskLogPathOccupied(y.TaskLogPath(), err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	_, err = f.WriteString(taskLogTemplate)
-	return errors.Join(err, f.Close())
+	return tasklog.Bootstrap(y.Path)
 }
 
-// EnsureTaskLogs adds the task log to existing workspaces on app startup.
+// EnsureTaskLogs adds the working log to existing workspaces on app startup.
 // It never rewrites Knowledge or other metadata, and repeated calls are safe.
 func (s *Store) EnsureTaskLogs() error {
 	ys, err := s.List()
@@ -253,7 +213,7 @@ func (s *Store) EnsureTaskLogs() error {
 	var errs []error
 	for _, y := range ys {
 		if err := s.Use(y.Name, ensureTaskLog); err != nil {
-			errs = append(errs, fmt.Errorf("%s task log: %w", y.Name, err))
+			errs = append(errs, fmt.Errorf("%s working log: %w", y.Name, err))
 		}
 	}
 	return errors.Join(errs...)
