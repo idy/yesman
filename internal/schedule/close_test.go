@@ -159,3 +159,77 @@ func mustRuns(t *testing.T, e *env) *os.Root {
 	t.Cleanup(func() { r.Close() })
 	return r
 }
+
+// A background check held up reading a file (a slow disk, a file that does
+// not answer) holds up Close only for its short wait, and the lock stays
+// until the check ended: another app does not take the tasks over
+// meanwhile. The check claims nothing once Close was called, so the run
+// due is left to whoever runs the tasks next, which claims and sends it.
+func TestCloseDoesNotWaitLongForAHeldBackgroundCheck(t *testing.T) {
+	e := newEnv(t, "", utc("2026-11-16T08:59:00Z"))
+	e.save(PlanInput{Schedule: daily("09:00"), Enabled: true})
+	e.clock.Add(time.Minute)
+	e.restart("")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	beforeOpenRead = func(name string) {
+		if name == "yesman.json" {
+			once.Do(func() { close(entered); <-release })
+		}
+	}
+	defer func() { beforeOpenRead = nil }()
+	e.svc.Start()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the background check never read the workspace")
+	}
+
+	start := time.Now()
+	closed := make(chan time.Duration, 4)
+	for range 4 {
+		go func() { s := time.Now(); e.svc.Close(); closed <- time.Since(s) }()
+	}
+	for range 4 {
+		select {
+		case d := <-closed:
+			if d > closeWait+time.Second {
+				t.Errorf("Close waited %v", d)
+			}
+		case <-time.After(closeWait + 2*time.Second):
+			close(release)
+			t.Fatal("Close waited for the background check held up")
+		}
+	}
+	if waited := time.Since(start); waited < closeWait-100*time.Millisecond {
+		t.Fatalf("Close returned after %v with the background check under way", waited)
+	}
+	if !locked(t, e.cfg.LockPath) {
+		t.Fatal("the lock was let go while the background check may still write")
+	}
+	other := New(Config{Yesmen: yesmen.New(filepath.Join(e.root, "yesmen"), filepath.Join(e.root, "archive")), Agents: e.agents, Now: e.clock.Now, LockPath: e.cfg.LockPath})
+	defer other.Close()
+	if other.Owner() {
+		t.Fatal("another scheduler took the tasks over while the background check may still write")
+	}
+
+	// The check goes on, claims nothing, and ends; then the lock goes.
+	close(release)
+	start = time.Now()
+	e.svc.Close()
+	if waited := time.Since(start); waited > closeWait/2 || locked(t, e.cfg.LockPath) {
+		t.Fatalf("the lock was not let go once the check ended (closing again took %v)", waited)
+	}
+	if files := e.runFiles(); len(files) != 0 {
+		t.Fatalf("claimed after Close: %v", files)
+	}
+	if !other.Owner() {
+		t.Fatal("the lock was not taken over")
+	}
+	other.Tick(t0ctx())
+	other.Wait()
+	if r := readRun(t, e, "s1-20261116t0900"); r.Kind != RunScheduled {
+		t.Fatalf("the run due, by the next scheduler: %+v", r)
+	}
+	e.waitPrompts(1)
+}

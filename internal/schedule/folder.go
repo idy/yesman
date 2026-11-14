@@ -25,7 +25,9 @@ import (
 // .yesman and schedules included, or swapped in while a file is opened, is
 // refused and left as it is. Only the store's own folder is opened by its
 // path, which may lead through a link the user chose (a moved home or data
-// folder, /tmp on macOS).
+// folder, /tmp on macOS). A file is opened without waiting (openRead), so a
+// FIFO swapped in after the file was found regular is refused on its handle,
+// not waited on for a writer.
 //
 // os.Root opens files on Windows sharing their deletion, so these reads do
 // not stop the store or a user replacing a file meanwhile.
@@ -183,6 +185,22 @@ func (v fileVersion) stamp() fileStamp {
 	return fileStamp{size: v.info.Size(), mod: v.info.ModTime(), ok: true}
 }
 
+// openRead opens name in dir to read it, without waiting: had a FIFO been
+// put at the name since it was found a regular file, a plain open would wait
+// for a writer, holding the caller (the background check, a Save, Close)
+// before the handle could be checked and refused. The caller checks the
+// handle is the regular file it found.
+func openRead(dir *os.Root, name string) (*os.File, error) {
+	if beforeOpenRead != nil {
+		beforeOpenRead(name)
+	}
+	return dir.OpenFile(name, os.O_RDONLY|openNoWait, 0)
+}
+
+// beforeOpenRead, for tests, runs just before openRead opens a file: after
+// the file was found regular at its name.
+var beforeOpenRead func(name string)
+
 // readVersionIn is readIn, also giving the version of the file read.
 func readVersionIn(dir *os.Root, name string, limit int64) ([]byte, fileVersion, error) {
 	info, err := dir.Lstat(name)
@@ -195,7 +213,7 @@ func readVersionIn(dir *os.Root, name string, limit int64) ([]byte, fileVersion,
 	if !info.Mode().IsRegular() {
 		return nil, fileVersion{}, errUnsafePath{name}
 	}
-	f, err := dir.Open(name)
+	f, err := openRead(dir, name)
 	if err != nil {
 		return nil, fileVersion{}, err
 	}
@@ -281,12 +299,12 @@ func unchangedIn(dir *os.Root, name string, want fileVersion) error {
 	if want.info == nil || !os.SameFile(want.info, info) || info.Size() != want.size {
 		return errChangedOnDisk
 	}
-	f, err := dir.Open(name)
+	f, err := openRead(dir, name)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if opened, err := f.Stat(); err != nil || !os.SameFile(info, opened) {
+	if opened, err := f.Stat(); err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
 		return errChangedOnDisk
 	}
 	data, err := io.ReadAll(io.LimitReader(f, want.size+1))

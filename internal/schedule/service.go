@@ -215,15 +215,17 @@ func (s *Service) Start() {
 // closeWait is how long Close waits for the deliveries under way.
 const closeWait = 2 * time.Second
 
-// Close stops scheduling: no run is claimed after it returns, and no
-// operation that may write starts. Runs on their way stay recorded as they
+// Close stops scheduling: once it is called no run is claimed (beyond one
+// being recorded at that moment), and no operation that may write starts. Runs on their way stay recorded as they
 // are and are resumed or resolved on the next start. The lock is let go
-// once every delivery and every operation under way has ended, and not
-// before, so that no other app takes the tasks over while a run may still
-// go out or a record still be written here: when they end, whether or not
-// a Close still waits for them. Close waits a little for that. It may be
-// called again, also at once from several goroutines; each call returns
-// once the lock was let go, or after the same short wait.
+// once the background check, every delivery and every operation under way
+// have ended, and not before, so that no other app takes the tasks over
+// while a run may still go out or a record still be written here: when they
+// end, whether or not a Close still waits for them. Close waits a little
+// for that, for the background check too: one held up by a disk or a file
+// that does not answer does not hold up quitting. It may be called again,
+// also at once from several goroutines; each call returns once the lock was
+// let go, or after the same short wait.
 func (s *Service) Close() {
 	s.mu.Lock()
 	first := !s.closed
@@ -233,24 +235,34 @@ func (s *Service) Close() {
 	}
 	started := s.started
 	s.mu.Unlock()
-	if started {
-		<-s.done
-	}
 	if first {
-		go s.release()
+		go s.release(started)
 	}
 	select {
 	case <-s.released:
 	case <-time.After(closeWait):
-		// A delivery still waits on pi. The lock goes when it ends; exiting
-		// the app drops it too.
+		// A delivery still waits on pi, or a check on a file. The lock goes
+		// when it ends; exiting the app drops it too.
 	}
 }
 
-// release lets the lock go once every delivery worker and every operation
-// has ended. None starts once the service is closed (enqueue, begin), so
-// none can start after.
-func (s *Service) release() {
+// stopped reports whether Close was called, without taking s.mu.
+func (s *Service) stopped() bool {
+	select {
+	case <-s.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+// release lets the lock go once the background loop, when it was started,
+// every delivery worker and every operation have ended. None starts once
+// the service is closed (Start, enqueue, begin), so none can start after.
+func (s *Service) release(started bool) {
+	if started {
+		<-s.done
+	}
 	s.work.Wait()
 	s.ops.Wait()
 	s.mu.Lock()
@@ -514,6 +526,11 @@ func (s *Service) writeRunLocked(y yesmen.Yesman, r *record) error {
 
 // claimLocked creates a run's record, which must not exist yet.
 func (s *Service) claimLocked(sp *space, y yesmen.Yesman, r Run) (*record, error) {
+	// Nothing is claimed once Close was called: a check held up past its
+	// wait would otherwise claim a run that no one sends now.
+	if s.stopped() {
+		return nil, ErrClosed
+	}
 	rec := &record{Run: r}
 	data, err := encodeRun(*rec)
 	if err != nil {
