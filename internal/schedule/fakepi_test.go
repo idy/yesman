@@ -182,12 +182,29 @@ func (e *env) reopen(cfg Config) {
 	e.svc = New(cfg)
 }
 
+// close quits as the app does, scheduler first, then the agents; once they
+// stopped, the deliveries they held end and the lock is let go, which
+// closing again waits for. The lock must then be free: a test leaves no
+// lock behind (Windows cannot remove the folder of a file still open).
 func (e *env) close() {
 	if e.svc != nil {
 		e.svc.Close()
 	}
 	if e.agents != nil {
 		e.agents.StopAll()
+	}
+	if e.svc != nil {
+		e.svc.Close()
+	}
+	if e.cfg.LockPath != "" {
+		f, err := lockFile(e.cfg.LockPath)
+		if err != nil {
+			e.t.Errorf("the scheduler's lock is still held after it closed and its deliveries ended: %v", err)
+			return
+		}
+		if err := f.Close(); err != nil {
+			e.t.Errorf("closing the lock: %v", err)
+		}
 	}
 }
 

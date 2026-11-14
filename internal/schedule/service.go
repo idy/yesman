@@ -56,6 +56,9 @@ type Config struct {
 	// writeRun is asked before a run record or pruned.json is written: an
 	// error fails the write, as a crash would; nil lets it go on.
 	writeRun func(path string, data []byte) error
+	// plansLimit replaces maxPlansFile, the most of plans.json read and
+	// written, so tests can check the bound with small files.
+	plansLimit int64
 }
 
 // Errors a caller may show as they are.
@@ -91,7 +94,13 @@ type Service struct {
 	done    chan struct{}
 	events  chan agent.Event
 	sem     chan struct{}
-	work    sync.WaitGroup
+	// work counts the delivery workers. One is counted only while the
+	// service is open, so once Close set closed, work.Wait waits for every
+	// worker there will be.
+	work sync.WaitGroup
+	// released is closed once Close let the lock go, after every worker
+	// ended.
+	released chan struct{}
 	// epoch counts the receipt updates missed: one dropped makes every run
 	// waiting on a receipt to be checked again.
 	epoch atomic.Uint64
@@ -156,9 +165,12 @@ func New(cfg Config) *Service {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 4
 	}
+	if cfg.plansLimit <= 0 {
+		cfg.plansLimit = maxPlansFile
+	}
 	return &Service{
 		cfg: cfg, spaces: map[string]*space{}, id: randomHex(8),
-		wake: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
+		wake: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}), released: make(chan struct{}),
 		events: make(chan agent.Event, 256), sem: make(chan struct{}, cfg.Concurrency),
 	}
 }
@@ -177,37 +189,54 @@ func (s *Service) Start() {
 	go s.loop()
 }
 
+// closeWait is how long Close waits for the deliveries under way.
+const closeWait = 2 * time.Second
+
 // Close stops scheduling: no run is claimed after it returns. Runs on their
 // way stay recorded as they are and are resumed or resolved on the next
-// start. It waits a little for deliveries under way, then releases the lock.
+// start. The lock is let go once every delivery under way has ended, and
+// not before, so that no other app takes a run over while it may still go
+// out: when they end, whether or not a Close still waits for them. Close
+// waits a little for that. It may be called again, also at once from
+// several goroutines; each call returns once the lock was let go, or after
+// the same short wait.
 func (s *Service) Close() {
 	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return
+	first := !s.closed
+	if first {
+		s.closed = true
+		close(s.stop)
 	}
-	s.closed = true
-	close(s.stop)
 	started := s.started
 	s.mu.Unlock()
 	if started {
 		<-s.done
 	}
-	finished := make(chan struct{})
-	go func() { s.work.Wait(); close(finished) }()
+	if first {
+		go s.release()
+	}
 	select {
-	case <-finished:
-	case <-time.After(2 * time.Second):
-		// A delivery still waits on pi: keep the lock, so no other app takes
-		// its run over while it may still go out. Exiting releases it.
-		return
+	case <-s.released:
+	case <-time.After(closeWait):
+		// A delivery still waits on pi. The lock goes when it ends; exiting
+		// the app drops it too.
 	}
+}
+
+// release lets the lock go once every delivery worker has ended. No worker
+// starts once the service is closed (enqueue), so none can start after.
+func (s *Service) release() {
+	s.work.Wait()
 	s.mu.Lock()
-	if s.lock != nil {
-		_ = s.lock.Close()
-		s.lock, s.owner = nil, false
-	}
+	lock := s.lock
+	s.lock, s.owner = nil, false
 	s.mu.Unlock()
+	if lock != nil {
+		if err := lock.Close(); err != nil {
+			logf("letting the scheduled tasks' lock go: %v", err)
+		}
+	}
+	close(s.released)
 }
 
 // Wait waits for the deliveries under way, for tests and tools.
@@ -333,7 +362,7 @@ func (s *Service) loadLocked(sp *space, y yesmen.Yesman) {
 	dirErr := err
 	var data []byte
 	if dir != nil {
-		data, err = readIn(dir, "plans.json", maxPlansFile)
+		data, err = readIn(dir, "plans.json", s.cfg.plansLimit)
 	}
 	var f plansFile
 	if err == nil && data != nil {
@@ -381,10 +410,20 @@ func (s *Service) loadLocked(sp *space, y yesmen.Yesman) {
 	sp.loaded, sp.stamp = true, st
 }
 
+// errTasksTooLarge is why a change that would make plans.json larger than
+// yesman reads back is refused.
+var errTasksTooLarge = errors.New("the tasks file would be larger than yesman reads back")
+
+// writePlansLocked replaces plans.json with f, within the size it is read
+// at. A file that would be larger is not written: the one on disk, and what
+// is known of it here, stay as they were.
 func (s *Service) writePlansLocked(sp *space, y yesmen.Yesman, f plansFile) error {
 	data, err := f.encode()
 	if err != nil {
 		return err
+	}
+	if int64(len(data)) > s.cfg.plansLimit {
+		return fmt.Errorf("%w (%d KiB, at most %d KiB), so nothing was saved: archived tasks and fields this version does not know take room too", errTasksTooLarge, (len(data)+1023)>>10, s.cfg.plansLimit>>10)
 	}
 	dir, err := openSchedules(y, true)
 	if err != nil {
@@ -408,10 +447,17 @@ func runsFolder(y yesmen.Yesman) (*os.Root, error) {
 	return openRuns(dir, true)
 }
 
+// errRunTooLarge: a run record would be larger than yesman reads back; it
+// is not written, and the one on disk stays.
+var errRunTooLarge = fmt.Errorf("the run record would be larger than %d KiB, so it was not written", maxRunFile>>10)
+
 func (s *Service) writeRunLocked(y yesmen.Yesman, r *record) error {
 	data, err := encodeRun(*r)
 	if err != nil {
 		return err
+	}
+	if len(data) > maxRunFile {
+		return errRunTooLarge
 	}
 	if s.cfg.writeRun != nil {
 		if err := s.cfg.writeRun(runPath(y, r.ID), data); err != nil {
@@ -432,6 +478,9 @@ func (s *Service) claimLocked(sp *space, y yesmen.Yesman, r Run) (*record, error
 	data, err := encodeRun(*rec)
 	if err != nil {
 		return nil, err
+	}
+	if len(data) > maxRunFile {
+		return nil, errRunTooLarge
 	}
 	rd, err := runsFolder(y)
 	if err != nil {
@@ -1017,7 +1066,19 @@ func (s *Service) enqueue(sp *space, id string) {
 	if !start {
 		return
 	}
+	// A worker is counted only while the service is open: Close lets the
+	// lock go once the workers counted have ended, and none starts after.
+	// (Its run stays recorded as it is, for the next start.)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		sp.mu.Lock()
+		sp.working = false
+		sp.mu.Unlock()
+		return
+	}
 	s.work.Add(1)
+	s.mu.Unlock()
 	go func() {
 		defer s.work.Done()
 		for {
@@ -1596,11 +1657,21 @@ func (s *Service) save(name string, in PlanInput, by string, guard ...func(yesme
 				i, _ := findPlan(f, in.ID)
 				f.Plans[i] = p
 			}
-			delete(sp.problem, p.ID)
 			saved = p
 			return nil
 		}()
-		return then, err
+		if err != nil {
+			return nil, err
+		}
+		// Only once the file was written: a refused change leaves even the
+		// plan's last problem as it was.
+		evict := then
+		return func() {
+			delete(sp.problem, saved.ID)
+			if evict != nil {
+				evict()
+			}
+		}, nil
 	})
 	if err == nil {
 		s.changed(name)

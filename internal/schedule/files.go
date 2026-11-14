@@ -198,9 +198,21 @@ const (
 	keepRuns        = 30  // closed records per plan, besides the retained ones
 	maxOpenRuns     = 100 // retained runs of a plan before new runs wait for some to close
 	maxRunsPerPlan  = 60  // records of a plan a view lists, the newest; it counts the rest
-	maxPlansFile    = 1 << 20
-	maxRunFile      = 64 << 10
-	maxAttempts     = 5
+	// maxPlanBytes bounds one plan as plans.json keeps it. Its title and
+	// instructions at their longest, every character one JSON writes as six
+	// bytes ("<" or U+2028, say), take 24,720 bytes; its other fields,
+	// indented, under 1 KiB. TestWorstPlanFitsItsShare checks it.
+	maxPlanBytes = 32 << 10
+	// maxPlansFile is the most of plans.json yesman reads, and so the most
+	// it writes: maxPlans plans at their largest, with room for the file's
+	// own fields. A change that would make the file larger is refused before
+	// anything is written, so every file yesman saved reads back.
+	maxPlansFile = maxPlans*maxPlanBytes + 64<<10
+	// maxRunFile is the most of a run record yesman reads and writes; one at
+	// its largest (its plan's text, maxAttempts errors, a note) is about
+	// 40 KiB.
+	maxRunFile  = 64 << 10
+	maxAttempts = 5
 )
 
 // plansFile is .yesman/schedules/plans.json. Fields this version does not
