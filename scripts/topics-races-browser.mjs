@@ -163,6 +163,18 @@ async function run(engine, launcher) {
         assert.equal(after.length, before + 1);
         assert.ok(after.some((t) => t.startsWith('live question')), 'shown without its line');
       });
+      await check(engine, 'keys typed in a topic\'s composer stay text', async () => {
+        const box = page.locator('#topics [data-key="compose-tp1"]');
+        await box.click();
+        await page.keyboard.type('k/b ,.?');
+        await page.keyboard.press('Shift+KeyB');
+        await page.keyboard.press('Shift+KeyE');
+        assert.equal(await box.inputValue(), 'k/b ,.?BE');
+        assert.equal(await page.locator('.palette-option').count(), 0, 'no palette');
+        assert.equal(await page.locator('#topics').isVisible(), true, 'the pane stays');
+        assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'compose-tp1');
+        await box.fill('');
+      });
       assert.deepEqual(errors, []);
       await page.close();
     }
