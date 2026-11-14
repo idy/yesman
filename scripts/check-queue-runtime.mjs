@@ -33,6 +33,20 @@ child.on('error',e=>{error=e});child.stderr.on('data',d=>{stderr+=d});
 child.stdout.on('data',d=>{buffer+=d;let n;while((n=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,n);buffer=buffer.slice(n+1);if(line.trim())records.push(JSON.parse(line));}});
 async function until(find){const deadline=Date.now()+20000;while(!find()){if(error)throw error;if(Date.now()>deadline)throw Error(`${stderr}\n${JSON.stringify(records.slice(-8))}`);await new Promise(r=>setTimeout(r,5));}return find();}
 async function call(cmd){const id=`fixture-${++seq}`;child.stdin.write(JSON.stringify({...cmd,id})+'\n');const r=await until(()=>records.find(r=>r.type==='response'&&r.id===id));assert.equal(r.success,true,JSON.stringify(r));return r.data;}
+async function holdTurn(message) {
+  await rm(`${temp}/audit`, { force: true });
+  const result = await call({type:'prompt', message});
+  // The prompt ACK precedes the loop's initial steering poll. Only the local
+  // provider audit proves that poll has passed and the gated turn is running.
+  const deadline = Date.now() + 20000;
+  for (;;) {
+    try { await readFile(`${temp}/audit`); break; } catch {
+      if (Date.now() > deadline) throw Error(`provider did not enter its hold gate: ${stderr}`);
+      await new Promise(r => setTimeout(r, 5));
+    }
+  }
+  return result;
+}
 const image={type:'image',mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg=='};
 const id=n=>Date.now().toString(16).padStart(12,'0')+n.toString(16).padStart(36,'0');
 const results=[];
@@ -42,7 +56,7 @@ try {
   await rm(`${temp}/gate`,{force:true});
   await call({type:'set_steering_mode',mode});await call({type:'set_follow_up_mode',mode});
   const before=records.length;
-  assert.equal((await call({type:'prompt',message:`hold-${mode}`})).disposition,'started');
+  assert.equal((await holdTurn(`hold-${mode}`)).disposition,'started');
   await until(()=>records.slice(before).some(r=>r.type==='message_end'&&r.message?.role==='user'));
   const ids=Array.from({length:6},(_,n)=>id(n+(mode==='all'?100:0)));
   // Concurrent RPC writers pass independent invocation identities through hooks.
@@ -78,7 +92,7 @@ try {
   await rm(`${temp}/gate`,{force:true});
   await call({type:'set_steering_mode',mode});await call({type:'set_follow_up_mode',mode});
   const before=records.length;
-  await call({type:'prompt',message:`promotion hold ${mode}`});
+  await holdTurn(`promotion hold ${mode}`);
   const ids=Array.from({length:5},(_,n)=>id(200+(mode==='all'?20:0)+n));
   await Promise.all(ids.map((submissionId,n)=>call({type:n===0||n===4?'steer':'follow_up',message:'same',images:[image,image],submissionId})));
   const q=await call({type:'get_pending_queue'}), b=q.items.find(i=>i.submissionId===ids[2]), c=q.items.find(i=>i.submissionId===ids[3]);
@@ -108,7 +122,7 @@ try {
  }
  // Abort changes the control generation: a delayed request cannot revive work.
  await rm(`${temp}/gate`,{force:true});
- await call({type:'prompt',message:'stop fence'});
+ await holdTurn('stop fence');
  const stopId=id(400);await call({type:'follow_up',message:'must stay pending',submissionId:stopId});
  const stopQueue=await call({type:'get_pending_queue'}),stopItem=stopQueue.items.find(i=>i.submissionId===stopId);
  await call({type:'abort'});

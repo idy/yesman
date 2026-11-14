@@ -465,7 +465,6 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		a.proc = p
 		p.piSession.Store(state.SessionID)
 		a.nativeQueue = state.PendingQueue
-		p.origins.native = state.PendingQueue.Capability >= 2 && state.PendingQueue.supported()
 		if state.PendingQueue.supported() {
 			a.queue = pendingStatus(state.PendingQueue)
 		}
@@ -526,7 +525,7 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	// get_state answers once pi has loaded its session and extensions.
 	ctx, cancel := context.WithTimeout(startContext, 60*time.Second)
 	defer cancel()
-	state, err := p.modelState(ctx)
+	state, err := p.startupState(ctx)
 	if err != nil {
 		p.stop(2 * time.Second)
 		m.mu.Lock()

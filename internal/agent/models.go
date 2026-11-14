@@ -135,6 +135,13 @@ type modelState struct {
 	PendingQueue  pendingQueue `json:"pendingQueue"`
 }
 
+// startupState fixes the process's provenance mode on its ordered reader,
+// before the startup response is published or a later event is observed. The
+// mode is immutable thereafter; model/session refreshes cannot race readers.
+func (p *proc) startupState(ctx context.Context) (modelState, error) {
+	return p.modelState(ctx, func(s modelState) { p.origins.native = s.PendingQueue.supportsPromotion() })
+}
+
 func (p *proc) modelState(ctx context.Context, at ...func(modelState)) (modelState, error) {
 	var state modelState
 	var decodeErr error
