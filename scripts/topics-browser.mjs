@@ -151,7 +151,8 @@ async function run(engineName, engine) {
     await page.click('#topics [data-key="back"]');
     await create('Image limits', 'What images can a topic message carry?');
     await page.click('#topics [data-key="back"]');
-    assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'topic-tp2', 'back returns focus to the row');
+    // Back returns focus to the row; a redraw from the topic just created may still be settling.
+    await page.waitForFunction(() => document.activeElement?.dataset.key === 'topic-tp2', null, { timeout: 5000 });
 
     // The info panel follows: Topics now counts the two open topics.
     try {
@@ -190,6 +191,15 @@ async function run(engineName, engine) {
     await page.click('#topics [data-key="conflict-keep"]');
     await page.locator('#topics h3.topic-title', { hasText: 'Topics and tasks' }).waitFor();
     assert.match(await page.locator('#topics .topic-section').first().innerText(), /Mine/);
+    // Saving my version of a conflicting field keeps a field only they changed.
+    await page.click('#topics [data-key="edit"]');
+    await page.fill('#topics [data-key="edit-summary"]', 'Mine again');
+    await post(backend.url, '/fixture/lead', { id: 'tp1', patch: { summary: 'Theirs again', addQuestions: ['Lead-only question'] } });
+    await page.click('#topics [data-key="edit-save"]');
+    await page.locator('#topics [data-key="conflict-keep"]').click();
+    await page.locator('#topics [data-kind="question"] li', { hasText: 'Lead-only question' }).waitFor();
+    assert.match(await page.locator('#topics .topic-section').first().innerText(), /Mine again/);
+    assert.equal(await page.locator('#topics [data-kind="question"] li').count(), 2, 'the lead\'s question survives');
 
     // Send from topics while the lead's run is held: the main draft stays,
     // A then B (with an image) reach the lead's one conversation.
@@ -201,6 +211,8 @@ async function run(engineName, engine) {
     await composeA.press('Enter');
     await page.waitForFunction(() => [...document.querySelectorAll('#thread .topic-chip')].some((c) => c.innerText.includes('tp1')));
     await page.waitForFunction(() => !document.querySelector('#topics [data-key="compose-tp1"]')?.value);
+    // The open topic lists the message once pi records it, without a redraw by hand.
+    await page.locator('#topics .topic-message', { hasText: 'What belongs on the board?' }).waitFor();
     await page.click('#topics [data-key="back"]');
     await page.click('#topics [data-key="topic-tp2"]');
     await page.locator('#topics .topic-composer input[type="file"]').setInputFiles({ name: 'dot.png', mimeType: 'image/png', buffer: PNG });

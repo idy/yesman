@@ -532,7 +532,7 @@ export function createTopics(host) {
     const conflict = ed.conflict ? h('div', { class: 'topic-notice', role: 'alert', 'data-tone': 'warn' },
       h('p', null, t('This topic changed while you edited it ({fields}). Your version is still in the form; nothing was saved.', { fields: ed.conflict.fields.map((f) => t(f)).join(', ') })),
       h('div', { class: 'topic-actions' },
-        h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-key': 'conflict-keep', onclick: () => { ed.base = ed.conflict.current; ed.conflict = null; save(y); } }, t('Save my version')),
+        h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-key': 'conflict-keep', onclick: () => { rebase(ed, ed.conflict.current); save(y); } }, t('Save my version')),
         h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-key': 'conflict-load', onclick: () => { replace(y, ed.conflict.current); startEdit(y, ed.id); } }, t('Discard mine and load theirs')))) : null;
     const form = h('form', { class: 'topic-edit-form', onsubmit: (e) => { e.preventDefault(); save(y); } },
       h('label', { class: 'field' }, h('span', null, t('Title')), title),
@@ -637,6 +637,20 @@ export function createTopics(host) {
     } finally {
       if (v.editing === ed) { ed.saving = false; render(); }
     }
+  }
+
+  // rebase moves the form onto the topic as it is now, so that saving it
+  // sends only what the user changed: a field the user left alone takes the
+  // newer value, and a field the user edited keeps the user's version.
+  function rebase(ed, now) {
+    const f = ed.form, base = ed.base;
+    if (f.title === base.title) f.title = now.title;
+    if (f.summary === (base.summary ?? '')) f.summary = now.summary ?? '';
+    if (sameItems(f.conclusions, base.conclusions)) f.conclusions = itemsOf(now.conclusions);
+    if (sameItems(f.questions, base.questions)) f.questions = itemsOf(now.questions);
+    f.removeSources = f.removeSources.filter((id) => now.sources.some((s) => s.id === id));
+    ed.base = now;
+    ed.conflict = null;
   }
 
   // merge combines the form with the topic as it is now, field by field,

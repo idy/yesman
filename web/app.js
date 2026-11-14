@@ -746,6 +746,8 @@ function onAgentEvent(ev) {
     return;
   }
   applyEvent(c, e, false);
+  // The topics pane lists the lead's messages about the topic shown.
+  if (e.type === 'message_end' && state.pane === 'topics' && agent?.role === 'lead' && e.message?.role === 'user') topics.rerender();
 }
 
 // applyEvent updates a conversation with one record, and the thread when it
@@ -2570,7 +2572,11 @@ const topics = createTopics({
     if (!lead) return;
     const c = convo(lead);
     if (!c.deliveries.has(id)) {
-      const preview = Array.from(text).slice(0, 128).join('');
+      // Keep the whole topic line, so the receipt shows its chip, and clip
+      // only the user's text after it, as the composer's receipts do.
+      const marker = parseTopicMarker(text);
+      const head = marker ? text.slice(0, text.length - marker.rest.length) : '';
+      const preview = head + Array.from(text.slice(head.length)).slice(0, 128).join('');
       c.deliveries.set(id, { id, revision: 0, state: 'sending', text: preview, imageCount, preview: preview !== text });
     }
     if (c.loaded) schedulePatch(c);
