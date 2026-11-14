@@ -30,39 +30,57 @@ const LEAD_DENIED = ["bash"];
 const LEAD_WRITES = ["edit", "write"]; // allowed only for shared documents
 const LEAD_ADDED = ["grep", "find", "ls"];
 
-// writableTaskLog checks the new exception's actual file boundary. A linked
-// .yesman directory or task-log file could otherwise write code or another
-// workspace. Resolve the workspace itself (for paths such as /tmp on macOS),
-// then accept only ordinary directories and an unaliased regular file, or a
-// missing path that write may create. Existing user links stay untouched.
-function writableTaskLog(): boolean {
-	if (!WORKSPACE) return false;
+// writableTaskLog checks only the TOC and flat Markdown records. The workspace
+// itself may be an alias; metadata/record parents and files must be ordinary.
+// This is a pi tool hook, not an OS sandbox or a grant to other plugin tools.
+function writableTaskLog(path: string): boolean {
+	if (!WORKSPACE || path.split(/[\\/]/).includes("..")) return false;
 	try {
 		const workspace = realpathSync(WORKSPACE);
-		const meta = resolve(workspace, ".yesman");
-		let parent;
-		try {
-			parent = lstatSync(meta);
-		} catch (err) {
-			return (err as NodeJS.ErrnoException).code === "ENOENT";
+		const target = resolve(WORKSPACE, path);
+		const roots = [resolve(WORKSPACE), workspace];
+		const fold = (s: string) => process.platform === "win32" ? s.toLowerCase() : s;
+		// Absolute paths may spell the workspace through an OS alias (/var,
+		// /tmp, drive casing or a workspace junction). Resolve only that prefix,
+		// then validate .yesman/task-log parents below the canonical root.
+		const alias = target.match(/^(.*)[\\/]\.yesman[\\/](?:task-log\.md|task-log[\\/][^\\/]+)$/i);
+		if (alias && fold(realpathSync(alias[1])) === fold(workspace)) roots.push(alias[1]);
+		let rel: string | undefined;
+		for (const root of roots) {
+			const candidate = relative(fold(root), fold(target)).replace(/\\/g, "/");
+			const name = candidate.slice(".yesman/task-log/".length);
+			const record = candidate.startsWith(".yesman/task-log/") && /^[a-z0-9][a-z0-9._-]*\.md$/i.test(name) && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
+			if (candidate === ".yesman/task-log.md" || record) {
+				rel = relative(root, target).replace(/\\/g, "/");
+				break;
+			}
 		}
-		if (!parent.isDirectory() || parent.isSymbolicLink()) return false;
-		try {
-			const file = lstatSync(resolve(meta, "task-log.md"));
-			return file.isFile() && !file.isSymbolicLink() && file.nlink === 1;
-		} catch (err) {
-			return (err as NodeJS.ErrnoException).code === "ENOENT";
+		if (!rel) return false;
+		const parts = rel.split("/");
+		let current = workspace;
+		for (let i = 0; i < parts.length; i++) {
+			current = resolve(current, parts[i]);
+			try {
+				const st = lstatSync(current);
+				if (st.isSymbolicLink()) return false;
+				if (i < parts.length - 1 ? !st.isDirectory() : !st.isFile() || st.nlink !== 1) return false;
+			} catch (err) {
+				// Only the preselected .yesman and task-log parents may be created.
+				return (err as NodeJS.ErrnoException).code === "ENOENT";
+			}
 		}
+		return true;
 	} catch {
 		return false;
 	}
 }
 
-// sharedDocumentPath allows Knowledge notes and the single task-log file.
+// The Knowledge exception is unchanged. The task log has a narrower file set.
 function sharedDocumentPath(path: unknown): boolean {
 	if (typeof path !== "string" || !path || !WORKSPACE) return false;
-	const target = resolve(WORKSPACE, path.replace(/^@/, ""));
-	if (target === resolve(WORKSPACE, ".yesman", "task-log.md")) return writableTaskLog();
+	const input = path.replace(/^@/, "");
+	if (writableTaskLog(input)) return true;
+	const target = resolve(WORKSPACE, input);
 	const dir = resolve(WORKSPACE, ".yesman", "knowledge");
 	const rel = relative(dir, target);
 	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
@@ -198,7 +216,7 @@ export default function yesman(pi: ExtensionAPI) {
 				return { block: true, reason: "The lead has no shell, to stay free for the user. Hand this to a worker with yesman_worker_start." };
 			}
 			if (LEAD_WRITES.includes(event.toolName) && !sharedDocumentPath((event.input as { path?: unknown } | undefined)?.path)) {
-				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/ and a regular task log at .yesman/task-log.md in this workspace; task-log aliases are not writable. Hand code and other changes to a worker with yesman_worker_start." };
+				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/, the TOC .yesman/task-log.md and flat Markdown records .yesman/task-log/<name>.md in this workspace; linked task-log files or parents are not writable. Hand code and other changes to a worker with yesman_worker_start." };
 			}
 		});
 	}

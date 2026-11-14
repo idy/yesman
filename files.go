@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/egoist/mygo"
+	"github.com/idy/yesman/internal/tasklog"
 )
 
 // filesEvent says which files of a yesman's workspace changed, while the
@@ -163,6 +164,11 @@ func (s *service) ReadFile(yesman, file string) (FileView, error) {
 	}
 	defer root.Close()
 	file = cleanRel(file)
+	if tasklog.IsPath(file) {
+		if err := tasklog.Check(root, file, false); err != nil {
+			return FileView{}, err
+		}
+	}
 	f, err := root.Open(file)
 	if err != nil {
 		return FileView{}, err
@@ -233,6 +239,9 @@ func (s *service) WriteFile(yesman, file, text, base string) (FileView, error) {
 	}
 	defer root.Close()
 	file = cleanRel(file)
+	if tasklog.IsPath(file) {
+		return FileView{}, errors.New("task history is read-only; the lead maintains its Markdown records")
+	}
 	if file == "." {
 		return FileView{}, errors.New("no file named")
 	}

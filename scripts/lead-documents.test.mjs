@@ -49,10 +49,10 @@ test('lead may maintain Knowledge and the exact task log, with code and other me
   const { handlers } = extension('lead', workspace);
   const gate = handlers.get('tool_call')[0];
   for (const toolName of ['write', 'edit']) {
-    for (const path of ['.yesman/task-log.md', '@.yesman/task-log.md', resolve(workspace, '.yesman/task-log.md'), '.yesman/knowledge/icons.md', '.yesman/knowledge/INDEX.md', '.yesman/knowledge/deep/rules.md']) {
+    for (const path of ['.yesman/task-log.md', '.yesman/task-log/2026-01-15-t3-picker.md', '@.yesman/task-log/2026-01-15-t3-picker-02.md', '@.yesman/task-log.md', resolve(workspace, '.yesman/task-log.md'), '.yesman/knowledge/icons.md', '.yesman/knowledge/INDEX.md', '.yesman/knowledge/deep/rules.md']) {
       assert.equal(await gate({ toolName, input: { path } }), undefined, `${toolName} should allow ${path}`);
     }
-    for (const path of [undefined, '', '.yesman/board.json', '.yesman/yesman.json', '.yesman/task-log.md.bak', '.yesman/task-log.md/child.md', '.yesman/knowledge', '.yesman/knowledge/../workers.json', '.yesman/task-log.md/../../code.go', 'repo/main.go', '../other/.yesman/task-log.md', resolve(workspace, '..', 'other', '.yesman/task-log.md')]) {
+    for (const path of [undefined, '', '.yesman/task-log/CON.md', '.yesman/task-log/nul.md', '.yesman/task-log/a.md:stream', '.yesman/task-log/x.md.bak', '.yesman/task-log/deep/a.md', '.yesman/task-log/.hidden.md', '.yesman/task-log/a.md/child.md', '.yesman/task-log-neighbor/a.md', '.yesman/task-log/a/../b.md', '.yesman/task-log-recovery/snapshot.md', '.yesman/task-log-migration.json', '.yesman/board.json', '.yesman/yesman.json', '.yesman/task-log.md.bak', '.yesman/task-log.md/child.md', '.yesman/knowledge', '.yesman/knowledge/../workers.json', '.yesman/task-log.md/../../code.go', 'repo/main.go', '../other/.yesman/task-log.md', resolve(workspace, '..', 'other', '.yesman/task-log.md')]) {
       const blocked = await gate({ toolName, input: { path } });
       assert.equal(blocked?.block, true, `${toolName} should block ${path}`);
       assert.match(blocked.reason, /\.yesman\/task-log\.md/);
@@ -157,6 +157,49 @@ test('workspace aliases resolve to the same safe regular task log', async (t) =>
   writeFileSync(log, '# Task log\n');
   const gate = extension('lead', alias).handlers.get('tool_call')[0];
   for (const toolName of ['write', 'edit']) assert.equal(await gate({ toolName, input: { path: '.yesman/task-log.md' } }), undefined);
+});
+
+// Exercise the actual tool_call gate using only synthetic temporary files.
+for (const kind of ['regular', 'directory', 'symlink', 'dangling', 'hardlink', 'root-link', 'parent-file']) {
+  test(`flat task-log record boundary: ${kind}`, async (t) => {
+    const { root, workspace } = fixture(t);
+    const dir = join(workspace, '.yesman', 'task-log');
+    const part = join(dir, '2026-01-15-t3-picker.md');
+    const target = join(root, 'other-workspace-code.go');
+    writeFileSync(target, 'keep external code\n');
+    if (kind === 'root-link') {
+      try { symlinkSync(root, dir, 'junction'); } catch (e) { if (process.platform === 'win32') return t.skip(e.code); throw e; }
+    } else if (kind === 'parent-file') writeFileSync(dir, 'preserve placeholder');
+    else {
+      mkdirSync(dir);
+      if (kind === 'regular') writeFileSync(part, '# Record\n');
+      if (kind === 'directory') mkdirSync(part);
+      try {
+        if (kind === 'symlink' || kind === 'dangling') symlinkSync(kind === 'dangling' ? join(root, 'absent.go') : target, part, 'file');
+        if (kind === 'hardlink') linkSync(target, part);
+      } catch (e) { if (process.platform === 'win32') return t.skip(e.code); throw e; }
+    }
+    const gate = extension('lead', workspace).handlers.get('tool_call')[0];
+    for (const toolName of ['write', 'edit']) {
+      for (const path of [part, '.yesman/task-log/2026-01-15-t3-picker.md', '@.yesman/task-log/2026-01-15-t3-picker.md']) {
+        const result = await gate({ toolName, input: { path } });
+        assert.equal(result?.block ?? false, kind !== 'regular', `${toolName} ${path}`);
+      }
+    }
+    assert.equal(readFileSync(target, 'utf8'), 'keep external code\n');
+  });
+}
+
+test('canonical and workspace-alias record paths stay in this workspace', async (t) => {
+  const { root, workspace } = fixture(t);
+  mkdirSync(join(workspace, '.yesman', 'task-log'));
+  const alias = join(root, 'alias');
+  try { symlinkSync(workspace, alias, 'junction'); } catch (e) { if (process.platform === 'win32') return t.skip(e.code); throw e; }
+  const gate = extension('lead', alias).handlers.get('tool_call')[0];
+  for (const path of [join(workspace, '.yesman', 'task-log', 'new.md'), join(alias, '.yesman', 'task-log', 'new.md'), '.yesman/task-log/new.md']) {
+    assert.equal(await gate({ toolName: 'write', input: { path } }), undefined);
+  }
+  assert.equal((await gate({ toolName: 'write', input: { path: join(root, 'bob', '.yesman', 'task-log', 'new.md') } }))?.block, true);
 });
 
 test('lead tool narrowing still removes the shell and workers retain their tools', async () => {

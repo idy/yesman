@@ -8,6 +8,7 @@ import { orderWorkers } from './sidebar.js';
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
+import { logRoute } from './task-log.js';
 import { createInfo } from './info.js';
 import { createBoard } from './board.js';
 import { createContextViewer } from './context.js';
@@ -2315,6 +2316,7 @@ const files = createFiles({
     return a ? yesmanOf(a.id) : null;
   },
   isOpen: () => state.pane === 'files',
+  selectWorkspace: (name) => { if (agentById(`${name}/lead`)) selectAgent(`${name}/lead`); },
   setOpen: (on) => setPane(on ? 'files' : state.pane === 'files' ? null : state.pane),
   checkout: (y) => openCheckout(y),
   dismiss: (name) => dismiss(name),
@@ -2528,7 +2530,9 @@ async function refreshState() {
   pruneCaches();
   if (state.view.kind === 'agent' && !agentById(state.view.id)) state.view = { kind: 'none' };
   if (state.view.kind === 'none' && state.snap.yesmen.length) {
-    state.view = { kind: 'agent', id: `${state.snap.yesmen[0].name}/lead` };
+    const route = logRoute();
+    const name = state.snap.yesmen.some((y) => y.name === route?.name) ? route.name : state.snap.yesmen[0].name;
+    state.view = { kind: 'agent', id: `${name}/lead` };
     selectAgent(state.view.id);
     return;
   }

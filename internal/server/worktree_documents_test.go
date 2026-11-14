@@ -44,7 +44,7 @@ func TestContextDocumentsAndWorktreePoliciesTogether(t *testing.T) {
 					t.Errorf("lead lacks %q", want)
 				}
 			}
-		} else if !strings.Contains(text, "your lead, which appends the task log") {
+		} else if !strings.Contains(text, "your lead, which maintains the task-log TOC") {
 			t.Error("worker task-log responsibility changed")
 		}
 	}

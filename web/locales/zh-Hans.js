@@ -1,6 +1,11 @@
 // Simplified Chinese for the page, by the English of each message (see
 // web/i18n.js). A message left out shows in English.
 export default {
+  "Contents": "目录",
+  "Reload": "重新载入",
+  "Complete original": "完整原文",
+  "Legacy slice: Markdown may continue across files. The complete original preserves its formatting and old anchors.": "历史分片：Markdown 结构可能跨越文件。完整原文保留原始排版与旧锚点。",
+  "This anchor is not on this page. For migrated history, open the complete original from Contents and search for the heading.": "本页没有此锚点。若为已迁移的历史，请从目录打开完整原文并查找该标题。",
   "Attach images": "添加图片",
   "Attach images (PNG, JPEG, GIF, WebP; 4 images, 5 MB each, 10 MB total)": "添加图片（PNG、JPEG、GIF、WebP；最多 4 张，每张 5 MB，合计 10 MB）",
   "Attached image": "已添加的图片",
