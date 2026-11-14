@@ -4,6 +4,7 @@
 //   mygo.call("Yesman.<Method>", ...)  services in service.go
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
+import { orderWorkers } from './sidebar.js';
 import { renderMarkdown } from './markdown.js';
 import { $, h, icon } from './dom.js';
 import { createFiles } from './files.js';
@@ -37,7 +38,7 @@ const statusText = (status) => (STATUS[status] ? t(STATUS[status]) : status);
 // A worker's question goes to its lead, not to you: it shows as asking,
 // in the working colour, and only a lead can need you.
 const asking = (a) => a.role === 'worker' && a.status === 'waiting';
-const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: a.yesman }) : statusText(a.status));
+const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: yesmanLabel(a.yesman) }) : statusText(a.status));
 const statusTone = (a) => (asking(a) ? 'asking' : a.status);
 
 const state = {
@@ -67,6 +68,7 @@ const state = {
 
 const agentById = (id) => state.snap.agents.find((a) => a.id === id);
 const yesmanOf = (id) => state.snap.yesmen.find((y) => y.name === id?.split('/')[0]);
+const yesmanLabel = (name) => state.snap.yesmen.find((y) => y.name === name)?.displayName || name;
 const selectedAgent = () => (state.view.kind === 'agent' ? agentById(state.view.id) : null);
 
 // ---------- Conversations ----------
@@ -296,8 +298,8 @@ function renderThread() {
     const y = yesmanOf(a.id);
     thread.append(
       a.role === 'lead'
-        ? h('div', { class: 'thread-empty' }, h('strong', null, t('{name} is ready', { name: a.yesman })),
-            t('Tell {name} what you want done. It works in {path}, checks out repos from the pool, and starts workers when the job splits up.', { name: a.yesman, path: y?.path ?? t('its workspace') }))
+        ? h('div', { class: 'thread-empty' }, h('strong', null, t('{name} is ready', { name: yesmanLabel(a.yesman) })),
+            t('Tell {name} what you want done. It works in {path}, checks out repos from the pool, and starts workers when the job splits up.', { name: yesmanLabel(a.yesman), path: y?.path ?? t('its workspace') }))
         : h('div', { class: 'thread-empty' }, h('strong', null, a.name), t('This worker has not started yet.')),
     );
   } else {
@@ -533,9 +535,10 @@ function agentRow(a, cls, label) {
   const worker = cls.includes('agent-row--worker');
   const done = worker && a.finishedAt;
   let status = done ? t('Done') : statusLabel(a);
-  if (worker && a.status === 'failed') status = t('{status}; {name} was told', { status, name: a.yesman });
+  if (worker && a.status === 'failed') status = t('{status}; {name} was told', { status, name: yesmanLabel(a.yesman) });
   return h('button', {
     class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': statusTone(a), 'data-done': done ? 'true' : null,
+    'data-sidebar-entry': worker ? 'worker' : cls.includes('agent-row--yesman') ? 'yesman' : 'needs-you',
     'aria-current': current ? 'page' : null, 'aria-haspopup': 'menu',
     title: `${a.id}: ${status}${a.title ? `\n${a.title}` : ''}${a.detail ? `\n${a.detail}` : ''}`,
     onclick: () => selectAgent(a.id),
@@ -585,40 +588,57 @@ async function openAgentMenu(e, a) {
       case 'logs': await call('Reveal', `${workspace.path}/.yesman/sessions/${a.name}`); break;
       case 'abort': await call('Abort', a.id); break;
       case 'sleep': await call('Stop', a.id); break;
+      case 'rename': await renameYesman(workspace); break;
       case 'archive': await dismiss(a.yesman); break;
       case 'remove': await removeWorker(a); break;
       case 'hide-done':
       case 'show-done': setHideDone(a.yesman, action === 'hide-done'); break;
       default:
-        document.querySelector(`.agent-row[data-agent="${CSS.escape(a.id)}"]`)?.focus({ preventScroll: true });
+        restoreSidebarFocus(row);
     }
   } catch (err) {
     fail(err);
   }
 }
 
+// A waiting lead has two entries. Preserve the entry as well as the agent;
+// if it disappears, use the other entry, then the workspace's lead for a
+// hidden/removed worker. Keep focus unchanged when the workspace is gone.
+function restoreSidebarFocus(row) {
+  if (!row?.dataset.agent) return;
+  const list = $('#yesmen');
+  const agent = `[data-agent="${CSS.escape(row.dataset.agent)}"]`;
+  const entry = `[data-sidebar-entry="${CSS.escape(row.dataset.sidebarEntry)}"]`;
+  const lead = `${row.dataset.agent.split('/')[0]}/lead`;
+  const target = list.querySelector(agent + entry) ?? list.querySelector(agent)
+    ?? list.querySelector(`[data-agent="${CSS.escape(lead)}"][data-sidebar-entry="yesman"]`);
+  target?.focus({ preventScroll: true });
+}
+
 function renderSidebar() {
   const list = $('#yesmen');
+  const focusedRow = list.contains(document.activeElement) ? document.activeElement : null;
   list.replaceChildren();
   const waiting = state.snap.agents.filter((a) => a.status === 'waiting' && a.role === 'lead');
   if (waiting.length) {
     list.append(h('p', { class: 'side-group' }, t('Needs you')));
-    for (const a of waiting) list.append(agentRow(a, '', a.role === 'lead' ? a.yesman : a.id));
+    for (const a of waiting) list.append(agentRow(a, '', a.role === 'lead' ? yesmanLabel(a.yesman) : a.id));
   }
   list.append(h('div', { class: 'side-group' }, h('span', null, t('Yesmen')),
     h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Hire a yesman'), 'aria-label': t('Hire a yesman'), onclick: openHire }, icon('plus'))));
   for (const y of state.snap.yesmen) {
     const agents = state.snap.agents.filter((a) => a.yesman === y.name);
     const lead = agents.find((a) => a.role === 'lead');
-    if (lead) list.append(agentRow(lead, 'agent-row--yesman', y.name));
-    // Done workers keep their place, greyed; the yesman's menu can hide them.
-    // The one you are looking at stays.
+    if (lead) list.append(agentRow(lead, 'agent-row--yesman', y.displayName || y.name));
+    // Active workers come first; preserve start order within each class.
+    // The yesman's menu can hide done workers, except the one being viewed.
     const hide = state.hideDone.has(y.name);
-    for (const w of agents.filter((a) => a.role === 'worker')) {
+    for (const w of orderWorkers(agents.filter((a) => a.role === 'worker'))) {
       if (hide && w.finishedAt && !(state.view.kind === 'agent' && state.view.id === w.id)) continue;
       list.append(agentRow(w, 'agent-row--worker', w.name));
     }
   }
+  restoreSidebarFocus(focusedRow);
   renderSideFoot();
 }
 
@@ -642,8 +662,8 @@ function renderBar() {
     crumbs.replaceChildren(h('span', null, t('Settings')), sep(), h('span', { 'aria-current': 'page' }, t(page.label)));
   } else if (a) {
     const y = yesmanOf(a.id);
-    const here = h('span', { 'aria-current': 'page', title: y?.path ?? '' }, a.role === 'lead' ? a.yesman : a.name);
-    crumbs.replaceChildren(...(a.role === 'lead' ? [here] : [h('span', null, a.yesman), sep(), here]));
+    const here = h('span', { 'aria-current': 'page', title: y?.path ?? '' }, a.role === 'lead' ? yesmanLabel(a.yesman) : a.name);
+    crumbs.replaceChildren(...(a.role === 'lead' ? [here] : [h('span', null, yesmanLabel(a.yesman)), sep(), here]));
   } else {
     crumbs.replaceChildren();
   }
@@ -879,7 +899,7 @@ function renderDock({ focusComposer = false } = {}) {
     // disabled textarea would drop focus to BODY before the next render.
     rows: 1, 'aria-label': t('Message'), readonly: attachments.sending,
     title: working ? t('Enter to send after the current step; Shift+Enter for a new line') : '',
-    placeholder: a.role === 'lead' ? t('Message {name}…', { name: a.yesman }) : t('Message worker {name}…', { name: a.name }),
+    placeholder: a.role === 'lead' ? t('Message {name}…', { name: yesmanLabel(a.yesman) }) : t('Message worker {name}…', { name: a.name }),
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
   const action = working
@@ -962,7 +982,7 @@ function askEl(a) {
   const d = a.dialog;
   const answer = (payload) => call('Answer', a.id, d.id, payload).catch(fail);
   const box = h('div', { class: 'ask', role: 'alert' }, h('strong', null, d.title || t('Question')), d.message ? h('p', null, d.message) : null,
-    a.role === 'worker' ? h('p', { class: 'ask-hint' }, t('{name} has this question and answers it. You can answer here instead.', { name: a.yesman })) : null);
+    a.role === 'worker' ? h('p', { class: 'ask-hint' }, t('{name} has this question and answers it. You can answer here instead.', { name: yesmanLabel(a.yesman) })) : null);
   const actions = h('div', { class: 'ask-actions' });
   if (d.method === 'confirm') {
     actions.append(
@@ -1648,6 +1668,7 @@ const cloneStatus = (c) => (c.state === 'queued' ? t('waiting to clone') : t('cl
 // agent may.
 function repoRow(r, clone) {
   const worktrees = state.snap.yesmen.flatMap((y) => y.worktrees.filter((w) => w.repo === r.name).map((w) => ({ yesman: y.name, dir: w.dir || w.path })));
+  // Labels may be shared; deduplicate users by workspace identity first.
   const users = [...new Set(worktrees.map((w) => w.yesman))];
   const fetching = state.fetches.fetching.includes(r.name);
   const busy = fetching || !!clone;
@@ -1662,8 +1683,8 @@ function repoRow(r, clone) {
     h('div', { class: 'card-row-text' }, h('strong', { title: r.name }, name || r.name),
       h('span', { title: error || null }, meta, error ? [meta ? ' · ' : null, h('span', { class: 'danger' }, t('last fetch failed: {error}', { error }))] : null)),
     users.length
-      ? h('span', { class: 'card-row-aside', title: worktrees.map((w) => `${w.yesman}: ${w.dir}`).join('\n') },
-          `${tn(worktrees.length, '1 worktree', '{n} worktrees')} · ${users.join(', ')}`)
+      ? h('span', { class: 'card-row-aside', title: worktrees.map((w) => `${yesmanLabel(w.yesman)}: ${w.dir}`).join('\n') },
+          `${tn(worktrees.length, '1 worktree', '{n} worktrees')} · ${users.map(yesmanLabel).join(', ')}`)
       : null,
     h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Fetch {name}', { name: r.name }), 'aria-label': t('Fetch {name}', { name: r.name }), disabled: busy, onclick: () => fetchRepo(r.name) },
       busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload')));
@@ -2144,6 +2165,56 @@ async function hire(name) {
   }
 }
 
+async function renameYesman(y) {
+  if (!y) return;
+  const dialog = $('#rename-dialog');
+  const form = $('#rename-form');
+  const input = form.elements.name;
+  const error = $('#rename-error');
+  const save = form.querySelector('[type="submit"]');
+  const cancel = $('#rename-cancel');
+  let busy = false;
+  input.value = y.displayName || y.name;
+  error.hidden = true;
+  input.oninput = () => { error.hidden = true; input.setCustomValidity(''); };
+  cancel.onclick = () => dialog.close('cancel');
+  dialog.oncancel = (e) => { if (busy) e.preventDefault(); };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    const label = input.value.trim();
+    if (!label || /[\u0000-\u001f\u007f-\u009f]/u.test(label)) {
+      error.textContent = t('Enter a name without control characters.');
+      error.hidden = false;
+      input.focus();
+      return;
+    }
+    busy = true;
+    save.disabled = cancel.disabled = input.disabled = true;
+    try {
+      const renamed = await call('Rename', y.name, label);
+      // Update every visible label immediately; the changed event also refreshes
+      // other windows. IDs and conversation/draft caches stay untouched.
+      const current = state.snap.yesmen.find((item) => item.name === y.name);
+      if (current) current.displayName = renamed.displayName;
+      render();
+      dialog.close('save');
+    } catch (err) {
+      error.textContent = errorText(err);
+      error.hidden = false;
+    } finally {
+      busy = false;
+      save.disabled = cancel.disabled = input.disabled = false;
+      if (dialog.open) input.focus();
+    }
+  };
+  const answer = openDialog(dialog);
+  input.focus();
+  input.select();
+  await answer;
+  form.onsubmit = input.oninput = dialog.oncancel = cancel.onclick = null;
+}
+
 async function confirmAction(title, body, ok) {
   const dialog = $('#confirm-dialog');
   $('#confirm-title').textContent = title;
@@ -2153,7 +2224,7 @@ async function confirmAction(title, body, ok) {
 }
 
 async function dismiss(name) {
-  if (!(await confirmAction(t('Dismiss {name}?', { name }), t('Its agents stop and its workspace moves to the archive. Branches stay in the repo pool.'), t('Dismiss')))) return;
+  if (!(await confirmAction(t('Dismiss {name}?', { name: yesmanLabel(name) }), t('Its agents stop and its workspace moves to the archive. Branches stay in the repo pool.'), t('Dismiss')))) return;
   try {
     const dest = await call('Dismiss', name);
     toast(t('Archived to {path}', { path: dest }));
@@ -2198,7 +2269,11 @@ async function refreshState() {
     selectAgent(state.view.id);
     return;
   }
+  const sidebarFocus = $('#yesmen').contains(document.activeElement) ? document.activeElement : null;
   render();
+  // The rebuilt composer can take initial focus during a full state refresh.
+  // Preserve the sidebar's stable agent + semantic entry after that rebuild.
+  restoreSidebarFocus(sidebarFocus);
 }
 
 function onAgents(agents) {

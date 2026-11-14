@@ -516,7 +516,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
 
 	if me.Role == agent.RoleLead {
-		w("You are the lead of the yesman named %q. You talk with the user, plan, keep the board and this yesman's knowledge, and get the work delivered by workers.\n\n", y.Name)
+		w("You are the lead of the yesman named %q. You talk with the user, plan, keep the board and this yesman's knowledge, and get the work delivered by workers.\n\n", y.Label())
 		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are knowledge notes. Read files only to answer a quick question, not to investigate. ")
 		w("Hand everything else to workers with yesman_worker_start (changes, commands, tests, research across many files, reviews, releases), each with a title naming its subject, then end your run. Each worker is its own pi agent in this workspace; several can run at once. ")
 		w("Keep every run short: answer, delegate, end.\n")
@@ -531,7 +531,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 		w("Decide everything you can. Bring the user only what you cannot decide: what to build, trade-offs only they can weigh, taste, credentials, or anything irreversible they did not ask for. ")
 		w("Never hold the rest of the work for these: mark each task that waits on one blocked, with the question in its note, finish everything else, and then put the open decisions to the user together, each with the options and your recommendation.\n")
 	} else {
-		w("You are %q, a worker of the yesman named %q. Your lead started you for one task and receives your final message when you finish a run, so end each run with a short report: what you did, where (worktree, branch, PR) and what is left.\n", me.Name, y.Name)
+		w("You are %q, a worker of the yesman named %q. Your lead started you for one task and receives your final message when you finish a run, so end each run with a short report: what you did, where (worktree, branch, PR) and what is left.\n", me.Name, y.Label())
 		w("Do not stop to ask. When something is unclear, make the reasonable choice, say so in your report, and go on. If you cannot go on without a decision, finish everything that does not depend on it, then end your run with the question in your report: your lead answers it, not the user. Questions your tools ask go to your lead too.\n")
 		if me.Task != "" {
 			w("\nYour task, as given:\n%s\n", indent(me.Task))

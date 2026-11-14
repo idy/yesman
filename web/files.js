@@ -108,6 +108,7 @@ export function createFiles(host) {
       panes.set(key, p);
     }
     p.path = y.path;
+    p.label = y.displayName || y.name;
     return p;
   }
 
@@ -612,7 +613,7 @@ export function createFiles(host) {
     class: 'files-crumb', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-current': last ? 'page' : null,
     onclick: (e) => onopen(e.currentTarget),
   }, label);
-  const scopeLabel = (p) => (p.scope.kind === 'worktree' ? p.scope.dir : p.scope.kind === 'knowledge' ? t('Knowledge') : p.name);
+  const scopeLabel = (p) => (p.scope.kind === 'worktree' ? p.scope.dir : p.scope.kind === 'knowledge' ? t('Knowledge') : p.label);
 
   // scopeCrumb names the part of the workspace shown, and opens the menu
   // that shows another: all of it, the knowledge, or another worktree.
@@ -846,7 +847,7 @@ export function createFiles(host) {
       }, icon(glyph), h('span', null, label), aside ?? h('span'));
     };
     const items = [
-      item(WORKSPACE, 'folder', y.name, h('span', { class: 'files-menu-aside' }, t('All files')), y.path),
+      item(WORKSPACE, 'folder', y.displayName || y.name, h('span', { class: 'files-menu-aside' }, t('All files')), y.path),
       item({ kind: 'knowledge' }, 'book', t('Knowledge'), null, KNOWLEDGE),
     ];
     const wts = host.worktrees?.(y) ?? [];
@@ -911,7 +912,7 @@ export function createFiles(host) {
       } });
     return h('nav', { class: 'files-tree', 'aria-label': t('Files') },
       h('label', { class: 'search files-search' }, icon('search'), input),
-      h('div', { class: 'files-tree-list', id: 'files-tree-list', role: 'tree', 'aria-label': p.name, onkeydown: (e) => treeKey(e, p) }));
+      h('div', { class: 'files-tree-list', id: 'files-tree-list', role: 'tree', 'aria-label': p.label, onkeydown: (e) => treeKey(e, p) }));
   }
 
   let findSeq = 0;
