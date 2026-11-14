@@ -2,6 +2,10 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.19
+
+- Settings › Secrets keeps password fields at a fixed width, so long secret values no longer widen the list. The fields fit within the available space in narrow windows.
+
 ## 0.1.17
 
 - This release retains the image submission support shipped in 0.1.16. There are no additional application changes.
