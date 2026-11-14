@@ -18,7 +18,7 @@ def inspect(app):
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     binary = app / 'Contents/MacOS' / info['CFBundleExecutable']
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
-    entitlements = plistlib.loads(subprocess.check_output(['codesign', '-d', '--entitlements', '-', str(app)], stderr=subprocess.PIPE))
+    entitlements = plistlib.loads(subprocess.check_output(['codesign', '-d', '--entitlements', ':-', str(app)], stderr=subprocess.PIPE))
     assert entitlements == {key: True for key in (
         'com.apple.security.device.audio-input', 'com.apple.security.device.camera', 'com.apple.security.device.bluetooth')}, entitlements
     assert info['CFBundleIdentifier'] == 'dev.idy.yesman', info
