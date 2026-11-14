@@ -48,6 +48,22 @@ func waitRetiring(t *testing.T, p *proc) {
 	}
 }
 
+// refusedWhileDraining checks, while a change admitted earlier is still
+// held, that the ended process's credential no longer authenticates and
+// begins no change: retirement closes admission before it waits.
+func refusedWhileDraining(t *testing.T, m *Manager, token string, y yesmen.Yesman) {
+	t.Helper()
+	if credentialLive(m, token) {
+		t.Fatal("the ended process's credential still maps to its agent while an admitted change drains")
+	}
+	if _, err := m.Authenticate(token); err == nil {
+		t.Fatal("the ended process's credential still authenticates while an admitted change drains")
+	}
+	if _, err := m.BeginChange(token, y); !errors.Is(err, ErrRetired) {
+		t.Fatalf("a new change was admitted while an earlier one drains: %v", err)
+	}
+}
+
 func notReturned(t *testing.T, done <-chan struct{}, what string) {
 	t.Helper()
 	select {
@@ -124,8 +140,9 @@ func TestBeginChangeIsBoundToProcessAndWorkspace(t *testing.T) {
 	release()
 }
 
-// A change admitted before Stop ends before Stop returns, and the
-// credential is forgotten only after it; none is admitted afterwards.
+// A change admitted before Stop ends before Stop returns. The credential
+// stops authenticating as soon as the process has ended, while that change
+// is still being written, and none is admitted afterwards.
 func TestStopWaitsForAdmittedChange(t *testing.T) {
 	m, store := newTestManager(t, 0)
 	id := ID("alice", yesmen.LeadName)
@@ -143,9 +160,8 @@ func TestStopWaitsForAdmittedChange(t *testing.T) {
 	go func() { m.Stop(id); close(stopped) }()
 	waitRetiring(t, p)
 	notReturned(t, stopped, "Stop")
-	if !credentialLive(m, token) {
-		t.Fatal("the credential was forgotten before its admitted change ended")
-	}
+	refusedWhileDraining(t, m, token, y)
+	notReturned(t, stopped, "Stop")
 	// A manager-wide read is not held up by the change or the waiting Stop.
 	if _, err := m.Get(id); err != nil {
 		t.Fatal(err)
@@ -187,15 +203,17 @@ func TestNaturalExitWaitsForAdmittedChangeBeforeRestart(t *testing.T) {
 		}
 		close(restarted)
 	}()
-	if !credentialLive(m, token) {
-		t.Fatal("the exited process's credential was forgotten before its admitted change ended")
-	}
+	refusedWhileDraining(t, m, token, y)
 	notReturned(t, restarted, "the restart")
 	release()
 	returns(t, restarted, "the restart")
 	renewed, _ := credentialOf(t, m, id)
 	if renewed == token || credentialLive(m, token) {
 		t.Fatal("the exited process's credential outlived it")
+	}
+	// The old process's watcher revoked only its own credential.
+	if info, err := m.Authenticate(renewed); err != nil || info.ID != id {
+		t.Fatalf("the restarted process's credential: %+v %v", info, err)
 	}
 	if _, err := m.BeginChange(token, y); !errors.Is(err, ErrRetired) {
 		t.Fatalf("exited process admitted: %v", err)
@@ -238,6 +256,7 @@ func TestRemoveWorkerAndStopAllWaitForAdmittedChange(t *testing.T) {
 	}()
 	waitRetiring(t, wp)
 	notReturned(t, removed, "RemoveWorker")
+	refusedWhileDraining(t, m, worker, y)
 	release()
 	leave()
 	returns(t, removed, "RemoveWorker")
@@ -263,10 +282,89 @@ func TestRemoveWorkerAndStopAllWaitForAdmittedChange(t *testing.T) {
 	go func() { m.StopAll(); close(quit) }()
 	waitRetiring(t, lp)
 	notReturned(t, quit, "StopAll")
+	refusedWhileDraining(t, m, lead, y)
 	release()
 	leave()
 	returns(t, quit, "StopAll")
 	if _, err := m.BeginChange(lead, y); !errors.Is(err, ErrRetired) {
 		t.Fatalf("admitted after quitting: %v", err)
+	}
+}
+
+// A start that is stopped, or whose pi dies before it is ready, retires
+// the credential the process was given the same way: refused at once,
+// while a change admitted with it drains; the start ends only after it.
+func TestStartupRetirementRefusesCredentialBeforeDrain(t *testing.T) {
+	for _, mode := range []string{"stop-during-start", "get-state-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			// get_state answers late, so the start is still in progress.
+			m, store := newTestManager(t, 2*time.Second)
+			id := ID("alice", yesmen.LeadName)
+			y, err := store.Get("alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := make(chan error, 1)
+			go func() { _, _, err := m.ensure(id); started <- err }()
+			var token string
+			var p *proc
+			deadline := time.Now().Add(10 * time.Second)
+			for p == nil {
+				m.mu.Lock()
+				if a := m.agents[id]; a != nil && a.starting != nil && a.tokenProc != nil {
+					token, p = a.token, a.tokenProc
+				}
+				m.mu.Unlock()
+				if p == nil && time.Now().After(deadline) {
+					t.Fatal("the start never gave its process a credential")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			release, err := m.BeginChange(token, y)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			stopped := make(chan struct{})
+			if mode == "stop-during-start" {
+				go func() { m.Stop(id); close(stopped) }()
+			} else if err := p.cmd.Process.Kill(); err != nil {
+				t.Fatal(err)
+			}
+			waitRetiring(t, p)
+			refusedWhileDraining(t, m, token, y)
+			select {
+			case err := <-started:
+				t.Fatalf("the start ended before the admitted change: %v", err)
+			default:
+			}
+			release()
+			select {
+			case err := <-started:
+				if err == nil {
+					t.Fatal("a stopped or failed start succeeded")
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the start did not end")
+			}
+			if mode == "stop-during-start" {
+				returns(t, stopped, "Stop during the start")
+			}
+			if err := m.Prompt(context.Background(), id, "again"); err != nil {
+				t.Fatal(err)
+			}
+			renewed, q := credentialOf(t, m, id)
+			if renewed == token || q == p {
+				t.Fatal("the retired incarnation was reused")
+			}
+			if _, err := m.Authenticate(token); err == nil {
+				t.Fatal("the retired credential authenticates again")
+			}
+			again, err := m.BeginChange(renewed, y)
+			if err != nil {
+				t.Fatalf("the new process was refused: %v", err)
+			}
+			again()
+		})
 	}
 }

@@ -402,8 +402,10 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			p := a.proc
 			select {
 			case <-p.done:
-				// Exited, and watch has not cleared it yet. Its credential's
-				// changes end first, without the lock they may wait for.
+				// Exited, and watch has not cleared it yet. Its credential
+				// stops authenticating now; the changes it already began end
+				// first, without the lock they may wait for.
+				m.revokeLocked(a, p)
 				m.mu.Unlock()
 				p.retireChanges()
 				m.mu.Lock()
@@ -438,7 +440,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			// letting Stop return.
 			m.mu.Unlock()
 			p.stop(10 * time.Second)
-			p.retireChanges()
+			m.retireCredential(a, p)
 			m.mu.Lock()
 			m.clearLocked(a, p)
 			err = errStopped
@@ -507,7 +509,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 	state, err := p.modelState(ctx)
 	if err != nil {
 		p.stop(2 * time.Second)
-		p.retireChanges()
+		m.retireCredential(a, p)
 		m.mu.Lock()
 		m.clearLocked(a, p)
 		m.mu.Unlock()
@@ -654,7 +656,7 @@ func (m *Manager) number(a *agent, kind string, raw json.RawMessage) Event {
 // watch follows a process until it exits.
 func (m *Manager) watch(a *agent, p *proc) {
 	<-p.done
-	p.retireChanges()
+	m.retireCredential(a, p)
 	m.mu.Lock()
 	if a.proc != p {
 		m.mu.Unlock()
@@ -950,8 +952,9 @@ func (m *Manager) Stop(id string) {
 		return
 	}
 	p.stop(10 * time.Second)
-	// Changes its requests began end before Stop does; none begins after.
-	p.retireChanges()
+	// Its credential stops authenticating, and the changes its requests
+	// already began end before Stop does.
+	m.retireCredential(a, p)
 	m.mu.Lock()
 	if a.proc == p {
 		m.clearLocked(a, p)
@@ -996,7 +999,7 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 
 // clearLocked forgets an agent's process, its credential, and the reply
 // it was writing, which a new process will not continue. Callers first
-// retire the changes of p's credential, outside mu.
+// retire p's credential (retireCredential), which already forgot it.
 func (m *Manager) clearLocked(a *agent, p *proc) {
 	if a.proc == p {
 		a.proc = nil

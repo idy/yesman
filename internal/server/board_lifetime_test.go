@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/crew"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -413,8 +414,12 @@ func TestBoardChangeAdmittedBeforeStopLandsBeforeItReturns(t *testing.T) {
 		stopped <- f.boardBytes("alice") // as Stop returns
 	}()
 	waitFor(t, "Stop to close the process", func() bool { return f.closed("alice/lead", lead.PID) })
-	if _, err := f.m.Authenticate(lead.Token); err != nil {
-		t.Fatal("the credential was retired before its admitted change was written")
+	// Once the process has ended, its credential is refused at once, while
+	// the change it had admitted is still being written.
+	waitRetired(t, f, lead.Token)
+	unchanged := f.boardBytes("alice")
+	if r := f.post(lead.Token, `{"add":[{"title":"New after the process ended"}]}`); r.Code != 401 || !bytes.Equal(unchanged, f.boardBytes("alice")) {
+		t.Fatalf("new request from the ended process: %d %s", r.Code, r.Body)
 	}
 	// Not held up: the manager, another workspace, the same workspace's
 	// other agents, and reads.
@@ -454,6 +459,113 @@ func TestBoardChangeAdmittedBeforeStopLandsBeforeItReturns(t *testing.T) {
 	if r := f.post(lead.Token, `{"add":[{"title":"After Stop"}]}`); r.Code != 401 || !bytes.Equal(atStop, f.boardBytes("alice")) {
 		t.Fatalf("after Stop: %d %s", r.Code, r.Body)
 	}
+}
+
+// waitRetired waits, boundedly, until an ended process's credential no
+// longer authenticates.
+func waitRetired(t *testing.T, f *boardFixture, token string) {
+	t.Helper()
+	waitFor(t, "the ended process's credential to stop authenticating", func() bool {
+		_, err := f.m.Authenticate(token)
+		return err != nil
+	})
+}
+
+// t101's counterexample: while a change admitted before its lead ended is
+// still being written, that lead's credential must not be accepted for
+// anything new, such as starting a worker that StopYesman would then miss.
+// Whether the process was stopped or exited by itself, a new request is
+// refused at once, the admitted change still lands, and no worker runs.
+func TestEndedCredentialStartsNothingWhileAdmittedChangeDrains(t *testing.T) {
+	for _, mode := range []string{"stop-yesman", "natural-exit"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newBoardFixture(t)
+			f.srv.Crew = func(context.Context) []crew.Member {
+				return []crew.Member{{Key: "fixture/fixture", Provider: "fixture", Model: "fixture"}}
+			}
+			f.hire("alice")
+			f.seed("alice")
+			lead := f.start("alice/lead")
+			finish := f.heldCommit(lead.Token, `{"add":[{"title":"Admitted before the end"}]}`)
+			defer finish()
+			stopped := make(chan error, 1)
+			var atStop []byte
+			if mode == "stop-yesman" {
+				go func() {
+					err := f.m.StopYesman("alice")
+					atStop = f.boardBytes("alice") // as StopYesman returns
+					stopped <- err
+				}()
+				waitFor(t, "StopYesman to close the process", func() bool { return f.closed("alice/lead", lead.PID) })
+			} else {
+				// The fixture's pi exits after answering this prompt.
+				_ = f.m.Prompt(context.Background(), "alice/lead", "exit")
+			}
+			waitRetired(t, f, lead.Token)
+
+			// Synchronously, with the admitted change still held.
+			unchanged := f.boardBytes("alice")
+			start := f.serveWorkers(lead.Token, `{"name":"after-end","title":"After the end","task":"must not start"}`)
+			if start.Code != 401 {
+				t.Fatalf("worker start with the ended lead's credential: %d %s", start.Code, start.Body)
+			}
+			if r := f.post(lead.Token, `{"add":[{"title":"New after the end"}]}`); r.Code != 401 || !bytes.Equal(unchanged, f.boardBytes("alice")) {
+				t.Fatalf("board change with the ended lead's credential: %d %s", r.Code, r.Body)
+			}
+			if ws, err := f.store.Workers("alice"); err != nil || len(ws) != 0 {
+				t.Fatalf("workers while draining: %+v %v", ws, err)
+			}
+			if mode == "stop-yesman" {
+				select {
+				case err := <-stopped:
+					t.Fatalf("StopYesman returned before the admitted change was written: %v", err)
+				default:
+				}
+			}
+
+			if res := finish(); res.Code != 200 {
+				t.Fatalf("admitted change: %d %s", res.Code, res.Body)
+			}
+			if mode == "stop-yesman" {
+				select {
+				case err := <-stopped:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("StopYesman did not return")
+				}
+				if !bytes.Contains(atStop, []byte("Admitted before the end")) {
+					t.Fatalf("the admitted change had not landed when StopYesman returned: %s", atStop)
+				}
+			}
+			if ws, err := f.store.Workers("alice"); err != nil || len(ws) != 0 {
+				t.Fatalf("workers after the end: %+v %v", ws, err)
+			}
+			if i, err := f.m.Get("alice/after-end"); err == nil {
+				t.Fatalf("a worker exists after the end: %+v", i)
+			}
+			// The lead starts again with a new credential that works.
+			renewed := f.start("alice/lead")
+			if renewed.Token == lead.Token {
+				t.Fatal("same credential after the end")
+			}
+			if r := f.post(renewed.Token, `{"add":[{"title":"After restart"}]}`); r.Code != 200 {
+				t.Fatalf("restarted lead: %d %s", r.Code, r.Body)
+			}
+			if r := f.post(lead.Token, `{"add":[{"title":"Old again"}]}`); r.Code != 401 {
+				t.Fatalf("old credential after restart: %d", r.Code)
+			}
+		})
+	}
+}
+
+func (f *boardFixture) serveWorkers(token, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", "/v1/workers", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	res := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(res, req)
+	return res
 }
 
 // Ordering two: Stop before the change is admitted; it is refused.

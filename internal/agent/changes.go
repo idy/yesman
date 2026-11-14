@@ -52,12 +52,35 @@ func (m *Manager) BeginChange(token string, y yesmen.Yesman) (release func(), er
 	return func() { once.Do(p.changes.RUnlock) }, nil
 }
 
+// retireCredential ends the credential of p, a process of a that exited or
+// was stopped. First, under a short hold of mu, the credential stops
+// authenticating, so no new request with it is accepted and no new change
+// begins. Then, outside mu, it waits for the changes requests with it had
+// already begun, which still land. Every path that forgets a process's
+// credential calls it, after the process ended and before clearLocked.
+func (m *Manager) retireCredential(a *agent, p *proc) {
+	m.mu.Lock()
+	m.revokeLocked(a, p)
+	m.mu.Unlock()
+	p.retireChanges()
+}
+
+// revokeLocked forgets the credential a holds for p, so that it no longer
+// authenticates. The credential of a process started since is not p's,
+// and stays.
+func (m *Manager) revokeLocked(a *agent, p *proc) {
+	if a.tokenProc == p && a.token != "" {
+		delete(m.tokens, a.token)
+		a.token, a.tokenProc = "", nil
+	}
+}
+
 // retireChanges waits for the changes that requests with this process's
-// credential began, and refuses later ones. Every path that forgets the
-// credential calls it first. Never call it holding the manager's mu or the
-// Store's own mutexes, which a change may wait for while it holds the gate.
-// Holding a workspace's Use, or Archive's hold of it, is fine: a change
-// takes its workspace's lease before the gate, never while holding it.
+// credential began, and refuses later ones. Never call it holding the
+// manager's mu or the Store's own mutexes, which a change may wait for
+// while it holds the gate. Holding a workspace's Use, or Archive's hold of
+// it, is fine: a change takes its workspace's lease before the gate, never
+// while holding it.
 func (p *proc) retireChanges() {
 	p.changes.Lock()
 	p.changesClosed = true
