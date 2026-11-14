@@ -42,7 +42,7 @@ Every agent runs your installed `pi` with your usual pi configuration (models, p
 - `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`, `yesman_board`, `yesman_env`
 - for leads: `yesman_worker_start`, `yesman_worker_send`, `yesman_worker_answer`, `yesman_worker_remove`
 
-For a lead, the extension also takes away pi's `bash` and adds the read-only `grep`, `find` and `ls`, and allows `edit` and `write` only under `.yesman/knowledge/` or for the single `.yesman/task-log.md` file. Code work still belongs to workers. Tools from your own pi configuration stay.
+For a lead, the extension also takes away pi's `bash` and adds the read-only `grep`, `find` and `ls`, and allows `edit` and `write` only under `.yesman/knowledge/` or for the single `.yesman/task-log.md` file. The task-log exception checks the actual file and parent: linked targets or metadata directories are preserved but not writable through it. Code work still belongs to workers. Tools from your own pi configuration stay.
 
 New workspaces start with a Knowledge index explaining what belongs there and an empty task log with an entry template. On startup, existing workspaces gain a task log only when that path is missing; existing logs, notes, indexes and other metadata are preserved. No automatic rewriting or migration of old notes takes place. For the document policy and an example entry, see [workspace documents](docs/workspace-documents.md).
 
