@@ -39,7 +39,7 @@ func validInstall(i installIntent, expected string) bool {
 	if path.Dir(i.Temporary) != path.Dir(i.Target) || !temporaryName.MatchString(path.Base(i.Temporary)) {
 		return false
 	}
-	if i.Target == TOC || i.Target == Marker {
+	if i.Target == TOC || i.Target == Marker || i.Target == retainIntentPath {
 		return true
 	}
 	if suffix, ok := strings.CutPrefix(i.Target, Dir+"/legacy-"+expected+"-"); ok {

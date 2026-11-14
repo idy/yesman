@@ -164,12 +164,16 @@ func (s *service) ReadFile(yesman, file string) (FileView, error) {
 	}
 	defer root.Close()
 	file = cleanRel(file)
+	var f *os.File
+	var history *tasklog.File
 	if tasklog.IsPath(file) {
-		if err := tasklog.Check(root, file, false); err != nil {
-			return FileView{}, err
+		history, err = tasklog.Open(root, file)
+		if err == nil {
+			f = history.File
 		}
+	} else {
+		f, err = root.Open(file)
 	}
-	f, err := root.Open(file)
 	if err != nil {
 		return FileView{}, err
 	}
@@ -201,6 +205,11 @@ func (s *service) ReadFile(yesman, file string) (FileView, error) {
 	data, err := io.ReadAll(io.LimitReader(f, limit))
 	if err != nil {
 		return v, err
+	}
+	if history != nil {
+		if err := history.Validate(); err != nil {
+			return v, err
+		}
 	}
 	if !isText(data, v.Truncated) {
 		v.Kind, v.Truncated = "binary", false

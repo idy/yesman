@@ -7,6 +7,10 @@ import (
 	"syscall"
 )
 
+func openRead(root *os.Root, name string) (*os.File, error) {
+	return root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+}
+
 func lockFile(f *os.File) (func(), error) {
 	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }, err

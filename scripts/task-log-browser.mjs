@@ -30,6 +30,7 @@ const recordPath='.yesman/task-log/2026-01-15-t3-picker.md';
 const nl=String.fromCharCode(10);
 filesFixture[recordPath]=filesFixture[recordPath].replace('## Validation',('Synthetic historical paragraph'+nl+nl).repeat(160)+'## Validation')+nl+nl+'[Top](#picker-detail)'+nl;
 filesFixture[toc]+=nl+'[Custom history](task-log/'+encodeURIComponent('资料')+'/'+encodeURIComponent('旧 记录.md')+')'+nl;
+filesFixture[toc]+=nl+Array.from({length:100},(_,i)=>'- [Record '+i+'](task-log/2026-01-15-t3-picker.md) — historical result '+i).join(nl)+nl;
 const agents=['alice','bob'].map(name=>({id:name+'/lead',name:'lead',yesman:name,role:'lead',status:'idle'}));
 window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...args)=>{
  const m=method.replace('Yesman.','');calls.push([m,...args]);
@@ -177,6 +178,17 @@ try {
    await files.getByRole('button',{name:'Close the files',exact:true}).click();
    await page.getByRole('button',{name:'Working log',exact:true}).click();
    await files.getByRole('link',{name:'Picker',exact:true}).waitFor();
+   const toc85=files.getByRole('link',{name:'Record 85',exact:true});
+   await toc85.scrollIntoViewIfNeeded();
+   const tocPosition=await files.locator('#files-view').evaluate(e=>e.scrollTop);
+   await toc85.click();await files.locator('#picker-detail').waitFor();
+   await page.goBack();await files.getByRole('link',{name:'Record 85',exact:true}).waitFor();
+   assert.ok(Math.abs((await files.locator('#files-view').evaluate(e=>e.scrollTop))-tocPosition)<2,'Back restores TOC position');
+   await toc85.click();await files.locator('#picker-detail').waitFor();
+   await files.getByRole('button',{name:'Contents',exact:true}).click();await toc85.waitFor();
+   assert.ok(Math.abs((await files.locator('#files-view').evaluate(e=>e.scrollTop))-tocPosition)<2,'Contents restores TOC position');
+   await files.getByRole('link',{name:'Picker',exact:true}).click();await assertHeadingVisible('validation');
+   await files.getByRole('button',{name:'Contents',exact:true}).click();
    await page.evaluate(()=>menuAction='reveal');await files.getByRole('button',{name:'More',exact:true}).click();
    await page.waitForFunction(()=>calls.some(c=>c[0]==='Reveal'&&c[1]==='/synthetic/alice'));
    for(const [locale,dark,width] of [['en',false,900],['en',true,480],['zh-Hans',false,900],['zh-Hans',true,480]]){

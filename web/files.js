@@ -13,7 +13,7 @@ import { languageOf } from './code.js';
 import { createEditor } from './editor.js';
 import { createChanges, statusMark, counts } from './diff.js';
 import { t, tn, formatNumber } from './i18n.js';
-import { TASK_LOG, isTaskLog, legacyLog, logBase, documentLink, logRoute, saveLogRoute, headingAnchors } from './task-log.js';
+import { TASK_LOG, isTaskLog, legacyLog, logBase, documentLink, logRoute, saveLogRoute, saveLogScroll, headingAnchors } from './task-log.js';
 
 // A folder's menu shows this many entries.
 const MENU_ROWS = 500;
@@ -89,6 +89,17 @@ export function createFiles(host) {
   let watching = null;
   let wide = false;
   let restoredRoute = null;
+  const logPositions = new Map(); // bounded session positions; no document bodies
+  function rememberLogPosition() {
+    const section=$('#files-view');
+    const p=section && panes.get(section.dataset.pane);
+    const rel=section?.dataset.path;
+    if (!p || !isTaskLog(rel) || p.pendingAnchor || p.pendingScroll != null) return;
+    const key=`${p.name}\u0001${rel}`;
+    logPositions.delete(key);logPositions.set(key,section.scrollTop);
+    while(logPositions.size>512) logPositions.delete(logPositions.keys().next().value);
+    saveLogScroll(p.name,rel,p.taskAnchor ?? '',section.scrollTop);
+  }
   const restoreRoute = () => {
     const route = logRoute();
     const y = host.yesman();
@@ -97,7 +108,7 @@ export function createFiles(host) {
     if (restoredRoute === key) return false;
     restoredRoute = key;
     scopes.delete(y.name);
-    open(route.path, true, route.anchor, false);
+    open(route.path, true, route.anchor, false, route.scroll);
     return true;
   };
   window.addEventListener('popstate', () => {
@@ -331,11 +342,13 @@ export function createFiles(host) {
   // open shows a file in a tab: a preview tab, in italics, that the next
   // file replaces, unless pin keeps it. A file outside the part of the
   // workspace shown opens with all of it.
-  function open(rel, pin = false, anchor = '', route = true) {
+  function open(rel, pin = false, anchor = '', route = true, scroll) {
     const y = host.yesman();
     if (!y) return;
+    rememberLogPosition();
+    const destination = Number.isFinite(scroll) ? scroll : (logPositions.get(`${y.name}\u0001${rel}`) ?? 0);
     if (isTaskLog(rel)) {
-      if (route) saveLogRoute(y.name, rel, anchor);
+      if (route) saveLogRoute(y.name, rel, anchor, false, destination);
       restoredRoute = `${y.name}\u0001${location.hash}`;
     } else if (route && logRoute()?.name === y.name) {
       history.replaceState(null, '', location.pathname + location.search);
@@ -365,13 +378,15 @@ export function createFiles(host) {
     const sameAnchorPage = p.active === rel && isTaskLog(rel) && Boolean(anchor);
     p.active = rel;
     p.taskAnchor = anchor;
-    p.pendingAnchor = isTaskLog(rel);
+    p.pendingAnchor = isTaskLog(rel) && Boolean(anchor);
+    p.pendingScroll = isTaskLog(rel) && !anchor ? destination : null;
     // Show where it is in the tree.
     for (let dir = parentOf(rel); dir !== '.' && dir !== p.root; dir = parentOf(dir)) p.expanded.add(dir);
     if (!host.isOpen()) host.setOpen(true);
     // A file the editor has open may have changed while nothing watched
     // it: refresh reconciles it, keeping unsaved changes as a conflict.
     if (!(sameAnchorPage && p.views.get(rel)?.kind === 'text')) {
+      if (isTaskLog(rel)) p.views.set(rel,'loading');
       if (editor?.has(keyOf(p, rel))) refresh(p, rel);
       else loadView(p, rel);
     }
@@ -524,7 +539,7 @@ export function createFiles(host) {
     closeMenu();
     if (diff) changes.ensure(p);
     else if (!p.dirs.has(p.root)) loadDir(p, p.root);
-    const keep = scrolls(Boolean(p.pendingAnchor));
+    const keep = scrolls(Boolean(p.pendingAnchor || p.pendingScroll != null));
     aside.toggleAttribute('data-has-file', hasView);
     const mode = hasView ? 'file' : 'tree';
     const fixed = wide && hasView;
@@ -624,6 +639,7 @@ export function createFiles(host) {
     p.active = tab.path;
     p.taskAnchor = '';
     p.pendingAnchor = false;
+    p.pendingScroll = null;
     if (!p.views.has(tab.path)) loadView(p, tab.path);
     render();
   }
@@ -1139,6 +1155,11 @@ export function createFiles(host) {
     const section = $('#files-view');
     const p = current();
     if (!section || !p?.active || isChanges(p)) return;
+    section.dataset.pane = p.key;
+    if (!section.dataset.logScrollListener) {
+      section.dataset.logScrollListener='true';
+      section.addEventListener('scroll',rememberLogPosition);
+    }
     const rel = p.active;
     const v = p.views.get(rel);
     section.dataset.fresh = section.dataset.path === rel ? '' : 'true';
@@ -1203,6 +1224,7 @@ export function createFiles(host) {
       if (!section.dataset.fresh) section.scrollTop = top;
       const target = p.taskAnchor ? article.querySelector(`[id="${CSS.escape(p.taskAnchor)}"]`) : article.querySelector('h1,h2,h3,h4,h5,h6');
       if (p.pendingAnchor && target) { target.scrollIntoView(); target.focus({ preventScroll: true }); }
+      else if (p.pendingScroll != null) { section.scrollTop=p.pendingScroll; section.tabIndex=-1;section.focus({preventScroll:true}); }
       if (isTaskLog(rel) && p.taskAnchor && !target) {
         const fallback = h('p', { class: 'files-notice', role: 'status' }, t('This anchor is not on this page. For migrated history, open the complete original from Contents and search for the heading.'));
         if (rel === TASK_LOG) {
@@ -1215,6 +1237,8 @@ export function createFiles(host) {
         section.prepend(fallback);
       }
       p.pendingAnchor = false;
+      p.pendingScroll = null;
+      rememberLogPosition();
       return;
     }
     const slot = h('div', { class: 'files-editor', id: 'files-editor' }, h('p', { class: 'files-note' }, t('Loading…')));

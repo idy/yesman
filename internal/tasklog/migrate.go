@@ -34,16 +34,18 @@ type Part struct {
 }
 
 type Manifest struct {
-	Version        int    `json:"version"`
-	SHA256         string `json:"sha256"`
-	SourceModTime  string `json:"sourceModTime"`
-	Bytes          int    `json:"bytes"`
-	Parts          []Part `json:"parts"`
-	Catalogs       []Part `json:"catalogs,omitempty"`
-	Original       string `json:"original"`
-	Retained       string `json:"retained"`
-	TOCHash        string `json:"tocSHA256"`
-	RestoredSHA256 string `json:"restoredSHA256,omitempty"`
+	Version        int      `json:"version"`
+	SourceIdentity Identity `json:"sourceIdentity"`
+	MigrationID    string   `json:"migrationID"`
+	SHA256         string   `json:"sha256"`
+	SourceModTime  string   `json:"sourceModTime"`
+	Bytes          int      `json:"bytes"`
+	Parts          []Part   `json:"parts"`
+	Catalogs       []Part   `json:"catalogs,omitempty"`
+	Original       string   `json:"original"`
+	Retained       string   `json:"retained"`
+	TOCHash        string   `json:"tocSHA256"`
+	RestoredSHA256 string   `json:"restoredSHA256,omitempty"`
 }
 
 type Options struct {
@@ -68,14 +70,15 @@ func hook(o Options, stage string) error {
 }
 
 func read(root *os.Root, path string, limit int64) ([]byte, error) {
-	if err := Check(root, path, false); err != nil {
-		return nil, err
-	}
-	f, err := root.Open(path)
+	f, err := Open(root, path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	return readOpened(f, limit)
+}
+
+func readOpened(f *File, limit int64) ([]byte, error) {
 	before, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -85,7 +88,10 @@ func read(root *os.Root, path string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("%s exceeds %d bytes; keep the original and archive manually", path, limit)
+		return nil, fmt.Errorf("%s exceeds %d bytes; keep the original and archive manually", f.path, limit)
+	}
+	if err = f.Validate(); err != nil {
+		return nil, err
 	}
 	after, err := f.Stat()
 	if err != nil {
@@ -97,9 +103,33 @@ func read(root *os.Root, path string, limit int64) ([]byte, error) {
 	return b, nil
 }
 
+func snapshotSource(root *os.Root, name string) ([]byte, os.FileInfo, Identity, error) {
+	f, err := Open(root, name)
+	if err != nil {
+		return nil, nil, Identity{}, err
+	}
+	defer f.Close()
+	identity, err := fileIdentity(f.File)
+	if err != nil {
+		return nil, nil, Identity{}, err
+	}
+	b, err := readOpened(f, maxSource)
+	if err != nil {
+		return nil, nil, Identity{}, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return nil, nil, Identity{}, err
+	}
+	if err = requireIdentity(f.File, identity); err != nil {
+		return nil, nil, Identity{}, err
+	}
+	return b, st, identity, nil
+}
+
 func plan(b []byte) (Manifest, []byte) {
 	hash := digest(b)
-	m := Manifest{Version: 1, SHA256: hash, Bytes: len(b), Original: original(hash), Retained: retained(hash), Parts: []Part{}}
+	m := Manifest{Version: 2, SHA256: hash, Bytes: len(b), Original: original(hash), Retained: retained(hash), Parts: []Part{}}
 	var toc strings.Builder
 	toc.WriteString(Template)
 	toc.WriteString("\n## Legacy history\n\n")
@@ -258,13 +288,15 @@ func loadMarker(root *os.Root) (Manifest, error) {
 	if err = json.Unmarshal(b, &m); err != nil {
 		return m, err
 	}
-	if m.Version != 1 || len(m.SHA256) != 64 {
-		return m, errors.New("invalid working-log migration marker")
+	if m.Version != 2 || !m.SourceIdentity.valid() || len(m.MigrationID) < 16 || len(m.SHA256) != 64 {
+		return m, errors.New("migration metadata cannot prove the prepared source generation; preserve original/recovery files and recover explicitly with its reviewed utility")
 	}
 	if _, err = hex.DecodeString(m.SHA256); err != nil {
 		return m, err
 	}
-	// Ignore all other manifest path fields until recomputed from the original.
+	// Derive destinations; metadata never supplies arbitrary paths.
+	m.Original = original(m.SHA256)
+	m.Retained = retained(m.SHA256)
 	return m, nil
 }
 
@@ -343,6 +375,17 @@ func Run(workspace string, o Options) (Manifest, error) {
 	if markerErr != nil && !errors.Is(markerErr, os.ErrNotExist) {
 		return Manifest{}, markerErr
 	}
+	if hasMarker {
+		if o.Action == "apply" || o.Action == "rollback" {
+			if err = recoverRetain(root, marker, o); err != nil {
+				return marker, err
+			}
+		} else if _, e := root.Lstat(retainIntentPath); e == nil {
+			return marker, errors.New("source retention is pending; resume offline with the prepared hash")
+		} else if !errors.Is(e, os.ErrNotExist) {
+			return marker, e
+		}
+	}
 	source := TOC
 	if hasMarker {
 		if _, e := root.Lstat(retained(marker.SHA256)); e == nil {
@@ -351,9 +394,12 @@ func Run(workspace string, o Options) (Manifest, error) {
 			return marker, e
 		}
 	}
-	b, err := read(root, source, maxSource)
+	b, sourceInfo, sourceID, err := snapshotSource(root, source)
 	if err != nil {
 		return Manifest{}, err
+	}
+	if hasMarker && sourceID != marker.SourceIdentity {
+		return marker, errors.New("prepared source identity changed; preserve both generations and reconcile offline")
 	}
 	if !utf8.Valid(b) || bytes.IndexByte(b, 0) >= 0 {
 		return Manifest{}, errors.New("legacy log is not UTF-8 text; original preserved, convert a copy explicitly")
@@ -378,6 +424,8 @@ func Run(workspace string, o Options) (Manifest, error) {
 		}
 		prepared, toc := plan(snapshot)
 		prepared.SourceModTime = marker.SourceModTime
+		prepared.SourceIdentity = marker.SourceIdentity
+		prepared.MigrationID = marker.MigrationID
 		e = rollback(root, prepared, toc, b, o) // restore the retained inode's latest bytes, including late appends
 		prepared.RestoredSHA256 = digest(b)
 		return prepared, e
@@ -385,15 +433,17 @@ func Run(workspace string, o Options) (Manifest, error) {
 	if !hasMarker && bytes.Contains(b, []byte("<!-- yesman-task-log-toc v1 -->")) {
 		return Manifest{}, errors.New("already a TOC; no migration needed")
 	}
-	sourceInfo, err := root.Stat(source)
-	if err != nil {
-		return Manifest{}, err
-	}
 	if sourceInfo.Size() != int64(len(b)) {
 		return Manifest{}, errors.New("source changed after snapshot read")
 	}
 	m, toc := plan(b)
 	m.SourceModTime = sourceInfo.ModTime().UTC().Format(time.RFC3339Nano)
+	m.SourceIdentity = sourceID
+	if hasMarker {
+		m.MigrationID = marker.MigrationID
+	} else if o.Action != "dry-run" {
+		m.MigrationID = rand.Text()
+	}
 	if hasMarker && (marker.SHA256 != m.SHA256 || marker.SourceModTime != m.SourceModTime) {
 		return marker, errors.New("source changed since preparation; retained source is authoritative, preserve it and reconcile before retry")
 	}
@@ -444,7 +494,7 @@ func Run(workspace string, o Options) (Manifest, error) {
 	}
 	// Fresh migration refuses any same-name existing parts, even matching bytes.
 	if !hasMarker {
-		reservation := Manifest{Version: m.Version, SHA256: m.SHA256, SourceModTime: m.SourceModTime, Bytes: m.Bytes}
+		reservation := Manifest{Version: m.Version, SHA256: m.SHA256, SourceModTime: m.SourceModTime, Bytes: m.Bytes, SourceIdentity: m.SourceIdentity, MigrationID: m.MigrationID}
 		if err = put(root, Marker, manifestBytes(reservation), m.SHA256, o.Hook); err != nil {
 			return m, err
 		}
@@ -482,35 +532,25 @@ func Run(workspace string, o Options) (Manifest, error) {
 		}
 	}
 	if source == TOC {
-		// Content CAS immediately before retaining the source inode. Recheck it
-		// after rename as well, catching append/replacement during the switch.
-		current, e := read(root, TOC, maxSource)
+		current, currentInfo, currentID, e := snapshotSource(root, TOC)
 		if e != nil {
 			return m, e
 		}
-		currentInfo, e := root.Stat(TOC)
-		if e != nil {
-			return m, e
-		}
-		if !bytes.Equal(current, b) || !os.SameFile(sourceInfo, currentInfo) || !sourceInfo.ModTime().Equal(currentInfo.ModTime()) {
+		if !bytes.Equal(current, b) || currentID != m.SourceIdentity || !sourceInfo.ModTime().Equal(currentInfo.ModTime()) {
 			return m, errors.New("concurrent source change; original left at task-log.md")
 		}
-		if err = root.Rename(TOC, m.Retained); err != nil {
+		if err = retainSource(root, m, o); err != nil {
 			return m, err
 		}
 	}
 	if err = hook(o, "retained"); err != nil {
 		return m, err
 	}
-	moved, e := read(root, m.Retained, maxSource)
+	moved, movedInfo, movedID, e := snapshotSource(root, m.Retained)
 	if e != nil {
 		return m, e
 	}
-	movedInfo, e := root.Stat(m.Retained)
-	if e != nil {
-		return m, e
-	}
-	if !bytes.Equal(moved, b) || !os.SameFile(sourceInfo, movedInfo) || !sourceInfo.ModTime().Equal(movedInfo.ModTime()) {
+	if !bytes.Equal(moved, b) || movedID != m.SourceIdentity || !sourceInfo.ModTime().Equal(movedInfo.ModTime()) {
 		return m, errors.New("concurrent append retained in recovery/source.md; reconcile it before continuing")
 	}
 	if err = put(root, TOC, toc, m.SHA256, o.Hook); err != nil {
@@ -519,15 +559,11 @@ func Run(workspace string, o Options) (Manifest, error) {
 	if err = hook(o, "installed"); err != nil {
 		return m, err
 	}
-	moved, e = read(root, m.Retained, maxSource)
+	moved, movedInfo, movedID, e = snapshotSource(root, m.Retained)
 	if e != nil {
 		return m, e
 	}
-	movedInfo, e = root.Stat(m.Retained)
-	if e != nil {
-		return m, e
-	}
-	if !bytes.Equal(moved, b) || !os.SameFile(sourceInfo, movedInfo) || !sourceInfo.ModTime().Equal(movedInfo.ModTime()) {
+	if !bytes.Equal(moved, b) || movedID != m.SourceIdentity || !sourceInfo.ModTime().Equal(movedInfo.ModTime()) {
 		return m, errors.New("late writer changed retained source; migration NOT complete")
 	}
 	return m, verify(root, m, toc, b)

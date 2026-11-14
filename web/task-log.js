@@ -29,14 +29,25 @@ export function logRoute() {
   try {
     if (!location.hash.startsWith('#task-log=')) return null;
     const value = JSON.parse(decodeURIComponent(location.hash.slice(10)));
-    return typeof value.name === 'string' && isTaskLog(value.path) && typeof value.anchor === 'string' ? value : null;
+    if (!(typeof value.name === 'string' && isTaskLog(value.path) && typeof value.anchor === 'string')) return null;
+    const saved = history.state?.workingLog;
+    const scroll = saved?.name === value.name && saved.path === value.path && saved.anchor === value.anchor && Number.isFinite(saved.scroll) && saved.scroll >= 0 ? saved.scroll : undefined;
+    return { ...value, scroll };
   } catch { return null; }
 }
 
-export function saveLogRoute(name, path, anchor = '', replace = false) {
+export function saveLogRoute(name, path, anchor = '', replace = false, scroll = 0) {
   const value = { name, path, anchor };
   const hash = `#task-log=${encodeURIComponent(JSON.stringify(value))}`;
-  if (location.hash !== hash) history[replace ? 'replaceState' : 'pushState'](null, '', hash);
+  const state = { ...history.state, workingLog: { ...value, scroll } };
+  history[replace || location.hash === hash ? 'replaceState' : 'pushState'](state, '', hash);
+}
+
+export function saveLogScroll(name, path, anchor, scroll) {
+ const route=logRoute();
+ if (route?.name===name&&route.path===path&&route.anchor===anchor) {
+  history.replaceState({ ...history.state, workingLog: { name,path,anchor,scroll } },'');
+ }
 }
 
 // IDs are derived from text, never interpreted as HTML. Duplicate headings

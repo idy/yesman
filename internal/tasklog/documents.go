@@ -60,47 +60,36 @@ Keep this TOC below 16 KiB. When links fill it, move older link groups to flat
 Keep the detail files and their links stable; catalogs contain links, not full reports.
 `
 
-// Check validates ordinary parents and an existing, unaliased regular file.
-// The workspace root may itself be an alias. os.Root confines later reads.
-// This preflight does not isolate the filesystem from concurrent OS writers.
+// Check is a path preflight for creation and callers that need no content.
+// Readers must use Open and consume that same verified descriptor.
 func Check(root *os.Root, path string, missing bool) error {
-	parts := strings.Split(path, "/")
-	for i := range parts {
-		p := strings.Join(parts[:i+1], "/")
-		st, err := root.Lstat(p)
-		if missing && errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if st.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("linked working log path: %s", p)
-		}
-		if i < len(parts)-1 {
-			if !st.IsDir() {
-				return fmt.Errorf("not a working log directory: %s", p)
+	parts, err := pathParts(path)
+	if err != nil {
+		return err
+	}
+	if missing {
+		for i := range parts {
+			p := strings.Join(parts[:i+1], "/")
+			st, err := root.Lstat(p)
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
 			}
-		} else {
-			if !st.Mode().IsRegular() {
-				return fmt.Errorf("not a regular working log file: %s", p)
-			}
-			f, err := root.Open(p)
 			if err != nil {
 				return err
 			}
-			n, countErr := links(f)
-			actual, statErr := f.Stat()
-			closeErr := f.Close()
-			if err := errors.Join(countErr, statErr, closeErr); err != nil {
-				return err
+			if st.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("linked working log path: %s", p)
 			}
-			if n != 1 || !os.SameFile(st, actual) {
-				return fmt.Errorf("aliased working log file: %s", p)
+			if i < len(parts)-1 && !st.IsDir() {
+				return fmt.Errorf("not a working log directory: %s", p)
 			}
 		}
 	}
-	return nil
+	f, err := Open(root, path)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // Bootstrap adds only a missing TOC and missing record directory. Existing

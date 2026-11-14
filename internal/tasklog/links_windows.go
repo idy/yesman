@@ -5,6 +5,8 @@ import (
 	"os"
 )
 
+func openRead(root *os.Root, name string) (*os.File, error) { return root.Open(name) }
+
 func lockFile(f *os.File) (func(), error) {
 	var ov windows.Overlapped
 	err := windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)
