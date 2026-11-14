@@ -19,12 +19,15 @@ export const sameSubmissionImages = (left, right) => left.length === right.lengt
 
 // The visible line a message sent from a topic begins with
 // (yesmen.TopicMarker). It names the topic for the lead and the reader; it
-// is shown, never hidden, and is not how receipts are matched.
-const MARKER = /^\[Topic (tp[1-9][0-9]{0,5}): ([^\n]*)\](?:\n\n|$)/;
-
-export function parseTopicMarker(text) {
-  const m = typeof text === 'string' ? MARKER.exec(text) : null;
-  return m ? { id: m[1], title: m[2], rest: text.slice(m[0].length) } : null;
+// is shown, never hidden from the model, and is never how a message is tied
+// to a topic: the app's record of the submission is.
+// withoutLine is a topic message's text without the line the app recorded
+// sending before it; text that does not begin with that line is kept whole.
+export function withoutLine(text, line) {
+  if (!line || typeof text !== 'string' || !text.startsWith(line)) return text;
+  const rest = text.slice(line.length);
+  if (rest === '') return '';
+  return rest.startsWith('\n\n') ? rest.slice(2) : text;
 }
 
 export function topicMarker(topic) {

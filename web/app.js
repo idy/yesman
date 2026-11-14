@@ -19,7 +19,7 @@ import { createGrants } from './grants.js';
 import { createEnvPage } from './env.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
-import { DELIVERY_LABELS, newSubmissionID, sameSubmissionImages, parseTopicMarker } from './submission.js';
+import { DELIVERY_LABELS, newSubmissionID, sameSubmissionImages, withoutLine } from './submission.js';
 import { createTopics } from './topics.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, formatNumber, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
@@ -171,13 +171,16 @@ function deliveryStatus(d, bound) {
 // (a preview and the number of images), never a guess at the original.
 const receiptVariant = (d) => (d.state === 'sending' ? 'sending' : d.state === 'unconfirmed' && !d.error ? 'compact' : 'bubble');
 
+// receiptKey is what a receipt's row is drawn from, besides its state.
+const receiptKey = (c, d) => `${receiptVariant(d)}:${d.text ?? ''}:${d.imageCount ?? 0}:${topicKey(topicOfSubmission(c, d.id))}`;
+
 function receiptEl(c, d) {
-  const el = receiptBody(d);
-  el._variant = `${receiptVariant(d)}:${d.text ?? ''}:${d.imageCount ?? 0}`;
+  const el = receiptBody(d, topicOfSubmission(c, d.id));
+  el._variant = receiptKey(c, d);
   return el;
 }
 
-function receiptBody(d) {
+function receiptBody(d, topic) {
   const imageCount = d.imageCount ?? d.images?.length ?? 0;
   const preview = d.text ? (d.preview ? `${d.text}…` : d.text) : '';
   const imageNote = imageCount ? h('div', { class: 'delivery-image-count' }, tn(imageCount, '{n} image submitted', '{n} images submitted')) : null;
@@ -191,9 +194,10 @@ function receiptBody(d) {
       deliveryStatus(d, false));
   }
   const images = (d.images ?? []).filter((image) => imageURL(image));
-  // A submission from a topic names it, as its message will once pi takes it.
-  const bubble = parseTopicMarker(preview)
-    ? userBubble({ role: 'user', content: [{ type: 'text', text: preview }, ...images] })
+  // A submission the app recorded as sent from a topic names it, as its
+  // message will once pi takes it.
+  const bubble = topic
+    ? userBubble({ role: 'user', content: [{ type: 'text', text: preview }, ...images] }, topic)
     : h('div', { class: 'msg-user' }, preview || (imageCount ? t('Attached images') : ''),
       images.length ? h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
   return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(d.state === 'sending') },
@@ -259,6 +263,17 @@ async function loadConvo(c) {
   c.queue = null;
   const a = selectedAgent();
   if (a && keyOf(a) === c.key) renderThread();
+  // The topics pane lists the lead's messages about the topic shown, live or
+  // read with the history.
+  topicsFollow(c);
+}
+
+// topicsFollow redraws the topics pane when it shows the yesman whose
+// current lead conversation c is.
+function topicsFollow(c) {
+  const a = c && agentById(c.id);
+  if (state.pane !== 'topics' || a?.role !== 'lead' || keyOf(a) !== c.key) return;
+  topics.refresh(yesmanOf(a.id));
 }
 
 const textOf = (content) =>
@@ -363,20 +378,34 @@ function legacyNoteEl(text) {
   return null;
 }
 
-function userBubble(m) {
+// topicOfSubmission is the topic the app recorded a submission of
+// conversation c as sent from: { id, title, context }, or null. Only a lead's
+// conversation has them, and only the app's own record says so: what a
+// message's text says is never evidence of where it came from.
+const topicSends = new Map(); // `${yesman}@${hiredAt}/${submission}` -> topic, before the topic's record is read
+function topicOfSubmission(c, id) {
+  const a = c && agentById(c.id);
+  if (!id || a?.role !== 'lead' || `${c.id}@${a.since ?? ''}` !== c.key) return null;
+  const y = yesmanOf(a.id);
+  if (!y) return null;
+  return topics.bySubmission(y, id) ?? topicSends.get(`${y.name}@${y.hiredAt ?? ''}/${id}`) ?? null;
+}
+const topicKey = (topic) => (topic ? `${topic.id}:${topic.title}:${topic.context}` : '');
+
+function userBubble(m, topic = null) {
   const images = Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image' && imageURL(b)) : [];
-  // A message sent from a topic begins with a visible line naming it; it is
-  // drawn as a chip that opens the topic. The text is never used to decide
-  // who wrote the message.
-  const marker = parseTopicMarker(textOf(m.content));
-  if (marker) {
+  // A message the app recorded as sent from a topic is drawn with a chip that
+  // opens the topic, and without the line it was sent with. A message whose
+  // text only looks like one is shown as it is.
+  if (topic) {
     const a = selectedAgent();
     const y = a && yesmanOf(a.id);
-    const title = (y && topics.title(y, marker.id)) || marker.title;
+    const text = withoutLine(textOf(m.content), topic.context);
+    const title = (y && topics.title(y, topic.id)) || topic.title;
     return h('div', { class: 'msg-user msg-user--topic' },
-      h('button', { class: 'topic-chip', type: 'button', title: t('Open topic {id}', { id: marker.id }),
-        onclick: () => y && topics.open(y, marker.id) }, icon('topics', 'mds-icon topic-chip-mark'), h('span', null, t('Topic {id}', { id: marker.id })), h('span', { class: 'topic-chip-title' }, title)),
-      marker.rest ? h('div', { class: 'msg-user-text' }, marker.rest) : null,
+      h('button', { class: 'topic-chip', type: 'button', title: t('Open topic {id}', { id: topic.id }),
+        onclick: () => y && topics.open(y, topic.id) }, icon('topics', 'mds-icon topic-chip-mark'), h('span', null, t('Topic {id}', { id: topic.id })), h('span', { class: 'topic-chip-title' }, title)),
+      text ? h('div', { class: 'msg-user-text' }, text) : null,
       images.length ? h('div', { class: 'message-images' }, images.map((image) =>
         h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
   }
@@ -385,13 +414,14 @@ function userBubble(m) {
       h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
 }
 
-function userRowEl(row) {
+function userRowEl(c, row) {
   // yesman wrote its notices as text alone: a message with images is a
   // person's whatever its text says, and is shown in full with them.
   const images = Array.isArray(row.message.content) && row.message.content.some((b) => b?.type === 'image');
   const legacy = !row.origin && !images && legacyNoteEl(textOf(row.message.content));
   if (legacy) return legacy;
-  const bubble = userBubble(row.message);
+  const topic = row.origin?.source === 'user' ? topicOfSubmission(c, row.origin.submission) : null;
+  const bubble = userBubble(row.message, topic);
   if (!row.delivery) return bubble;
   return h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble, deliveryStatus(row.delivery, true));
 }
@@ -547,7 +577,7 @@ function updateWork(c, el, row) {
 
 function rowEl(c, row) {
   switch (row.type) {
-    case 'user': return userRowEl(row);
+    case 'user': return userRowEl(c, row);
     case 'lead': return leadRowEl(row);
     case 'text': return h('div', { class: 'msg-assistant' }, md(row.text));
     case 'note': return noteRowEl(row);
@@ -557,11 +587,11 @@ function rowEl(c, row) {
   }
 }
 
-function rowSig(row) {
+function rowSig(c, row) {
   switch (row.type) {
-    case 'user': return row.delivery ? `bound:${row.delivery.id}` : '';
+    case 'user': return `${row.delivery ? `bound:${row.delivery.id}` : ''}|${row.origin?.source === 'user' ? topicKey(topicOfSubmission(c, row.origin.submission)) : ''}`;
     case 'text': return row.live ? `l:${row.text}` : 'f';
-    case 'receipt': return `${row.delivery.state}:${row.delivery.revision}:${row.delivery.error ?? ''}:${row.delivery.images?.length ?? 0}`;
+    case 'receipt': return `${row.delivery.state}:${row.delivery.revision}:${row.delivery.error ?? ''}:${row.delivery.images?.length ?? 0}|${topicKey(topicOfSubmission(c, row.delivery.id))}`;
     default: return 'f';
   }
 }
@@ -587,7 +617,7 @@ function patchThread(c) {
   if (rows.length) thread.querySelector('.thread-empty')?.remove();
   patchChildren(thread, 'data-row', rows, {
     make: (row) => rowEl(c, row),
-    sig: rowSig,
+    sig: (row) => rowSig(c, row),
     update: (el, row) => {
       if (row.type === 'work') return updateWork(c, el, row);
       if (row.type === 'text') {
@@ -597,7 +627,7 @@ function patchThread(c) {
       // A receipt changing state keeps its row (and what is selected in it)
       // unless it changes form.
       const d = row.delivery;
-      if (row.type === 'receipt' && el._variant === `${receiptVariant(d)}:${d.text ?? ''}:${d.imageCount ?? 0}` && !d.images?.length) {
+      if (row.type === 'receipt' && el._variant === receiptKey(c, d) && !d.images?.length) {
         el.querySelector('.delivery-status').replaceWith(deliveryStatus(row.delivery, false));
         return el;
       }
@@ -742,13 +772,13 @@ function onAgentEvent(ev) {
   }
   if (e.type === 'delivery_update' || e.type === 'delivery_retained') {
     applyDeliveryReceipt(c,e,ev.seq);
-    if (state.pane === 'topics' && agent?.role === 'lead') topics.rerender();
+    topicsFollow(c);
     schedulePatch(c);
     return;
   }
   applyEvent(c, e, false);
   // The topics pane lists the lead's messages about the topic shown.
-  if (e.type === 'message_end' && state.pane === 'topics' && agent?.role === 'lead' && e.message?.role === 'user') topics.rerender();
+  if (e.type === 'message_end' && e.message?.role === 'user') topicsFollow(c);
 }
 
 // applyEvent updates a conversation with one record, and the thread when it
@@ -2575,19 +2605,32 @@ const topics = createTopics({
     files.openKnowledge();
   },
   openURL: (url) => call('OpenURL', url).catch(fail),
-  track: (y, id, text, imageCount) => {
+  track: (y, id, text, imageCount, topic) => {
     const lead = leadOf(y);
     if (!lead) return;
+    // The app ties the submission to its topic before sending it, so its
+    // receipt names the topic before the topic's record is read again.
+    if (topic) {
+      topicSends.set(`${y.name}@${y.hiredAt ?? ''}/${id}`, topic);
+      if (topicSends.size > 256) topicSends.delete(topicSends.keys().next().value);
+    }
     const c = convo(lead);
     if (!c.deliveries.has(id)) {
       // Keep the whole topic line, so the receipt shows its chip, and clip
       // only the user's text after it, as the composer's receipts do.
-      const marker = parseTopicMarker(text);
-      const head = marker ? text.slice(0, text.length - marker.rest.length) : '';
+      const head = topic?.context && text.startsWith(topic.context) ? topic.context : '';
       const preview = head + Array.from(text.slice(head.length)).slice(0, 128).join('');
       c.deliveries.set(id, { id, revision: 0, state: 'sending', text: preview, imageCount, preview: preview !== text });
     }
     if (c.loaded) schedulePatch(c);
+  },
+  // Topics read again can tie more of the conversation's messages to them.
+  changed: (y) => {
+    const lead = leadOf(y);
+    const now = lead && yesmanOf(lead.id);
+    if (!now || (now.hiredAt ?? '') !== (y.hiredAt ?? '')) return;
+    const c = state.convos.get(keyOf(lead));
+    if (c?.loaded) schedulePatch(c);
   },
   receipt: (y, d, id) => {
     const lead = leadOf(y);

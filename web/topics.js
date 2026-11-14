@@ -13,7 +13,7 @@ import { $, h, icon } from './dom.js';
 import { renderMarkdown } from './markdown.js';
 import { t, tn, formatNumber } from './i18n.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
-import { DELIVERY_LABELS, newSubmissionID, sameSubmissionImages, topicMarker, isCommand, parseTopicMarker } from './submission.js';
+import { DELIVERY_LABELS, newSubmissionID, sameSubmissionImages, topicMarker, isCommand, withoutLine } from './submission.js';
 import { originOf } from './conversation.js';
 
 const STATUS = { open: 'Open', resolved: 'Resolved', archived: 'Archived' };
@@ -60,8 +60,10 @@ const textOf = (content) => (typeof content === 'string' ? content
 //   openLead(y)             shows the lead's conversation
 //   showMessage(y, source)  shows one message of it; resolves to 'shown', 'missing', 'ambiguous' or 'other'
 //   openAgent(id), openBoard(), openKnowledge(path), openURL(url)
-//   track(y, id, text, imageCount)   shows a submission as sending in the lead's conversation
+//   track(y, id, text, imageCount, topic)   shows a submission as sending in the lead's
+//                                    conversation, tied to topic { id, title, context }
 //   receipt(y, delivery)             gives the lead's conversation a receipt
+//   changed(y)                       y's topics were read again
 export function createTopics(host) {
   const data = new Map(); // `${name}@${since}` -> { topics, error, loading, again }
   const views = new Map(); // `${name}@${since}` -> { selected, query, filter, editing, notice }
@@ -91,6 +93,8 @@ export function createTopics(host) {
     }
     e.loading = false;
     if (e.again) { e.again = false; return load(y); }
+    if (data.get(key) !== e) return;
+    host.changed?.(y);
     if (current() && keyOf(current()) === key) render();
   }
 
@@ -276,24 +280,24 @@ export function createTopics(host) {
 
   // ---------- The conversation ----------
 
-  // The lead's messages about this topic: those the app recorded as sent from
-  // it (each native message's origin names its submission), and any other
-  // carrying its visible line. Then the submissions the topic recorded, with
-  // what their receipts say, each tied to its message when the history has it.
+  // The lead's messages about this topic: only those the app recorded as
+  // sent from it, each native message's recorded origin naming one of this
+  // topic's submissions. A message's text is never evidence: a pasted or
+  // rewritten topic line, or a message of unknown origin, belongs to no topic.
+  // Then the submissions the topic recorded, with what their receipts say,
+  // each tied to its message when the history has it.
   function conversation(y, x, lead) {
     const convo = host.leadConvo(y);
-    const sendIDs = new Set(x.sends.map((s) => s.id));
+    const sendOf = new Map(x.sends.map((s) => [s.id, s]));
     const native = new Map(); // submission ID -> message
     const rows = [];
     for (const m of convo?.messages ?? []) {
       if (m.role !== 'user') continue;
       const origin = originOf(m);
-      if (origin?.source && origin.source !== 'user') continue; // a lead's task or yesman's notice
-      const marker = parseTopicMarker(textOf(m.content));
-      const exact = origin?.submission && sendIDs.has(origin.submission);
-      if (exact) native.set(origin.submission, m);
-      if (!exact && marker?.id !== x.id) continue;
-      const text = marker ? marker.rest : textOf(m.content);
+      const send = origin?.source === 'user' && origin.submission ? sendOf.get(origin.submission) : null;
+      if (!send) continue;
+      native.set(send.id, m);
+      const text = withoutLine(textOf(m.content), send.context);
       rows.push(h('li', { class: 'topic-message' },
         h('button', { class: 'mds-link-button', type: 'button', 'data-key': `msg-${m.timestamp}`, onclick: () => locate(y, { kind: 'message', agent: 'lead', role: 'user', timestamp: m.timestamp, since: lead?.since }) },
           excerpt(text) || t('Attached images')),
@@ -424,7 +428,7 @@ export function createTopics(host) {
     d.submission ??= { text, images };
     const frozen = x.sends.find((s) => s.id === messageID)?.context;
     const line = isCommand(text) ? '' : (frozen ?? topicMarker(x));
-    host.track(y, messageID, line ? (text ? `${line}\n\n${text}` : line) : text, images.length);
+    host.track(y, messageID, line ? (text ? `${line}\n\n${text}` : line) : text, images.length, { id: x.id, title: x.title, context: line });
     d.sending = true;
     d.error = '';
     render();
@@ -472,6 +476,7 @@ export function createTopics(host) {
     const i = e.topics.findIndex((x) => x.id === topic.id);
     if (i >= 0) e.topics[i] = topic;
     else e.topics.push(topic);
+    e.indexed = null;
   }
 
   function startEdit(y, id) {
@@ -482,7 +487,7 @@ export function createTopics(host) {
       form: base
         ? { title: base.title, summary: base.summary ?? '', conclusions: itemsOf(base.conclusions), questions: itemsOf(base.questions), addSources: [], removeSources: [] }
         : { title: '', summary: '', conclusions: [], questions: [], addSources: [], removeSources: [] },
-      conflict: null, saving: false, error: '',
+      conflict: null, saving: false, error: '', info: '',
     };
     if (id !== 'new') v.selected = id;
     render();
@@ -542,6 +547,7 @@ export function createTopics(host) {
       sources,
       conflict,
       ed.error ? h('p', { class: 'topic-notice', role: 'alert', 'data-tone': 'error' }, ed.error) : null,
+      ed.info ? h('p', { class: 'topic-notice', role: 'status', 'data-tone': 'quiet' }, ed.info) : null,
       h('div', { class: 'mds-dialog-actions topic-edit-actions' },
         h('button', { class: 'mds-button', type: 'button', 'data-key': 'edit-cancel', disabled: ed.saving, onclick: () => cancelEdit(y) }, t('Cancel')),
         h('button', { class: 'mds-button mds-button--primary', type: 'submit', 'data-key': 'edit-save', disabled: ed.saving }, ed.id === 'new' ? t('Create') : t('Save'))));
@@ -559,12 +565,12 @@ export function createTopics(host) {
       .slice(-40).reverse();
     const messageSelect = h('select', { class: 'mds-select', 'data-key': 'pick-message', 'aria-label': t('A message of the conversation') },
       h('option', { value: '' }, convo ? t('Add a message of the conversation…') : t('Open the conversation to pick its messages')),
-      picks.map((m, i) => h('option', { value: String(i) }, `${m.role === 'user' ? t('You') : t('Lead')}: ${excerpt(parseTopicMarker(textOf(m.content))?.rest ?? textOf(m.content), 70)}`)));
+      picks.map((m, i) => h('option', { value: String(i) }, `${m.role === 'user' ? t('You') : t('Lead')}: ${excerpt(textOf(m.content), 70)}`)));
     messageSelect.disabled = !picks.length;
     messageSelect.addEventListener('change', () => {
       const m = picks[Number(messageSelect.value)];
       if (!m) return;
-      ed.form.addSources.push({ kind: 'message', agent: 'lead', since: lead?.since, role: m.role, timestamp: m.timestamp, label: excerpt(parseTopicMarker(textOf(m.content))?.rest ?? textOf(m.content), 120) });
+      ed.form.addSources.push({ kind: 'message', agent: 'lead', since: lead?.since, role: m.role, timestamp: m.timestamp, label: excerpt(textOf(m.content), 120) });
       render();
     });
     const kind = h('select', { class: 'mds-select', 'data-key': 'pick-kind', 'aria-label': t('Kind of source') },
@@ -581,14 +587,17 @@ export function createTopics(host) {
   // save creates the topic, or saves the form against the revision it was
   // started from. When the topic changed meanwhile, the parts only one side
   // changed are combined and saved; parts both changed are left to the user.
+  // It saves the form as it was when Save was pressed: the form stays
+  // editable, and what is typed meanwhile is kept for the next save.
   async function save(y) {
     const v = viewOf(y);
     const ed = v.editing;
     if (!ed || ed.saving) return;
     ed.saving = true;
     ed.error = '';
+    ed.info = '';
     render();
-    const f = ed.form;
+    const f = cloneForm(ed.form);
     try {
       if (ed.id === 'new') {
         const created = await host.call('CreateTopic', y.name, y.hiredAt, {
@@ -597,11 +606,9 @@ export function createTopics(host) {
           questions: f.questions.map((c) => c.text).filter((s) => s.trim()),
           sources: f.addSources,
         });
-        entry(y)?.topics?.push(created);
-        v.editing = null;
-        v.selected = created.id;
-        render();
-        $('#topics [data-key="edit"]')?.focus({ preventScroll: true });
+        replace(y, created);
+        if (v.editing === ed) v.selected = created.id;
+        settle(y, v, ed, f, created);
         return;
       }
       const base = ed.base;
@@ -629,14 +636,64 @@ export function createTopics(host) {
         v.notice = { text: t('Saved, together with a change made meanwhile.'), tone: 'quiet' };
       }
       replace(y, r.topic);
-      v.editing = null;
-      render();
-      $('#topics [data-key="edit"]')?.focus({ preventScroll: true });
+      settle(y, v, ed, f, r.topic);
     } catch (err) {
       ed.error = err?.message || String(err);
     } finally {
       if (v.editing === ed) { ed.saving = false; render(); }
     }
+  }
+
+  const cloneForm = (f) => JSON.parse(JSON.stringify(f));
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  // settle ends an edit the app saved as sent. When the user changed the form
+  // while it was saving, the edit goes on from the saved topic instead: the
+  // fields changed meanwhile keep the user's text, the others take what was
+  // saved, and nothing typed is lost.
+  function settle(y, v, ed, sent, saved) {
+    if (v.editing !== ed) return;
+    const now = ed.form;
+    if (same(now, sent)) {
+      v.editing = null;
+      render();
+      focusAfter(y, 'edit');
+      return;
+    }
+    const items = (mine, was, theirs) => {
+      if (same(mine, was)) return itemsOf(theirs);
+      // Items saved as new have IDs now; the form's copies take them.
+      const used = new Set(mine.map((i) => i.id).filter(Boolean));
+      return mine.map((i) => {
+        if (i.id) return i;
+        const match = theirs.find((x) => x.text === i.text && !used.has(x.id));
+        if (!match) return i;
+        used.add(match.id);
+        return { id: match.id, text: i.text };
+      });
+    };
+    ed.id = saved.id;
+    ed.base = saved;
+    ed.form = {
+      title: now.title === sent.title ? saved.title : now.title,
+      summary: now.summary === sent.summary ? saved.summary ?? '' : now.summary,
+      conclusions: items(now.conclusions, sent.conclusions, saved.conclusions),
+      questions: items(now.questions, sent.questions, saved.questions),
+      addSources: now.addSources.filter((s) => !sent.addSources.some((x) => same(x, s))),
+      removeSources: now.removeSources.filter((id) => !sent.removeSources.includes(id) && saved.sources.some((s) => s.id === id)),
+    };
+    ed.conflict = null;
+    ed.info = t('Saved. What you changed while it was saving is not saved yet.');
+  }
+
+  // focusAfter moves focus after a save, unless the user has moved on: to
+  // another yesman, or to something outside the pane.
+  function focusAfter(y, key) {
+    const aside = $('#topics');
+    const active = document.activeElement;
+    if (!current() || keyOf(current()) !== keyOf(y)) return;
+    if (active && active !== document.body && !aside?.contains(active)) return;
+    $(`#topics [data-key="${key}"]`)?.focus({ preventScroll: true });
   }
 
   // rebase moves the form onto the topic as it is now, so that saving it
@@ -678,13 +735,26 @@ export function createTopics(host) {
 
   // onChange follows topics changed by the lead or another window.
   function onChange(name) {
-    for (const [key] of data) if (key.startsWith(`${name}@`)) {
-      const y = current();
-      if (y && keyOf(y) === key) load(y);
-      else data.delete(key); // read again when shown
-    }
+    // Every generation read so far is read again: the conversation's topic
+    // chips use them too.
+    for (const [key] of data) if (key.startsWith(`${name}@`)) load({ name, hiredAt: key.slice(name.length + 1) });
     const y = current();
     if (y?.name === name && !data.has(keyOf(y))) load(y);
+  }
+
+  // bySubmission is the topic of yesman y a submission was sent from, as the
+  // app recorded it before sending: { id, title, context }, or null. It reads
+  // y's topics when they are not read yet, and says so through changed(y).
+  function bySubmission(y, id) {
+    if (!y || !id) return null;
+    const e = entry(y);
+    if (!e) { load(y); return null; }
+    if (e.indexed !== e.topics) {
+      e.index = new Map();
+      for (const x of e.topics ?? []) for (const send of x.sends ?? []) e.index.set(send.id, { id: x.id, title: x.title, context: send.context ?? '' });
+      e.indexed = e.topics;
+    }
+    return e.index.get(id) ?? null;
   }
 
   // open shows the pane at a topic of yesman y, or its list.
@@ -703,5 +773,9 @@ export function createTopics(host) {
     return topics ? { open: topics.filter((x) => x.status === 'open').length } : null;
   };
 
-  return { render, onChange, open, title, counts, rerender: () => { if (current()) render(); } };
+  // refresh redraws the pane when it shows yesman y, after y's lead
+  // conversation changed; a redraw keeps drafts, focus and caret.
+  const refresh = (y) => { if (y && current() && keyOf(current()) === keyOf(y)) render(); };
+
+  return { render, onChange, open, title, counts, bySubmission, refresh };
 }

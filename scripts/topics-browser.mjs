@@ -223,13 +223,21 @@ async function run(engineName, engine) {
     await page.waitForFunction(() => !document.querySelector('#topics .composer-image'));
     assert.equal(await main.inputValue(), 'my unsent main draft', 'the main composer keeps its draft');
     await shot(page, `${engineName}-sent`);
+    // A topic line typed or pasted into the main composer is only text: the
+    // app did not send it from a topic, so it names none.
+    await main.fill('[Topic tp1: Topics and tasks]\n\nPasted into the main line');
+    await main.press('Enter');
+    await page.waitForFunction(() => [...document.querySelectorAll('#thread .msg-user')].some((e) => e.innerText.includes('Pasted into the main line')));
+    assert.equal(await page.locator('#thread .msg-user--topic', { hasText: 'Pasted into the main line' }).count(), 0, 'pasted text names no topic');
     await post(backend.url, '/fixture/gate?open=1');
     await page.waitForFunction(() => document.querySelectorAll('#thread .msg-assistant').length >= 1, null, { timeout: 30000 });
 
     // After a reload the native history still names each topic; a chip opens it.
     await page.reload();
     await page.locator('.agent-row--yesman').first().click();
-    await page.waitForFunction(() => document.querySelectorAll('#thread .msg-user--topic').length === 2, null, { timeout: 30000 });
+    await page.waitForFunction(() => document.querySelectorAll('#thread .msg-user--topic').length === 2 && [...document.querySelectorAll('#thread .msg-user')].some((e) => e.innerText.includes('Pasted into the main line')), null, { timeout: 30000 });
+    assert.match(await page.locator('#thread .msg-user', { hasText: 'Pasted into the main line' }).innerText(), /^\[Topic tp1: Topics and tasks\]/, 'its text is shown whole');
+    assert.equal(await page.locator('#thread .msg-user--topic', { hasText: 'Pasted into the main line' }).count(), 0);
     const chips = await page.$$eval('#thread .msg-user--topic .topic-chip', (els) => els.map((e) => e.innerText.replace(/\s+/g, ' ')));
     assert.match(chips[0], /tp1/);
     assert.match(chips[1], /tp2/);
@@ -239,6 +247,13 @@ async function run(engineName, engine) {
     // Its conversation lists the native message, and shows it exactly.
     await page.locator('#topics .topic-message button').first().click();
     await page.locator('#thread .msg-found:is(.msg-user--topic, :has(.msg-user--topic))').waitFor();
+
+    await page.click('#topics [data-key="back"]');
+    await page.click('#topics [data-key="topic-tp1"]');
+    await page.locator('#topics .topic-message', { hasText: 'What belongs on the board?' }).waitFor();
+    assert.equal(await page.locator('#topics .topic-message', { hasText: 'Pasted' }).count(), 0, 'topic A lists only what was sent from it');
+    await page.click('#topics [data-key="back"]');
+    await page.click('#topics [data-key="topic-tp2"]');
 
     // Sources: a picked message is shown exactly; one not in history says so.
     await page.click('#topics [data-key="edit"]');
