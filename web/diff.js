@@ -407,7 +407,7 @@ export function createChanges(host) {
       onclick: () => (n.dir ? toggle(s, n.path) : select(s, n.path)),
     },
     n.dir ? icon('chevron', 'mds-icon tree-chevron') : statusMark(n.status),
-    h('span', { class: 'tree-name' }, n.name, !n.dir && n.uncommitted ? h('i', { class: 'change-dirty', 'aria-hidden': 'true' }) : null),
+    h('span', { class: 'tree-name' }, n.name, !n.dir && n.uncommitted ? icon('record', 'mds-icon change-dirty') : null),
     counts(n));
   }
 
@@ -577,7 +577,7 @@ export function createChanges(host) {
         onclick: () => select(s, n.path) },
       statusMark(n.status),
       h('span', { class: 'changes-list-name' }, n.name,
-        n.uncommitted ? h('i', { class: 'change-dirty', 'aria-hidden': 'true' }) : null,
+        n.uncommitted ? icon('record', 'mds-icon change-dirty') : null,
         n.oldPath ? h('span', { class: 'changes-list-note' }, t('from {path}', { path: n.oldPath })) : null),
       counts(n))));
     if (!rows.length) rows.push(h('p', { class: 'files-note' }, t('No changes here.')));

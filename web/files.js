@@ -109,6 +109,7 @@ export function createFiles(host) {
       panes.set(key, p);
     }
     p.path = y.path;
+    p.label = y.displayName || y.name;
     return p;
   }
 
@@ -562,7 +563,7 @@ export function createFiles(host) {
     const diff = isChanges(p);
     const title = diff ? t('Changes') : p.scope.kind === 'knowledge' ? t('Knowledge') : t('Files');
     const tabs = (diff ? [] : p.tabs).map((tab) => h('div', { class: 'files-tab', role: 'tab', 'aria-selected': String(tab.path === p.active), 'data-pinned': tab.pinned ? 'true' : null, 'data-dirty': tab.dirty ? 'true' : null, title: tab.dirty ? t('{path} (not saved)', { path: tab.path }) : tab.path },
-      h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = tab.path; if (!p.views.has(tab.path)) loadView(p, tab.path); render(); }, ondblclick: () => { tab.pinned = true; render(); } }, baseOf(tab.path)),
+      h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = tab.path; if (!p.views.has(tab.path)) loadView(p, tab.path); render(); }, ondblclick: () => { tab.pinned = true; render(); } }, baseOf(tab.path), tab.dirty ? icon('record', 'mds-icon files-dirty-mark') : null),
       iconButton('x', t('Close {file}', { file: baseOf(tab.path) }), () => closeTab(p, tab.path))));
     return h('div', { class: 'files-head drag' },
       tabs.length ? h('div', { class: 'files-tabs', role: 'tablist', 'aria-label': t('Open files') }, tabs) : h('strong', { class: 'files-title' }, title),
@@ -618,7 +619,7 @@ export function createFiles(host) {
     class: 'files-crumb', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-current': last ? 'page' : null,
     onclick: (e) => onopen(e.currentTarget),
   }, label);
-  const scopeLabel = (p) => (p.scope.kind === 'worktree' ? p.scope.dir : p.scope.kind === 'knowledge' ? t('Knowledge') : p.name);
+  const scopeLabel = (p) => (p.scope.kind === 'worktree' ? p.scope.dir : p.scope.kind === 'knowledge' ? t('Knowledge') : p.label);
 
   // scopeCrumb names the part of the workspace shown, and opens the menu
   // that shows another: all of it, the knowledge, or another worktree.
@@ -852,7 +853,7 @@ export function createFiles(host) {
       }, icon(glyph), h('span', null, label), aside ?? h('span'));
     };
     const items = [
-      item(WORKSPACE, 'folder', y.name, h('span', { class: 'files-menu-aside' }, t('All files')), y.path),
+      item(WORKSPACE, 'folder', y.displayName || y.name, h('span', { class: 'files-menu-aside' }, t('All files')), y.path),
       item({ kind: 'knowledge' }, 'book', t('Knowledge'), null, KNOWLEDGE),
       // Task log is a shortcut to a file in the workspace, not another scope.
       h('button', { class: 'files-menu-item', type: 'button', role: 'menuitem', title: TASK_LOG,
@@ -921,7 +922,7 @@ export function createFiles(host) {
       } });
     return h('nav', { class: 'files-tree', 'aria-label': t('Files') },
       h('label', { class: 'search files-search' }, icon('search'), input),
-      h('div', { class: 'files-tree-list', id: 'files-tree-list', role: 'tree', 'aria-label': p.name, onkeydown: (e) => treeKey(e, p) }));
+      h('div', { class: 'files-tree-list', id: 'files-tree-list', role: 'tree', 'aria-label': p.label, onkeydown: (e) => treeKey(e, p) }));
   }
 
   let findSeq = 0;

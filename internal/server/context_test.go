@@ -72,6 +72,7 @@ func TestContextSharedDocumentsAreReadOnDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	y.DisplayName = "Renamed project 工程"
 	index := "# Knowledge\n- [Icon policy](icons.md) — when adding icons\n"
 	for path, text := range map[string]string{
 		filepath.Join(y.KnowledgeDir(), "INDEX.md"): index,
@@ -89,6 +90,7 @@ func TestContextSharedDocumentsAreReadOnDemand(t *testing.T) {
 		t.Run(role, func(t *testing.T) {
 			text := BuildContext(context.Background(), p, m, y, agent.Info{ID: "alice/" + role, Name: role, Role: role}, yesmen.Board{})
 			for _, want := range []string{
+				`named "Renamed project 工程"`,
 				".yesman/knowledge/", ".yesman/task-log.md", "Icon policy",
 				"Phosphor icon helper and local font assets", "head abc123 passed CI",
 				"Finishing a task alone is not a reason to add Knowledge",

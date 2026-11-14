@@ -16,7 +16,7 @@ function mark(status) {
     case 'done': return icon('check', 'mds-icon board-mark');
     case 'blocked': return icon('alert', 'mds-icon board-mark');
     case 'dropped': return icon('minimize', 'mds-icon board-mark');
-    default: return h('i', { class: 'board-mark board-dot', 'aria-hidden': 'true' });
+    default: return icon(status === 'doing' ? 'record' : 'circle', 'mds-icon board-mark board-dot');
   }
 }
 
@@ -88,7 +88,7 @@ export function createBoard(host) {
     } else if (!tasks.length) {
       body.append(h('div', { class: 'board-empty' },
         h('strong', null, t('No tasks yet')),
-        h('p', null, t('{name} adds tasks here as it plans, and its workers keep them up to date.', { name: y.name }))));
+        h('p', null, t('{name} adds tasks here as it plans, and its workers keep them up to date.', { name: y.displayName || y.name }))));
     } else {
       body.append(open.length
         ? h('ol', { class: 'board-list', 'aria-label': t('Open tasks') }, open.map((task) => row(y, task)))
@@ -121,7 +121,7 @@ export function createBoard(host) {
     const ownerEl = !task.owner ? null
       : owner
         ? h('button', { class: 'board-owner', type: 'button', title: t('{name}: open its conversation', { name: task.owner }), onclick: () => host.openAgent(owner.id) }, owner.number ? `a${owner.number}` : task.owner)
-        : h('span', { class: 'board-owner', 'data-gone': 'true', title: t('{name} is not one of {yesman}\'s agents now', { name: task.owner, yesman: y.name }) }, task.owner);
+        : h('span', { class: 'board-owner', 'data-gone': 'true', title: t('{name} is not one of {yesman}\'s agents now', { name: task.owner, yesman: y.displayName || y.name }) }, task.owner);
     const inline = task.status === 'blocked' && task.note && !isExpanded ? h('p', { class: 'board-inline' }, task.note.split('\n')[0]) : null;
     const details = isExpanded
       ? h('div', { class: 'board-details' },
