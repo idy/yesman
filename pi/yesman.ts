@@ -155,6 +155,24 @@ async function commandEnv(signal?: AbortSignal): Promise<{ env: Record<string, s
 	}
 }
 
+// shellEnvironment preserves configured variables but reserves the local broker
+// identity and prefixes only command PATH. The wrapper remains present when the
+// env endpoint is unavailable, so PR creation cannot silently become personal.
+function shellEnvironment(base: Record<string, string>, injected: Record<string, string>): Record<string, string> {
+	const env = { ...base, ...injected };
+	const shim = process.env.YESMAN_GH_SHIM;
+	if (!shim) return env;
+	const pathOf = (source: Record<string, string>) => Object.entries(source).find(([name]) => name.toUpperCase() === "PATH")?.[1];
+	const path = pathOf(injected) ?? pathOf(base) ?? "";
+	for (const name of Object.keys(env)) if (name.toUpperCase() === "PATH") delete env[name];
+	const separator = process.platform === "win32" ? ";" : ":";
+	env.PATH = [shim, ...path.split(separator).filter((part) => part !== shim)].join(separator);
+	env.YESMAN_GH_REAL = process.env.YESMAN_GH_REAL ?? "";
+	env.YESMAN_API = API!;
+	env.YESMAN_TOKEN = TOKEN!;
+	return env;
+}
+
 // refreshHidden asks the app for the secrets' values to hide, keeping
 // those remembered when it does not answer.
 async function refreshHidden(signal?: AbortSignal) {
@@ -227,7 +245,7 @@ export default function yesman(pi: ExtensionAPI) {
 			defaultActive: false,
 			async execute(id, params, signal, onUpdate, ctx) {
 				const { env, note } = await commandEnv(signal);
-				const tool = make(ctx.cwd, { spawnHook: (c) => ({ ...c, env: { ...c.env, ...env } }) });
+				const tool = make(ctx.cwd, { spawnHook: (c) => ({ ...c, env: shellEnvironment(c.env, env) }) });
 				const update: typeof onUpdate = onUpdate && ((partial) => onUpdate({ ...partial, content: hideContent(partial.content ?? []) }));
 				let out;
 				try {

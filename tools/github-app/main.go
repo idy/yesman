@@ -88,6 +88,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		defer client.Close()
 		ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		defer cancel()
 		if os.Args[1] == "test" {

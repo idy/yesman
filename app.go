@@ -11,6 +11,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/home"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
@@ -60,6 +61,11 @@ type app struct {
 	variables *secrets.Variables
 	keychain  keychain   // keeps the secrets' password; nil for none
 	envmu     sync.Mutex // one change of them at a time
+
+	githubApp         *githubapp.Manager
+	githubSetupMu     sync.Mutex
+	githubSetup       GitHubAppSetup
+	githubSetupCancel context.CancelFunc
 
 	wmu  sync.Mutex
 	win  *mygo.Window

@@ -23,7 +23,10 @@ const githubAPI = "https://api.github.com"
 // RegistrationServer handles one short-lived GitHub manifest exchange. Neither
 // the callback URL nor GitHub's response is logged or rendered to the browser.
 type RegistrationServer struct {
-	Owner, Name, Dir      string
+	Owner, Name, Dir string
+	// Save encrypts the key directly into the desktop's backend-only vault.
+	// When absent, the standalone helper uses StoreRegistration.
+	Save                  func(Registration, []byte) error
 	client                *http.Client
 	base                  string
 	mu                    sync.Mutex
@@ -89,7 +92,7 @@ func (s *RegistrationServer) manifest() map[string]any {
 		"default_events":      []string{}, "request_oauth_on_install": false}
 }
 
-var registerPage = template.Must(template.New("register").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Register your yesman GitHub App</title><h1>Register your yesman GitHub App</h1><p>Sign in to GitHub as <strong>{{.Owner}}</strong>. The App belongs to your personal account and is private.</p><p>Permissions: pull requests (read and write), contents (read only), and GitHub's default metadata read. Webhooks and user OAuth are disabled.</p><p>After creating it, install on <strong>Only select repositories → idy/yesman</strong>. This page saves the private key directly to a private directory on this computer; do not paste it into chat or Settings → Secrets.</p><form method="post" action="https://github.com/settings/apps/new?state={{.State}}"><input type="hidden" name="manifest" value="{{.Manifest}}"><button type="submit">Continue to GitHub</button></form></html>`))
+var registerPage = template.Must(template.New("register").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Register your yesman GitHub App</title><h1>Register your yesman GitHub App</h1><p>Sign in to GitHub as <strong>{{.Owner}}</strong>. The App belongs to your personal account and is private.</p><p>Permissions: pull requests (read and write), contents (read only), and GitHub's default metadata read. Webhooks and user OAuth are disabled.</p><p>After creating it, install on <strong>Only select repositories</strong> and choose the repositories you intend to use. This page saves the private key directly to a private directory on this computer; do not paste it into chat or Settings → Secrets.</p><form method="post" action="https://github.com/settings/apps/new?state={{.State}}"><input type="hidden" name="manifest" value="{{.Manifest}}"><button type="submit">Continue to GitHub</button></form></html>`))
 
 func (s *RegistrationServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -146,7 +149,7 @@ func (s *RegistrationServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Registration exchange failed. See the local setup command; no credentials are shown here.", http.StatusBadGateway)
 			return
 		}
-		_, _ = fmt.Fprintf(w, "<!doctype html><title>yesman App saved</title><h1>GitHub App saved securely</h1><p>Install the App on Only select repositories → idy/yesman.</p><p><a href=\"https://github.com/apps/%s/installations/new\">Install your App</a></p><p>You can close this page.</p>", template.HTMLEscapeString(app.Slug))
+		_, _ = fmt.Fprintf(w, "<!doctype html><title>yesman App saved</title><h1>GitHub App saved securely</h1><p>Install the App using Only select repositories and choose the repositories you intend to use.</p><p><a href=\"https://github.com/apps/%s/installations/new\">Install your App</a></p><p>You can close this page.</p>", template.HTMLEscapeString(app.Slug))
 	default:
 		http.NotFound(w, r)
 	}
@@ -195,6 +198,9 @@ func (s *RegistrationServer) exchange(ctx context.Context, code string) (Registr
 		return app, errors.New("GitHub App permissions differ from pull requests write and contents read; inspect the registration")
 	}
 	app = Registration{ID: wire.ID, ClientID: wire.ClientID, Slug: wire.Slug, Name: wire.Name, Owner: wire.Owner.Login, URL: wire.URL}
+	if s.Save != nil {
+		return app, s.Save(app, []byte(wire.PEM))
+	}
 	return app, StoreRegistration(s.Dir, app, []byte(wire.PEM))
 }
 

@@ -24,15 +24,17 @@ import (
 // Each token is narrowed to one explicitly configured repository. No personal
 // credential fallback exists. A new client is needed when configuration changes.
 type Client struct {
-	app     Registration
-	key     *rsa.PrivateKey
-	allowed map[string]bool
-	http    *http.Client
-	base    string
-	now     func() time.Time
-	mu      sync.Mutex
-	tokens  map[string]installationToken
-	flights map[string]*tokenFlight
+	app      Registration
+	key      *rsa.PrivateKey
+	allowed  map[string]bool
+	http     *http.Client
+	base     string
+	now      func() time.Time
+	mu       sync.Mutex
+	tokens   map[string]installationToken
+	flights  map[string]*tokenFlight
+	lifetime context.Context
+	stop     context.CancelFunc
 }
 
 type installationToken struct {
@@ -51,21 +53,29 @@ func NewClient(dir string, repositories []string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(repositories) == 0 {
+		return nil, errors.New("select at least one repository for the GitHub App")
+	}
 	return newClient(app, key, repositories)
 }
 
 func newClient(app Registration, key *rsa.PrivateKey, repositories []string) (*Client, error) {
-	c := &Client{app: app, key: key, allowed: map[string]bool{}, http: safeHTTPClient(), base: githubAPI, now: time.Now, tokens: map[string]installationToken{}, flights: map[string]*tokenFlight{}}
+	lifetime, stop := context.WithCancel(context.Background())
+	c := &Client{app: app, key: key, allowed: map[string]bool{}, http: safeHTTPClient(), base: githubAPI, now: time.Now, tokens: map[string]installationToken{}, flights: map[string]*tokenFlight{}, lifetime: lifetime, stop: stop}
 	for _, repo := range repositories {
 		if !repoPattern.MatchString(repo) {
 			return nil, errors.New("App repositories must be explicit owner/repo names")
 		}
 		c.allowed[strings.ToLower(repo)] = true
 	}
-	if len(c.allowed) == 0 {
-		return nil, errors.New("select at least one repository for the GitHub App")
-	}
 	return c, nil
+}
+
+func (c *Client) Close() {
+	c.stop()
+	c.mu.Lock()
+	c.tokens = map[string]installationToken{}
+	c.mu.Unlock()
 }
 
 var repoPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$`)
@@ -92,6 +102,8 @@ func (e *apiError) Error() string {
 }
 
 func (c *Client) request(ctx context.Context, method, path, credential string, body, out any) error {
+	ctx, cancel := joinedContext(ctx, c.lifetime)
+	defer cancel()
 	var data []byte
 	if body != nil {
 		var err error
@@ -138,6 +150,9 @@ func (c *Client) token(ctx context.Context, repo string) (installationToken, err
 	if err := ctx.Err(); err != nil {
 		return installationToken{}, err
 	}
+	if err := c.lifetime.Err(); err != nil {
+		return installationToken{}, err
+	}
 	c.mu.Lock()
 	if t, ok := c.tokens[repo]; ok && t.expires.After(c.now().Add(time.Minute)) {
 		c.mu.Unlock()
@@ -150,12 +165,15 @@ func (c *Client) token(ctx context.Context, repo string) (installationToken, err
 		// A canceled waiter must not abort another agent's concurrent mint.
 		// The shared request still has its own fixed 30-second deadline.
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(c.lifetime, 30*time.Second)
 			defer cancel()
 			t, err := c.mint(ctx, repo)
 			c.mu.Lock()
-			if err == nil {
+			if err == nil && c.lifetime.Err() == nil {
 				c.tokens[repo] = t
+			}
+			if c.lifetime.Err() != nil {
+				t, err = installationToken{}, c.lifetime.Err()
 			}
 			f.token, f.err = t, err
 			delete(c.flights, repo)

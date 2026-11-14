@@ -15,6 +15,7 @@ import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
 import { createCrew } from './crew.js';
 import { createEnvPage } from './env.js';
+import { createGitHubAppPage } from './github-app.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
@@ -1305,6 +1306,7 @@ const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
   { page: 'yesman', label: 'yesman', icon: 'users' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
+  { page: 'github-app', label: 'GitHub App', icon: 'pullRequest' },
   { page: 'secrets', label: 'Secrets', icon: 'lock' },
   { page: 'variables', label: 'Variables', icon: 'code' },
   { page: 'storage', label: 'Storage', icon: 'folder' },
@@ -1354,6 +1356,7 @@ async function loadSettingsPage(page) {
     else if (page === 'pi') { await piPage.load(); return; }
     else if (page === 'yesman') { await crewPage.load(); return; }
     else if (page === 'secrets') { await secretsPage.load(); return; }
+    else if (page === 'github-app') { await githubAppPage.load(); return; }
     else if (page === 'variables') { await variablesPage.load(); return; }
   } catch (err) {
     fail(err);
@@ -1370,6 +1373,7 @@ function renderSettings(body) {
   else if (state.view.page === 'pi') piPage.render(inner);
   else if (state.view.page === 'yesman') crewPage.renderPage(inner);
   else if (state.view.page === 'secrets') secretsPage.render(inner);
+  else if (state.view.page === 'github-app') githubAppPage.render(inner);
   else if (state.view.page === 'variables') variablesPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
   else if (state.view.page === 'about') renderAbout(inner);
@@ -1447,6 +1451,10 @@ const envPage = (kind) => createEnvPage(kind, {
 });
 const secretsPage = envPage('secrets');
 const variablesPage = envPage('variables');
+const githubAppPage = createGitHubAppPage({
+  call, shown: () => state.view.kind === 'settings' && state.view.page === 'github-app',
+  rerender: () => renderBody(), preferenceRow, settingsSection,
+});
 
 function renderGeneral(inner) {
   const v = state.settings;

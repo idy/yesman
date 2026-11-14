@@ -1,78 +1,70 @@
-# GitHub App identity: local setup helper
+# GitHub App identity for agent pull requests
 
-This helper registers a **user-owned** GitHub App and can create a PR with its installation credential. It does not yet change desktop settings, agent tools, `gh`, Git credentials, merging, or releases. Desktop integration and a live identity test are required before enabling this as the default agent PR path.
+Settings → **GitHub App** lets you use your own App's bot name and avatar when yesman agents run `gh pr create`. It is opt-in for explicitly selected workspaces and repositories. Every desktop user supplies or registers their own App; the installer contains no shared private key or token and needs no public token server.
 
-## Registration
+## Set up
 
-Run outside an agent workspace's credential directories, using a new, dedicated directory under your own account:
+1. Set up the separate App key storage. Leave the password empty to use the operating system's credential store (macOS Keychain, Windows Credential Manager, or Linux Secret Service). Without one, choose a password of at least eight characters and enter it after each restart.
+2. Either **Start registration** with a personal GitHub owner and App name, or enter an existing App's numeric ID and **Choose key file…**. The native file chooser reads the PEM directly in Go; its contents never pass through the page. Import verifies the key and App identity against GitHub before saving.
+3. Open the registration page, complete GitHub login/confirmation, and install with **Only select repositories**. Select only the repositories you intend to use. The local registration link expires after 30 minutes; if it expires or a conversion fails after GitHub created the App, inspect that registration before creating another.
+4. Use **Save App logo** to save the existing yesman yak artwork, then upload it under the GitHub App's **Display information** and set the avatar. An App's registered name/slug and avatar determine its bot appearance.
+5. Enter explicit `owner/repo` names, select the intended workspaces, and **Save scope**. Then **Test connection** and **Enable App identity**. Changing the key or scope disables App identity until a fresh connection test and explicit enable. Renaming a workspace keeps its selection; recreating one requires saving and testing its new scope.
 
-```sh
-go run ./tools/github-app register \
-  --owner idy --name 'yesman by idy' \
-  --directory '/absolute/private/path/yesman-github-app'
-```
+For the initial project setup, the owner is `idy`, the suggested display name is `yesman by idy`, and the installation/scope is only `idy/yesman`. The bare `yesman` username is held by another GitHub account and cannot be used as idy's App name. GitHub's registration form determines final availability and permits editing the proposed name.
 
-Open the printed loopback URL within 30 minutes and continue to GitHub. Sign in as the selected personal owner. GitHub lets you edit the display name before creating the App. A GitHub username already held by somebody else cannot be used as the App name; a missing public `/apps/slug` page does not prove availability.
-
-The manifest requests only:
+The manifest creates a private personal App, with `https://github.com/idy/yesman` as the homepage, no user OAuth authorization, no webhook endpoint and no event subscriptions. Required repository permissions are exactly:
 
 - Pull requests: read and write.
 - Contents: read only.
 - Metadata: GitHub's automatic read permission.
 
-The App is private, with webhooks disabled, no subscribed events, no user OAuth authorization, and `https://github.com/idy/yesman` as its homepage. It creates PRs from branches already pushed using the existing Git credentials.
+No Issues, Checks, Actions, organization or account permissions are requested. The read-only Contents permission does not push branches. Push the branch using the existing Git credentials before creating the PR.
 
-After creation, use the provided installation URL and choose **Only select repositories → idy/yesman** for the initial test. In the App's settings, upload the existing `resources/icon.png` under Display information and set the avatar. This is the project's 1024px yak artwork, not an Action branding icon.
+## What enabling changes
 
-The exchange saves only public `app.json` metadata and `private-key.pem` in the dedicated `0700` directory, with both files `0600`. It discards unneeded OAuth and webhook secrets. Existing registrations are never overwritten. Do not move these files into a repository, configuration export, public installer, or Settings → Secrets: that vault supplies shell environments. The standalone helper fails closed on Windows pending credential-store integration; cross-compilation alone does not establish secure Windows storage.
+For selected workspaces, including workers already running the current extension, the next standard `gh pr create` uses the App even when `GH_TOKEN` or `GITHUB_TOKEN` is configured. Other workspaces, other gh subcommands, Git pushes, pool fetches, merging and releases retain their original credentials. There is no global `gh auth` switch, token replacement, Git config change or repository remote rewrite. Disable App identity to return subsequent creations to the existing personal credential mode. Locking retains the selected App mode and makes creation fail until unlocked; it never silently changes the author to a human.
 
-The local callback uses a random state, rejects duplicate state/code parameters and wrong Host headers, accepts one exchange, disables response caching, and never logs its callback URL, exchange body, private key, JWT or token. A browser navigation loss does not cancel an in-progress one-time exchange. Stop the helper with Ctrl+C; it also expires after 30 minutes. If an exchange fails, inspect the App registration before starting another one, as GitHub may already have created it.
-
-## Verify a connection and create a draft
+The supported path is noninteractive creation with an already-pushed head:
 
 ```sh
-go run ./tools/github-app test \
-  --directory '/absolute/private/path/yesman-github-app' --repo idy/yesman
+gh pr create --repo idy/yesman --head feat/example --base main \
+  --title 'feat: Example' --body-file /path/to/pr-body.md --draft
 ```
 
-The result contains public App identity, repository, installation ID and expiration. It validates an actual repository API call using the installation token. Authentication and permissions failures do not fall back to personal credentials.
+Supported options are `--repo/-R`, `--head/-H`, `--base/-B`, `--title/-t`, `--body/-b`, `--body-file/-F` (including `-` for stdin), and `--draft/-d`. Repository, head, base and title must be explicit. Unsupported flags, duplicate options, interactive creation and implicit branch pushing fail clearly in App mode. This is the normal yesman shell path; absolute gh paths, aliases that create PRs, direct API calls, remote shells and third-party plugins' own command tools are not rewritten. Agent context directs creation through the supported path.
 
-For an authorized smoke test, push a separate synthetic branch first, then prepare a non-secret JSON file:
+The app prepares a private `gh` executable wrapper under its runtime directory and prefixes only its agents' command PATH. The wrapper checks the authenticated caller's workspace mode through the loopback API. In personal mode it preserves arguments, stdin and the command environment. In App mode it sends only the PR fields to Go. The backend runs the installed real gh in an isolated directory with a repository-scoped installation token in that child alone. No App token reaches the wrapper, pi, the shell command environment, an extension, the model, or the webview. After gh creates the PR, a repository API read verifies the Bot author and registered App slug before reporting success.
 
-```json
-{
-  "repository": "idy/yesman",
-  "head": "test/github-app-identity",
-  "base": "main",
-  "title": "test: GitHub App identity smoke test",
-  "body": "Synthetic draft for verifying the yesman App author and avatar. Do not merge.",
-  "draft": true
-}
-```
+An unavailable broker, a conflicting non-github.com `GH_HOST`, or unreadable App configuration fails without personal fallback. A changed/locked/disabled configuration cancels outstanding App operations. An interrupted write may already have reached GitHub, so its error directs the caller to inspect the repository before retrying; creation is never blindly replayed.
+
+## Key and token lifecycle
+
+App metadata and the private key are encrypted together with the existing age/sops vault implementation in a **separate** `github-app/vault/` directory under the yesman data folder. The vault password has its own `github-app-password/…` namespace in the native credential store. It is not the shell Secrets vault, not exposed by `yesman_env`, and not included in normal configuration exports. Imports/exports of other settings do not enable, replace or erase this App configuration. Keep the original key or generate a replacement in GitHub when moving to a different machine.
+
+The backend's client allowlist consists of explicit `owner/repo` names. It looks up each repository's installation, validates the App, owner and suspension state, and mints a token narrowed to that one repository and the requested permissions. Cache entries are per repository, including across different installation owners. Tokens refresh with a one-minute safety margin; concurrent requests share a mint. Canceling one waiter does not cancel other agents' mint; the shared request has its own 30-second deadline.
+
+An HTTP 401 invalidates only the token used by that request and permits one authentication refresh before a write. Missing/suspended installations, insufficient permissions, redirects and other HTTP/transport failures do not fall back to a personal token. Revocation or uninstall causes subsequent operations to fail; a still-valid cached token can remain usable until GitHub invalidates it or it expires. Locking drops the cached client. Disabling this local mode does not uninstall the GitHub App or revoke its key.
+
+Registration uses random state, one conversion, duplicate parameter and Host validation, no-store/referrer/CSP headers, and a bounded loopback listener. Codes, callback URLs with codes, response bodies, PEM, JWTs and installation tokens are never logged. A canceled or superseded registration cannot replace a newer key. Native import and a replacement key disable any old selected identity before storage changes.
+
+## Validate the real identity
+
+A connection test is read-only and does not create a PR. For an authorized smoke test, create a distinct synthetic branch/commit with the existing push identity, then create a clearly titled **draft** PR using the selected App path. Independently verify REST `user.type = Bot`, the expected `user.login = <slug>[bot]`, avatar/profile URLs and the head repository/branch/SHA. Preserve the PR link; close the synthetic draft afterward without merging it or deleting its reference.
+
+The current yesman OpenAI dispatcher skips draft PRs. A draft proves the author/avatar path, not ready-PR review admission or merge gates. App-created events must still trigger normal CI and current-head reviews; this App must not serve as an independent reviewer of its own PR. Ordinary GitHub Apps do not automatically join GitHub's partner Agents selector, and historical PR/comment authors are not rewritten.
+
+## Development checks and standalone helper
 
 ```sh
-go run ./tools/github-app create-pr \
-  --directory '/absolute/private/path/yesman-github-app' \
-  --repo idy/yesman --input /absolute/path/pull.json
+go test -race ./internal/githubapp ./internal/server .
+go vet ./...
+node --test scripts/*.test.mjs
+node scripts/check-github-app-pi.mjs
+YESMAN_TEST_PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node scripts/check-github-app-browser.mjs
+GOOS=linux go build ./...
+GOOS=windows go build ./...
 ```
 
-The PR request is made directly by the Go client with an installation token; the token is never passed to the shell, pi, a frontend, or a model. The response must identify a `Bot` author matching the registered App slug. Preserve the returned PR URL, `user.login`, `user.type`, avatar/profile URLs and source SHA as evidence. Verify the live PR independently and close the synthetic draft after testing; do not merge it or delete the retained reference.
+Tests use generated keys and mock GitHub endpoints. They exercise the installed real gh through an isolated TLS proxy, the compiled desktop wrapper through actual pi with a deterministic local provider, native-import wire shape and vault isolation, and production Chromium/WebKit page behavior. On Windows the TLS proxy test trusts its generated public CA only in a disposable GitHub Actions runner's CurrentUser store, then removes that exact certificate; it skips that network fixture on other Windows hosts. These tests do not substitute for the real App installation/author/avatar test.
 
-The current repository's OpenAI dispatcher skips draft PRs. A draft proves identity without proving ready-PR review admission or the full merge gates. A real ready feature PR must still receive the existing CI and current-head reviews.
-
-## Credential behavior
-
-The client allowlist consists of explicit `owner/repo` names. It looks up the installation for the requested repository, validates its App and owner, and mints a token narrowed to that repository and the two requested permissions. Cache entries are per repository, including when different owners install the same App. It refreshes with a one-minute expiry margin and coalesces concurrent mints. A canceled waiter does not cancel another caller's mint; shared mint attempts have a 30-second timeout.
-
-An authentication rejection invalidates only the token used by that request and permits one remint/retry. Permission errors, missing installations, suspension, redirects, other HTTP errors and ambiguous network failures are reported without personal fallback or write retries. Responses and request URLs are omitted from errors to prevent reflected credentials. Removing an installation or revoking the key causes subsequent operations to fail; previously cached tokens may remain valid until GitHub revokes them or they expire.
-
-## Validation
-
-```sh
-go test -race ./internal/githubapp ./tools/github-app
-go vet ./internal/githubapp ./tools/github-app
-GOOS=linux go build ./tools/github-app
-GOOS=windows go build ./tools/github-app
-```
-
-The tests use local mock GitHub endpoints and generated fixture keys. They cover callback replay/expiry/CSRF, owner checks, private Unix storage, JWT signatures, exact mint permissions and repository scope, concurrent refresh/cancellation, token invalidation, denied requests, output redaction and PR-author checks. They do not substitute for the user's real App installation test, browser setup or Windows credential-store support.
+`go run ./tools/github-app` remains a macOS/Linux developer setup helper with `register`, `test`, and `create-pr`. Pass a new absolute `--directory` outside workspaces. Its standalone registration stores PEM in dedicated `0700/0600` files; the desktop uses the encrypted vault on every platform instead. The helper never overrides existing registrations, global gh/Git authentication or environment secrets. Import its saved PEM using the desktop's native chooser and the public App ID from `app.json`.
