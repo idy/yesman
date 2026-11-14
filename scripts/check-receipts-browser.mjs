@@ -10,11 +10,11 @@
 // folded line that opens to all of them while every message, image and reply
 // stays as it was, and that what is sent now reads as the person's message
 // with its state: sending, accepted, refused, uncertain and retried, two with
-// the same text, images, a native message tied late, another agent, repeated
-// records and snapshots, reloading, Chinese, dark and narrow windows, and the
-// local icon font with outside requests blocked. Set YESMAN_RECEIPTS_WEB to
-// another page's web directory (such as an earlier release's) to check it
-// instead. A browser bridge is not the native window, pi or a real provider.
+// the same text, images, a native message tied late, another agent, the
+// command palette, keys and Settings pages, repeated records and snapshots,
+// reloading, Chinese, dark and narrow windows, and the local icon font with
+// outside requests blocked. Set YESMAN_RECEIPTS_WEB to another page's web
+// directory (such as an earlier release's) to check it instead. A browser bridge is not the native window, pi or a real provider.
 const { chromium, webkit } = await import(process.env.YESMAN_TEST_PLAYWRIGHT_MODULE || "playwright");
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -132,6 +132,8 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
     };
     window.mygo = {
       locale: "en",
+      // macOS, so ⌘ is the shortcuts' modifier whatever system runs the check.
+      platform: "darwin",
       on: (n, f) => (window.events[n] = f),
       call: async (method, ...args) => {
         switch (method.replace("Yesman.", "")) {
@@ -153,6 +155,9 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
             return new Promise((resolve, reject) => (pending[id] = { resolve, reject }));
           }
           case "TakeFocus": return "";
+          case "Shortcuts": return {};
+          case "Grants": return { platform: "darwin", items: [] };
+          case "ModelUsage": throw new Error("no usage in this check");
           default: return {};
         }
       },
@@ -414,6 +419,42 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await input.inputValue(), "");
     assert.deepEqual(await seen(page), live);
 
+    // Keys, the command palette and Settings around it: the folded line stays
+    // open and keeps focus, and the conversation is as it was.
+    const summary = folded.locator(":scope > summary");
+    const focused = (locator) => locator.evaluate((el) => document.activeElement === el);
+    await summary.focus();
+    await page.keyboard.press("Meta+KeyK");
+    await page.locator("dialog.palette-dialog[open]").waitFor();
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector("dialog.palette-dialog[open]"));
+    await frame(page);
+    assert.equal(await focused(summary), true, "the palette gave focus back elsewhere");
+    assert.equal(await folded.evaluate((el) => el.open), true);
+    await page.keyboard.press("Meta+KeyL");
+    assert.equal(await focused(input), true);
+    assert.equal(await folded.evaluate((el) => el.open), true);
+    // Settings › Grant and Settings › Model usage, then back by the sidebar.
+    await page.keyboard.press("Meta+Comma");
+    await page.locator('#settings-nav [data-page="grant"]').click();
+    await page.locator(".grant-page").waitFor();
+    await page.locator('#settings-nav [data-page="usage"]').click();
+    await page.locator('#settings-nav [data-page="usage"][aria-current="page"]').waitFor();
+    await page.waitForTimeout(50);
+    await page.locator('[data-agent="alice/lead"]').first().click();
+    await folded.waitFor();
+    assert.equal(await folded.evaluate((el) => el.open), true);
+    assert.deepEqual(await seen(page), live);
+    // The next conversation and back by keys.
+    await summary.focus();
+    await page.keyboard.press("Meta+Alt+ArrowDown");
+    await page.locator("#thread .thread-empty").waitFor();
+    await page.keyboard.press("Meta+Alt+ArrowUp");
+    await folded.waitFor();
+    assert.equal(await folded.evaluate((el) => el.open), true);
+    assert.deepEqual(await seen(page), live);
+    assert.equal(await folded.locator(".receipts-body > [data-delivery]").count(), 29);
+
     // History reads the same, without what only this window had: the folded
     // line closed again, the latest uncertain one in view from its preview.
     await page.reload();
@@ -457,7 +498,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await shot(dark.page, "dark-narrow", engine);
     assert.deepEqual(dark.errors, []);
     await dark.context.close();
-    console.log(engine, "earlier receipts folded/messages and replies whole/opened in order/repeats/sent as sent/states/same text/late native/retry/edit/refusal/images/agents/reload/i18n/dark/narrow/local icons PASS");
+    console.log(engine, "earlier receipts folded/messages and replies whole/opened in order/repeats/sent as sent/states/same text/late native/retry/edit/refusal/images/agents/palette/keys/Settings/reload/i18n/dark/narrow/local icons PASS");
   } finally {
     await browser.close();
   }
