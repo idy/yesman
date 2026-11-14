@@ -333,15 +333,16 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .import-faint { color: var(--mds-muted); font-size: var(--mds-text-note); }
 
 /* Settings › Secrets and Variables: entries as a form, or their YAML. */
-.env-page { position: relative; display: grid; gap: 16px; }
-.env-page > [role="tabpanel"] { display: grid; gap: 10px; }
+.env-page { position: relative; display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.env-page > [role="tabpanel"] { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .env-page > [role="tabpanel"][hidden] { display: none; }
 .env-status { color: var(--mds-muted); font-size: var(--mds-text-note); white-space: nowrap; }
 .env-error { margin: 0; font-size: var(--mds-text-note); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* An entry is a line of underlined text in columns: its name, value and
    description, then its actions. Clicking one opens an editor of one width
    floating below it, as tall as its text, so nothing moves. */
-.env-row { display: flex; align-items: center; gap: 8px; padding: 8px 14px; }
+.env-list { grid-template-columns: minmax(0, 1fr); }
+.env-row { display: flex; min-width: 0; align-items: center; gap: 8px; padding: 8px 14px; }
 .env-row + .env-row { border-top: 1px solid var(--mds-line); }
 .env-cell {
   flex: 1 1 0; min-width: 0; height: var(--mds-control-height); padding: 0 11px;
@@ -355,6 +356,8 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .env-cell:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: 2px; }
 .env-cell--name { flex: 0 1 220px; }
 .env-cell--value { flex-grow: 1.3; }
+/* Secret values keep one width; only a narrow row may shrink them. */
+#env-secrets-list .env-cell--value { flex: 0 1 200px; max-width: 100%; }
 .env-cell--description { flex-grow: 1.7; color: var(--mds-ink-subtle); }
 .env-cell-empty { color: var(--mds-faint); }
 .env-cell--editing { background: var(--mds-hover); text-decoration-color: var(--mds-accent-ink); }
