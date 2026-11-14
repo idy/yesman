@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"slices"
 	"time"
+
+	"github.com/idy/yesman/internal/crew"
 )
 
 // Model is a choice from pi's authenticated catalog. Keep provider headers and
@@ -15,6 +19,95 @@ type Model struct {
 	Provider      string `json:"provider"`
 	Name          string `json:"name"`
 	ContextWindow int    `json:"contextWindow,omitempty"`
+	// Levels are the thinking levels it takes, in a catalog.
+	Levels []string `json:"levels,omitempty"`
+}
+
+// catalogModel is a model as pi's get_available_models lists it, with what
+// decides the thinking levels it takes.
+type catalogModel struct {
+	Model
+	Reasoning        bool                       `json:"reasoning"`
+	ThinkingLevelMap map[string]json.RawMessage `json:"thinkingLevelMap,omitempty"`
+}
+
+// decodeCatalog reads get_available_models' answer.
+func decodeCatalog(data json.RawMessage) ([]Model, error) {
+	var d struct {
+		Models []catalogModel `json:"models"`
+	}
+	if err := json.Unmarshal(data, &d); err != nil {
+		return nil, err
+	}
+	out := make([]Model, 0, len(d.Models))
+	for _, m := range d.Models {
+		m.Model.Levels = crew.SupportedLevels(m.Reasoning, m.ThinkingLevelMap)
+		out = append(out, m.Model)
+	}
+	return out, nil
+}
+
+// Choice is a model to run as, at a thinking level; an empty Effort leaves
+// pi's.
+type Choice struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Effort   string `json:"effort,omitempty"`
+}
+
+// IsZero reports whether it chooses nothing, leaving pi's default.
+func (c Choice) IsZero() bool { return c.Provider == "" || c.Model == "" }
+
+// String is the choice's crew key, provider/model:effort.
+func (c Choice) String() string { return crew.MemberKey(c.Provider, c.Model, c.Effort) }
+
+// ParseChoice reads a crew key back into a Choice.
+func ParseChoice(key string) (Choice, bool) {
+	provider, model, effort, ok := crew.ParseKey(key)
+	return Choice{Provider: provider, Model: model, Effort: effort}, ok
+}
+
+// Catalog starts pi on its own in dir, with no session and without
+// yesman's extension, to read its authenticated catalog of models. It
+// loads the user's own extensions, which may add providers.
+func (m *Manager) Catalog(ctx context.Context, dir string) ([]Model, error) {
+	env := append(os.Environ(), m.cfg.Env...)
+	p, err := startProc(spec{Path: m.cfg.Pi, Args: []string{"--mode", "rpc", "--no-session"}, Dir: dir, Env: env},
+		func(*proc, string, json.RawMessage) {})
+	if err != nil {
+		return nil, err
+	}
+	defer p.stop(2 * time.Second)
+	r, err := p.call(ctx, map[string]any{"type": "get_available_models"})
+	if err != nil {
+		if msg := p.stderr.String(); msg != "" {
+			return nil, fmt.Errorf("%v: %s", err, lastLines(msg, 6))
+		}
+		return nil, err
+	}
+	return decodeCatalog(r.Data)
+}
+
+// applyChoice selects a model and effort on a process no one else uses
+// yet. pi clamps an effort the model does not take.
+func applyChoice(ctx context.Context, p *proc, c Choice) error {
+	if _, err := p.call(ctx, map[string]any{"type": "set_model", "provider": c.Provider, "modelId": c.Model}); err != nil {
+		return err
+	}
+	if c.Effort == "" {
+		return nil
+	}
+	_, err := p.call(ctx, map[string]any{"type": "set_thinking_level", "level": c.Effort})
+	return err
+}
+
+// RunAs selects a model and, when given, an effort for an idle agent.
+func (m *Manager) RunAs(ctx context.Context, id string, c Choice) (Info, error) {
+	info, err := m.SetModel(ctx, id, c.Provider, c.Model)
+	if err != nil || c.Effort == "" {
+		return info, err
+	}
+	return m.SetEffort(ctx, id, c.Effort)
 }
 
 // ModelOptions includes the agent's current selection and the models it can use.
@@ -83,7 +176,7 @@ func (m *Manager) Models(ctx context.Context, id string) (ModelOptions, error) {
 		return ModelOptions{}, err
 	}
 	out := ModelOptions{Models: []Model{}}
-	if err := json.Unmarshal(r.Data, &out); err != nil {
+	if out.Models, err = decodeCatalog(r.Data); err != nil {
 		return out, err
 	}
 	out.Agent, err = m.syncModel(ctx, a, p)

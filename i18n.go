@@ -82,6 +82,17 @@ var zhHans = map[string]string{
 	"%q is not a package source: use npm:name, git:host/path, a URL or a local path": "%q 不是包来源：请使用 npm:名称、git:主机/路径、URL 或本地路径",
 	"pi %s took too long": "pi %s 超时",
 
+	// Settings › yesman: the crew, and what new yesmen run as
+	"Choose the model new yesmen run as in Settings › yesman.": "请先在 设置 › yesman 中选择新 yesman 使用的模型。",
+	"pi has no model %s":             "pi 没有模型 %s",
+	"%s does not take the %s effort": "%s 不支持 %s 推理强度",
+	"Artificial Analysis has no scores for %s at this effort: give your own": "Artificial Analysis 没有 %s 在这个推理强度下的评分：请填写你的估计",
+	"%s is in the crew already":                              "%s 已在列表中",
+	"%s is not in the crew":                                  "%s 不在列表中",
+	"the intelligence score must be above 0 and at most 100": "智力分必须大于 0，且不超过 100",
+	"scores cannot be below zero":                            "评分不能小于 0",
+	"coding is a percentage, at most 100":                    "编码是百分比，不能超过 100",
+
 	// The tray
 	"Open yesman":                            "打开 yesman",
 	"Quit yesman":                            "退出 yesman",

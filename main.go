@@ -87,7 +87,7 @@ func main() {
 	go a.unlockFromKeychain() // the system may ask the user first
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
 		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) },
-		Secrets:      a.vault, Variables: a.variables}
+		Secrets:      a.vault, Variables: a.variables, Crew: a.leadCrew}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}
@@ -100,6 +100,13 @@ func main() {
 		OnChange:  a.agentsChanged,
 	})
 	srv.Agents = a.agents
+	a.catalog = newCatalog(func(ctx context.Context) ([]agent.Model, error) {
+		if a.piErr != nil {
+			return nil, a.piErr
+		}
+		return a.agents.Catalog(ctx, h.Runtime())
+	})
+	go a.catalog.get(context.Background(), false) // for the first lead's crew
 
 	web, err := fs.Sub(webFS, "web")
 	if err != nil {
