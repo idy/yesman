@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.28
+
+- Let review agents reclaim their own clean, reconstructible temporary worktrees after saving the review outcome and exact commit, with cleanup delegated by the lead when needed.
+- Reclaim merged development and release worktrees only after checking the actual pull request source commit, completed tasks and release work, and no active use, including squash merges.
+- Keep active, primary and main worktrees, dirty worktrees, those with untracked or ignored files, and unknown resources. Preserve branches, commits, tags, checkpoints and recovery refs.
+- Give each managed worktree its own instance identity so an old cleanup request cannot remove a replacement created at the same path.
+
 ## 0.1.27
 
 - Show message submission and Steering or Follow-up receipt states, with an unknown state when pi's acknowledgment cannot be confirmed.
