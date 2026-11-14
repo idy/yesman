@@ -71,6 +71,8 @@ type Worktree struct {
 	// Warning reports a problem that did not stop the checkout, such as a
 	// failed fetch that left the pool's copy of the remote stale.
 	Warning string `json:"warning,omitempty"`
+	// CleanupID identifies an agent checkout generation; absent for UI/user trees.
+	CleanupID string `json:"cleanupId,omitempty"`
 }
 
 // NameFromURL derives a pool name from a remote URL: host and path without

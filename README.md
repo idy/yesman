@@ -41,6 +41,8 @@ Every agent runs your installed `pi` with your usual pi configuration (models, p
 - `yesman_repos`, `yesman_repo_add`, `yesman_checkout`, `yesman_worktree_remove`, `yesman_agents`, `yesman_board`, `yesman_env`
 - for leads: `yesman_worker_start`, `yesman_worker_send`, `yesman_worker_answer`, `yesman_worker_remove`
 
+Agents register temporary checkouts with their purpose and board task. After saving completion and exact-head recovery evidence, reviewers reclaim their clean, unused detached trees; authors and release workers reclaim branch trees after the exact source PR is merged and their associated task finishes. The lead arranges a verified batch fallback for missed cleanup. Primary, active, dirty and unknown resources stay protected, while branches, refs and session history remain available. See [worktree completion and recovery](docs/worktree-cleanup.md) for the tool contract and safety boundaries.
+
 For a lead, the extension also takes away pi's `bash` and adds the read-only `grep`, `find` and `ls`, and refuses `edit` and `write` outside `.yesman/knowledge/`. Tools from your own pi configuration stay.
 
 Only a lead turns to you. A question a worker's tools ask (an extension dialog) goes to its lead as a message, which answers it with `yesman_worker_answer`; the worker shows as asking its yesman, and you can still answer it from its conversation. A worker's failure goes to the lead too. When the lead ends a run with board tasks still to do or in progress and no worker running, yesman reminds it of them once, until you or a worker write to it again. You are notified when a lead asks you something, fails, or finishes with its whole yesman settled.
