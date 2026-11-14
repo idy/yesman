@@ -27,8 +27,8 @@ import (
 // The real Windows Credential Manager is exercised only in disposable CI,
 // under a new service/account namespace. It never reads or replaces user keys.
 func TestGitHubAppWindowsCredentialManager(t *testing.T) {
-	if os.Getenv("GITHUB_ACTIONS") != "true" {
-		t.Skip("native credential-store fixture is limited to disposable GitHub Actions runners")
+	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Skip("native credential-store fixture is limited to disposable GitHub-hosted runners")
 	}
 	suffix := make([]byte, 16)
 	_, _ = rand.Read(suffix)
@@ -74,8 +74,8 @@ func TestGitHubAppWindowsCredentialManager(t *testing.T) {
 // when yesman installs it as the private gh wrapper. This uses the production
 // main, including its early dispatch before MyGo startup, in a path with spaces.
 func TestGitHubAppWindowsGUIWrapper(t *testing.T) {
-	if os.Getenv("GITHUB_ACTIONS") != "true" {
-		t.Skip("production Windows subprocess fixture is limited to disposable CI")
+	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Skip("production Windows subprocess fixture is limited to disposable GitHub-hosted runners")
 	}
 	realGH, err := exec.LookPath("gh")
 	if err != nil {

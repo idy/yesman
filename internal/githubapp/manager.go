@@ -57,6 +57,7 @@ type Manager struct {
 	gh          string
 	cfg         Config
 	loadErr     error
+	closed      bool
 	client      *Client
 	app         *Registration
 	verified    bool
@@ -151,10 +152,23 @@ func (m *Manager) passwordKey() (string, error) {
 	return "github-app-password/" + recipients[0], nil
 }
 
-func (m *Manager) View() View {
+var errManagerClosed = errors.New("GitHub App identity service is closed")
+
+func (m *Manager) closedError() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v := View{Config: m.cfg, Configured: m.vault.Configured(), Unlocked: m.vault.Unlocked(), Keychain: m.hasKeychain(), Verified: m.verified, Connections: slices.Clone(m.connections)}
+	if m.closed {
+		return errManagerClosed
+	}
+	return nil
+}
+func (m *Manager) Configured() bool { return m.vault.Configured() }
+
+func (m *Manager) View() View {
+	hasKeychain := m.hasKeychain() // native stores may prompt; never hold the state lock
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v := View{Config: m.cfg, Configured: m.vault.Configured(), Unlocked: m.vault.Unlocked() && !m.closed, Keychain: hasKeychain, Verified: m.verified, Connections: slices.Clone(m.connections)}
 	v.Config.Repositories = slices.Clone(m.cfg.Repositories)
 	v.Config.Workspaces = slices.Clone(m.cfg.Workspaces)
 	v.Config.WorkspaceGenerations = maps.Clone(m.cfg.WorkspaceGenerations)
@@ -165,6 +179,9 @@ func (m *Manager) View() View {
 	if m.loadErr != nil {
 		v.Error = m.loadErr.Error()
 	}
+	if m.closed {
+		v.Error = errManagerClosed.Error()
+	}
 	return v
 }
 
@@ -173,6 +190,9 @@ func (m *Manager) View() View {
 func (m *Manager) Prepare(password string) error {
 	m.operations.Lock()
 	defer m.operations.Unlock()
+	if err := m.closedError(); err != nil {
+		return err
+	}
 	if m.vault.Unlocked() {
 		return nil
 	}
@@ -185,6 +205,9 @@ func (m *Manager) Prepare(password string) error {
 			b := make([]byte, 32)
 			_, _ = rand.Read(b)
 			password = base64.RawURLEncoding.EncodeToString(b)
+		}
+		if err := m.closedError(); err != nil {
+			return err
 		}
 		if err := m.vault.Create(password); err != nil {
 			return err
@@ -214,12 +237,19 @@ func (m *Manager) Prepare(password string) error {
 			}
 			password = string(value)
 		}
+		if err := m.closedError(); err != nil {
+			return err
+		}
 		if err := m.vault.Unlock(password); err != nil {
 			return err
 		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		m.vault.Lock()
+		return errManagerClosed
+	}
 	m.invalidateLocked()
 	return m.loadClientLocked()
 }
@@ -268,6 +298,9 @@ func (m *Manager) SaveRegistration(app Registration, key []byte) error {
 	defer m.operations.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return errManagerClosed
+	}
 	if !m.vault.Unlocked() {
 		return errors.New("unlock the GitHub App vault before importing a key")
 	}
@@ -285,6 +318,9 @@ func (m *Manager) SaveRegistration(app Registration, key []byte) error {
 }
 
 func (m *Manager) ImportKey(ctx context.Context, id int64, key []byte) (Registration, error) {
+	if err := m.closedError(); err != nil {
+		return Registration{}, err
+	}
 	c, err := m.newClient(Registration{ID: id}, key, nil)
 	if err != nil {
 		return Registration{}, err
@@ -316,12 +352,32 @@ func (m *Manager) Lock() {
 	defer m.operations.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
 	m.invalidateLocked()
 	m.vault.Lock()
 }
-func (m *Manager) Close() { m.Lock() }
+
+// Close must not wait for a native keychain prompt held by Prepare. Late
+// operations recheck closed before publishing a client, so shutdown cannot
+// restore credentials or allow a personal fallback while agents stop.
+func (m *Manager) Close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
+	m.closed = true
+	m.invalidateLocked()
+	m.cancel()
+	m.vault.Lock()
+}
 
 func (m *Manager) saveConfigLocked(cfg Config) error {
+	if m.closed {
+		return errManagerClosed
+	}
 	if err := os.MkdirAll(m.dir, 0700); err != nil {
 		return err
 	}
@@ -370,6 +426,9 @@ func (m *Manager) Configure(cfg Config) error {
 func (m *Manager) Enable(enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return errManagerClosed
+	}
 	if enabled {
 		if m.loadErr != nil {
 			return m.loadErr
@@ -406,6 +465,10 @@ func joinedContext(parent, epoch context.Context) (context.Context, func()) {
 }
 func (m *Manager) Test(ctx context.Context) ([]Connection, error) {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, errManagerClosed
+	}
 	c, revision, epoch, repos := m.client, m.revision, m.epoch, slices.Clone(m.cfg.Repositories)
 	m.mu.Unlock()
 	if c == nil {
@@ -439,6 +502,9 @@ func (m *Manager) Test(ctx context.Context) ([]Connection, error) {
 func (m *Manager) Mode(workspace, generation string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return "", errManagerClosed
+	}
 	if m.loadErr != nil {
 		return "", m.loadErr
 	}
@@ -452,6 +518,10 @@ func (m *Manager) Mode(workspace, generation string) (string, error) {
 }
 func (m *Manager) Create(ctx context.Context, workspace, generation string, in PullInput) (Pull, error) {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return Pull{}, errManagerClosed
+	}
 	if m.loadErr != nil {
 		err := m.loadErr
 		m.mu.Unlock()

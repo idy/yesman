@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -19,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -134,23 +132,7 @@ func TestRealGHAppSubprocess(t *testing.T) {
 	if err := os.WriteFile(caFile, certPEM, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS == "windows" {
-		if os.Getenv("GITHUB_ACTIONS") != "true" {
-			t.Skip("Windows TLS trust fixture is limited to disposable GitHub-hosted CI")
-		}
-		// Go's Windows verifier uses the OS store, not SSL_CERT_FILE. Trust
-		// only this generated public fixture CA in the disposable runner's
-		// CurrentUser store and remove that exact certificate in cleanup.
-		thumbprint := fmt.Sprintf("%X", sha1.Sum(der))
-		if out, err := exec.Command("certutil", "-user", "-f", "-addstore", "Root", caFile).CombinedOutput(); err != nil {
-			t.Fatalf("install fixture CA: %v: %s", err, out)
-		}
-		t.Cleanup(func() {
-			if out, err := exec.Command("certutil", "-user", "-delstore", "Root", thumbprint).CombinedOutput(); err != nil {
-				t.Errorf("remove fixture CA: %v: %s", err, out)
-			}
-		})
-	}
+	trustGHFixture(t, der)
 	t.Setenv("HTTPS_PROXY", proxy.URL)
 	t.Setenv("https_proxy", proxy.URL)
 	t.Setenv("NO_PROXY", "127.0.0.1,localhost")

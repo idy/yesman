@@ -121,7 +121,7 @@ func main() {
 		appGH = ""
 	} // cannot enable without automatic routing
 	a.githubApp = githubapp.NewManager(filepath.Join(h.Root, "github-app"), a.keychain, appGH)
-	if a.githubApp.View().Configured {
+	if a.githubApp.Configured() {
 		go func() { _ = a.githubApp.Prepare("") }()
 	}
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
