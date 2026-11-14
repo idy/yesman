@@ -16,6 +16,7 @@ import (
 type stage struct {
 	Version, Archive, Manifest, Web, Source string
 	BinarySHA256                            string `json:"binarySHA256"`
+	Official                                bool   `json:"official"`
 }
 type plan struct {
 	PublicKey, Feed string
@@ -34,16 +35,28 @@ func main() {
 	must(err)
 	var p plan
 	must(json.Unmarshal(b, &p))
-	key, err := update.ParsePrivateKey(os.Getenv("MYGO_UPDATER_PRIVATE_KEY"))
+	verifyOnly := len(os.Args) > 2 && os.Args[2] == "verify"
+	pub, err := update.ParsePublicKey(p.PublicKey)
 	must(err)
-	if base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey)) != p.PublicKey {
-		panic("signer/public key mismatch")
+	var key ed25519.PrivateKey
+	if !verifyOnly {
+		key, err = update.ParsePrivateKey(os.Getenv("MYGO_UPDATER_PRIVATE_KEY"))
+		must(err)
+		if base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey)) != p.PublicKey {
+			panic("signer/public key mismatch")
+		}
 	}
 	work, err := os.MkdirTemp("", "production-upgrade-delta-")
 	must(err)
 	defer os.RemoveAll(work)
 	dirs := make([]string, len(p.Stages))
 	for i, s := range p.Stages {
+		if !filepath.IsAbs(s.Archive) {
+			s.Archive = filepath.Join(filepath.Dir(file), filepath.FromSlash(s.Archive))
+		}
+		if !filepath.IsAbs(s.Manifest) {
+			s.Manifest = filepath.Join(filepath.Dir(file), filepath.FromSlash(s.Manifest))
+		}
 		archive, err := os.ReadFile(s.Archive)
 		must(err)
 		raw, err := os.ReadFile(s.Manifest)
@@ -51,13 +64,26 @@ func main() {
 		var m update.Manifest
 		must(json.Unmarshal(raw, &m))
 		sum := sha256.Sum256(archive)
-		must(update.Verify(key.Public().(ed25519.PublicKey), sum[:], m.Signature))
+		must(update.Verify(pub, sum[:], m.Signature))
 		dir := filepath.Join(work, fmt.Sprint(i))
 		must(update.ExtractArchive(bytes.NewReader(archive), dir))
 		dirs[i] = dir
 		if strings.HasPrefix(p.Target, "darwin-") {
 			dirs[i] = filepath.Join(dir, "yesman.app")
 		}
+		if verifyOnly {
+			for _, d := range m.Deltas {
+				path := filepath.Join(filepath.Dir(file), filepath.Base(d.URL))
+				body, err := os.ReadFile(path)
+				must(err)
+				sum := sha256.Sum256(body)
+				must(update.Verify(pub, sum[:], d.Signature))
+			}
+			continue
+		}
+		if s.Official {
+			continue
+		} // preserve published/draft manifest bytes and deltas
 		m.URL = p.Feed + "/" + filepath.Base(s.Archive)
 		m.Deltas = nil
 		if i > 0 {

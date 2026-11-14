@@ -5,6 +5,7 @@ Controlled plans explicitly describe production-source rebuilds, not releases.
 No recorder or updater implementation is loaded into an application. Drive only
 existing public Yesman CheckForUpdates/Update/RestartToUpdate APIs and WEB_DIR.
 """
+import contextlib
 import ctypes
 import hashlib
 import http.server
@@ -74,11 +75,19 @@ class Feed:
     def send(self,op):
         with self.lock:
             self.serial+=1;self.command={'id':self.serial,'op':op,'page':self.latest['page'] if self.latest else None}
-    def serve(self,host,port):
+    def serve(self,host,port,tls_context=None):
         feed=self
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args):pass
-            def do_CONNECT(self):self.send_error(403,'Network outside upgrade inputs disabled')
+            def do_CONNECT(self):
+                host,separator,port=self.path.partition(':')
+                allowed={'github.com','api.github.com','objects.githubusercontent.com','release-assets.githubusercontent.com'}
+                if tls_context is None or not separator or port!='443' or host not in allowed:
+                    self.send_error(403,'Network outside upgrade inputs disabled');return
+                self.send_response(200);self.end_headers()
+                connection=tls_context.wrap_socket(self.connection,server_side=True)
+                try:Handler(connection,self.client_address,self.server)
+                finally:connection.close();self.close_connection=True
             def respond(self,code,typ='application/json'):
                 self.send_response(code);self.send_header('Content-Type',typ);self.send_header('Access-Control-Allow-Origin','*');self.end_headers()
             def do_OPTIONS(self):
@@ -132,17 +141,34 @@ window.addEventListener('DOMContentLoaded',async()=>{
 });</script>'''
 
 def main():
+    with contextlib.ExitStack() as stack:
+        run(stack)
+
+
+def run(stack):
     naming.hosted()
     path=pathlib.Path(sys.argv[1]).resolve();plan=json.loads(path.read_text(encoding='utf-8'));plan['_path']=str(path)
     evidence=pathlib.Path(sys.argv[2]).resolve();evidence.mkdir(parents=True,exist_ok=True)
-    assert plan['kind']=='controlled-production-source-rebuild','Released-artifact plans require the published gate, not this controlled label'
+    assert plan['kind'] in ('controlled-production-source-rebuild','released-candidate-plus-private-QA')
+    for s in plan['Stages']:
+        for field in ('Archive','Manifest','Web'):
+            if not pathlib.Path(s[field]).is_absolute():s[field]=str(path.parent/s[field])
     assert len(plan['Stages'])==4
+    actual_target=subprocess.check_output(['go','env','GOOS'],text=True).strip()+'-'+subprocess.check_output(['go','env','GOARCH'],text=True).strip()
+    assert plan['Target']==actual_target,'Plan target does not match native host'
+    subprocess.run(['go','run','./tools/package','-verify-upgrade-assets',str(path)],check=True)
     proof={'kind':plan['kind'],'limits':plan['limits'],'sourceSHA':plan['sourceSHA'],'runID':os.environ['GITHUB_RUN_ID'],'scenarios':[]}
     helper=None
     if sys.platform=='darwin':
         helper=evidence/'native-info';subprocess.run(['xcrun','swiftc',str(pathlib.Path(__file__).with_name('name-process-macos.swift')),'-o',str(helper)],check=True)
+    tls_context=None;ca_file=None
+    if plan['kind']=='released-candidate-plus-private-QA':
+        module_spec=importlib.util.spec_from_file_location('transport',pathlib.Path(__file__).with_name('upgrade-transport.py'))
+        transport=importlib.util.module_from_spec(module_spec);module_spec.loader.exec_module(transport)
+        tls_context,ca_file,fingerprint=stack.enter_context(transport.trusted_transport())
+        proof['controlledTransportCAFingerprint']=fingerprint
     for mode in ('archive','delta'):
-        feed=Feed(plan,mode);url=urllib.parse.urlparse(plan['Feed']);server=feed.serve(url.hostname,url.port)
+        feed=Feed(plan,mode);url=urllib.parse.urlparse(plan['Feed']);server=feed.serve(url.hostname,url.port,tls_context)
         process=None;guard=None
         try:
             with tempfile.TemporaryDirectory(prefix='Real upgrade '+mode+' ',dir=os.environ['RUNNER_TEMP'],ignore_cleanup_errors=True) as directory:
@@ -165,6 +191,7 @@ def main():
                     if value and value.get('about',{}).get('version')==plan['Stages'][index]['Version']:
                         assert not value.get('error') and not value['errors'],value
                         assert value['state']['home']==str(data) and not value['state']['agents'],value
+                        if plan['Stages'][index].get('official'):assert value['about'].get('revision')==plan['Stages'][index]['Source'],value
                         return value
                     return None
                 def inspect(index):
@@ -197,6 +224,7 @@ def main():
                 env={k:v for k,v in os.environ.items() if k in ('HOME','USER','LOGNAME','PATH','TMPDIR','LANG','LC_ALL','SHELL','SystemRoot','SYSTEMROOT','WINDIR','USERPROFILE','APPDATA','LOCALAPPDATA','TEMP','TMP','DISPLAY','XAUTHORITY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS')}
                 assert not any('PRIVATE_KEY' in k or k in ('GH_TOKEN','GITHUB_TOKEN') for k in env)
                 env.update(YESMAN_HOME=str(data),YESMAN_PI=str(root/'missing-pi'),PI_CODING_AGENT_DIR=str(root/'pi'),YESMAN_WEB_DIR=str(active),HTTP_PROXY=plan['Feed'],HTTPS_PROXY=plan['Feed'],NO_PROXY='127.0.0.1,localhost,::1')
+                if ca_file and sys.platform=='linux':env['SSL_CERT_FILE']=ca_file
                 log=(evidence/(mode+'-initial.log')).open('w')
                 process=subprocess.Popen([str(executable(0))],cwd=root,env=env,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT)
                 wait(lambda:snapshot(0),'Old production source did not start')

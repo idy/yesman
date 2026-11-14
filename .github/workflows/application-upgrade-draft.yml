@@ -1,0 +1,126 @@
+name: Released naming upgrade gate
+on:
+  workflow_dispatch:
+    inputs:
+      predecessor:
+        description: Published predecessor (allocated naming transition only)
+        default: v0.1.35
+        required: true
+      candidate:
+        description: Immutable draft candidate
+        default: v0.1.36
+        required: true
+permissions:
+  contents: read
+jobs:
+  download:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # GitHub requires push visibility for draft GET/download
+    outputs:
+      source: ${{ steps.inputs.outputs.source }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download and authenticate public predecessor and draft inputs
+        id: inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREDECESSOR: ${{ inputs.predecessor }}
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          python3 scripts/prepare-published-upgrade.py "$PREDECESSOR" "$CANDIDATE" "$RUNNER_TEMP/released-inputs"
+          source=$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/released-inputs/release-inputs.json"))["refs"]["v0.1.36"])')
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: released-upgrade-inputs
+          path: ${{ runner.temp }}/released-inputs
+          if-no-files-found: error
+  sign-qa:
+    needs: download
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.download.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: released-upgrade-inputs
+          path: ${{ runner.temp }}/released-inputs
+      # Only this packaging step receives the existing updater key. It builds
+      # private QA successors; never executes an app or publishes a release.
+      - name: Package and sign private QA successors
+        env:
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/prepare-upgrade-qa.py "$RUNNER_TEMP/released-inputs" "$RUNNER_TEMP/gate-inputs"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-upgrade-inputs-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/gate-inputs/plan.json
+            ${{ runner.temp }}/gate-inputs/**/*.tar.gz
+            ${{ runner.temp }}/gate-inputs/**/update-*.json
+            ${{ runner.temp }}/gate-inputs/*.delta
+            ${{ runner.temp }}/gate-inputs/**/web
+            ${{ runner.temp }}/gate-inputs/qa-build-*.log
+          if-no-files-found: error
+  native:
+    needs: [download, sign-qa]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel, windows-latest, ubuntu-latest]
+    # Fresh VM per runtime; this job has neither signing key nor GH_TOKEN.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.download.outputs.source }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-upgrade-inputs-${{ matrix.os }}
+          path: ${{ runner.temp }}/gate-inputs
+      - name: Linux desktop prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 xvfb dbus-x11 x11-utils
+      - name: Run untouched released/draft upgrade and QA rollback gate
+        if: runner.os != 'Linux'
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/check-production-upgrade.py "$RUNNER_TEMP/gate-inputs/plan.json" "$RUNNER_TEMP/upgrade-gate-evidence"
+      - name: Run Linux released/draft upgrade and QA rollback gate
+        if: runner.os == 'Linux'
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: xvfb-run -a dbus-run-session -- python3 scripts/check-production-upgrade.py "$RUNNER_TEMP/gate-inputs/plan.json" "$RUNNER_TEMP/upgrade-gate-evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: released-upgrade-proof-${{ matrix.os }}
+          path: ${{ runner.temp }}/upgrade-gate-evidence
+          if-no-files-found: error

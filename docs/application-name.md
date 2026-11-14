@@ -110,6 +110,12 @@ shortcut targets, old-folder reuse, and uninstallation. Scripts refuse self-host
 or workstation execution. These checks require no provider credentials or paid calls.
 Native Windows/Linux ARM execution is not implied by their cross-builds.
 
+The production-source multi-hop jobs additionally run actual old/new mains and
+helpers through both archive and delta updates, next update and failure recovery.
+They are controlled rebuilds with explicit fixture configuration, not the original
+released `.29` binary. The final downloaded `.35`→draft `.36` acceptance is an
+executable, separate hard gate. See [evidence levels and publisher commands](production-upgrade.md).
+
 Before publishing the release containing this change:
 
 1. Integrate against the final preceding main. Existing `go tool mygo build`

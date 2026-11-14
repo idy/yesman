@@ -26,6 +26,18 @@ def run(exe, env, cwd, args=()):
     return {'exitCode':p.returncode,'stdoutHex':p.stdout.hex(),'stderrHex':p.stderr.hex()}
 
 
+def wait_image(executable):
+    # The intentionally broken old launcher exits before its real child.
+    # Reap/wait that exact private image before deleting the fixture directory.
+    quoted=str(executable).replace("'","''")
+    deadline=time.monotonic()+15
+    while time.monotonic()<deadline:
+        ids=json.loads(subprocess.check_output(['powershell.exe','-NoProfile','-NonInteractive','-Command',"ConvertTo-Json -Compress -InputObject @((Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq '"+quoted+"'}).ProcessId)"],text=True))
+        if not ids:return
+        time.sleep(.1)
+    raise AssertionError('Old counterexample child remained alive: '+str(executable))
+
+
 def main():
     assert sys.platform == 'win32' and os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
     package, evidence = [pathlib.Path(p).resolve() for p in sys.argv[1:3]]
@@ -67,6 +79,10 @@ def main():
         assert results['direct']['stdoutHex']==results['new']['stdoutHex']==PAYLOAD.hex()
         assert results['direct']['stderrHex']==results['new']['stderrHex']==STDERR.hex()
         assert results['old']['exitCode']==0 and results['old']['stdoutHex']==results['old']['stderrHex']=='', results
+        with (temp/'stdout.bin').open('wb') as out,(temp/'stderr.bin').open('wb') as err:
+            files=subprocess.run([str(new/'yesman.exe'),*args],stdin=subprocess.DEVNULL,stdout=out,stderr=err,env=env,cwd=cwd,timeout=30)
+        assert files.returncode==37 and (temp/'stdout.bin').read_bytes()==b'' and (temp/'stderr.bin').read_bytes()==STDERR
+        proof['fileRedirectionExit']=files.returncode
         # The unmodified packaged real main must report an actual binding
         # generation failure with its nonzero status and diagnostic intact.
         for folder in (old,new):shutil.copy2(package/'Yes Man.exe',folder/'Yes Man.exe')
@@ -78,6 +94,7 @@ def main():
         normalize=lambda v:re.sub(rb'^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ',b'',bytes.fromhex(v['stderrHex']))
         assert normalize(failures['direct'])==normalize(failures['new']) and normalize(failures['new'])
         assert not pathlib.Path(env['YESMAN_HOME']).exists()
+        wait_image(old/'Yes Man.exe')
         proof.update(passed=True,originalBlobs=hashes,stdio=results,realBindingsFailure=failures,packagedLauncherSHA256=hashlib.sha256((package/'yesman.exe').read_bytes()).hexdigest(),packagedMainSHA256=hashlib.sha256((package/'Yes Man.exe').read_bytes()).hexdigest())
     (evidence/'windows-cli.json').write_text(json.dumps(proof,indent=2))
     print('PASS: original Windows launcher FAIL; actual packaged entry preserves stdin/stdout/stderr/exit37/argv/env/cwd and real app nonzero failure')

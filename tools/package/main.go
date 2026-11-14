@@ -128,7 +128,7 @@ func run() error {
 		}
 		cmd = exec.Command("go", "test", "github.com/egoist/mygo", "-run", "^Test(YesmanRename|Updater|SwapFiles|Relaunch)", "-count=1", "-v", "-timeout=5m")
 	}
-	if len(os.Args) == 3 && os.Args[1] == "-upgrade-assets" {
+	if len(os.Args) == 3 && (os.Args[1] == "-upgrade-assets" || os.Args[1] == "-verify-upgrade-assets") {
 		dir := filepath.Join(staged, "cmd", "yesman-upgrade-assets")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -137,6 +137,9 @@ func run() error {
 			return err
 		}
 		cmd = exec.Command("go", "run", "github.com/egoist/mygo/cmd/yesman-upgrade-assets", os.Args[2])
+		if os.Args[1] == "-verify-upgrade-assets" {
+			cmd.Args = append(cmd.Args, "verify")
+		}
 	}
 	// GOFLAGS propagates the same staged module to the CLI and app build.
 	if strings.ContainsAny(modfile, "\"'\n\r") {
