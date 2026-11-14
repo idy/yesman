@@ -837,7 +837,7 @@ export function createFiles(host) {
     if (!frame) return;
     const here = scopeKey(p.scope);
     const item = (scope, glyph, label, aside, title) => {
-      const mine = scopeKey(scope) === here && !(scope.kind === 'workspace' && p.active === TASK_LOG);
+      const mine = scopeKey(scope) === here;
       return h('button', {
         class: 'files-menu-item files-menu-item--aside', type: 'button', role: 'menuitem', 'aria-current': mine ? 'true' : null, title,
         onclick: () => {
@@ -854,8 +854,8 @@ export function createFiles(host) {
     const items = [
       item(WORKSPACE, 'folder', y.name, h('span', { class: 'files-menu-aside' }, t('All files')), y.path),
       item({ kind: 'knowledge' }, 'book', t('Knowledge'), null, KNOWLEDGE),
+      // Task log is a shortcut to a file in the workspace, not another scope.
       h('button', { class: 'files-menu-item', type: 'button', role: 'menuitem', title: TASK_LOG,
-        'aria-current': p.active === TASK_LOG ? 'true' : null,
         onclick: () => { closeMenu(); openTaskLog(); } }, icon('fileText'), h('span', null, t('Task log'))),
     ];
     const wts = host.worktrees?.(y) ?? [];
