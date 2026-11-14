@@ -123,7 +123,10 @@ type Attempt struct {
 	ID    string    `json:"id"`
 	At    time.Time `json:"at"`
 	State string    `json:"state"` // the receipt's state, or "" before it has one
-	Error string    `json:"error,omitempty"`
+	// Rev is the revision of the receipt last applied: an older copy of it,
+	// read before a newer one arrived, never takes its place.
+	Rev   uint64 `json:"rev,omitempty"`
+	Error string `json:"error,omitempty"`
 	// Definite: it was proven not to reach pi, so a new ID may be used.
 	Definite bool `json:"definite,omitempty"`
 }
@@ -140,6 +143,32 @@ type Outcome struct {
 // inFlight reports whether a run is still on its way to the lead.
 func (r Run) inFlight() bool {
 	return r.State == StateClaimed || r.State == StateBoarded || r.State == StateSending
+}
+
+// waiting reports whether the run, as recorded, waits in the lead's queue.
+// After a quit its receipt may say the queue was lost, so such a run is
+// checked again. (A run pi accepted is sent, whatever came of it after.)
+func (r Run) waiting() bool {
+	a := r.attempt()
+	return a != nil && r.State == StateQueued && (a.State == "queued" || a.State == "sending")
+}
+
+// retained reports whether a record stays in the history whatever its age:
+// one on its way, one that cannot be read, and a run whose board task is
+// still open (or a board that cannot be read). Once its board task is done,
+// dropped or removed, a run is history like any other, also one whose
+// delivery stayed unknown: the lead, or the user, settled it.
+func retained(r Run, tasks map[string]yesmen.Task, boardErr error) bool {
+	switch {
+	case r.State == StateDamaged, r.inFlight():
+		return true
+	case !r.fired():
+		return false
+	case boardErr != nil:
+		return true
+	}
+	t, ok := taskOf(r, tasks)
+	return ok && t.Open()
 }
 
 // fired reports whether the record is a run sent, or to be sent, to the lead.
@@ -168,8 +197,9 @@ const (
 	MaxInstructions = 4000
 	MaxActivePlans  = 50
 	maxPlans        = 200 // with archived ones
-	keepRuns        = 30  // records per plan, besides runs still under way
-	maxRunsPerPlan  = 60
+	keepRuns        = 30  // closed records per plan, besides the retained ones
+	maxOpenRuns     = 100 // retained runs of a plan before new runs wait for some to close
+	maxRunsPerPlan  = 60  // records of a plan a view lists, the newest; it counts the rest
 	maxPlansFile    = 1 << 20
 	maxRunFile      = 64 << 10
 	maxAttempts     = 5
@@ -535,24 +565,144 @@ func plansRuns(runs map[string]*record, plan string) []*record {
 	return out
 }
 
-// prune lists records of a plan to remove: the oldest beyond keepRuns, never
-// one still on its way, one whose board task is open, or the newest.
-func prune(list []*record, open func(*record) bool) []*record {
+// prune lists records of a plan to remove: closed ones older than the
+// newest keepRuns. A record that must stay (keep) is never removed, however
+// many there are: new runs wait instead (maxOpenRuns).
+func prune(list []*record, keep func(*record) bool) []*record {
 	var out []*record
 	kept := 0
 	for i, r := range list {
 		switch {
-		case i == 0, r.inFlight(), r.State == StateDamaged:
-			kept++
-		case kept < keepRuns:
-			kept++
-		case open(r) && kept < maxRunsPerPlan:
+		case keep(r):
+		case i == 0, kept < keepRuns:
 			kept++
 		default:
 			out = append(out, r)
 		}
 	}
 	return out
+}
+
+// ---------- What pruning removed ----------
+
+// prunedFile is .yesman/schedules/pruned.json: what the history must still
+// know of the records pruning removed. A manual run is named by the request
+// ID of the click that asked for it; once its record is gone, the same
+// request repeated must not pass for a new one. Plans hold the request IDs
+// removed, the newest maxPrunedRequests of each plan exactly, and below them
+// a floor: request IDs start with the time they were made (12 hex digits of
+// milliseconds), and one made at or before the floor is refused.
+type prunedFile struct {
+	Version int                    `json:"version"`
+	Plans   map[string]*prunedPlan `json:"plans"`
+	extra   map[string]json.RawMessage
+}
+
+type prunedPlan struct {
+	Requests []string `json:"requests,omitempty"` // oldest first
+	Floor    string   `json:"floor,omitempty"`
+}
+
+const (
+	prunedVersion     = 1
+	maxPrunedRequests = 64
+	maxPrunedFile     = 1 << 20
+)
+
+var prunedKeys = []string{"version", "plans"}
+
+func prunedPath(y yesmen.Yesman) string { return filepath.Join(schedulesDir(y), "pruned.json") }
+
+func decodePruned(data []byte) (prunedFile, error) {
+	f := prunedFile{Version: prunedVersion, Plans: map[string]*prunedPlan{}}
+	if data == nil {
+		return f, nil
+	}
+	if err := json.Unmarshal(data, &f); err != nil {
+		return f, err
+	}
+	if f.Version != prunedVersion {
+		return f, fmt.Errorf("version %d of pruned.json is not one this yesman reads", f.Version)
+	}
+	extra, err := unknown(data, prunedKeys)
+	if err != nil {
+		return f, err
+	}
+	f.extra = extra
+	if f.Plans == nil {
+		f.Plans = map[string]*prunedPlan{}
+	}
+	for id, p := range f.Plans {
+		if !planIDRE.MatchString(id) || p == nil {
+			return f, fmt.Errorf("pruned.json has an invalid task %q", id)
+		}
+		if p.Floor != "" && !floorRE.MatchString(p.Floor) {
+			return f, fmt.Errorf("pruned.json has an invalid floor for %s", id)
+		}
+		for _, r := range p.Requests {
+			if !requestRE.MatchString(r) {
+				return f, fmt.Errorf("pruned.json has an invalid request ID for %s", id)
+			}
+		}
+	}
+	return f, nil
+}
+
+func (f prunedFile) encode() ([]byte, error) {
+	data, err := withExtra(struct {
+		Version int                    `json:"version"`
+		Plans   map[string]*prunedPlan `json:"plans"`
+	}{prunedVersion, f.Plans}, f.extra)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+var floorRE = regexp.MustCompile(`^[a-f0-9]{12}$`)
+
+// requestTime is the time part of a request ID, comparable as a string.
+func requestTime(id string) string { return id[:12] }
+
+// clone copies the file deeply enough to change it.
+func (f prunedFile) clone() prunedFile {
+	out := prunedFile{Version: f.Version, Plans: make(map[string]*prunedPlan, len(f.Plans)), extra: f.extra}
+	for id, p := range f.Plans {
+		out.Plans[id] = &prunedPlan{Requests: slices.Clone(p.Requests), Floor: p.Floor}
+	}
+	return out
+}
+
+// used reports whether a plan's request ID was pruned, or may have been.
+func (f prunedFile) used(plan, request string) bool {
+	p := f.Plans[plan]
+	if p == nil {
+		return false
+	}
+	return slices.Contains(p.Requests, request) || p.Floor != "" && requestTime(request) <= p.Floor
+}
+
+// add records request IDs pruned from a plan, keeping the newest
+// maxPrunedRequests exactly and raising the floor over the older ones. A
+// time after latest (a request ID from before they carried their time) does
+// not raise it, or no click could pass it.
+func (f *prunedFile) add(plan string, requests []string, latest string) {
+	p := f.Plans[plan]
+	if p == nil {
+		p = &prunedPlan{}
+		f.Plans[plan] = p
+	}
+	for _, r := range requests {
+		if !slices.Contains(p.Requests, r) {
+			p.Requests = append(p.Requests, r)
+		}
+	}
+	for len(p.Requests) > maxPrunedRequests {
+		if t := requestTime(p.Requests[0]); t > p.Floor && t <= latest {
+			p.Floor = t
+		}
+		p.Requests = p.Requests[1:]
+	}
 }
 
 func clip(s string, n int) string {
@@ -572,6 +722,11 @@ func archivedPlans(plans []Plan) []Plan {
 			out = append(out, p)
 		}
 	}
-	slices.SortFunc(out, func(a, b Plan) int { return a.ArchivedAt.Compare(b.ArchivedAt) })
+	slices.SortFunc(out, func(a, b Plan) int {
+		if c := a.ArchivedAt.Compare(b.ArchivedAt); c != 0 {
+			return c
+		}
+		return planNumber(a.ID) - planNumber(b.ID)
+	})
 	return out
 }

@@ -16,7 +16,11 @@ type View struct {
 	// and they are read-only here.
 	Owner bool `json:"owner"`
 	// Error says why the tasks file cannot be read; it is left unchanged.
-	Error  string     `json:"error,omitempty"`
+	Error string `json:"error,omitempty"`
+	// Notice says why part of the history cannot be kept as it should
+	// (what pruning removed cannot be read): tasks still run, nothing is
+	// pruned, and Run now waits until it can be read.
+	Notice string     `json:"notice,omitempty"`
 	Now    time.Time  `json:"now"`
 	Plans  []PlanView `json:"plans"`
 	Limits Limits     `json:"limits"`
@@ -45,8 +49,13 @@ type PlanView struct {
 	// Sending: a run of it is on its way to the lead now.
 	Sending bool `json:"sending"`
 	// Open is the run of it whose board task is still open, if any.
-	Open string    `json:"open,omitempty"`
-	Runs []RunView `json:"runs"`
+	Open string `json:"open,omitempty"`
+	// Runs are its newest records, at most maxRunsPerPlan; More counts the
+	// older ones kept and not listed. Attention counts, of them all, the
+	// runs that need the user: missed without a catch-up, failed, unknown.
+	Runs      []RunView `json:"runs"`
+	More      int       `json:"more,omitempty"`
+	Attention int       `json:"attention,omitempty"`
 }
 
 // RunView is a run with its board task as it is now.
@@ -98,6 +107,9 @@ func (s *Service) View(name string) (View, error) {
 	if sp.err != nil {
 		v.Error = sp.err.Error()
 	}
+	if sp.prunedErr != nil {
+		v.Notice = sp.prunedErr.Error()
+	}
 	for _, p := range sp.plans.Plans {
 		v.Plans = append(v.Plans, s.planView(sp, p, tasks, boardErr, now))
 	}
@@ -145,8 +157,16 @@ func (s *Service) planView(sp *space, p Plan, tasks map[string]yesmen.Task, boar
 			pv.Open = r.ID
 		}
 	}
-	for _, r := range records {
-		pv.Runs = append(pv.Runs, runView(r.Run, p, tasks, boardErr, sp.active[r.ID]))
+	for i, r := range records {
+		v := runView(r.Run, p, tasks, boardErr, sp.active[r.ID])
+		if v.CanCatchUp || v.Status == StateFailed || v.Status == StateUnknown {
+			pv.Attention++
+		}
+		if i < maxRunsPerPlan {
+			pv.Runs = append(pv.Runs, v)
+		} else {
+			pv.More++
+		}
 	}
 	return pv
 }
@@ -215,11 +235,7 @@ func (s *Service) Summarize(name string) (Summary, error) {
 				sum.Next = p.Next
 			}
 		}
-		for _, r := range p.Runs {
-			if r.CanCatchUp || r.Status == StateFailed || r.Status == StateUnknown {
-				sum.Attention++
-			}
-		}
+		sum.Attention += p.Attention
 	}
 	return sum, nil
 }

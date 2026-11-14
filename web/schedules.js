@@ -48,12 +48,18 @@ function timeZones() {
   return zones;
 }
 
-// A random request ID: one per click, kept for a retry of the same click.
+// A request ID: one per click, kept for a retry of the same click. It starts
+// with the time it was made (12 hex digits of milliseconds), so that yesman
+// can tell a click older than the history it keeps; the rest is random.
 function requestID() {
-  const b = new Uint8Array(8);
+  const b = new Uint8Array(6);
   crypto.getRandomValues(b);
-  return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+  return Date.now().toString(16).padStart(12, '0').slice(-12) + [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
+
+// How yesman refuses a click whose run was made and has left the history
+// (schedule.ErrRequestUsed).
+const USED = 'this run was already made and its record has left the history';
 
 function formatter(zone, opts) {
   try {
@@ -164,7 +170,7 @@ export function createSchedules(host) {
         zone = p.timezone;
       }
     }
-    const attention = plans.reduce((n, p) => n + p.runs.filter((r) => r.canCatchUp || r.status === 'failed' || r.status === 'unknown').length, 0);
+    const attention = plans.reduce((n, p) => n + (p.attention ?? p.runs.filter((r) => r.canCatchUp || r.status === 'failed' || r.status === 'unknown').length), 0);
     return { total: plans.length, on: on.length, next, zone, attention, owner: v.view.owner, error: v.view.error || v.error };
   }
 
@@ -204,6 +210,7 @@ export function createSchedules(host) {
     } else {
       if (readOnly) body.append(h('p', { class: 'sched-notice', role: 'status' }, icon('lock'), h('span', null, t('Another yesman app is running these tasks, so they are read-only here.'))));
       if (view.error) body.append(h('p', { class: 'sched-notice', 'data-tone': 'error', role: 'alert' }, icon('alert'), h('span', null, view.error)));
+      if (view.notice) body.append(h('p', { class: 'sched-notice', 'data-tone': 'error', role: 'alert' }, icon('alert'), h('span', null, view.notice)));
       if (v.error) body.append(h('p', { class: 'sched-notice', 'data-tone': 'error', role: 'alert' }, icon('alert'), h('span', null, v.error)));
       if (!active.length) {
         body.append(h('div', { class: 'board-empty' },
@@ -338,7 +345,8 @@ export function createSchedules(host) {
     return h('div', { class: 'sched-history' },
       h('span', { class: 'board-label' }, t('History')),
       h('ol', { class: 'sched-runs', 'aria-label': t('Runs of {title}', { title: p.title }) }, p.runs.map((r) => runRow(y, view, p, r, writable))),
-      p.runs.length >= view.limits.history ? h('p', { class: 'sched-hint' }, t('The last {n} runs are kept.', { n: formatNumber(view.limits.history) })) : null);
+      p.more ? h('p', { class: 'sched-hint' }, t('{n} older runs are kept and not listed here.', { n: formatNumber(p.more) })) : null,
+      p.runs.length >= view.limits.history ? h('p', { class: 'sched-hint' }, t('The last {n} finished runs are kept, and every run whose board task is open.', { n: formatNumber(view.limits.history) })) : null);
   }
 
   function runRow(y, view, p, r, writable) {
@@ -438,7 +446,10 @@ export function createSchedules(host) {
         await host.call('RunSchedule', y.name, p.id, id, '');
         retryIDs.delete(key);
       } catch (err) {
-        retryIDs.set(key, id);
+        // Kept for a retry, unless yesman says that click's run was made
+        // and pruned: the next click is a new one.
+        if (!String(err?.message ?? err).includes(USED)) retryIDs.set(key, id);
+        else retryIDs.delete(key);
         throw err;
       } finally {
         running.delete(key);

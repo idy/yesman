@@ -61,6 +61,10 @@ var (
 	ErrConflict = errors.New("this task was changed since you opened it: reload to see the latest version, then edit again")
 	ErrClosed   = errors.New("yesman is quitting")
 	errRetired  = errors.New("this yesman was dismissed")
+	// ErrRequestUsed: the click's run was made, and its record has since
+	// left the history; it is not taken for a new run.
+	ErrRequestUsed = errors.New("this run was already made and its record has left the history, so it was not sent again: use Run now again for a new run")
+	errCaughtUp    = errors.New("this missed run was caught up already")
 )
 
 // Service runs the scheduled tasks of every workspace while the app runs.
@@ -82,6 +86,9 @@ type Service struct {
 	events  chan agent.Event
 	sem     chan struct{}
 	work    sync.WaitGroup
+	// epoch counts the receipt updates missed: one dropped makes every run
+	// waiting on a receipt to be checked again.
+	epoch atomic.Uint64
 }
 
 // space is the scheduler's state of one workspace generation.
@@ -104,6 +111,13 @@ type space struct {
 	problem map[string]string // plan ID -> why it could not run last time
 	queue   []string
 	working bool
+	// checked holds, for runs whose receipt was read again since they were
+	// loaded, the epoch it was read in, plus one.
+	checked map[string]uint64
+	// pruned is what pruning removed; prunedErr says why it cannot be read,
+	// and then nothing is pruned and no click is taken for a new run.
+	pruned    prunedFile
+	prunedErr error
 
 	retired atomic.Bool
 }
@@ -281,7 +295,7 @@ func (s *Service) spaceFor(y yesmen.Yesman) *space {
 		sp = nil
 	}
 	if sp == nil {
-		sp = &space{name: y.Name, since: y.HiredAt, active: map[string]bool{}, fresh: map[string]bool{}, problem: map[string]string{}}
+		sp = &space{name: y.Name, since: y.HiredAt, active: map[string]bool{}, fresh: map[string]bool{}, problem: map[string]string{}, checked: map[string]uint64{}}
 		s.spaces[y.Name] = sp
 	}
 	return sp
@@ -330,6 +344,15 @@ func (s *Service) loadLocked(sp *space, y yesmen.Yesman) {
 			runs = map[string]*record{}
 		}
 		sp.runs = runs
+		clear(sp.checked)
+		data, perr := readLimited(prunedPath(y), maxPrunedFile)
+		if perr == nil {
+			sp.pruned, perr = decodePruned(data)
+		}
+		sp.prunedErr = nil
+		if perr != nil {
+			sp.prunedErr = fmt.Errorf("what yesman keeps of pruned runs (pruned.json) cannot be read, so it left it unchanged: %w", perr)
+		}
 	}
 	sp.loaded, sp.stamp = true, st
 }
@@ -523,11 +546,26 @@ func (s *Service) tickSpace(listed yesmen.Yesman) time.Time {
 	s.loadLocked(sp, y)
 	changed := s.followBoardLocked(sp, y, tasks, boardErr, now)
 	var launch []string
-	// Runs left on their way by a crash or a quit resume or resolve.
+	// Runs left on their way by a crash or a quit resume or resolve. Runs
+	// waiting on a receipt, in the lead's queue or unconfirmed, have it read
+	// again once after they were loaded, and after a receipt update was
+	// missed: a quit may have ended the queue they were in. Reading sends
+	// nothing.
+	epoch, checks := s.epoch.Load()+1, 0
 	for _, id := range sortedIDs(sp.runs) {
-		if r := sp.runs[id]; r.inFlight() && !sp.active[id] && s.mayDrive(r.Run) {
+		r := sp.runs[id]
+		if sp.active[id] || !s.mayDrive(r.Run) {
+			continue
+		}
+		switch {
+		case r.inFlight():
 			sp.active[id] = true
 			launch = append(launch, id)
+		case needsCheck(r.Run) && sp.checked[id] != epoch && checks < maxChecks:
+			sp.checked[id] = epoch
+			sp.active[id] = true
+			launch = append(launch, id)
+			checks++
 		}
 	}
 	var next time.Time
@@ -553,6 +591,17 @@ func (s *Service) tickSpace(listed yesmen.Yesman) time.Time {
 		s.changed(y.Name)
 	}
 	return next
+}
+
+// maxChecks bounds the receipts one tick reads again per workspace; the
+// rest wait for the next tick.
+const maxChecks = 16
+
+// needsCheck reports whether a run's receipt may say more than its record:
+// it waits in pi, or its delivery is unknown.
+func needsCheck(r Run) bool {
+	a := r.attempt()
+	return r.fired() && a != nil && (r.waiting() || r.State == StateUnknown && !a.Definite)
 }
 
 func sortedIDs(runs map[string]*record) []string {
@@ -687,11 +736,17 @@ func (s *Service) dueLocked(sp *space, y yesmen.Yesman, p Plan, tasks map[string
 		if onTime {
 			r := s.snapshot(y, p, spec, now)
 			r.ID, r.Key, r.At, r.Due = p.ID+"-"+newest.Key, newest.Key, newest.At, newest.At
-			if prev := s.openRunLocked(sp, p.ID, tasks, boardErr); prev != nil {
-				r.Kind, r.State, r.Prev = RunSkipped, StateSkipped, prev.ID
-				r.Reason = "its last run was still open"
-				if prev.Board != "" {
-					r.Reason = fmt.Sprintf("its last run (board task %s) was still open", prev.Board)
+			prev := s.openRunLocked(sp, p.ID, tasks, boardErr)
+			full := prev == nil && retainedCount(sp, p.ID, tasks, boardErr) >= maxOpenRuns
+			if prev != nil || full {
+				r.Kind, r.State = RunSkipped, StateSkipped
+				switch {
+				case full:
+					r.Reason = fmt.Sprintf("%d of its runs were still open", maxOpenRuns)
+				case prev.Board != "":
+					r.Prev, r.Reason = prev.ID, fmt.Sprintf("its last run (board task %s) was still open", prev.Board)
+				default:
+					r.Prev, r.Reason = prev.ID, "its last run was still open"
 				}
 				if _, err := s.claimLocked(sp, y, r); err != nil && !errors.Is(err, errClaimed) {
 					sp.problem[p.ID] = "Could not record a skipped run: " + err.Error()
@@ -795,14 +850,21 @@ func (s *Service) followBoardLocked(sp *space, y yesmen.Yesman, tasks map[string
 	return changed
 }
 
-// pruneLocked keeps each plan's history bounded.
+// pruneLocked keeps each plan's closed history bounded. What a removed
+// record still has to answer for is kept first: the request ID of a manual
+// run in pruned.json, and the catch-up of a missed run in the missed
+// record. Nothing is removed when that cannot be written.
 func (s *Service) pruneLocked(sp *space, y yesmen.Yesman, tasks map[string]yesmen.Task, boardErr error) bool {
-	byPlan := map[string][]*record{}
-	for _, r := range sp.runs {
-		byPlan[r.Plan] = append(byPlan[r.Plan], r)
+	if sp.prunedErr != nil {
+		return false
 	}
-	changed := false
-	for plan := range byPlan {
+	byPlan := map[string]bool{}
+	for _, r := range sp.runs {
+		byPlan[r.Plan] = true
+	}
+	var remove []*record
+	requests := map[string][]string{}
+	for _, plan := range slices.Sorted(maps.Keys(byPlan)) {
 		list := plansRuns(sp.runs, plan)
 		if len(list) <= keepRuns {
 			continue
@@ -810,18 +872,89 @@ func (s *Service) pruneLocked(sp *space, y yesmen.Yesman, tasks map[string]yesme
 		// The record the cursor rests on stays, whatever its age: chosen as
 		// cursor chooses it, or the plan's schedule would start over.
 		anchor := cursorRecord(list)
-		for _, r := range prune(list, func(r *record) bool { return open(r.Run, tasks, boardErr) }) {
-			if r == anchor || sp.active[r.ID] {
-				continue
+		// A run being checked may go: its update then finds it gone.
+		old := prune(list, func(r *record) bool { return r == anchor || retained(r.Run, tasks, boardErr) })
+		for i := len(old) - 1; i >= 0; i-- { // the oldest first
+			r := old[i]
+			switch r.Kind {
+			case RunCatchUp:
+				// A catch-up left by a crash before its missed record
+				// learned of it: the missed record learns now.
+				if m := sp.runs[r.From]; m != nil && m.CaughtUp == "" {
+					if _, err := s.updateLocked(sp, y, m.ID, func(m *Run) bool { m.CaughtUp = r.ID; return true }); err != nil {
+						continue
+					}
+				}
+			case RunManual:
+				req, ok := strings.CutPrefix(r.ID, r.Plan+"-m-")
+				if !ok || !requestRE.MatchString(req) {
+					continue // not one this version made: keep it
+				}
+				requests[plan] = append(requests[plan], req)
 			}
-			if err := os.Remove(runPath(y, r.ID)); err == nil || errors.Is(err, os.ErrNotExist) {
-				delete(sp.runs, r.ID)
-				changed = true
-			}
+			remove = append(remove, r)
+		}
+	}
+	if len(remove) == 0 {
+		return false
+	}
+	if len(requests) > 0 {
+		next := sp.pruned.clone()
+		latest := fmt.Sprintf("%012x", s.now().Add(24*time.Hour).UnixMilli())
+		for plan, reqs := range requests {
+			next.add(plan, reqs, latest)
+		}
+		if err := s.writePrunedLocked(y, next); err != nil {
+			logf("%s: keeping what pruning removes: %v", y.Name, err)
+			remove = slices.DeleteFunc(remove, func(r *record) bool { return r.Kind == RunManual })
+		} else {
+			sp.pruned = next
+		}
+	}
+	changed := false
+	for _, r := range remove {
+		if err := os.Remove(runPath(y, r.ID)); err == nil || errors.Is(err, os.ErrNotExist) {
+			delete(sp.runs, r.ID)
+			delete(sp.checked, r.ID)
+			changed = true
 		}
 	}
 	return changed
 }
+
+// writePrunedLocked replaces pruned.json, within the size it is read at.
+func (s *Service) writePrunedLocked(y yesmen.Yesman, f prunedFile) error {
+	data, err := f.encode()
+	if err != nil {
+		return err
+	}
+	if len(data) > maxPrunedFile {
+		return fmt.Errorf("pruned.json would be larger than %d KiB", maxPrunedFile>>10)
+	}
+	if err := safeDir(schedulesDir(y)); err != nil {
+		return err
+	}
+	if s.cfg.writeRun != nil {
+		return s.cfg.writeRun(prunedPath(y), data)
+	}
+	return writeFile(prunedPath(y), data)
+}
+
+// retainedCount counts a plan's runs that stay whatever their age.
+func retainedCount(sp *space, plan string, tasks map[string]yesmen.Task, boardErr error) int {
+	n := 0
+	for _, r := range sp.runs {
+		if r.Plan == plan && r.fired() && r.State != StateDamaged && retained(r.Run, tasks, boardErr) {
+			n++
+		}
+	}
+	return n
+}
+
+// errTooManyOpen is why a plan with maxOpenRuns runs still open makes no
+// new run: its history keeps every open run, so new ones wait for some to
+// close.
+var errTooManyOpen = fmt.Errorf("this task has %d runs whose board tasks are still open: mark some done or dropped first", maxOpenRuns)
 
 // ---------- Delivery ----------
 
@@ -911,6 +1044,13 @@ func (s *Service) pipeline(sp *space, id string) {
 			more = s.stepAttempt(sp, r, fresh)
 		case StateSending:
 			s.stepSend(sp, r, fresh)
+		default:
+			if !needsCheck(r) {
+				return
+			}
+			if _, err := s.reconcile(sp, r); err != nil {
+				logf("%s: reading the receipt of %s: %v", sp.name, r.ID, err)
+			}
 		}
 		s.changed(sp.name)
 		if !more {
@@ -1104,8 +1244,11 @@ func applyReceipt(r *Run, attemptID string, d *agent.Delivery, reason string) bo
 		r.State, r.Reason = StateUnknown, reason
 		return true
 	}
+	if d.Revision < a.Rev {
+		return false // read before an update applied already
+	}
 	before, state, reason := *a, r.State, r.Reason
-	a.State, a.Error = d.State, clip(d.Error, 300)
+	a.State, a.Error, a.Rev = d.State, clip(d.Error, 300), d.Revision
 	unsettled := r.State == StateSending || r.State == StateUnknown
 	switch {
 	case d.State == "sending":
@@ -1156,7 +1299,11 @@ func (s *Service) OnAgentEvent(e agent.Event) {
 	}
 	select {
 	case s.events <- e:
-	default: // the next start or a check resolves it from the receipt
+	default:
+		// Dropped: the next tick reads the receipts of the runs waiting on
+		// one again.
+		s.epoch.Add(1)
+		s.Wake()
 	}
 }
 
@@ -1241,6 +1388,14 @@ func (s *Service) ownerError() error {
 
 // edit runs a change of a workspace's plans with it held and loaded.
 func (s *Service) edit(name string, fn func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) error) error {
+	return s.editThen(name, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error) {
+		return nil, fn(sp, y, f, now)
+	})
+}
+
+// editThen is edit with a step to take, still held, once the plans file
+// was written: what must not happen unless the change was saved.
+func (s *Service) editThen(name string, fn func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error)) error {
 	if err := s.ownerError(); err != nil {
 		return err
 	}
@@ -1262,10 +1417,17 @@ func (s *Service) edit(name string, fn func(sp *space, y yesmen.Yesman, f *plans
 	f := sp.plans
 	f.Plans = slices.Clone(f.Plans)
 	f.planExtras = maps.Clone(f.planExtras)
-	if err := fn(sp, y, &f, s.now()); err != nil {
+	then, err := fn(sp, y, &f, s.now())
+	if err != nil {
 		return err
 	}
-	return s.writePlansLocked(sp, y, f)
+	if err := s.writePlansLocked(sp, y, f); err != nil {
+		return err
+	}
+	if then != nil {
+		then()
+	}
+	return nil
 }
 
 func findPlan(f *plansFile, id string) (int, error) {
@@ -1312,57 +1474,62 @@ func (s *Service) Draft(name string, in PlanInput) (Plan, error) {
 
 func (s *Service) save(name string, in PlanInput, by string) (Plan, error) {
 	var saved Plan
-	err := s.edit(name, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) error {
-		in, loc, err := in.normalize(now)
-		if err != nil {
-			return err
-		}
-		var p Plan
-		if in.ID == "" {
-			if activeCount(f.Plans) >= MaxActivePlans {
-				return fmt.Errorf("a yesman keeps at most %d tasks: archive one first", MaxActivePlans)
-			}
-			for len(f.Plans) >= maxPlans {
-				old := archivedPlans(f.Plans)
-				if len(old) == 0 {
-					return fmt.Errorf("a yesman keeps at most %d tasks", maxPlans)
-				}
-				s.forgetPlanLocked(sp, y, f, old[0].ID)
-			}
-			f.Next++
-			p = Plan{ID: fmt.Sprintf("s%d", f.Next), CreatedAt: now, CreatedBy: by, Revision: 0}
-		} else {
-			i, err := findPlan(f, in.ID)
+	err := s.editThen(name, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error) {
+		var then func()
+		err := func() error {
+			in, loc, err := in.normalize(now)
 			if err != nil {
 				return err
 			}
-			p = f.Plans[i]
-			if p.Archived() {
-				return errors.New("this task is archived")
+			var p Plan
+			if in.ID == "" {
+				if activeCount(f.Plans) >= MaxActivePlans {
+					return fmt.Errorf("a yesman keeps at most %d tasks: archive one first", MaxActivePlans)
+				}
+				if len(f.Plans) >= maxPlans {
+					board, boardErr := s.cfg.Yesmen.Board(y.Name)
+					forgotten, err := s.forgetPlansLocked(sp, f, len(f.Plans)-maxPlans+1, boardTasks(board, boardErr), boardErr)
+					if err != nil {
+						return err
+					}
+					then = func() { s.dropRunsLocked(sp, y, forgotten) }
+				}
+				f.Next++
+				p = Plan{ID: fmt.Sprintf("s%d", f.Next), CreatedAt: now, CreatedBy: by, Revision: 0}
+			} else {
+				i, err := findPlan(f, in.ID)
+				if err != nil {
+					return err
+				}
+				p = f.Plans[i]
+				if p.Archived() {
+					return errors.New("this task is archived")
+				}
+				if p.Revision != in.Revision {
+					return ErrConflict
+				}
 			}
-			if p.Revision != in.Revision {
-				return ErrConflict
+			reset := in.ID == "" || !p.Enabled && in.Enabled || !specEqual(p.Schedule, in.Schedule) || p.Timezone != in.Timezone
+			p.Title, p.Instructions, p.Schedule, p.Timezone, p.Enabled = in.Title, in.Instructions, in.Schedule, in.Timezone, in.Enabled
+			if reset {
+				p.ActiveSince = now
 			}
-		}
-		reset := in.ID == "" || !p.Enabled && in.Enabled || !specEqual(p.Schedule, in.Schedule) || p.Timezone != in.Timezone
-		p.Title, p.Instructions, p.Schedule, p.Timezone, p.Enabled = in.Title, in.Instructions, in.Schedule, in.Timezone, in.Enabled
-		if reset {
-			p.ActiveSince = now
-		}
-		if err := dueAhead(p, loc, now); err != nil {
-			return err
-		}
-		p.Revision++
-		p.UpdatedAt = now
-		if in.ID == "" {
-			f.Plans = append(f.Plans, p)
-		} else {
-			i, _ := findPlan(f, in.ID)
-			f.Plans[i] = p
-		}
-		delete(sp.problem, p.ID)
-		saved = p
-		return nil
+			if err := dueAhead(p, loc, now); err != nil {
+				return err
+			}
+			p.Revision++
+			p.UpdatedAt = now
+			if in.ID == "" {
+				f.Plans = append(f.Plans, p)
+			} else {
+				i, _ := findPlan(f, in.ID)
+				f.Plans[i] = p
+			}
+			delete(sp.problem, p.ID)
+			saved = p
+			return nil
+		}()
+		return then, err
 	})
 	if err == nil {
 		s.changed(name)
@@ -1375,17 +1542,57 @@ func specEqual(a, b Spec) bool {
 	return a.Kind == b.Kind && a.Date == b.Date && a.Time == b.Time && a.Every == b.Every && slices.Equal(a.Days, b.Days)
 }
 
-// forgetPlanLocked removes an archived plan and its history, the oldest
-// first, to keep the file bounded.
-func (s *Service) forgetPlanLocked(sp *space, y yesmen.Yesman, f *plansFile, id string) {
-	f.Plans = slices.DeleteFunc(f.Plans, func(p Plan) bool { return p.ID == id })
-	delete(f.planExtras, id)
-	for rid, r := range sp.runs {
-		if r.Plan == id && !r.inFlight() {
-			if err := os.Remove(runPath(y, rid)); err == nil || errors.Is(err, os.ErrNotExist) {
-				delete(sp.runs, rid)
-			}
+// forgetPlansLocked removes n archived plans from the file, the oldest
+// archive first, to keep it bounded. A plan with a run still retained (on
+// its way, or with its board task open) is kept with its history; when n
+// such plans cannot be found, nothing is removed. Their records are
+// removed once the file was written (dropRunsLocked).
+func (s *Service) forgetPlansLocked(sp *space, f *plansFile, n int, tasks map[string]yesmen.Task, boardErr error) ([]string, error) {
+	var out []string
+	for _, p := range archivedPlans(f.Plans) {
+		if len(out) == n {
+			break
 		}
+		if slices.ContainsFunc(plansRuns(sp.runs, p.ID), func(r *record) bool {
+			return sp.active[r.ID] || retained(r.Run, tasks, boardErr)
+		}) {
+			continue
+		}
+		out = append(out, p.ID)
+	}
+	if len(out) < n {
+		return nil, fmt.Errorf("a yesman keeps at most %d tasks, with the archived ones: the archived tasks it could clear away still have runs whose board tasks are open", maxPlans)
+	}
+	f.Plans = slices.DeleteFunc(f.Plans, func(p Plan) bool { return slices.Contains(out, p.ID) })
+	for _, id := range out {
+		delete(f.planExtras, id)
+	}
+	return out, nil
+}
+
+// dropRunsLocked removes the records of plans no longer in the file, and
+// what pruned.json keeps of them. A record that cannot be removed stays;
+// its plan's ID is never given again.
+func (s *Service) dropRunsLocked(sp *space, y yesmen.Yesman, plans []string) {
+	for _, id := range sortedIDs(sp.runs) {
+		r := sp.runs[id]
+		if !slices.Contains(plans, r.Plan) || sp.active[id] {
+			continue
+		}
+		if err := os.Remove(runPath(y, id)); err == nil || errors.Is(err, os.ErrNotExist) {
+			delete(sp.runs, id)
+			delete(sp.checked, id)
+		}
+	}
+	if sp.prunedErr != nil {
+		return
+	}
+	next := sp.pruned.clone()
+	for _, id := range plans {
+		delete(next.Plans, id)
+	}
+	if len(next.Plans) != len(sp.pruned.Plans) && s.writePrunedLocked(y, next) == nil {
+		sp.pruned = next
 	}
 }
 
@@ -1478,6 +1685,8 @@ func (s *Service) RunNow(name, id, requestID, from string) (Run, error) {
 		return Run{}, err
 	}
 	defer release()
+	board, boardErr := s.cfg.Yesmen.Board(y.Name)
+	tasks := boardTasks(board, boardErr)
 	sp := s.spaceFor(y)
 	sp.mu.Lock()
 	if sp.retired.Load() {
@@ -1513,15 +1722,34 @@ func (s *Service) RunNow(name, id, requestID, from string) (Run, error) {
 		}
 		r.ID, r.Kind, r.From = from+"-c", RunCatchUp, from
 		r.Key, r.First, r.Last, r.Count, r.CountCapped = missed.Key, missed.First, missed.Last, missed.Count, missed.CountCapped
-		if missed.CaughtUp != "" && missed.CaughtUp != r.ID {
+		// The missed record names its catch-up for good: once that run's
+		// record has left the history, it is still caught up.
+		if missed.CaughtUp != "" && (missed.CaughtUp != r.ID || sp.runs[r.ID] == nil) {
 			sp.mu.Unlock()
-			return Run{}, errors.New("this missed run was caught up already")
+			return Run{}, errCaughtUp
 		}
 	}
 	if existing := sp.runs[r.ID]; existing != nil {
 		run := existing.Run
 		sp.mu.Unlock()
 		return run, nil // the same click again
+	}
+	if r.Kind == RunManual {
+		// A click whose run was pruned is not a new one; nor is any click
+		// while what was pruned cannot be read.
+		if sp.prunedErr != nil {
+			err := sp.prunedErr
+			sp.mu.Unlock()
+			return Run{}, err
+		}
+		if sp.pruned.used(p.ID, requestID) {
+			sp.mu.Unlock()
+			return Run{}, ErrRequestUsed
+		}
+	}
+	if retainedCount(sp, p.ID, tasks, boardErr) >= maxOpenRuns {
+		sp.mu.Unlock()
+		return Run{}, errTooManyOpen
 	}
 	for _, other := range plansRuns(sp.runs, p.ID) {
 		if other.fired() && other.inFlight() {
@@ -1621,33 +1849,61 @@ func (s *Service) Check(name, runID string) (Run, error) {
 	if rec == nil {
 		return Run{}, fmt.Errorf("no run %s", runID)
 	}
+	if r.attempt() == nil || r.inFlight() || active {
+		return r, nil
+	}
+	r, err = s.reconcile(sp, r)
+	s.changed(name)
+	return r, err
+}
+
+// reconcile reads a run's receipt again and records what it says, without
+// sending anything: a queue its lead lost with its process makes it
+// unknown, and a submission never registered makes an unknown run failed.
+func (s *Service) reconcile(sp *space, r Run) (Run, error) {
 	a := r.attempt()
-	if a == nil || r.inFlight() || active {
+	if a == nil {
 		return r, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	d, found, err := s.cfg.Agents.LookupDelivery(ctx, agent.ID(name, yesmen.LeadName), a.ID, sp.since)
+	d, found, err := s.cfg.Agents.LookupDelivery(ctx, agent.ID(sp.name, yesmen.LeadName), a.ID, sp.since)
 	cancel()
 	if err != nil {
 		return r, err
 	}
 	switch found {
 	case agent.DeliveryFound:
-		r, err = s.update(sp, runID, func(r *Run) bool { return applyReceipt(r, a.ID, &d, "") })
+		return s.update(sp, r.ID, func(r *Run) bool { return applyReceipt(r, a.ID, &d, "") })
 	case agent.DeliveryAbsent:
-		if r.State == StateUnknown {
-			// It was never registered: definitely not sent.
-			r, err = s.update(sp, runID, func(r *Run) bool {
-				if at := r.attempt(); at != nil && at.ID == a.ID {
-					at.Definite, at.State = true, "absent"
-				}
-				r.State, r.Reason = StateFailed, "Not sent: the lead never received it"
-				return true
-			})
+		if r.State != StateUnknown {
+			return r, nil
 		}
+		// It was never registered: definitely not sent.
+		return s.update(sp, r.ID, func(r *Run) bool {
+			at := r.attempt()
+			if r.State != StateUnknown || at == nil || at.ID != a.ID {
+				return false
+			}
+			at.Definite, at.State = true, "absent"
+			r.State, r.Reason = StateFailed, "Not sent: the lead never received it"
+			return true
+		})
+	default:
+		if !r.waiting() {
+			return r, nil
+		}
+		// It waited in pi, and its receipt is no longer kept: whether it
+		// reached the lead cannot be told.
+		return s.update(sp, r.ID, func(r *Run) bool {
+			at := r.attempt()
+			if !r.waiting() || at == nil || at.ID != a.ID {
+				return false
+			}
+			at.State = "unknown"
+			r.State, r.Reason = StateUnknown, "Its delivery record is no longer kept, so yesman cannot confirm it reached the lead; it was not sent again"
+			return true
+		})
 	}
-	s.changed(name)
-	return r, err
 }
 
 func canRetry(r Run) bool {
