@@ -555,6 +555,7 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 // record handles one record of an agent's process. It runs on the
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
+	raw = p.origins.observe(kind, raw)
 	m.observeDelivery(a, p, kind, raw)
 	m.follow(a, p, kind, raw)
 	switch kind {
@@ -600,7 +601,7 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 				// The user stopped its run. A worker being put to sleep, removed
 				// or shut down with the app tells nobody: telling the lead would
 				// start it again.
-				m.tellLead(a, fmt.Sprintf("[yesman] Worker %q was stopped by the user before it finished its run. It keeps its session; message it to continue.", a.info.Name))
+				m.tellLead(a, "stopped", fmt.Sprintf("[yesman] Worker %q was stopped by the user before it finished its run. It keeps its session; message it to continue.", a.info.Name))
 			}()
 		}
 	case "thinking_level_changed":
@@ -694,7 +695,7 @@ func (m *Manager) watch(a *agent, p *proc) {
 	m.mu.Unlock()
 	m.changed()
 	if failed && worker {
-		go m.tellLead(a, fmt.Sprintf("[yesman] Worker %q stopped unexpectedly (%s). It keeps its session; message it to start it again.", a.info.Name, clip(strings.Join(strings.Fields(detail), " "))))
+		go m.tellLead(a, "failed", fmt.Sprintf("[yesman] Worker %q stopped unexpectedly (%s). It keeps its session; message it to start it again.", a.info.Name, clip(strings.Join(strings.Fields(detail), " "))))
 	}
 }
 
@@ -706,18 +707,28 @@ func (m *Manager) Prompt(ctx context.Context, id, text string) error {
 
 // PromptImages sends text and image content together, including when steering.
 func (m *Manager) PromptImages(ctx context.Context, id, text string, images []Image) error {
+	return m.promptImages(ctx, id, text, images, Origin{Source: OriginUser})
+}
+
+// PromptFromLead sends a worker a message its lead wrote, steering a run in
+// progress like the user's messages.
+func (m *Manager) PromptFromLead(ctx context.Context, id, text string) error {
+	return m.promptImages(ctx, id, text, nil, Origin{Source: OriginLead, Kind: "message"})
+}
+
+func (m *Manager) promptImages(ctx context.Context, id, text string, images []Image, origin Origin) error {
 	if err := validateImages(images); err != nil {
 		return err
 	}
 	m.unnudge(id)
-	return m.prompt(ctx, id, text, "steer", images...)
+	return m.prompt(ctx, id, text, "steer", origin, images...)
 }
 
-func (m *Manager) prompt(ctx context.Context, id, text, behavior string, images ...Image) error {
-	return m.promptDelivery(ctx, id, text, behavior, "", nil, nil, images...)
+func (m *Manager) prompt(ctx context.Context, id, text, behavior string, origin Origin, images ...Image) error {
+	return m.promptDelivery(ctx, id, text, behavior, "", nil, nil, origin, images...)
 }
 
-func (m *Manager) promptDelivery(ctx context.Context, id, text, behavior, messageID string, owner *agent, scope *time.Time, images ...Image) error {
+func (m *Manager) promptDelivery(ctx context.Context, id, text, behavior, messageID string, owner *agent, scope *time.Time, origin Origin, images ...Image) error {
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return errors.New("empty message")
 	}
@@ -777,16 +788,16 @@ func (m *Manager) promptDelivery(ctx context.Context, id, text, behavior, messag
 		}
 	}
 	a.modelMu.Unlock()
-	return m.sendPromptDelivery(ctx, a, p, text, behavior, messageID, images...)
+	return m.sendPromptDelivery(ctx, a, p, text, behavior, messageID, origin, images...)
 }
 
 // sendPrompt dispatches a prompt already registered under modelMu and mu.
 // No manager lock is held while sending or waiting for pi's answer.
-func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behavior string, images ...Image) error {
-	return m.sendPromptDelivery(ctx, a, p, text, behavior, "", images...)
+func (m *Manager) sendPrompt(ctx context.Context, a *agent, p *proc, text, behavior string, origin Origin, images ...Image) error {
+	return m.sendPromptDelivery(ctx, a, p, text, behavior, "", origin, images...)
 }
 
-func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, text, behavior, messageID string, images ...Image) error {
+func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, text, behavior, messageID string, origin Origin, images ...Image) error {
 	done := make(chan error, 1)
 	go func() {
 		// Cancelling the caller does not cancel the RPC already sent to pi.
@@ -812,7 +823,18 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 			err = m.bindDelivery(a, p, messageID)
 		}
 		if err == nil {
-			_, err = p.callObserved(context.Background(), cmd, func(r response) { m.deliveryResponse(a, p, messageID, behavior, r) })
+			// pi's answer, read in order with its records, says what became
+			// of the prompt; see originTracker.
+			p.origins.sent()
+			answered := false
+			_, err = p.callObserved(context.Background(), cmd, func(r response) {
+				answered = true
+				p.origins.answered(origin, behavior, &r)
+				m.deliveryResponse(a, p, messageID, behavior, r)
+			})
+			if !answered {
+				p.origins.answered(origin, behavior, nil)
+			}
 		}
 		a.modelMu.Lock()
 		m.mu.Lock()
@@ -850,7 +872,23 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	if !wasRunning {
 		defer func() { go m.closeIfFinished(a, p, time.Time{}) }()
 	}
-	_, _ = p.modelState(ctx, func(s modelState) { m.deliverySessionChanged(a, p, s.SessionID); m.syncPending(a, p, s.PendingQueue) })
+	var session string
+	_, _ = p.modelState(ctx, func(s modelState) {
+		session = s.SessionID
+		m.deliverySessionChanged(a, p, s.SessionID)
+		m.syncPending(a, p, s.PendingQueue)
+	})
+	// Origins recorded before this process are in the session's entries,
+	// read once per session; the reader adds later ones.
+	p.origins.scanMu.Lock()
+	if p.origins.needsScan(session) {
+		r, err := p.call(ctx, map[string]any{"type": "get_entries"})
+		if err != nil {
+			r.Data = nil
+		}
+		p.origins.indexEntries(session, r.Data)
+	}
+	p.origins.scanMu.Unlock()
 	// pi answers after emitting every earlier event, and the reader numbers
 	// those first. Capture the reply in progress and the last number on the
 	// reader as the answer arrives: events it handles next are not in the
@@ -875,7 +913,7 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	if err := json.Unmarshal(r.Data, &data); err != nil {
 		return Conversation{}, err
 	}
-	conv.Messages = data.Messages
+	conv.Messages = p.origins.project(data.Messages)
 	return conv, nil
 }
 
@@ -1098,7 +1136,7 @@ func (m *Manager) StartWorkerAs(ctx context.Context, yesman, name, title, task s
 			return Info{}, errors.Join(fmt.Errorf("run as %s: %w", as, err), m.RemoveWorker(yesman, name))
 		}
 	}
-	if err := m.prompt(ctx, id, task, "followUp"); err != nil {
+	if err := m.prompt(ctx, id, task, "followUp", Origin{Source: OriginLead, Kind: "task"}); err != nil {
 		// Leave no worker that never got its task, so the name can be
 		// used again.
 		return Info{}, errors.Join(err, m.RemoveWorker(yesman, name))
@@ -1210,7 +1248,7 @@ func (m *Manager) reportToLead(a *agent, p *proc) {
 			report = *data.Text
 		}
 	}
-	if m.tellLeadWithin(ctx, a, fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report)) == nil {
+	if m.tellLeadWithin(ctx, a, "report", fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report)) == nil {
 		m.closeIfFinished(a, p, time.Now().UTC())
 	}
 }
@@ -1261,19 +1299,22 @@ const titleLimit = 80
 // a run or is read after the current one. The lead never waits for its
 // workers, so it learns how each run ended this way: finished, stopped by
 // the user, or failed.
-func (m *Manager) tellLead(a *agent, msg string) {
+func (m *Manager) tellLead(a *agent, kind, msg string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	m.tellLeadWithin(ctx, a, msg)
+	m.tellLeadWithin(ctx, a, kind, msg)
 }
 
 // tellLeadWithin tries a few times; a message that cannot be delivered is
 // shown on the worker, for the user.
-func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, msg string) error {
+func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, kind, msg string) error {
 	scope, active := m.reportScope(a)
 	if !active {
 		return errStopped
 	}
+	m.mu.Lock()
+	origin := Origin{Source: OriginYesman, Kind: kind, Worker: a.info.Name}
+	m.mu.Unlock()
 	lead := ID(a.info.Yesman, yesmen.LeadName)
 	m.unnudge(lead)
 	var err error
@@ -1288,7 +1329,7 @@ func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, msg string) erro
 		if _, active := m.reportScope(a); !active {
 			return errStopped
 		}
-		if err = m.promptDelivery(ctx, lead, msg, "followUp", "", nil, &scope); err == nil {
+		if err = m.promptDelivery(ctx, lead, msg, "followUp", "", nil, &scope, origin); err == nil {
 			return nil
 		}
 		select {

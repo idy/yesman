@@ -121,12 +121,16 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
         reject(id) {
           pending[id]?.reject(new Error("network unavailable"));
         },
-        consume(agent, id) {
+        // bound: the message records its submission, as yesman's extension
+        // does when it can tell; otherwise it is untied, as from older pi
+        // sessions or input another extension rewrote.
+        consume(agent, id, bound = false) {
           const d = saved.inputs[agent][id];
           const m = {
             role: "user",
             timestamp: 123,
             content: [{ type: "text", text: d.text }, ...(d.images ?? [])],
+            ...(bound ? { yesman: { source: "user", submission: id } } : {}),
           };
           saved.messages[agent] ??= [];
           saved.messages[agent].push(m);
@@ -228,30 +232,18 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     );
     await ack(one, "accepted");
     assert.match(await row(one).innerText(), /Accepted · delivery unconfirmed/);
-    assert.equal(await row(one).locator("details").count(), 1);
+    // A submission the conversation does not show yet reads as the person's
+    // message, from what the receipt keeps, never as a folded Submission row.
+    assert.equal(await row(one).locator("details").count(), 0);
     assert.equal(await input.inputValue(), "");
-    await row(one).locator("summary").click();
-    assert.equal(
-      await row(one)
-        .locator("details")
-        .evaluate((el) => el.open),
-      true,
-    );
-    assert.equal(
-      await row(one).locator(".delivery-original .msg-user").innerText(),
-      "same",
-    );
+    assert.equal(await row(one).locator(".msg-user").innerText(), "same");
+    await row(one).locator(".msg-user").evaluate((el) => (el.dataset.kept = "1"));
     await page.evaluate(
       (id) => window.fixture.update("alice/lead", id, "steering"),
       one,
     );
-    assert.equal(
-      await row(one)
-        .locator("details")
-        .evaluate((el) => el.open),
-      true,
-    );
-    await row(one).locator("summary").click();
+    assert.match(await row(one).innerText(), /Accepted for steering/);
+    assert.equal(await row(one).locator('.msg-user[data-kept="1"]').count(), 1);
     await input.fill("same");
     await input.press("Control+Enter");
     await page.waitForFunction(() => window.sent.length === 2);
@@ -280,12 +272,18 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       });
     }, one);
     assert.match(await row(one).innerText(), /Accepted for steering/);
+    // An untied message stays the transcript's own; its receipt keeps its state.
     await page.evaluate((id) => window.fixture.consume("alice/lead", id), two);
     assert.equal(await page.locator("#thread > .msg-user").count(), 1);
     assert.equal(await row(two).count(), 1);
     assert.match(await row(two).innerText(), /delivery unconfirmed/);
-    await page.evaluate((id) => window.fixture.consume("alice/lead", id), one);
-    assert.equal(await page.locator("#thread > .msg-user").count(), 2); // identical text and timestamps remain two real messages
+    // A message tied to its receipt carries the receipt's state under it.
+    await page.evaluate((id) => window.fixture.consume("alice/lead", id, true), one);
+    assert.equal(await row(one).count(), 1);
+    assert.equal(await row(one).getAttribute("data-bound"), "true");
+    assert.equal(await row(one).locator(".msg-user").innerText(), "same");
+    assert.equal(await row(one).locator(".delivery-status").innerText(), "Delivered");
+    assert.equal(await page.locator("#thread > .msg-user, #thread > [data-bound] > .msg-user").count(), 2); // identical text and timestamps remain two real messages
     await page.evaluate(() =>
       window.fixture.emit("alice/lead", {
         type: "delivery_update",
@@ -303,7 +301,8 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await input.waitFor();
     await page.waitForTimeout(100);
     assert.equal(await page.locator(".msg-delivery").count(), 2);
-    assert.equal(await page.locator("#thread > .msg-user").count(), 2);
+    assert.equal(await page.locator("#thread > .msg-user, #thread > [data-bound] > .msg-user").count(), 2);
+    assert.equal(await row(one).getAttribute("data-bound"), "true");
     assert.match(
       await page.locator(".pi-queue-status").innerText(),
       /2 steering/,
@@ -554,9 +553,12 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     });
     await page.evaluate(
       (id) => window.fixture.update("alice/lead", id, "unconfirmed"),
-      one,
+      two,
     );
     assert((await page.locator("#scroll").evaluate((el) => el.scrollTop)) < 10);
+    // Untied and only accepted: one light line with the preview, not a bubble.
+    assert.equal(await row(two).locator(".msg-user").count(), 0);
+    assert.match(await row(two).innerText(), /Submission: same[\s\S]*Delivery unconfirmed/);
     await page.evaluate(() => {
       window.fixture.saved.queues["alice/lead"] = { known: false };
       window.fixture.emit("alice/lead", {
@@ -569,7 +571,8 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       window.events["mygo:locale"]({ locale: "zh-Hans" }),
     );
     await page.waitForTimeout(30);
-    assert.match(await row(one).innerText(), /交付状态尚未确认/);
+    assert.match(await row(two).innerText(), /交付状态尚未确认/);
+    assert.match(await row(one).innerText(), /已送达/);
     assert.match(await row(retryID).innerText(), /交付已中断/);
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "en" }));
     await page.waitForTimeout(30);

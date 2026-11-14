@@ -24,6 +24,9 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      CGO_CFLAGS: ${{ matrix.os == 'macos-latest' && '-O2 -g -mmacosx-version-min=13.0' || '-O2 -g' }}
     defaults:
       run:
         shell: bash
@@ -80,3 +83,40 @@ jobs:
             node --check "$f"
           done
           node --test scripts/*.test.mjs
+
+  macos-startup:
+    name: Production startup (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    # Standard GitHub-hosted images: each job gets a fresh VM/user profile.
+    # Never switch this job to self-hosted; the script also refuses it.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build the normal production app
+        env:
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: "-O2 -g -mmacosx-version-min=13.0"
+          MACOSX_DEPLOYMENT_TARGET: "13.0"
+        run: go tool mygo build -skip-dmg -o "$RUNNER_TEMP/production"
+      - name: Check release identity rejection against the built app
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("mygo.json"))["version"])')
+          python3 scripts/test_macos_release_gate.py "$RUNNER_TEMP/production/darwin-$(go env GOARCH)/yesman.app" "v$version" "$(git rev-parse HEAD)" "$(go env GOARCH)" "$RUNNER_TEMP/startup-evidence/release-gate-tests.json"
+      - name: Verify native window and production page bridge
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/check_macos_startup.py "$RUNNER_TEMP/production/darwin-$(go env GOARCH)/yesman.app" web "$RUNNER_TEMP/startup-evidence"
+      - name: Keep startup and actual SDK evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-startup-${{ matrix.os }}
+          path: ${{ runner.temp }}/startup-evidence
+          if-no-files-found: error

@@ -2,6 +2,18 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.31
+
+- Add Settings › Grant to view this copy of yesman's OS permission status, refresh it without prompting, and choose individual Request or Open Settings actions.
+- On macOS, cover Bluetooth, notifications, Full Disk Access, microphone, camera, Accessibility, Screen Recording, Input Monitoring and Automation. Full Disk Access and Automation use manual settings guidance; opening settings does not mean access was granted.
+- On Windows, provide fixed settings entries for Bluetooth, notifications, microphone and camera. On Linux, explain desktop, device, session and portal policy limits. Independently launched terminals, runtimes and helpers may need their own authorization.
+
+## 0.1.30
+
+- Keep your messages and images, ordinary replies and questions visible in full, while folding thinking, tool activity and recorded background collaboration into expandable work lines in their original order.
+- Render thinking with Markdown and show delivery states from actual submission records beneath linked messages. Work-line status describes only the steps it contains; it does not confirm individual message consumption or that every worker has finished.
+- Keep older or ambiguous messages visible when their source cannot be established, including their images.
+
 ## 0.1.29
 
 - Accept display names such as GizMoth, names with spaces and Chinese text when creating a yesman from the welcome page or Hire dialog, preserving their spelling and capitalization.
