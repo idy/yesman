@@ -73,9 +73,14 @@ func TestLauncherTransfersArguments(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatalf("report: %v: %s", err, b)
 	}
-	realTarget, _ := filepath.EvalSymlinks(target)
-	realCwd, _ := filepath.EvalSymlinks(cwd)
-	if got.Exe != realTarget || got.Cwd != realCwd || got.Sentinel != "preserved" {
+	// Windows may return the same working directory through its 8.3 alias
+	// (RUNNER~1) after CreateProcess. Compare filesystem identity, not spelling.
+	sameFile := func(a, b string) bool {
+		left, le := os.Stat(a)
+		right, re := os.Stat(b)
+		return le == nil && re == nil && os.SameFile(left, right)
+	}
+	if !sameFile(got.Exe, target) || !sameFile(got.Cwd, cwd) || got.Sentinel != "preserved" {
 		t.Fatalf("environment/path changed: %+v", got)
 	}
 	if runtime.GOOS != "windows" && got.PID != pid {

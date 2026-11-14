@@ -61,11 +61,28 @@ var patches = []patch{
 	},
 	{
 		File: "internal/linux/app.go", SHA256: "37c5ff2dea47d3a86718f1787a3954f7f57350fdf17c86696b5365bd91025757",
-		Replacements: []replacement{{`gSetPrgname(cs(filepath.Base(exe)))`, `name := filepath.Base(exe)
+		Replacements: []replacement{
+			{`func (b *Backend) Name() string { return "linux/webkitgtk" }`, `func (b *Backend) Name() string { return "linux/webkitgtk" }
+
+// The display name must not select a new cookie/content-rule profile.
+func (b *Backend) profileName() string {
+	if b.name == "Yes Man" { return "yesman" }
+	return b.name
+}`},
+			{`gSetPrgname(cs(filepath.Base(exe)))`, `name := filepath.Base(exe)
 		// GLib's program id also names the WebKitGTK profile and window
 		// class. Keep those stable; the kernel process uses the real image.
 		if name == "Yes Man" { name = "yesman" }
-		gSetPrgname(cs(name))`}},
+		gSetPrgname(cs(name))`},
+		},
+	},
+	{
+		File: "internal/linux/cookies.go", SHA256: "51f54a374c4687030b96de9411190a93358c35f54df8e51daa37724b080a34ce",
+		Replacements: []replacement{{`filepath.Join(dir, theBackend.name)`, `filepath.Join(dir, theBackend.profileName())`}},
+	},
+	{
+		File: "internal/linux/content_rules.go", SHA256: "35dc506a5beb03c1d7cf9ca4b45fb59ffcb1d6b6f784d088186e9e8660c2a3e6",
+		Replacements: []replacement{{`filepath.Join(dir, theBackend.name, "content-rules")`, `filepath.Join(dir, theBackend.profileName(), "content-rules")`}},
 	},
 	{
 		File: "internal/windows/app.go", SHA256: "b63e6e7940bd2ca54385835f216452766fb1cfc69fd7fe42e592c571e8074894",
