@@ -79,7 +79,7 @@ class Feed:
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args):pass
             def do_CONNECT(self):self.send_error(403,'Network outside upgrade inputs disabled')
-            def headers(self,code,typ='application/json'):
+            def respond(self,code,typ='application/json'):
                 self.send_response(code);self.send_header('Content-Type',typ);self.send_header('Access-Control-Allow-Origin','*');self.end_headers()
             def do_OPTIONS(self):
                 self.send_response(204);self.send_header('Access-Control-Allow-Origin','*');self.send_header('Access-Control-Allow-Methods','GET,POST,OPTIONS');self.send_header('Access-Control-Allow-Headers','Content-Type');self.send_header('Access-Control-Allow-Private-Network','true');self.end_headers()
@@ -88,12 +88,12 @@ class Feed:
                 size=int(self.headers.get('Content-Length','0'));assert size<131072
                 value=json.loads(self.rfile.read(size))
                 with feed.lock:feed.latest=value
-                self.headers(200);self.wfile.write(b'{}')
+                self.respond(200);self.wfile.write(b'{}')
             def do_GET(self):
                 path=urllib.parse.urlparse(self.path).path
                 if path=='/command':
                     with feed.lock:value=feed.command
-                    self.headers(200);self.wfile.write(json.dumps(value).encode());return
+                    self.respond(200);self.wfile.write(json.dumps(value).encode());return
                 name=urllib.parse.unquote(path.rsplit('/',1)[-1])
                 with feed.lock:
                     target=feed.target
@@ -101,10 +101,10 @@ class Feed:
                 if name=='update-'+feed.plan['Target']+'.json':
                     m=json.loads(pathlib.Path(feed.plan['Stages'][target]['Manifest']).read_text(encoding='utf-8'))
                     if feed.mode=='archive':m['deltas']=[]
-                    self.headers(200);self.wfile.write(json.dumps(m).encode());return
+                    self.respond(200);self.wfile.write(json.dumps(m).encode());return
                 file=feed.files.get(name)
                 if file is None:self.send_error(404);return
-                self.headers(200,'application/octet-stream')
+                self.respond(200,'application/octet-stream')
                 with file.open('rb') as body:shutil.copyfileobj(body,self.wfile)
         server=http.server.ThreadingHTTPServer((host,port),Handler)
         threading.Thread(target=server.serve_forever,daemon=True).start();return server
