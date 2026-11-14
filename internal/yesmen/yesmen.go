@@ -280,7 +280,9 @@ func (s *Store) get(name string) (Yesman, error) {
 		DisplayName string    `json:"displayName"`
 		Model       string    `json:"model"`
 	}
-	_ = readYesmanMetadata(filepath.Join(y.MetaDir(), "yesman.json"), &meta)
+	if err := readYesmanMetadata(filepath.Join(y.MetaDir(), "yesman.json"), &meta); errors.Is(err, errYesmanMetadataTooLarge) {
+		return Yesman{}, err
+	}
 	y.HiredAt, y.Model = meta.HiredAt, meta.Model
 	y.DisplayName = meta.DisplayName
 	return y, nil
@@ -320,7 +322,7 @@ func (s *Store) Rename(name, label string) (Yesman, error) {
 			return errors.New("invalid yesman metadata")
 		}
 		meta["displayName"], _ = json.Marshal(label)
-		if err := writeJSON(path, meta); err != nil {
+		if err := writeYesmanMetadata(path, meta); err != nil {
 			return err
 		}
 		y.DisplayName = label
@@ -346,6 +348,8 @@ func (s *Store) List() ([]Yesman, error) {
 		}
 		if y, err := s.Get(e.Name()); err == nil {
 			out = append(out, y)
+		} else if errors.Is(err, errYesmanMetadataTooLarge) {
+			return nil, err
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {

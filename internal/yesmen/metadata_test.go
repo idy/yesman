@@ -3,6 +3,7 @@ package yesmen
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -89,16 +90,16 @@ func TestMetadataReadSizeAndType(t *testing.T) {
 			var decoded map[string]json.RawMessage
 			err := readYesmanMetadata(path, &decoded)
 			got, getErr := s.Get("alice")
-			if getErr != nil {
-				t.Fatal(getErr)
-			}
 			if size == maxYesmanMetadataBytes {
+				if getErr != nil {
+					t.Fatal(getErr)
+				}
 				if err != nil || got.Label() != "Alice" || got.HiredAt.IsZero() || string(decoded["future"]) != "9007199254740993" {
 					t.Fatalf("exact limit: %+v %v, %s", got, err, decoded["future"])
 				}
 			} else {
-				if err == nil || decoded != nil || !got.HiredAt.IsZero() || got.DisplayName != "" {
-					t.Fatalf("oversized metadata decoded: %+v, %v", got, err)
+				if !errors.Is(err, errYesmanMetadataTooLarge) || !errors.Is(getErr, errYesmanMetadataTooLarge) || decoded != nil || got != (Yesman{}) {
+					t.Fatalf("oversized metadata not reported: %+v, read %v, Get %v", got, err, getErr)
 				}
 				if _, err := s.Rename("alice", "New label"); err == nil {
 					t.Fatal("Rename accepted oversized source metadata")
