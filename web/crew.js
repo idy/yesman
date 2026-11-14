@@ -1,8 +1,6 @@
 // Settings › yesman: what new yesmen run as, and the crew: the models,
-// each at one effort, that yesman runs agents as. Their scores are for the
-// lead, which weighs them to choose a member for each worker, so the page
-// shows scores only where the user gives their own, for an option
-// Artificial Analysis has no record of.
+// each at one effort, that yesman runs agents as. Show the same scores the
+// lead weighs when choosing a model for a worker, in their original units.
 import { $, h, icon } from './dom.js';
 import { openDialog } from './mds/js/magpie.js';
 import { t, tNodes, locale, formatNumber } from './i18n.js';
@@ -29,13 +27,16 @@ export function createCrew({ call, fail, shown, rerender, openPage, preferenceRo
   let loading = null; // the load under way
   let refreshing = false;
   let busy = false; // a change is being saved
+  let revision = 0; // a saved change makes an earlier read obsolete
 
   function load(refresh = false) {
     if (loading && !refresh) return loading;
     refreshing = refresh;
-    const p = call(refresh ? 'RefreshCrew' : 'Crew').then((v) => { view = v; }, fail).finally(() => {
-      if (loading === p) loading = null;
-      refreshing = false;
+    const readRevision = revision;
+    const p = call(refresh ? 'RefreshCrew' : 'Crew').then((v) => {
+      if (loading === p && revision === readRevision) view = v;
+    }, fail).finally(() => {
+      if (loading === p) { loading = null; refreshing = false; }
       if (shown()) rerender();
     });
     loading = p;
@@ -43,11 +44,20 @@ export function createCrew({ call, fail, shown, rerender, openPage, preferenceRo
     return p;
   }
 
+  // Invalidate reads both before and after saving: a pending catalog refresh
+  // must not restore a removed option or an earlier estimate.
+  async function save(method, ...args) {
+    revision++;
+    const next = await call(method, ...args);
+    revision++;
+    view = next;
+  }
+
   async function change(method, ...args) {
     busy = true;
     if (shown()) rerender();
     try {
-      view = await call(method, ...args);
+      await save(method, ...args);
       return true;
     } catch (err) {
       fail(err);
@@ -162,9 +172,8 @@ export function createCrew({ call, fail, shown, rerender, openPage, preferenceRo
         error.hidden = true;
         try {
           const score = scores.el.hidden ? null : scores.read();
-          view = member
-            ? await call('SetCrewScore', member.key, score)
-            : await call('AddCrewOption', pick.m.provider, pick.m.id, pick.effort, score);
+          if (member) await save('SetCrewScore', member.key, score);
+          else await save('AddCrewOption', pick.m.provider, pick.m.id, pick.effort, score);
           dialog.close('ok');
           if (shown()) rerender();
         } catch (err) {
@@ -186,19 +195,33 @@ export function createCrew({ call, fail, shown, rerender, openPage, preferenceRo
 
   // ---------- The page ----------
 
+  function memberScores(m) {
+    if (!m.score) return null;
+    return h('dl', { class: 'crew-metrics', role: 'group', 'aria-label': t('Scores for {model}', { model: optionName(m) }) }, FIELDS.map((f) => {
+      const value = m.score[f.key];
+      const available = typeof value === 'number' && Number.isFinite(value);
+      return h('div', null, h('dt', null, t(f.label)), h('dd', null, available
+        ? `${formatNumber(value, { maximumSignificantDigits: 4 })}${f.unit ? ` ${f.unit}` : ''}`
+        : [h('span', { 'aria-hidden': 'true' }, '—'), h('span', { class: 'mds-visually-hidden' }, t('Not available'))]));
+    }));
+  }
+
   function memberRow(m) {
     let status;
-    if (m.missing) status = h('span', { class: 'danger' }, t('pi no longer has this model at this effort'));
-    else if (m.source === 'aa') status = t('Scored by Artificial Analysis');
-    else if (m.source === 'user') status = t('Your scores');
+    if (m.source === 'aa') status = t('Scored by Artificial Analysis');
+    else if (m.source === 'user') status = t('Your estimate');
     else status = h('span', { class: 'danger' }, t('No scores: give yours'));
     const name = optionName(m);
     return h('div', { class: 'card-row crew-row' },
-      h('div', { class: 'card-row-text' }, h('strong', { title: m.key }, name), h('span', null, `${m.provider}/${m.model} · `, status)),
+      h('div', { class: 'card-row-text' }, h('strong', { title: m.key }, name),
+        h('span', null, `${m.provider}/${m.model} · `, status,
+          m.source === 'aa' && m.score && !m.score.effort ? ` · ${t('Effort not specified by source')}` : null,
+          m.missing ? h('span', { class: 'danger' }, ` · ${t('pi no longer has this model at this effort')}`) : null)),
       m.key === view.yesman ? h('span', { class: 'mds-pill crew-default' }, t('New yesmen')) : h('span'),
       h('div', { class: 'card-row-actions' },
         m.source !== 'aa' ? h('button', { class: 'mds-icon-button', type: 'button', disabled: busy, title: t('Your scores'), 'aria-label': t('Your scores for {model}', { model: name }), onclick: () => openOption(m) }, icon('sliders')) : null,
-        h('button', { class: 'mds-icon-button', type: 'button', disabled: busy, title: t('Remove'), 'aria-label': t('Remove {model}', { model: name }), onclick: () => change('RemoveCrewOption', m.key) }, icon('trash'))));
+        h('button', { class: 'mds-icon-button', type: 'button', disabled: busy, title: t('Remove'), 'aria-label': t('Remove {model}', { model: name }), onclick: () => change('RemoveCrewOption', m.key) }, icon('trash'))),
+      memberScores(m));
   }
 
   function renderPage(inner) {
@@ -230,7 +253,8 @@ export function createCrew({ call, fail, shown, rerender, openPage, preferenceRo
         h('div', { class: 'mds-toolbar crew-toolbar' }, h('div', { class: 'mds-toolbar-actions' }, refresh, add)),
         h('div', { class: 'card-list', 'aria-busy': String(busy) }, view.members.length ? view.members.map(memberRow)
           : h('div', { class: 'card-empty' }, h('strong', null, t('No models yet')), h('span', null, t('Add the models agents may run as. Until there is one, no yesman can be hired and no worker started.'))))),
-      h('p', { class: 'crew-source' }, tNodes('Scores from {source}, {date}, found by each model’s name.', { source, date })),
+      h('p', { class: 'crew-source' }, tNodes('Scores from {source}, {date}, found by each model’s name.', { source, date }), ' ',
+        t('Intelligence is Artificial Analysis’s Intelligence Index; coding is the mean of its coding evaluations. Cost and time are per task of that index. Missing figures are shown as —.')),
     ));
   }
 

@@ -324,7 +324,12 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 /* Settings › yesman: what new yesmen run as, and the crew's models. */
 .crew-page { display: grid; gap: 16px; }
 .crew-toolbar { margin-bottom: 10px; }
-.crew-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+.crew-row { grid-template-columns: minmax(0, 1fr) auto auto; row-gap: 8px; }
+.crew-row .card-row-text > * { white-space: normal; overflow-wrap: anywhere; }
+.crew-metrics { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; font-size: var(--mds-text-caption); }
+.crew-metrics > div { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.crew-metrics dt { color: var(--mds-muted); }
+.crew-metrics dd { margin: 0; color: var(--mds-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .crew-default { flex: none; }
 .crew-source { margin: 0; color: var(--mds-muted); font-size: var(--mds-text-caption); }
 .inline-link { min-height: 0; padding: 0; border: 0; color: var(--mds-ink); font: inherit; text-decoration: underline; text-underline-offset: 2px; }

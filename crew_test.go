@@ -73,6 +73,42 @@ func TestCrewView(t *testing.T) {
 	}
 }
 
+func TestCrewScoresFollowCatalogRefresh(t *testing.T) {
+	a, _ := crewApp(t)
+	name := "GPT-6.1 Sol · synthetic route"
+	a.catalog = newCatalog(func(context.Context) ([]agent.Model, error) {
+		return []agent.Model{{Provider: "synthetic", ID: "local-alias", Name: name, Levels: []string{"high", "xhigh"}}}, nil
+	})
+	a.settings.Crew = crew.Config{Options: []crew.Option{
+		{Provider: "synthetic", Model: "local-alias", Effort: "high"},
+		{Provider: "synthetic", Model: "local-alias", Effort: "xhigh", Score: &crew.Score{Intelligence: 12}},
+	}}
+	s := &service{app: a}
+	ctx := context.Background()
+	check := func(v CrewView, high, xhigh float64) {
+		t.Helper()
+		if len(v.Members) != 2 || v.Members[0].Score == nil || v.Members[1].Score == nil {
+			t.Fatalf("the view lost its scores: %+v", v.Members)
+		}
+		if v.Members[0].Source != crew.SourceAA || v.Members[1].Source != crew.SourceAA || v.Members[0].Score.Intelligence != high || v.Members[1].Score.Intelligence != xhigh || v.Members[0].Score.Effort != "high" || v.Members[1].Score.Effort != "xhigh" {
+			t.Errorf("wrong model/effort scores: %+v, %+v", v.Members[0], v.Members[1])
+		}
+	}
+	// Representative rows of the actual embedded snapshot; no live pi or
+	// user settings are read. A cached catalog keeps its original match.
+	check(s.Crew(ctx), 50.3, 52.5)
+	name = "GPT-6.1 Terra · synthetic route"
+	check(s.Crew(ctx), 50.3, 52.5)
+	check(s.RefreshCrew(ctx), 42.4, 45.3)
+	// Losing a name match must clear the old AA score, preserving only a
+	// configured estimate, rather than borrowing another effort's score.
+	name = "Unmeasured synthetic model"
+	v := s.RefreshCrew(ctx)
+	if v.Members[0].Score != nil || v.Members[0].Source != "" || v.Members[1].Source != crew.SourceUser || v.Members[1].Score == nil || v.Members[1].Score.Intelligence != 12 {
+		t.Errorf("refresh retained a stale match: %+v", v.Members)
+	}
+}
+
 func TestCrewOptions(t *testing.T) {
 	a, _ := crewApp(t)
 	s := &service{app: a}
