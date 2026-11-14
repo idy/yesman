@@ -1256,8 +1256,8 @@ const sameSubmissionImages = (left, right) => left.length === right.length && le
 async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
-  const text = textarea.value.trim();
-  if ((!text && !attachments?.items.length) || attachments?.reading || attachments?.sending || attachments?.recalling || state.modelOptions.get(key)?.busy) return;
+  const text = textarea.value;
+  if ((!text.trim() && !attachments?.items.length) || attachments?.reading || attachments?.sending || attachments?.recalling || state.modelOptions.get(key)?.busy) return;
   const images = imagePayload(attachments?.items ?? []);
   const c = convo(a);
   // Editing after an uncertain submission is a new user intent. Retrying the

@@ -165,6 +165,7 @@ type agent struct {
 	seq                            uint64        // the last event's number
 	turn                           []Event       // the events of the assistant message in progress
 	starting                       chan struct{} // closed when a start finishes, nil otherwise
+	startCancel                    context.CancelFunc
 	stopping                       bool
 	dir                            string   // the workspace, to show paths in it relative to it
 	tools                          []string // the tool calls running, oldest first
@@ -422,15 +423,22 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			continue
 		}
 		a.starting = make(chan struct{})
+		startContext, cancelStart := context.WithCancel(context.Background())
+		a.startCancel = cancelStart
 		a.stopping = false
 		a.info.Status, a.info.Detail, a.info.UpdatedAt = Starting, "", time.Now()
 		m.mu.Unlock()
 		m.changed()
 
 		started := time.Now()
-		p, state, err := m.spawn(a, y, name, role)
+		p, state, err := m.spawn(startContext, a, y, name, role)
+		cancelStart()
 
 		m.mu.Lock()
+		a.startCancel = nil
+		if (a.stopping || m.closed) && err != nil {
+			err = errStopped
+		}
 		if err == nil && (a.stopping || m.closed) {
 			// Stop came during the start: end what it started before
 			// letting Stop return.
@@ -470,7 +478,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 	}
 }
 
-func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, modelState, error) {
+func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman, name, role string) (*proc, modelState, error) {
 	sessions := y.SessionDir(name)
 	if err := os.MkdirAll(sessions, 0o755); err != nil {
 		return nil, modelState{}, err
@@ -494,7 +502,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 	)
 	path := m.cfg.Pi
 	if m.cfg.Command != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		ctx, cancel := context.WithTimeout(startContext, 10*time.Minute)
 		var prefix []string
 		var err error
 		path, prefix, err = m.cfg.Command(ctx)
@@ -515,7 +523,7 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 	m.tokens[token] = a.info.ID
 	m.mu.Unlock()
 	// get_state answers once pi has loaded its session and extensions.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(startContext, 60*time.Second)
 	defer cancel()
 	state, err := p.modelState(ctx)
 	if err != nil {
@@ -918,6 +926,9 @@ func (m *Manager) Stop(id string) {
 		return
 	}
 	a.stopping = true
+	if a.startCancel != nil {
+		a.startCancel()
+	}
 	wait := a.starting
 	m.mu.Unlock()
 	if wait != nil {

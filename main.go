@@ -65,6 +65,7 @@ func main() {
 	}
 	a.pi, a.piErr = findPi()
 	var piCommand func(context.Context) (string, []string, error)
+	var managedRuntime *piruntime.Runtime
 	if os.Getenv("YESMAN_PI") == "" && (a.piErr != nil || piruntime.OfficialNPM(a.pi)) {
 		managed, err := piruntime.New(h.Runtime())
 		a.piErr = err
@@ -72,6 +73,7 @@ func main() {
 			a.pi = managed.Description()
 			a.managedPi = true
 			piCommand = managed.Command
+			managedRuntime = managed
 		}
 	}
 	a.runPi = runPi(a.pi, h.Runtime())
@@ -140,7 +142,12 @@ func main() {
 	mygo.App.OnWindowAllClosed(func() {}) // keep running in the tray
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
-	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { a.agents.StopAll() })
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		if managedRuntime != nil {
+			managedRuntime.Close()
+		}
+		a.agents.StopAll()
+	})
 	mygo.App.WhenReady(func() {
 		if err := mygo.App.Dock.SetIcon(appIcon); err != nil {
 			log.Print("dock icon: ", err)

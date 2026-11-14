@@ -84,6 +84,38 @@ func TestPreparationWaitHonorsContext(t *testing.T) {
 		t.Fatal("preparation ignored deadline")
 	}
 }
+func TestCloseCancelsRuntimeWaiters(t *testing.T) {
+	life, cancel := context.WithCancel(context.Background())
+	r := &Runtime{gate: make(chan struct{}, 1), life: life, closeLife: cancel}
+	r.gate <- struct{}{} // an installer is finishing its cancelled subprocess
+	waiting := make(chan error, 1)
+	go func() { _, _, err := r.Command(context.Background()); waiting <- err }()
+	closed := make(chan struct{})
+	go func() { r.Close(); close(closed) }()
+	select {
+	case err := <-waiting:
+		if err == nil {
+			t.Fatal("closed runtime admitted a waiter")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel waiters")
+	}
+	select {
+	case <-closed:
+		t.Fatal("Close did not join the active installer")
+	default:
+	}
+	<-r.gate
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after installer")
+	}
+	if _, _, err := r.Command(context.Background()); err == nil {
+		t.Fatal("closed runtime reopened")
+	}
+}
+
 func TestPreparedRuntimeIntegrity(t *testing.T) {
 	// The same app build produced by tools/pi-runtime. Fast readonly check,
 	// enabled by CI after first-use preparation on each OS.

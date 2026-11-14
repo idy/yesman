@@ -40,7 +40,7 @@ try{for(const[name,engine]of Object.entries({chromium,webkit}))for(const languag
   },{api,language});
   await page.goto(`http://127.0.0.1:${http.address().port}`);
   const input=page.locator('.composer textarea');await input.waitFor();
-  const text='Original 中文\n'+('full text **markdown** '.repeat(50))+'END';
+  const text='  Original 中文\n'+('full text **markdown** '.repeat(50))+'END  ';
   const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg==','base64');
   const attach=async(count)=>page.locator('.composer input[type=file]').setInputFiles(Array.from({length:count},(_,i)=>({name:`original-${i}.png`,mimeType:'image/png',buffer:bytes})));
   const submit=async(text,count=0)=>{await input.fill(text);if(count)await attach(count);await page.waitForFunction(()=>!document.querySelector('.composer input[type=file]').disabled&&!document.querySelector('.composer textarea').readOnly);if(count)await page.locator('.composer-image').nth(count-1).waitFor();await input.press('Enter');await page.waitForFunction(()=>!document.querySelector('.composer textarea').readOnly&&document.querySelector('.composer textarea').value==='');return page.evaluate(()=>window.sent.filter(s=>s.method==='Yesman.Submit').at(-1));};

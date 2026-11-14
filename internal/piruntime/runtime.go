@@ -26,11 +26,13 @@ const Version = "1.5.2-yesman.1"
 const cli = "node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 
 type Runtime struct {
-	root  string
-	node  string
-	npm   string
-	gate  chan struct{}
-	ready bool
+	root      string
+	node      string
+	npm       string
+	gate      chan struct{}
+	ready     bool
+	life      context.Context
+	closeLife context.CancelFunc
 }
 
 // New discovers Node/npm only. Downloading happens on first Command, outside
@@ -49,7 +51,8 @@ func New(parent string) (*Runtime, error) {
 	}
 	root := filepath.Join(parent, "pi-managed", Version+"-"+hex.EncodeToString(h.Sum(nil))[:16])
 	npm := findNpm(node)
-	return &Runtime{root: root, node: node, npm: npm, gate: make(chan struct{}, 1)}, nil
+	life, closeLife := context.WithCancel(context.Background())
+	return &Runtime{root: root, node: node, npm: npm, gate: make(chan struct{}, 1), life: life, closeLife: closeLife}, nil
 }
 func findNpm(node string) string {
 	// npm's entry script is portable; execute with Node, never through a shell or
@@ -75,18 +78,42 @@ func findNpm(node string) string {
 }
 func (r *Runtime) Directory() string   { return r.root }
 func (r *Runtime) Description() string { return "Managed pi " + Version + " (" + r.root + ")" }
+func (r *Runtime) Close() {
+	if r.closeLife != nil {
+		r.closeLife()
+	}
+	// Wait until a cancelled installer has killed/joined its process tree and
+	// removed its own staging directory before the application exits.
+	r.gate <- struct{}{}
+	<-r.gate
+}
 func (r *Runtime) Command(ctx context.Context) (string, []string, error) {
+	if r.life != nil {
+		if err := r.life.Err(); err != nil {
+			return "", nil, err
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		stop := context.AfterFunc(r.life, cancel)
+		defer func() { stop(); cancel() }()
+	}
 	select {
 	case r.gate <- struct{}{}:
 	case <-ctx.Done():
 		return "", nil, ctx.Err()
 	}
 	defer func() { <-r.gate }()
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
 	if !r.ready {
 		if err := r.prepare(ctx); err != nil {
 			return "", nil, err
 		}
 		r.ready = true
+	}
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
 	}
 	return r.node, []string{filepath.Join(r.root, filepath.FromSlash(cli))}, nil
 }
