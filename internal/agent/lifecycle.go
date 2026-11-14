@@ -22,6 +22,9 @@ func (m *Manager) workspaceAgentLocked(y yesmen.Yesman, info Info) (*agent, erro
 		}
 		a = nil
 	}
+	if a != nil && a.removing {
+		return nil, errStopped
+	}
 	if a == nil {
 		a = &agent{info: Info{ID: info.ID, Yesman: y.Name, Name: info.Name, Role: info.Role, Status: Stopped, Since: info.Since}, dir: y.Path, workspaceSince: y.HiredAt}
 		m.agents[info.ID] = a
@@ -41,6 +44,22 @@ func (m *Manager) workspaceAgentLocked(y yesmen.Yesman, info Info) (*agent, erro
 	}
 	a.dir, a.workspaceSince, a.info.Since = y.Path, y.HiredAt, info.Since
 	return a, nil
+}
+
+// ForgetYesman releases only the drained incarnation that Archive moved. A
+// same-name hire may already exist when service post-processing gets here.
+func (m *Manager) ForgetYesman(name string, since time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, a := range m.agents {
+		if a.info.Yesman == name && a.workspaceSince.Equal(since) && a.retiring && a.proc == nil && a.starting == nil && (a.deliveryWriter == nil || a.deliveryWriter.finished()) {
+			if a.token != "" {
+				delete(m.tokens, a.token)
+				a.token = ""
+			}
+			delete(m.agents, id)
+		}
+	}
 }
 
 // StopYesman stops and drains a workspace's agents. Archive calls this while

@@ -21,7 +21,12 @@ type archiveResult struct {
 }
 
 func archiveManaged(ctx context.Context, m *Manager, store *yesmen.Store, name string) (string, error) {
-	return store.Archive(name, func(y yesmen.Yesman) error { return m.StopYesmanContext(ctx, y.Name) })
+	var since time.Time
+	path, err := store.Archive(name, func(y yesmen.Yesman) error { since = y.HiredAt; return m.StopYesmanContext(ctx, y.Name) })
+	if err == nil {
+		m.ForgetYesman(name, since)
+	}
+	return path, err
 }
 func archivedDelivery(t *testing.T, path, id string) Delivery {
 	t.Helper()
@@ -163,6 +168,10 @@ func TestDeliveryArchiveDrainsLastSnapshotBeforeRenameAndRehire(t *testing.T) {
 		t.Fatal(err)
 	}
 	flushDeliveries(t, m, "alice/lead")
+	m.ForgetYesman("alice", y.HiredAt) // delayed old service cleanup must not remove the new incarnation
+	if current, err := m.Get("alice/lead"); err != nil || !current.Since.Equal(fresh.HiredAt) {
+		t.Fatal("late cleanup removed the new hire")
+	}
 	// Simulate delayed old submission/model callbacks after the name is reused.
 	m.mu.Lock()
 	m.persistDeliveriesLocked(old)
@@ -234,6 +243,79 @@ func TestDeliveryArchiveFencesSubmitWaitingBeforeDispatch(t *testing.T) {
 	}
 	if prompts.Load() != 1 {
 		t.Fatalf("old caller dispatched into the new workspace: %d", prompts.Load())
+	}
+}
+
+func TestDeliveryWorkerRemovalCannotOutliveWorkspaceArchive(t *testing.T) {
+	m, store := newTestManager(t, 0, "FAKE_PI_DELIVERIES=1", "FAKE_PI_DELIVERY_MODE=steer")
+	if err := store.AddWorker("alice", yesmen.Worker{Name: "w1", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	gate, blocked := make(chan struct{}), make(chan struct{})
+	var release sync.Once
+	defer release.Do(func() { close(gate) })
+	var writes atomic.Int32
+	m.cfg.deliveryWrite = func(path string, data []byte) error {
+		if writes.Add(1) == 2 {
+			close(blocked)
+			<-gate
+		}
+		return writeDeliveryFile(path, data)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	id := deliveryTestID(808)
+	if _, err := m.Submit(ctx, "alice/w1", id, "remove while archiving", nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocked:
+	case <-ctx.Done():
+		t.Fatal("writer gate not reached")
+	}
+	removed := make(chan error, 1)
+	go func() { removed <- m.RemoveWorker("alice", "w1") }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m.mu.Lock()
+		a := m.agents["alice/w1"]
+		sealed := a != nil && a.deliverySealed
+		m.mu.Unlock()
+		if sealed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker removal did not seal metadata")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	result := make(chan archiveResult, 1)
+	go func() { path, err := archiveManaged(ctx, m, store, "alice"); result <- archiveResult{path, err} }()
+	select {
+	case r := <-result:
+		t.Fatalf("archive passed worker removal writer: %+v", r)
+	default:
+	}
+	release.Do(func() { close(gate) })
+	select {
+	case err := <-removed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("worker removal stuck")
+	}
+	dest := awaitArchive(t, ctx, result)
+	data, err := os.ReadFile(filepath.Join(dest, ".yesman", "sessions", "w1", "delivery.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var disk deliveryDisk
+	if err = json.Unmarshal(data, &disk); err != nil || len(disk.Records) != 1 || disk.Records[0].State != "interrupted" {
+		t.Fatalf("removed worker archived stale metadata: %v %s", err, data)
+	}
+	if _, err = store.Hire("alice"); err != nil {
+		t.Fatal(err)
 	}
 }
 

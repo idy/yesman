@@ -94,7 +94,9 @@ func (s *service) Dismiss(name string) (string, error) {
 	// While Archive holds the workspace no agent can start in it and no
 	// checkout can run, so the worktrees listed here are all it has.
 	var wts []pool.Worktree
+	var archivedSince time.Time
 	dest, err := a.yesmen.Archive(name, func(y yesmen.Yesman) error {
+		archivedSince = y.HiredAt
 		if err := a.agents.StopYesmanContext(ctx, name); err != nil {
 			return err
 		}
@@ -105,6 +107,7 @@ func (s *service) Dismiss(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	a.agents.ForgetYesman(name, archivedSince)
 	// The pool still records the worktrees at their old paths: point it at
 	// the archive before pruning, or the prune would delete their records
 	// and break the archived checkouts.

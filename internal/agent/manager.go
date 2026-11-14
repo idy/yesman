@@ -172,6 +172,7 @@ type agent struct {
 	deliveryVersion, deliveryOrder uint64
 	workspaceSince                 time.Time
 	retiring, deliverySealed       bool
+	removing                       bool
 	queue                          QueueStatus
 	deliverySettled                uint64 // sequence of last observed settled boundary
 	// nudged: the lead was reminded of open tasks, and neither the user nor
@@ -1061,25 +1062,68 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 	if name == yesmen.LeadName {
 		return errors.New("the lead cannot be removed")
 	}
+	y, release, err := m.cfg.Yesmen.BeginUse(yesman)
+	if err != nil {
+		return err
+	}
+	defer release()
 	id := ID(yesman, name)
+	m.mu.Lock()
+	a := m.agents[id]
+	if a != nil {
+		if a.removing {
+			m.mu.Unlock()
+			return errStopped
+		}
+		a.retiring, a.removing = true, true
+	}
+	m.mu.Unlock()
+	fail := func(err error) error {
+		m.mu.Lock()
+		if a != nil {
+			a.removing = false
+		}
+		m.mu.Unlock()
+		return err
+	}
+	if a != nil {
+		if err := m.ensureDeliveries(a, filepath.Join(y.SessionDir(name), "delivery.json")); err != nil {
+			return fail(err)
+		}
+	}
 	m.Stop(id)
+	if a != nil {
+		m.mu.Lock()
+		var writer *deliveryWriter
+		var events []Event
+		if a.deliveryWriter != nil {
+			if a.deliveryWriter.finished() {
+				a.deliverySealed = false
+				a.deliveryWriter = newDeliveryWriter(filepath.Join(y.SessionDir(name), "delivery.json"), m.cfg.deliveryWrite)
+			}
+			events = m.sealDeliveriesLocked(a)
+			writer = a.deliveryWriter
+		}
+		m.mu.Unlock()
+		for _, event := range events {
+			m.cfg.OnEvent(event)
+		}
+		if writer != nil {
+			if err := writer.close(context.Background()); err != nil {
+				return fail(err)
+			}
+		}
+	}
+	if err = m.cfg.Yesmen.RemoveWorker(yesman, name); err != nil {
+		return fail(err)
+	}
 	m.mu.Lock()
-	var writer *deliveryWriter
-	if a := m.agents[id]; a != nil {
-		writer = a.deliveryWriter
+	if a != nil && m.agents[id] == a {
+		delete(m.agents, id)
 	}
 	m.mu.Unlock()
-	// The name remains reserved until its old writer has finished, preventing
-	// a replacement worker from racing writes to the same receipt file.
-	if writer != nil {
-		writer.close(context.Background())
-	}
-	m.mu.Lock()
-	delete(m.agents, id)
-	m.mu.Unlock()
-	err := m.cfg.Yesmen.RemoveWorker(yesman, name)
 	m.changed()
-	return err
+	return nil
 }
 
 // handoffDone releases the report reservation after delivery and closing.
