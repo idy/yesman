@@ -319,6 +319,34 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await frame(page);
     assert.equal((await seen(page)).ownReceipts, 0);
 
+    // One still to come when the next is sent, which pi then stops before
+    // taking, folds as it finishes: nothing keeps it as it was sent.
+    let count = await page.evaluate(() => window.sent.length);
+    await input.fill("first while working");
+    await page.locator("input[type=file]").setInputFiles([{ name: "d.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") }]);
+    await page.waitForFunction(() => document.querySelectorAll(".composer-image").length === 1);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    const early = await sentID();
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), early);
+    await settled();
+    await input.fill("second while working");
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 2, count);
+    const later = await sentID();
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), later);
+    await settled();
+    assert.equal(await row(early).locator(".msg-user img").count(), 1);
+    assert.match(await row(early).innerText(), /^first while working\s*Accepted for steering/);
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed"), early);
+    await frame(page);
+    assert.equal(await row(early).count(), 0, "a submission a later one followed kept its own row once it finished");
+    assert.match(await folded.locator(`[data-delivery="${early}"]`).innerText(), /^Submission: first while working · 1 image submitted\s*Delivery unconfirmed$/);
+    assert.match(await row(later).innerText(), /^second while working\s*Accepted for steering/);
+    await page.evaluate((id) => window.fixture.native("alice/lead", id, "second while working"), later);
+    await frame(page);
+    assert.equal((await seen(page)).ownReceipts, 0);
+
     // The bridge fails before the server hears of it: uncertain, kept as sent;
     // retrying the unchanged draft is the same submission and the same row.
     await page.evaluate(() => (window.fixture.bridgeDown = true));
@@ -329,8 +357,9 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await row(lost).locator(".msg-user").innerText(), "did this arrive?");
     assert.equal(await row(lost).locator(".delivery-status").innerText(), "Delivery unconfirmed");
     assert.equal(await input.inputValue(), "did this arrive?");
+    count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
-    await page.waitForFunction(() => window.sent.length === 5);
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
     assert.equal(await sentID(), lost);
     await row(lost).locator(".delivery-status", { hasText: "Sending" }).waitFor();
     assert.equal(await page.locator("#thread > .msg-delivery", { hasText: "did this arrive?" }).count(), 1);
@@ -344,8 +373,9 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     // An edited draft is a new submission, and its own row; the earlier
     // uncertain one, superseded, folds with the earlier ones.
     await input.fill("did this arrive? (edited)");
+    count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
-    await page.waitForFunction(() => window.sent.length === 6);
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
     const edited = await sentID();
     assert.notEqual(edited, lost);
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), edited);
@@ -361,7 +391,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await settled();
     const unheard = await sentID();
     assert.match(await row(unheard).innerText(), /^never heard of\s*Delivery unconfirmed$/);
-    let count = await page.evaluate(() => window.sent.length);
+    count = await page.evaluate(() => window.sent.length);
     await input.fill("never heard of (edited)");
     await input.press("Enter");
     await page.waitForFunction((n) => window.sent.length === n + 1, count);
@@ -400,11 +430,12 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await settled();
     assert.equal(await row(alone).locator(".delivery-status").innerText(), "Accepted for follow-up · delivery unconfirmed");
     assert.equal(await row(refused).count(), 0, "a superseded refusal stays in view");
-    assert.equal((await seen(page)).foldedSummary, "29 earlier submissions | 27 delivery unconfirmed · 1 handled by an extension · 1 not sent");
+    assert.equal((await seen(page)).foldedSummary, "30 earlier submissions | 28 delivery unconfirmed · 1 handled by an extension · 1 not sent");
     // The uncertain answer from the server, the latest now, is in view.
     await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed", { error: "pi stopped before answering" }), alone);
     await frame(page);
     assert.match(await row(alone).innerText(), /Delivery unconfirmed/);
+    assert.equal(await row(alone).locator(".msg-user img").count(), 1, "the latest let go of what it was sent as");
     const live = await seen(page);
     results[`${engine}-live`] = { ...live, people: live.people.length };
 
@@ -453,7 +484,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await folded.waitFor();
     assert.equal(await folded.evaluate((el) => el.open), true);
     assert.deepEqual(await seen(page), live);
-    assert.equal(await folded.locator(".receipts-body > [data-delivery]").count(), 29);
+    assert.equal(await folded.locator(".receipts-body > [data-delivery]").count(), 30);
 
     // History reads the same, without what only this window had: the folded
     // line closed again, the latest uncertain one in view from its preview.
@@ -465,7 +496,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.deepEqual(reloaded.people, live.people);
     assert.equal(reloaded.replies, live.replies);
     // The one the server never heard of was only ever this window's.
-    assert.equal(reloaded.foldedSummary, "28 earlier submissions | 26 delivery unconfirmed · 1 handled by an extension · 1 not sent");
+    assert.equal(reloaded.foldedSummary, "29 earlier submissions | 27 delivery unconfirmed · 1 handled by an extension · 1 not sent");
     assert.equal(await folded.evaluate((el) => el.open), false);
     assert.equal(await row(alone).locator(".delivery-image-count").innerText(), "1 image submitted");
     assert.equal(await row(alone).locator("img").count(), 0, "an image was made up from a receipt");
@@ -478,7 +509,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     // Chinese.
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
     await page.waitForTimeout(50);
-    assert.equal((await seen(page)).foldedSummary, "较早的提交记录 · 28 条 | 26 条交付状态尚未确认 · 1 条已由扩展处理 · 1 条未发送");
+    assert.equal((await seen(page)).foldedSummary, "较早的提交记录 · 29 条 | 27 条交付状态尚未确认 · 1 条已由扩展处理 · 1 条未发送");
     assert.deepEqual(errors, []);
     assert.deepEqual(outside, []);
     await context.close();

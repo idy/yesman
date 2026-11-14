@@ -174,6 +174,7 @@ function updateDelivery(c, d) {
   if (d?.agentSince && `${c.id}@${d.agentSince}` !== c.key) return;
   if (!d?.id || (c.deliveries.get(d.id)?.revision ?? -1) >= d.revision) return;
   c.deliveries.set(d.id, d);
+  letGo(c);
   if (c.deliveries.size > 256) {
     const excess = [...c.deliveries.keys()].filter(id => id !== d.id).slice(0,c.deliveries.size-256);
     pruneDeliveryRows(c,excess);
@@ -312,6 +313,7 @@ async function loadConvo(c) {
       const sending = request?.sending && request.submissionID === d.id;
       c.deliveries.set(d.id, { ...d, state: sending ? 'sending' : 'unconfirmed' });
     }
+    letGo(c);
     c.seq = data?.seq ?? 0;
     c.eventSeqs.clear();
     c.piQueue = data?.queue ?? { known: false };
@@ -1431,6 +1433,13 @@ function holdSent(c, id, submission) {
   c.sent.delete(id);
   c.sent.set(id, { text: submission.text, images: submission.images });
   for (const held of [...c.sent.keys()].slice(0, Math.max(0, c.sent.size - SENT_KEPT))) c.sent.delete(held);
+}
+
+// letGo also lets go of one a later submission followed once nothing more
+// will be known about it, such as one still to come when the next was sent
+// that pi then stopped before taking.
+function letGo(c) {
+  for (const id of [...c.sent.keys()]) if (id !== c.lastSent && FINISHED.has(c.deliveries.get(id)?.state)) c.sent.delete(id);
 }
 
 const sameSubmissionImages = (left, right) => left.length === right.length && left.every((image, i) =>
