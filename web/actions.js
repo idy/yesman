@@ -22,7 +22,7 @@ export function registerActions(shortcuts, host) {
       run: () => host.palette().open(),
     },
     {
-      id: 'settings.open', label: 'Open Settings', group: 'General', keys: ['Mod+,'], keywords: ['preferences'],
+      id: 'settings.open', label: 'Go to Settings', group: 'General', keys: ['Mod+,'], keywords: ['open', 'preferences'],
       run: () => host.showSettings(),
     },
     {

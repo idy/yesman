@@ -92,14 +92,14 @@ Packages are installed for the user, in pi's agent directory (`~/.pi/agent`, or 
 
 ### Keyboard shortcuts
 
-The window has keyboard shortcuts for its common actions, a command palette, and Settings › Shortcuts to change them. They work while yesman's window has focus. There are no global shortcuts, and yesman asks for no Accessibility or Input Monitoring permission.
+The window has keyboard shortcuts for its common actions, a command palette, and Settings › Shortcuts to change them. They work while yesman's window has focus. There are no global shortcuts, and they need no Accessibility or Input Monitoring permission.
 
 **Show all commands** (⌘K on macOS, Ctrl+K on Windows and Linux) opens the command palette. Search the window's actions, yesmen and workers by name, keyword or keys; ↑ and ↓ choose, Enter runs, and Esc or the same keys close it. Each action shows its keys. An action that cannot run now stays listed and says why. An action from the palette does what its button or menu does, with the same confirmations, on the agent shown. A dialog it opens, or a conversation it shows, keeps the focus.
 
 | Action | macOS | Windows and Linux |
 | --- | --- | --- |
 | Show all commands | ⌘K, ⇧⌘P | Ctrl+K, Ctrl+Shift+P |
-| Open Settings | ⌘, | Ctrl+, |
+| Go to Settings | ⌘, | Ctrl+, |
 | Open keyboard shortcuts | ⌘/ | Ctrl+/ |
 | Hire a yesman… | ⌘N | Ctrl+N |
 | Focus the message box | ⌘L | Ctrl+L |

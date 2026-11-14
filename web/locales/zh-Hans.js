@@ -922,7 +922,7 @@ export default {
   "Use two of ⌘, ⌥ and ⌃ with this key: one moves the caret or deletes text in fields.": "这个键需同时搭配 ⌘、⌥、⌃ 中的两个：只加一个会在文本框中移动光标或删除文字。",
   "This moves the caret or deletes text in fields. Ctrl or Alt with Page Up or Page Down can be shortcuts.": "这组键会在文本框中移动光标或删除文字。Ctrl 或 Alt 加 Page Up、Page Down 可以作为快捷键。",
   "Show all commands": "显示全部命令",
-  "Open Settings": "打开设置",
+  "Go to Settings": "转到设置",
   "Open keyboard shortcuts": "打开键盘快捷键",
   "Hire a yesman…": "雇用一个 yesman…",
   "Focus the message box": "聚焦输入框",

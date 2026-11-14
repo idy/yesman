@@ -392,6 +392,25 @@ test('the action table registers stable IDs Go accepts, with usable, distinct de
   assert.match(menu, /shortcut\(keys, "files\.tree"\)/);
 });
 
+// Messages are keyed by their English, so a text written twice in the
+// Chinese table keeps only its last translation: another page's button with
+// the same English would say this action's words (Grant's Open Settings, for
+// the system's settings, is not Go to Settings).
+test('every action has its own Chinese label, and no English text is translated twice', async () => {
+  const source = readFileSync(new URL('../web/locales/zh-Hans.js', import.meta.url), 'utf8');
+  const english = [...source.matchAll(/^\s*("(?:[^"\\]|\\.)*")\s*:/gm)].map((m) => JSON.parse(m[1]));
+  const zh = (await import('../web/locales/zh-Hans.js')).default;
+  assert.equal(english.length, Object.keys(zh).length);
+  assert.deepEqual(english.filter((text, i) => english.indexOf(text) !== i), []);
+  for (const platform of ['mac', 'windows']) {
+    for (const action of actionTable(platform).actions()) {
+      assert.ok(action.label in zh && action.group in zh, action.id);
+    }
+  }
+  assert.equal(zh['Go to Settings'], '转到设置');
+  assert.equal(zh['Open Settings'], '打开系统设置');
+});
+
 test('side effect actions run only on the agent shown, and only when it can', () => {
   const working = { id: 'alice/worker-one', yesman: 'alice', role: 'worker', status: 'working' };
   const s = actionTable('mac', working);

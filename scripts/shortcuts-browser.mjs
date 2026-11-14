@@ -341,7 +341,7 @@ async function palette(x, check) {
   await run('open settings');
   await page.waitForFunction(() => document.querySelector('#app').dataset.view === 'settings');
   assert.equal(await page.evaluate(() => document.activeElement.matches('#settings-nav [aria-current="page"]')), true);
-  check('Open Settings from the palette focuses the page’s item in Settings');
+  check('Go to Settings from the palette (found by “open settings”) focuses the page’s item in Settings');
 }
 
 // ---------- 2. Settings › Shortcuts ----------
