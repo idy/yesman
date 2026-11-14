@@ -76,7 +76,7 @@ func TestRecallWithManagedPi(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial, err := m.Submit(ctx, info.ID, deliveryTestID(10000), "hold", nil, info.Since)
-	if err != nil || initial.State != "accepted" {
+	if err != nil || initial.State != "accepted" && initial.State != "dispatched" {
 		// Preserve complete diagnostics only from this synthetic configuration,
 		// not from any user's pi, for platform startup failures.
 		probe := exec.CommandContext(ctx, node, filepath.Join(runtime, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"), "--mode", "rpc", "--no-session", "-e", cfg.Extension)
@@ -86,6 +86,19 @@ func TestRecallWithManagedPi(t *testing.T) {
 		probe.Stdin = strings.NewReader("{\"type\":\"get_state\",\"id\":\"diagnostic\"}\n")
 		output, probeErr := probe.CombinedOutput()
 		t.Fatalf("initial prompt state=%s err=%v detail=%s; isolated probe %v: %s", initial.State, err, initial.Error, probeErr, output)
+	}
+	// Wait for the deterministic provider to enter its hold gate. Acceptance
+	// precedes the initial steering poll; enqueueing before it may legitimately
+	// be taken as initial context rather than remain pending in this fixture.
+	providerDeadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(temp, "audit")); err == nil {
+			break
+		}
+		if time.Now().After(providerDeadline) {
+			t.Fatal("provider did not enter hold gate")
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 	image := Image{Type: "image", MimeType: "image/png", Data: "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg=="}
 	text := "original " + strings.Repeat("complete text 中文\n", 100)

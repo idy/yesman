@@ -16,9 +16,9 @@ try {
  });
  assert.equal(p.status,0,p.stderr);
  const reply=p.stdout.trim().split('\n').map(line=>JSON.parse(line)).find(r=>r.id==='public-entry');
- assert.equal(reply?.data?.capability,2,'npm public CLI still reaches an unpatched bundle');
+ assert.equal(reply?.data?.capability,3,'npm public CLI still reaches an unpatched bundle');
 } finally {await rm(cliConfig,{recursive:true,force:true});}
-const {Agent}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-agent-core/dist/index.js')));
+const {Agent,hostInputRefs}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-agent-core/dist/index.js')));
 const {createAssistantMessageEventStream}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-ai/dist/index.js')));
 const model={id:'fixture',name:'Fixture',api:'fixture',provider:'fixture',baseUrl:'',input:['text'],contextWindow:1000,maxTokens:10,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}};
 const usage={input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}};
@@ -78,6 +78,7 @@ for(const mode of ['all','one-at-a-time']){
  agent.cancelQueuedMessage(epoch,a,0);
  await agent.continue();
  assert.deepEqual(events.flatMap(e=>e.changes).filter(e=>e.state==='taken').map(e=>e.queueId),[s1,s2,b,c]);
+ assert.deepEqual(hostInputRefs(agent.state.messages).filter(r=>r?.identity?.queueId && [s1,s2,b,c].includes(r.identity.queueId)).map(r=>r.identity.queueId),[s1,s2,b,c]);
  assert.equal(seen.length,4);assert(seen.every(m=>m===same));assert.equal(JSON.stringify(same),original);
  assert.equal(agent.promoteQueuedMessage(epoch,b,0).outcome,'not_pending');
  assert.equal(JSON.stringify(requests).includes('itemRevision'),false);

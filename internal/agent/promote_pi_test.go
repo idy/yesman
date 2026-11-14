@@ -102,11 +102,21 @@ func newPromotionFixture(t *testing.T) *promotionFixture {
 	if _, err = f.m.Submit(ctx, f.info.ID, deliveryTestID(60000), "hold", nil, f.info.Since); err != nil {
 		t.Fatal(err)
 	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(temp, "audit")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("provider did not enter hold gate")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 	f.m.mu.Lock()
 	capability := f.m.agents[f.info.ID].nativeQueue.Capability
 	f.m.mu.Unlock()
-	if capability != 2 {
-		t.Fatal("promotion requires real v2 runtime")
+	if capability != 3 {
+		t.Fatal("promotion requires real v3 runtime")
 	}
 	return f
 }

@@ -465,6 +465,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		a.proc = p
 		p.piSession.Store(state.SessionID)
 		a.nativeQueue = state.PendingQueue
+		p.origins.native = state.PendingQueue.Capability == 3
 		if state.PendingQueue.supported() {
 			a.queue = pendingStatus(state.PendingQueue)
 		}
@@ -556,6 +557,7 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 	raw = p.origins.observe(kind, raw)
+	m.observeNativeInput(a, p, kind, raw)
 	m.observeDelivery(a, p, kind, raw)
 	m.follow(a, p, kind, raw)
 	switch kind {
@@ -809,6 +811,9 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		}
 		m.mu.Lock()
 		retiring := a.retiring || a.proc != p
+		if a.nativeQueue.Capability == 3 {
+			cmd["hostOrigin"] = origin
+		}
 		if messageID != "" && a.nativeQueue.supported() {
 			cmd["submissionId"] = messageID
 		}
@@ -894,7 +899,16 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	// reader as the answer arrives: events it handles next are not in the
 	// history, and the client replays them.
 	var conv Conversation
-	r, err := p.callAt(ctx, map[string]any{"type": "get_messages"}, func() {
+	r, err := p.callObserved(ctx, map[string]any{"type": "get_messages"}, func(r response) {
+		if p.origins.native && r.Success {
+			var recorded struct {
+				HostSession    string         `json:"hostSession"`
+				RecordedInputs []hostInputRef `json:"recordedInputs"`
+			}
+			if json.Unmarshal(r.Data, &recorded) == nil {
+				m.reconcileRecordedInputs(a, p, recorded.HostSession, recorded.RecordedInputs)
+			}
+		}
 		m.mu.Lock()
 		pruned := m.pruneDeliveryEventLocked(a)
 		conv.Live, conv.Seq = append([]Event(nil), a.turn...), a.seq
@@ -908,12 +922,19 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 		return Conversation{}, err
 	}
 	var data struct {
-		Messages json.RawMessage `json:"messages"`
+		Messages       json.RawMessage `json:"messages"`
+		InputRefs      []hostInputRef  `json:"inputRefs"`
+		RecordedInputs []hostInputRef  `json:"recordedInputs"`
+		HostSession    string          `json:"hostSession"`
 	}
 	if err := json.Unmarshal(r.Data, &data); err != nil {
 		return Conversation{}, err
 	}
-	conv.Messages = p.origins.project(data.Messages)
+	if p.origins.native && data.HostSession == p.piSession.Load().(string) {
+		conv.Messages = projectNativeMessages(data.Messages, data.InputRefs)
+	} else {
+		conv.Messages = p.origins.project(data.Messages)
+	}
 	return conv, nil
 }
 

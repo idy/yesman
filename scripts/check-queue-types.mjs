@@ -31,6 +31,9 @@ const pending: PendingQueueSnapshot = await client.getPendingQueue();
 const cancelled: PendingQueueResult = await client.cancelQueuedMessage(pending.epoch, handle);
 const promoted = await client.promoteQueuedMessage(pending.epoch, handle, pending.items[0].itemRevision, pending.controlGeneration!);
 const promotion: import('@earendil-works/pi-agent-core').PendingPromotionResult = agent.promoteQueuedMessage(snapshot.epoch, handle, snapshot.items[0].itemRevision);
+const host = await client.getHostMessages();
+const refs: (import('@earendil-works/pi-agent-core').HostInputRef|null)[] = host.inputRefs;
+const ownHost = session.getHostMessages();
 const sessionPromotion = session.promoteQueuedMessage(snapshot.epoch, handle, 0, snapshot.controlGeneration!);
 const promoteWire: RpcCommand = {type:'promote_queued_message',epoch:snapshot.epoch,queueId:handle,expectedRevision:0,controlGeneration:0};
 // @ts-expect-error Queue identity is not part of a model message.

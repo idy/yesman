@@ -37,7 +37,7 @@ const image={type:'image',mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAABA
 const id=n=>Date.now().toString(16).padStart(12,'0')+n.toString(16).padStart(36,'0');
 const results=[];
 try {
- const initial=await call({type:'get_state'});assert.equal(initial.pendingQueue.capability,2);assert.equal(initial.runtime,'yesman-pi/1.5.2-2');
+ const initial=await call({type:'get_state'});assert.equal(initial.pendingQueue.capability,3);assert.equal(initial.runtime,'yesman-pi/1.5.2-3');
  for(const mode of ['one-at-a-time','all']){
   await rm(`${temp}/gate`,{force:true});
   await call({type:'set_steering_mode',mode});await call({type:'set_follow_up_mode',mode});
@@ -82,7 +82,7 @@ try {
   const ids=Array.from({length:5},(_,n)=>id(200+(mode==='all'?20:0)+n));
   await Promise.all(ids.map((submissionId,n)=>call({type:n===0||n===4?'steer':'follow_up',message:'same',images:[image,image],submissionId})));
   const q=await call({type:'get_pending_queue'}), b=q.items.find(i=>i.submissionId===ids[2]), c=q.items.find(i=>i.submissionId===ids[3]);
-  assert.equal(q.promoteAllowed,true);assert.equal(q.idleResume,false);
+  assert.equal(q.promoteAllowed,true);assert.equal(q.idleResume,true);
   const promote=(item,controlGeneration=q.controlGeneration)=>call({type:'promote_queued_message',epoch:q.epoch,queueId:item.queueId,expectedRevision:item.itemRevision,controlGeneration});
   assert.equal((await promote(b,q.controlGeneration+1)).outcome,'stale_control');
   const replies=await Promise.all([promote(b),promote(b)]);
@@ -113,15 +113,18 @@ try {
  const stopQueue=await call({type:'get_pending_queue'}),stopItem=stopQueue.items.find(i=>i.submissionId===stopId);
  await call({type:'abort'});
  const stale=await call({type:'promote_queued_message',epoch:stopQueue.epoch,queueId:stopItem.queueId,expectedRevision:0,controlGeneration:stopQueue.controlGeneration});
- assert.equal(stale.outcome,'stale_control');assert.equal(stale.promoteAllowed,false);
+ assert.equal(stale.outcome,'stale_control');
+ await writeFile(`${temp}/gate`,'release');
+ const resumeStart=records.length;
  const idle=await call({type:'promote_queued_message',epoch:stale.epoch,queueId:stopItem.queueId,expectedRevision:0,controlGeneration:stale.controlGeneration});
- assert.equal(idle.outcome,'inactive');assert.equal(idle.items.find(i=>i.queueId===stopItem.queueId).kind,'followUp');
+ assert.equal(idle.outcome,'promoted');
+ await until(()=>records.slice(resumeStart).some(r=>r.type==='agent_settled'));
+ assert.equal(records.slice(resumeStart).filter(r=>r.type==='message_end'&&r.message?.role==='user').length,1);
  assert.equal((await call({type:'get_state'})).isStreaming,false);
- await call({type:'cancel_queued_message',epoch:idle.epoch,queueId:stopItem.queueId,expectedRevision:0});
  const freshSession=await call({type:'new_session'});
  const retired=await call({type:'promote_queued_message',epoch:idle.epoch,queueId:stopItem.queueId,expectedRevision:0,controlGeneration:idle.controlGeneration});
  assert(['not_pending','stale','stale_control'].includes(retired.outcome));
- results.push({abort:'old request rejected',idle:'explicitly unsupported; no run started',newSession:'old handle rejected'});
+ results.push({abort:'old request rejected',idle:'explicit fresh-generation resume delivers once',newSession:'old handle rejected'});
  const hooks=await readFile(`${temp}/hooks`,'utf8'), contexts=await readFile(`${temp}/contexts`,'utf8');
  for(const field of ['submissionId','queueId','pendingQueue']){assert.equal(hooks.includes(field),false);assert.equal(contexts.includes(field),false);}
  assert(hooks.includes('transform:same')); // real third-party transform remained active

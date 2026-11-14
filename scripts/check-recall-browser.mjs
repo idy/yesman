@@ -136,9 +136,10 @@ try{for(const[name,engine]of selectedEngines)for(const language of ['en','zh-Han
   assert.equal(await page.locator('.composer-image').count(),2);
   assert.equal(await page.locator('.composer-image img').first().getAttribute('src'),`data:image/png;base64,${bytes.toString('base64')}`);
   await control('ReleaseProvider');
-  await page.waitForFunction(()=>document.querySelector('#thread > .msg-user .message-copy'));
-  await page.locator('#thread > .msg-user .message-copy').first().click();assert.equal(await page.evaluate(()=>window.copied.at(-1)),'hold');
-  assert.equal(await page.locator('#thread > .msg-user .message-recall').count(),0);
+  const nativeCopy = page.locator('#thread > .msg-user .message-copy, #thread > .msg-delivery[data-bound="true"] > .message-actions > .message-copy');
+  await nativeCopy.first().waitFor();
+  await nativeCopy.first().click();assert.equal(await page.evaluate(()=>window.copied.at(-1)),'hold');
+  assert.equal(await page.locator('#thread > .msg-user .message-recall, #thread > .msg-delivery[data-bound="true"] .message-recall').count(),0);
   await page.setViewportSize({width:480,height:740});await page.evaluate(()=>document.documentElement.dataset.theme='dark');
   if(out)await page.screenshot({path:`${out}/${name}-${language}-real-recall.png`});
   const counts=await control('Counts');assert.equal(counts.submit,5);assert.equal(counts.cancel,6);

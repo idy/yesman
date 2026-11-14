@@ -49,6 +49,8 @@ jobs:
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-queue-runtime.mjs
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-queue-sdk.mjs
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-promote-checkpoints.mjs
+          YESMAN_TEST_RUNTIME="$runtime" node scripts/check-input-identity.mjs
+          YESMAN_TEST_RUNTIME="$runtime" node scripts/check-input-projection.mjs
           npm install --prefix "$RUNNER_TEMP/yesman-types" --ignore-scripts --no-audit --no-fund typescript@5.9.3
           YESMAN_TEST_RUNTIME="$runtime" YESMAN_TEST_TSC="$RUNNER_TEMP/yesman-types/node_modules/typescript/bin/tsc" node scripts/check-queue-types.mjs
 

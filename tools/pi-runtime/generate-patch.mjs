@@ -3,20 +3,25 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
+import { identityPatch } from './identity-patch.mjs';
+import { idlePatch } from './idle-patch.mjs';
 const root = resolve(process.argv[2]);
 const dest = resolve(process.argv[3]);
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 const patches = [];
 async function patch(path, transform) {
   const original = await readFile(resolve(root, 'node_modules', path), 'utf8');
+  const existing = patches.find(p => p.path === path);
   let source = original;
-  const edits = [];
+  for (const e of existing?.edits ?? []) source = source.replace(e.before,e.after);
+  const edits = [...(existing?.edits ?? [])];
   const change = (before, after) => {
     if (source.split(before).length !== 2) throw new Error(`Nonunique anchor in ${path}: ${before.slice(0,100)}`);
     source = source.replace(before, after); edits.push({ before, after });
   };
   transform(change, source);
-  patches.push({ path, before: sha(original), after: sha(source), edits });
+  const entry = { path, before: sha(original), after: sha(source), edits };
+  if (existing) patches[patches.indexOf(existing)] = entry; else patches.push(entry);
 }
 const core = '@earendil-works/pi-agent-core/dist/';
 const app = '@earendil-works/pi-coding-agent/dist/';
@@ -184,5 +189,7 @@ await patch('@earendil-works/pi-coding-agent/package.json', (change) => {
   change('"pi": "dist/bundle/cli.js"', '"pi": "dist/cli.js"');
   change('"import": "./dist/bundle/rpc-entry.js"', '"import": "./dist/rpc-entry.js"');
 });
-await writeFile(dest, JSON.stringify({ upstream: '1.5.2', revision: 2, patches }, null, 2)+'\n');
+await identityPatch(patch, core, app);
+await idlePatch(patch, core, app);
+await writeFile(dest, JSON.stringify({ upstream: '1.5.2', revision: 3, patches }, null, 2)+'\n');
 console.log(`${patches.length} source files recorded in ${dest}`);

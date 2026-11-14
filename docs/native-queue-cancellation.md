@@ -1,7 +1,7 @@
 # Managed pi and native message recall
 
 yesman's default supported runtime is **pi 1.5.2 with queue protocol patch 1**
-(`1.5.2-yesman.2`). It provides actual per-occurrence pending identity and atomic
+(`1.5.2-yesman.3`). It provides actual per-occurrence pending identity and atomic
 cancellation. Original upstream pi 1.5.2 lacks that API; external runtimes retain
 normal sending/Copy and only expose recall if they report the supported protocol.
 
@@ -51,7 +51,7 @@ The upstream npm version is `@earendil-works/pi-coding-agent@1.5.2`, MIT license
 upstream tag `v1.5.2` resolves to `b4afdddf44e059c67ccf5097e5317d913521b470`.
 `assets/LICENSE-pi` preserves the upstream license. Downloaded dependencies retain
 the files/licenses published in their integrity-pinned npm packages. The source
-patch covers ten files: core implementation/declarations; AgentSession
+patch covers twelve files: core implementation/declarations; AgentSession
 implementation/declarations; RPC mode/types/client implementation/declarations;
 and the package CLI/RPC entrypoint paths plus a thin entry at the original bundled
 CLI path (so npm's existing platform shims also reach patched code). It adds one
@@ -89,9 +89,10 @@ upgrades (each runtime can occupy roughly 154 MB). They may still be used by
 running processes. This feature does not automatically delete them or implement
 cache GC; an ownership-aware cache collector is optional future work.
 
-## Follow-up promotion protocol (implementation in progress)
+## Follow-up promotion and idle recovery
 
-Capability 2 adds `promote_queued_message` and SDK `promoteQueuedMessage`.
+Capability 3 includes the v2 `promote_queued_message` and SDK `promoteQueuedMessage`,
+plus Session-owned idle admission and separate host-only input provenance.
 The command identifies an existing epoch/queueId plus its item revision and the
 Session control generation. Native promotion synchronously moves that same entry
 to the tail of steering, preserving other entries and the original message object.
@@ -101,20 +102,33 @@ based on the same snapshot cannot both change the entry. A later intentional
 cancel of the updated steering entry remains legal. New Go accepts v1 for recall,
 but never infers promotion support from counts or a v1 capability.
 
-The runtime advertises `promoteAllowed` only for an active Session with no pending
-Abort/settlement barrier. Abort increments its control generation, preventing a
+The runtime advertises `promoteAllowed` for an active Session without a pending
+Abort/settlement barrier, or a fully idle Session that can reserve a queued run. Abort increments its control generation, preventing a
 late pre-Stop request from mutating or waking the queue. Promotion does not interrupt
 the in-flight provider or any tool: native steering is polled after the assistant
 turn and its complete tool batch, subject to existing retry/compaction/hooks and
 steering FIFO/mode. The same occurrence may be taken before its promotion ACK
 arrives; receipt reconciliation preserves that later state.
 
-**Idle queued-run resume is not implemented in this checkpoint**: `idleResume`
-is false and idle follow-up promotion returns `inactive` without changing queues
-or starting a provider call. It needs a Session-owned lifecycle, not a bare
-`agent.continue()` or another loop. Desktop Send now/footer projection and native
-occurrence-to-history identity integration are also pending. This backend protocol
-does not claim those remaining parts of the 0.1.34 feature are complete.
+An idle Session reserves its existing lifecycle before asynchronous model/auth
+checks (bounded and cancellable), then claims the core run before promoting and
+draining native input. It prepares that claimed input without repeating input
+hooks/template expansion, and reuses the original retry/compaction/settle driver.
+Abort invalidates admission and can stop a claimed input during preparation before
+any model request. A stopped process has no queue authority and cannot be resumed
+by this operation. Desktop Send now/footer and final receipt grouping remain
+separate UI integration work.
+
+Input identity is carried by batch position and host event envelopes, never on
+AgentMessage. A same-object duplicate has distinct occurrences. After recording a
+user message, pi appends minimal `yesman-input-v1` custom metadata linked to its
+actual entry ID; it contains no image/text payload or queue authority. These custom
+records do not enter model context; boundary/compaction hook projections redact
+their private data. Live `get_messages` returns a parallel `inputRefs` array; idle
+history uses the canonical session projection/entry IDs. `recordedInputs` also
+reconciles known receipts after compaction removes their messages from context.
+Legacy history remains unknown rather than being matched by body or assistant
+answers. Only Go's window DTO gets the existing `yesman` projection field.
 
 Go promotion never calls Submit or requires a retained original payload. It
 captures owner/process/session identity under a short workspace lease, releases

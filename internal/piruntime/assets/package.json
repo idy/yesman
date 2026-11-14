@@ -1,6 +1,6 @@
 {
   "name": "yesman-pi-runtime",
-  "version": "1.5.2-yesman.2",
+  "version": "1.5.2-yesman.3",
   "private": true,
   "type": "module",
   "description": "Pinned pi runtime with yesman's atomic pending-message API",

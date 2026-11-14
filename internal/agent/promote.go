@@ -16,9 +16,8 @@ type PromotionResult struct {
 }
 
 // PromoteSubmission moves one existing occurrence. It neither creates an intent
-// nor sends payload, starts pi, aborts a run, or replays either queue. Native v2
-// presently admits this only into an active Session; idle resume is explicit in
-// the capability snapshot and remains unavailable until its lifecycle is proven.
+// nor sends payload, starts pi, aborts a run, or replays either queue. The live
+// runtime authorizes active steering admission or its own serial idle run.
 func (m *Manager) PromoteSubmission(ctx context.Context, agentID, id string, since time.Time) (PromotionResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -42,7 +41,7 @@ func (m *Manager) PromoteSubmission(ctx context.Context, agentID, id string, sin
 	}
 	d, exists := a.deliveries[id]
 	p := a.proc
-	if !exists || p == nil || a.nativeQueue.Capability != 2 || !a.deliveryView(d).NativePending || d.Session != p.deliverySession() {
+	if !exists || p == nil || a.nativeQueue.Capability < 2 || !a.deliveryView(d).NativePending || d.Session != p.deliverySession() {
 		m.mu.Unlock()
 		return PromotionResult{}, errors.New("this message has no supported native pending occurrence")
 	}
