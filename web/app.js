@@ -14,6 +14,7 @@ import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
 import { createCrew } from './crew.js';
+import { createUsagePage } from './usage.js';
 import { createEnvPage } from './env.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
@@ -1304,6 +1305,7 @@ function renderWelcome(body) {
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
   { page: 'yesman', label: 'yesman', icon: 'users' },
+  { page: 'usage', label: 'Model usage', icon: 'chart' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
   { page: 'secrets', label: 'Secrets', icon: 'lock' },
   { page: 'variables', label: 'Variables', icon: 'code' },
@@ -1353,6 +1355,7 @@ async function loadSettingsPage(page) {
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
     else if (page === 'pi') { await piPage.load(); return; }
     else if (page === 'yesman') { await crewPage.load(); return; }
+    else if (page === 'usage') { usagePage.load(); return; }
     else if (page === 'secrets') { await secretsPage.load(); return; }
     else if (page === 'variables') { await variablesPage.load(); return; }
   } catch (err) {
@@ -1369,6 +1372,7 @@ function renderSettings(body) {
   else if (state.view.page === 'storage') renderStorage(inner);
   else if (state.view.page === 'pi') piPage.render(inner);
   else if (state.view.page === 'yesman') crewPage.renderPage(inner);
+  else if (state.view.page === 'usage') usagePage.render(inner);
   else if (state.view.page === 'secrets') secretsPage.render(inner);
   else if (state.view.page === 'variables') variablesPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
@@ -1432,7 +1436,14 @@ const crewPage = createCrew({
   shown: () => state.view.kind === 'settings' && state.view.page === 'yesman',
   rerender: () => renderBody(),
   openPage: () => showSettings('yesman'),
+  openUsage: () => showSettings('usage'),
   preferenceRow,
+});
+// Settings › Model usage: what agents actually used, in usage.js.
+const usagePage = createUsagePage({
+  call,
+  shown: () => state.view.kind === 'settings' && state.view.page === 'usage',
+  openScores: () => showSettings('yesman'),
 });
 // Settings › Secrets and Settings › Variables, in env.js.
 const envPage = (kind) => createEnvPage(kind, {

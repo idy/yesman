@@ -54,6 +54,9 @@ type app struct {
 	piJobs *piJobs
 	// catalog is pi's catalog of models, for the crew.
 	catalog *catalog
+	// usage is what Settings › Model usage read of agents' session logs.
+	usageOnce sync.Once
+	usage     *usageIndex
 	// vault and variables are what agents' commands get as environment
 	// variables, in Settings › Secrets and Settings › Variables.
 	vault     *secrets.Vault

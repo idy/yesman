@@ -246,6 +246,10 @@
     "pencil": {
       "name": "pencil-simple",
       "codepoint": "e3b4"
+    },
+    "chart": {
+      "name": "chart-bar",
+      "codepoint": "e150"
     }
   },
   "fonts": {
