@@ -13,7 +13,6 @@ Each release's section is what installed copies show as its release notes.
 - The lead chooses a member of the crew for each worker, weighing how smart, fast and costly each is for the task, from Artificial Analysis's scores. Without a choice, a worker runs as its lead's model.
 - yesman finds each model's scores by its name. For a model Artificial Analysis has no record of, you give your own estimate when you add it.
 - You can still run any agent as any of pi's models from the composer.
-
 ## 0.1.17
 
 - This release retains the image submission support shipped in 0.1.16. There are no additional application changes.
