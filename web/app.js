@@ -1419,7 +1419,7 @@ function renderConfig(inner) {
   const e = c.exported;
   const exportHint = e
     ? h('div', null,
-        h('p', null, tNodes('Exported {repos} and the settings to {path}.', { repos: repositories(e.repos), path: h('span', { class: 'path', title: e.path }, e.path) }),
+        h('p', null, tNodes('Exported {repos} and the settings to {path}', { repos: repositories(e.repos), path: h('span', { class: 'path', title: e.path }, e.path) }),
           e.skipped.length ? [' ', t('Left out, as they are not from GitHub: {names}.', { names: e.skipped.join(', ') })] : null),
         h('p', null, exportedEnv(e)))
     : h('p', null, t('The theme, the fetch schedule, every GitHub repository in the pool, the variables and the secrets with the password that opens them, as a TOML file. Keep it private.'));
