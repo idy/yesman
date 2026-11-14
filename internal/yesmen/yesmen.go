@@ -280,7 +280,7 @@ func (s *Store) get(name string) (Yesman, error) {
 		DisplayName string    `json:"displayName"`
 		Model       string    `json:"model"`
 	}
-	_ = readJSON(filepath.Join(y.MetaDir(), "yesman.json"), &meta)
+	_ = readYesmanMetadata(filepath.Join(y.MetaDir(), "yesman.json"), &meta)
 	y.HiredAt, y.Model = meta.HiredAt, meta.Model
 	y.DisplayName = meta.DisplayName
 	return y, nil
@@ -313,7 +313,7 @@ func (s *Store) Rename(name, label string) (Yesman, error) {
 		}
 		path := filepath.Join(y.MetaDir(), "yesman.json")
 		meta := map[string]json.RawMessage{}
-		if err := readJSON(path, &meta); err != nil {
+		if err := readYesmanMetadata(path, &meta); err != nil {
 			return err
 		}
 		if meta == nil {
