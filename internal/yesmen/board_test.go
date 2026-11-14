@@ -159,3 +159,81 @@ func TestWorkerNumbers(t *testing.T) {
 		t.Errorf("numbers = %v", got)
 	}
 }
+
+// A task records when it became done and who owned it then, keeps them
+// while it stays done, and forgets them when reopened or dropped.
+func TestBoardDoneMetadata(t *testing.T) {
+	tmp := t.TempDir()
+	s := New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
+	if _, err := s.Hire("alice"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.ChangeBoard("alice", BoardChange{Add: []TaskEdit{
+		{Title: ptr("Ship"), Owner: ptr("w1")},
+		{Title: ptr("Born done"), Status: ptr("done"), Owner: ptr("w2")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !b.Tasks[0].DoneAt.IsZero() || b.Tasks[0].DoneOwner != "" {
+		t.Fatalf("open task has done metadata: %+v", b.Tasks[0])
+	}
+	if b.Tasks[1].DoneAt.IsZero() || b.Tasks[1].DoneOwner != "w2" {
+		t.Fatalf("task added done = %+v", b.Tasks[1])
+	}
+
+	b, err = s.ChangeBoard("alice", BoardChange{Update: []TaskEdit{{ID: "t1", Status: ptr("done")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := b.Tasks[0]
+	if done.DoneAt.IsZero() || done.DoneOwner != "w1" || !done.DoneAt.Equal(done.UpdatedAt) {
+		t.Fatalf("done task = %+v", done)
+	}
+
+	// Staying done keeps the time and owner, even when the owner changes
+	// and the note is edited later.
+	time.Sleep(2 * time.Millisecond)
+	b, err = s.ChangeBoard("alice", BoardChange{Update: []TaskEdit{{ID: "t1", Status: ptr("done"), Owner: ptr("lead"), Note: ptr("merged")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Tasks[0]; !got.DoneAt.Equal(done.DoneAt) || got.DoneOwner != "w1" || got.Owner != "lead" {
+		t.Fatalf("still done = %+v, want doneAt %v by w1", got, done.DoneAt)
+	}
+
+	// Reopening forgets them; done again records the new time and owner.
+	for _, status := range []string{"doing", "dropped"} {
+		b, err = s.ChangeBoard("alice", BoardChange{Update: []TaskEdit{{ID: "t1", Status: ptr(status)}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := b.Tasks[0]; !got.DoneAt.IsZero() || got.DoneOwner != "" {
+			t.Fatalf("%s task kept done metadata: %+v", status, got)
+		}
+	}
+	b, err = s.ChangeBoard("alice", BoardChange{Update: []TaskEdit{{ID: "t1", Status: ptr("done")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Tasks[0]; !got.DoneAt.After(done.DoneAt) || got.DoneOwner != "lead" {
+		t.Fatalf("done again = %+v", got)
+	}
+
+	// Persisted, and read back.
+	b, err = s.Board("alice")
+	if err != nil || b.Tasks[0].DoneOwner != "lead" || b.Tasks[0].DoneAt.IsZero() {
+		t.Fatalf("read back = %+v, %v", b.Tasks, err)
+	}
+}
+
+// A task done before the metadata existed is not given a completion time.
+func TestBoardLegacyDoneStaysUnrecorded(t *testing.T) {
+	b := Board{Tasks: []Task{{ID: "t1", Title: "Old", Status: TaskDone, Owner: "w1"}}, Next: 1}
+	if err := b.apply(BoardChange{Update: []TaskEdit{{ID: "t1", Note: ptr("released")}}}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Tasks[0]; !got.DoneAt.IsZero() || got.DoneOwner != "" {
+		t.Fatalf("legacy done task = %+v", got)
+	}
+}
