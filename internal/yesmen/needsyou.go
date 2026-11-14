@@ -73,12 +73,17 @@ func (h Handoff) Open() bool { return h.ClosedAt.IsZero() }
 type Handoffs struct {
 	Items []Handoff `json:"items"`
 	Next  int       `json:"next"`
-	// trimmed remembers the tool calls of closed handoffs trimmed from
-	// Items, so that the same call cannot register one again; see trim.
-	// trimmedBefore is when the latest forgotten one was registered.
-	trimmed       []trimmedCall
-	trimmedBefore time.Time
-	extra         map[string]json.RawMessage
+	// trimmed remembers the latest tool calls of closed handoffs trimmed
+	// from Items, so that the same call cannot register one again, and
+	// forgotten a fingerprint of the older ones; see trim.
+	trimmed   []trimmedCall
+	forgotten *callFilter
+	// unsure, only in a file of a pre-release version, is when the latest
+	// of the calls it forgot without a fingerprint was registered: since
+	// those cannot be told from new calls, every call it does not know is
+	// refused.
+	unsure time.Time
+	extra  map[string]json.RawMessage
 }
 
 // trimmedCall is the tool call of a handoff no longer kept.
@@ -112,7 +117,8 @@ func (hs Handoffs) Find(id string) (Handoff, bool) {
 const (
 	maxOpenHandoffs = 50
 	// keptClosed closed handoffs are kept as history, the most recently
-	// closed; keptCalls bounds the tool calls of older ones remembered.
+	// closed; the tool calls of keptCalls older ones are kept as they are,
+	// and of the others as a fingerprint.
 	keptClosed        = 30
 	keptCalls         = 1000
 	maxHandoffTitle   = 200
@@ -162,27 +168,18 @@ func (s *Store) openHandoffs(name string) (*handoffsFile, Handoffs, error) {
 	if err != nil {
 		return nil, Handoffs{}, err
 	}
-	return openHandoffs(y)
+	return openHandoffs(s.root, y, &s.metaMu)
 }
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-// AddHandoff is AddHandoffBy for a caller whose process start is unknown.
-func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
-	return s.AddHandoffBy(name, h, time.Time{})
-}
-
-// AddHandoffBy registers a handoff and returns it, and whether it is new.
-// started is when the process that made h.ToolCall started, or zero.
+// AddHandoff registers a handoff and returns it, and whether it is new.
 //
-// A tool call registers one handoff, ever: the same call again returns that
-// handoff, without a second one, or, once the handoff was closed and trimmed
-// from the history, an error. The tool calls of trimmed handoffs are
-// remembered up to a bound; past it, the oldest are forgotten, and a call
-// from a process started before the latest forgotten one was registered is
-// refused, since it might repeat it. A process started later cannot have
-// made a forgotten call.
-func (s *Store) AddHandoffBy(name string, h Handoff, started time.Time) (Handoff, bool, error) {
+// A tool call registers one handoff, ever, whichever process makes it: the
+// same call again returns that handoff, without a second one, or, once the
+// handoff was closed and trimmed from the history, an error. What decides is
+// the call itself, kept in the file, never when its process started.
+func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 	h.Type = strings.TrimSpace(h.Type)
 	if !slices.Contains(HandoffTypes, h.Type) {
 		return Handoff{}, false, fmt.Errorf("type must be one of %s", strings.Join(HandoffTypes, ", "))
@@ -219,8 +216,11 @@ func (s *Store) AddHandoffBy(name string, h Handoff, started time.Time) (Handoff
 		if i := slices.IndexFunc(hs.trimmed, func(c trimmedCall) bool { return c.ToolCall == h.ToolCall }); i >= 0 {
 			return Handoff{}, false, fmt.Errorf("tool call %s already registered handoff %s, which was closed since; nothing was added", h.ToolCall, hs.trimmed[i].ID)
 		}
-		if !hs.trimmedBefore.IsZero() && !started.After(hs.trimmedBefore) {
-			return Handoff{}, false, errors.New("this lead registered too many handoffs since it started to tell a repeated call from a new one; nothing was added. Restart the lead to add more")
+		if hs.forgotten.has(h.ToolCall) {
+			return Handoff{}, false, fmt.Errorf("tool call %s may repeat one whose handoff was closed long ago; nothing was added. For a new request, call again", h.ToolCall)
+		}
+		if !hs.unsure.IsZero() {
+			return Handoff{}, false, fmt.Errorf("this yesman's handoffs were kept by a pre-release version that forgot tool calls without a trace, so tool call %s cannot be told from a repeated one; nothing was added", h.ToolCall)
 		}
 	}
 	if len(hs.Open()) >= maxOpenHandoffs {
@@ -326,8 +326,8 @@ func (s *Store) CloseHandoff(name, id, resolution, by, note string) (Handoff, er
 }
 
 // trim keeps every open handoff and the keptClosed most recently closed,
-// in their order, and remembers the tool calls of the others, forgetting
-// the oldest past keptCalls.
+// in their order, and remembers the tool calls of the others: the latest
+// keptCalls as they are, the older ones as a fingerprint.
 func (hs *Handoffs) trim() {
 	var closed []int
 	for i, h := range hs.Items {
@@ -355,10 +355,11 @@ func (hs *Handoffs) trim() {
 	hs.Items = keep
 	if n := len(hs.trimmed) - keptCalls; n > 0 {
 		slices.SortStableFunc(hs.trimmed, func(a, b trimmedCall) int { return a.CreatedAt.Compare(b.CreatedAt) })
+		if hs.forgotten == nil {
+			hs.forgotten = newCallFilter()
+		}
 		for _, c := range hs.trimmed[:n] {
-			if c.CreatedAt.After(hs.trimmedBefore) {
-				hs.trimmedBefore = c.CreatedAt
-			}
+			hs.forgotten.add(c.ToolCall)
 		}
 		hs.trimmed = slices.Clone(hs.trimmed[n:])
 	}

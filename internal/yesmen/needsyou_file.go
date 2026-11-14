@@ -3,6 +3,7 @@ package yesmen
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,19 +11,24 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // The handoffs file is read and written only inside the workspace's own
-// .yesman directory, through handles opened from the workspace: never through
-// a link, a directory put in .yesman's place, a hard link shared with another
-// file, a pipe or an oversized file. Such a file is reported and left as it
-// is. Writes go to a fresh temporary file created exclusively in the same
-// directory, which then replaces the file read, if it is still that file.
+// .yesman directory, through handles opened from the Store's folder: the
+// workspace must be a directory in it, of the yesman asked for, and the file
+// is never reached through a link, a directory put in the workspace's or
+// .yesman's place, a hard link shared with another file, a pipe or an
+// oversized file. Such a file is reported and left as it is. Writes go to a
+// fresh temporary file created exclusively in the same directory, which then
+// replaces the file read, if it is still that file with the bytes read.
 // Fields this version does not know are kept as they were written.
 
 const (
@@ -41,13 +47,17 @@ var handoffFault func(step, path string) error
 type handoffsFile struct {
 	path     string   // for messages
 	ws, meta *os.Root // the workspace and its .yesman directory
-	found    os.FileInfo
+	// found is the file read, and sum the SHA-256 of its bytes; nil when
+	// there was none.
+	found os.FileInfo
+	sum   [sha256.Size]byte
 }
 
-// openHandoffs opens a yesman's handoffs and reads them.
-func openHandoffs(y Yesman) (*handoffsFile, Handoffs, error) {
+// openHandoffs opens a yesman's handoffs, in the Store's folder root, and
+// reads them. metaMu is the Store's lock on reading yesman.json.
+func openHandoffs(root string, y Yesman, metaMu *sync.Mutex) (*handoffsFile, Handoffs, error) {
 	f := &handoffsFile{path: y.HandoffsFile()}
-	hs, err := f.open(y)
+	hs, err := f.open(root, y, metaMu)
 	if err != nil {
 		f.close()
 		return nil, Handoffs{}, fmt.Errorf("%s: %w; it was left as it is", f.path, err)
@@ -55,13 +65,36 @@ func openHandoffs(y Yesman) (*handoffsFile, Handoffs, error) {
 	return f, hs, nil
 }
 
-func (f *handoffsFile) open(y Yesman) (Handoffs, error) {
-	ws, err := os.OpenRoot(y.Path)
+func (f *handoffsFile) open(root string, y Yesman, metaMu *sync.Mutex) (Handoffs, error) {
+	// The Store's folder may be reached through a link, as configured; the
+	// workspace in it may not.
+	name := filepath.Base(y.Path)
+	if filepath.Join(root, name) != y.Path {
+		return Handoffs{}, errors.New("not a workspace of this store")
+	}
+	store, err := os.OpenRoot(root)
+	if err != nil {
+		return Handoffs{}, err
+	}
+	defer store.Close()
+	dir, err := store.Lstat(name)
+	if err != nil {
+		return Handoffs{}, err
+	}
+	if dir.Mode().Type() != fs.ModeDir {
+		return Handoffs{}, errors.New("the workspace is not a directory of the store (a link or another kind of file)")
+	}
+	ws, err := store.OpenRoot(name)
 	if err != nil {
 		return Handoffs{}, err
 	}
 	f.ws = ws
-	dir, err := ws.Lstat(".yesman")
+	if opened, err := ws.Stat("."); err != nil {
+		return Handoffs{}, err
+	} else if !os.SameFile(dir, opened) {
+		return Handoffs{}, errors.New("the workspace changed while it was opened")
+	}
+	dir, err = ws.Lstat(".yesman")
 	if err != nil {
 		return Handoffs{}, err
 	}
@@ -80,58 +113,92 @@ func (f *handoffsFile) open(y Yesman) (Handoffs, error) {
 	if !os.SameFile(dir, opened) {
 		return Handoffs{}, errors.New(".yesman changed while it was opened")
 	}
+	// The workspace opened must be the yesman asked for, not a newer one
+	// of the same name that took its place since.
+	if !f.hiredAt(metaMu).Equal(y.HiredAt) {
+		return Handoffs{}, errors.New("the workspace was replaced while it was opened")
+	}
 	return f.read()
 }
 
+// hiredAt reads when the opened workspace's yesman was hired, as Store.Get
+// does: zero when it cannot be read.
+func (f *handoffsFile) hiredAt(metaMu *sync.Mutex) time.Time {
+	metaMu.Lock()
+	data, err := f.meta.ReadFile("yesman.json")
+	metaMu.Unlock()
+	var meta struct {
+		HiredAt time.Time `json:"hiredAt"`
+	}
+	if err == nil {
+		_ = json.Unmarshal(data, &meta)
+	}
+	return meta.HiredAt
+}
+
 func (f *handoffsFile) read() (Handoffs, error) {
-	fi, err := f.meta.Lstat(handoffsName)
-	if errors.Is(err, fs.ErrNotExist) {
+	data, opened, err := f.load(true)
+	if err != nil {
+		return Handoffs{}, err
+	}
+	if opened == nil {
 		return Handoffs{Items: []Handoff{}}, nil
-	}
-	if err != nil {
-		return Handoffs{}, err
-	}
-	if !fi.Mode().IsRegular() {
-		return Handoffs{}, errors.New("not a regular file (a link, directory or device)")
-	}
-	if fi.Size() > maxHandoffsBytes {
-		return Handoffs{}, fmt.Errorf("larger than %d bytes", maxHandoffsBytes)
-	}
-	file, err := f.meta.OpenFile(handoffsName, os.O_RDONLY|openNoBlock, 0)
-	if err != nil {
-		return Handoffs{}, err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return Handoffs{}, err
-	}
-	if !opened.Mode().IsRegular() || !os.SameFile(fi, opened) {
-		return Handoffs{}, errors.New("it changed while it was opened")
-	}
-	if n, err := linkCount(file, opened); err != nil {
-		return Handoffs{}, err
-	} else if n != 1 {
-		return Handoffs{}, errors.New("it has other hard links")
-	}
-	if handoffFault != nil {
-		if err := handoffFault("read", f.path); err != nil {
-			return Handoffs{}, err
-		}
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxHandoffsBytes+1))
-	if err != nil {
-		return Handoffs{}, err
-	}
-	if len(data) > maxHandoffsBytes {
-		return Handoffs{}, fmt.Errorf("larger than %d bytes", maxHandoffsBytes)
 	}
 	hs, err := decodeHandoffs(data)
 	if err != nil {
 		return Handoffs{}, err
 	}
-	f.found = opened
+	f.found, f.sum = opened, sha256.Sum256(data)
 	return hs, nil
+}
+
+// load reads the file's bytes, if it is a regular, singly linked file of a
+// size that can be read; with no file, it returns nil and no error. fault
+// lets tests hold up the read.
+func (f *handoffsFile) load(fault bool) ([]byte, os.FileInfo, error) {
+	fi, err := f.meta.Lstat(handoffsName)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, nil, errors.New("not a regular file (a link, directory or device)")
+	}
+	if fi.Size() > maxHandoffsBytes {
+		return nil, nil, fmt.Errorf("larger than %d bytes", maxHandoffsBytes)
+	}
+	file, err := f.meta.OpenFile(handoffsName, os.O_RDONLY|openNoBlock, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(fi, opened) {
+		return nil, nil, errors.New("it changed while it was opened")
+	}
+	if n, err := linkCount(file, opened); err != nil {
+		return nil, nil, err
+	} else if n != 1 {
+		return nil, nil, errors.New("it has other hard links")
+	}
+	if fault && handoffFault != nil {
+		if err := handoffFault("read", f.path); err != nil {
+			return nil, nil, err
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxHandoffsBytes+1))
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(data) > maxHandoffsBytes {
+		return nil, nil, fmt.Errorf("larger than %d bytes", maxHandoffsBytes)
+	}
+	return data, opened, nil
 }
 
 // write replaces the file read with hs.
@@ -151,7 +218,7 @@ func (f *handoffsFile) replace(hs Handoffs) error {
 	if len(data) > maxHandoffsBytes {
 		return fmt.Errorf("it would grow past %d bytes", maxHandoffsBytes)
 	}
-	if err := f.unchanged(); err != nil {
+	if err := f.unchanged(false); err != nil {
 		return err
 	}
 	var nonce [8]byte
@@ -182,10 +249,11 @@ func (f *handoffsFile) replace(hs Handoffs) error {
 	if err != nil {
 		return err
 	}
-	// In this app writers take turns; this catches another process that
-	// replaced the file meanwhile. A replacement after this check, before
-	// the rename, cannot be excluded: renames do not compare and swap.
-	if err := f.unchanged(); err != nil {
+	// In this app writers take turns; this catches another process, or
+	// someone editing the file, that replaced or changed it meanwhile: the
+	// change is kept and this one is not made. A change after this check,
+	// before the rename, cannot be excluded: renames do not compare and swap.
+	if err := f.unchanged(true); err != nil {
 		return err
 	}
 	if handoffFault != nil {
@@ -200,8 +268,9 @@ func (f *handoffsFile) replace(hs Handoffs) error {
 	return nil
 }
 
-// unchanged checks that the file is still the one read, or still absent.
-func (f *handoffsFile) unchanged() error {
+// unchanged checks that the file is still the one read, or still absent,
+// and with content, that it still has the bytes read.
+func (f *handoffsFile) unchanged(content bool) error {
 	cur, err := f.meta.Lstat(handoffsName)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -213,6 +282,17 @@ func (f *handoffsFile) unchanged() error {
 		return err
 	case f.found == nil || !cur.Mode().IsRegular() || !os.SameFile(cur, f.found):
 		return errors.New("it was replaced after it was read")
+	case !content:
+		return nil
+	}
+	data, opened, err := f.load(false)
+	switch {
+	case err != nil:
+		return err
+	case opened == nil || !os.SameFile(opened, f.found):
+		return errors.New("it was replaced after it was read")
+	case sha256.Sum256(data) != f.sum:
+		return errors.New("it was changed after it was read")
 	}
 	return nil
 }
@@ -236,10 +316,12 @@ var (
 	trimmedKeys = jsonKeys(reflect.TypeFor[trimmedCall]())
 )
 
-// The file's own keys besides "items" and "next".
+// The file's own keys besides "items" and "next". unsureKey is only in
+// files of a pre-release version.
 const (
-	trimmedKey       = "trimmedCalls"
-	trimmedBeforeKey = "trimmedCallsBefore"
+	trimmedKey   = "trimmedCalls"
+	forgottenKey = "forgottenCalls"
+	unsureKey    = "trimmedCallsBefore"
 )
 
 func jsonKeys(t reflect.Type) []string {
@@ -289,7 +371,7 @@ func decodeHandoffs(data []byte) (Handoffs, error) {
 	if err := json.Unmarshal(rawItems, &items); err != nil || items == nil {
 		return Handoffs{}, errors.New(`"items" is not a list`)
 	}
-	hs := Handoffs{Items: make([]Handoff, 0, len(items)), extra: unknownFields(top, "items", "next", trimmedKey, trimmedBeforeKey)}
+	hs := Handoffs{Items: make([]Handoff, 0, len(items)), extra: unknownFields(top, "items", "next", trimmedKey, forgottenKey, unsureKey)}
 	if err := json.Unmarshal(rawNext, &hs.Next); err != nil || hs.Next < 0 {
 		return Handoffs{}, errors.New(`"next" is not a count`)
 	}
@@ -322,10 +404,19 @@ func decodeHandoffs(data []byte) (Handoffs, error) {
 // decodeTrimmed reads the tool calls of trimmed handoffs, which files older
 // than them do not have.
 func decodeTrimmed(top map[string]json.RawMessage, hs *Handoffs) error {
-	if raw, ok := top[trimmedBeforeKey]; ok {
-		if err := json.Unmarshal(raw, &hs.trimmedBefore); err != nil {
-			return fmt.Errorf("%q is not a time", trimmedBeforeKey)
+	if raw, ok := top[unsureKey]; ok {
+		if err := json.Unmarshal(raw, &hs.unsure); err != nil {
+			return fmt.Errorf("%q is not a time", unsureKey)
 		}
+	}
+	if raw, ok := top[forgottenKey]; ok {
+		var obj map[string]json.RawMessage
+		var c callFilter
+		if json.Unmarshal(raw, &obj) != nil || obj == nil || json.Unmarshal(raw, &c) != nil || c.valid() != nil {
+			return fmt.Errorf("%q is not a filter of tool calls", forgottenKey)
+		}
+		c.extra = unknownFields(obj, callFilterKeys...)
+		hs.forgotten = &c
 	}
 	raw, ok := top[trimmedKey]
 	if !ok {
@@ -402,12 +493,24 @@ func encodeHandoffs(hs Handoffs) ([]byte, error) {
 		}
 		b.WriteByte(']')
 	}
-	if !hs.trimmedBefore.IsZero() {
-		at, err := json.Marshal(hs.trimmedBefore)
+	if hs.forgotten != nil {
+		known, err := json.Marshal(hs.forgotten)
 		if err != nil {
 			return nil, err
 		}
-		b.WriteString(`,"` + trimmedBeforeKey + `":`)
+		b.WriteString(`,"` + forgottenKey + `":`)
+		b.Write(known[:len(known)-1])
+		if err := writeFields(&b, hs.forgotten.extra); err != nil {
+			return nil, err
+		}
+		b.WriteByte('}')
+	}
+	if !hs.unsure.IsZero() {
+		at, err := json.Marshal(hs.unsure)
+		if err != nil {
+			return nil, err
+		}
+		b.WriteString(`,"` + unsureKey + `":`)
 		b.Write(at)
 	}
 	if err := writeFields(&b, hs.extra); err != nil {
