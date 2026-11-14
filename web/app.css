@@ -159,11 +159,12 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .work[data-state="running"] .work-mark { animation: spin 1s linear infinite; }
 .work[data-state="waiting"] .work-mark { color: var(--mds-warn); }
 .work-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mds-ink-secondary); }
-.work-facts { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.work-facts { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .work-facts:empty { display: none; }
-.work-caret { flex: none; width: 12px; height: 12px; font-size: 12px; margin-left: auto; color: var(--mds-muted); transition: transform .15s ease; }
+.work-caret { flex: none; display: inline-flex; width: 12px; height: 12px; font-size: 12px; margin-left: auto; color: var(--mds-muted); transition: transform .15s ease; }
 .work[open] > summary .work-caret { transform: rotate(90deg); }
-.work-body { display: grid; gap: 8px; min-width: 0; margin: 4px 0 6px 15px; padding-left: 12px; border-left: 2px solid var(--mds-line); }
+.work-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; margin: 4px 0 6px 15px; padding-left: 12px; border-left: 2px solid var(--mds-line); }
+.work-body > * { min-width: 0; }
 .work-thinking { color: var(--mds-ink-subtle); font-size: var(--mds-text-note); line-height: 1.6; }
 .work-notice { min-width: 0; color: var(--mds-ink-subtle); font-size: var(--mds-text-note); }
 .work-notice > strong { display: block; margin-bottom: 4px; font-family: var(--mds-font-heading); font-weight: 400; color: var(--mds-ink-secondary); }
@@ -176,11 +177,11 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 
 .tool { border-radius: var(--mds-radius-sm); }
 .tool > summary {
-  display: grid; grid-template-columns: 14px auto minmax(0, 1fr) auto; align-items: center; gap: 8px;
+  display: grid; grid-template-columns: 14px minmax(0, max-content) minmax(0, 1fr) auto; align-items: center; gap: 8px;
   padding: 5px 8px; border-radius: var(--mds-radius-sm); font-size: var(--mds-text-caption); color: var(--mds-ink-subtle);
 }
 .tool > summary:hover { background: var(--mds-hover); }
-.tool-name { font-family: var(--mds-mono); color: var(--mds-ink-secondary); }
+.tool-name { font-family: var(--mds-mono); color: var(--mds-ink-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-sum { font-family: var(--mds-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mds-muted); }
 .tool-state { color: var(--mds-muted); }
 .tool[data-status="error"] .tool-name, .tool[data-status="error"] .tool-state { color: var(--mds-error); }

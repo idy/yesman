@@ -135,7 +135,7 @@ const BOUND_DELIVERY = 'Delivered';
 function pruneDeliveryRows(c, ids) {
   let changed = false;
   for (const id of ids ?? []) changed = c.deliveries.delete(id) || changed;
-  if (changed) schedulePatch(c);
+  if (changed) schedulePatch(c, { frame: true });
 }
 
 function applyDeliveryReceipt(c,e,seq) {
@@ -501,7 +501,6 @@ function workEl(c, row) {
 }
 
 function updateWork(c, el, row) {
-  el._sig = 'f';
   const a = agentById(c.id);
   const label = workLabel(row, a ?? {}), facts = workFacts(row.counts);
   const failed = row.counts.failed > 0 && (row.state === 'done' || row.state === 'ended');
@@ -553,8 +552,6 @@ function scrollDown(force = false) {
   if (force || scroller.dataset.stick !== 'false') scroller.scrollTop = scroller.scrollHeight;
 }
 
-const projectConvo = (c, a) => project(c, a ?? {});
-
 // patchThread brings the shown thread up to date with its conversation.
 function patchThread(c) {
   const thread = $('#thread');
@@ -562,7 +559,7 @@ function patchThread(c) {
   if (!thread || !a || keyOf(a) !== c.key || !c.loaded || c.error) return;
   const scroller = $('#scroll');
   if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
-  const rows = projectConvo(c, a);
+  const rows = project(c, a);
   if (rows.length) thread.querySelector('.thread-empty')?.remove();
   patchChildren(thread, 'data-row', rows, {
     make: (row) => rowEl(c, row),

@@ -121,7 +121,10 @@ func TestPromptOriginWhileInFlight(t *testing.T) {
 
 	// A single submission is bound to its receipt.
 	id := deliveryTestID(3)
-	send(func() error { _, err := m.Submit(ctx, lead, id, "once", []Image{{Type: "image", MimeType: "image/png", Data: "iVBORw0KGgo="}}); return err })
+	send(func() error {
+		_, err := m.Submit(ctx, lead, id, "once", []Image{{Type: "image", MimeType: "image/png", Data: "iVBORw0KGgo="}})
+		return err
+	})
 	waitPrompts(t, m, lead, 1)
 	if o, ok := m.PromptOrigin(token, deliveryFingerprint("once", []Image{{Type: "image", MimeType: "image/png", Data: "iVBORw0KGgo="}})); !ok || o != (Origin{Source: OriginUser, Submission: id}) {
 		t.Fatalf("origin of a submission = %+v, %v", o, ok)

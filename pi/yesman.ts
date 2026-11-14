@@ -7,8 +7,9 @@
 // and tools to check repositories out of the pool, keep the board and, for
 // a lead, to run workers. Its shell tool sets the user's secrets and
 // variables in every command, asking the app for them each time, and what
-// tools return hides the secrets' values from the model. Everything is
-// done by the yesman app; this file only forwards.
+// tools return hides the secrets' values from the model. It also records on
+// each user message who wrote it, as the app knows (trackOrigins). Everything
+// is done by the yesman app; this file only forwards.
 //
 // A lead delegates, so that it is always free to talk: it has no shell and
 // writes only Knowledge notes and the task log. Its tools are narrowed when
