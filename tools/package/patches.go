@@ -12,6 +12,11 @@ var patches = []patch{
 	{
 		File: "cmd/mygo/bundle.go", SHA256: "dd85f78c8deae212e9439f587427d7f2f863109e84cdede85f6bb0810a5ddd3c",
 		Replacements: []replacement{
+			{`func writeLocalizations(c *Config, resources string, langs []appLanguage) error {`, `func writeLocalizations(c *Config, resources string, langs []appLanguage) error {
+	if len(langs) == 0 { langs = []appLanguage{{Tag: "en"}} }`},
+			{`"CFBundleInfoDictionaryVersion":        "6.0",`, `"CFBundleInfoDictionaryVersion":        "6.0",
+		"CFBundleDevelopmentRegion":            "en",
+		"CFBundleLocalizations":                []any{"en"},`},
 			{`"CFBundleName":                         c.Name,`, `"CFBundleName":                         c.slug(),`},
 			{`"CFBundleDisplayName":                  c.Name,`, `"CFBundleDisplayName":                  c.slug(),`},
 			{`names := map[string]any{}`, `// Finder honors a localized name when the base name matches the
