@@ -7,6 +7,9 @@ Each yesman keeps two kinds of shared documents. The board tracks current work; 
 | Knowledge: `.yesman/knowledge/`, cataloged in `INDEX.md` | Reusable development conventions, user preferences, architecture decisions and known pitfalls | Use the project's Phosphor icon helper and local font assets; preserve stable internal IDs when display names change; follow the project's release/version policy. |
 | Task log: `.yesman/task-log.md` | Dated historical facts about tasks and PRs | What changed and why, task/PR links, commit/head hashes, CI and validation results, release timelines, outcomes and follow-up work or temporary blockers at the time. |
 | Board: `.yesman/board.json`, managed with `yesman_board` | Current plan and status | Who owns a task, what is blocked now and what happens next. |
+| Topics: `.yesman/topics.json`, kept with `yesman_topics` and the Topics pane | The user's questions and discussions worth finding again | A summary of the question, the conclusions the user confirmed, the questions still open and their sources. |
+
+Topics are about the user's questions, not the work: a topic cites a task, a task-log entry's subject or a Knowledge note instead of repeating it, and is not added for routine reports or notifications. Only the lead writes topics through the API; the user edits them in the app. See the README's Topics section.
 
 A Knowledge note should help with future work even after its originating task is forgotten. “Use the Phosphor helper and local font assets” belongs there. “PR #42 at head abc123 passed three-platform CI and awaits release” belongs in the task log or board. Finishing a task alone does not justify adding Knowledge. Keep its index a concise catalog of durable notes, without task handoffs or progress summaries. Update an existing topic instead of duplicating it.
 

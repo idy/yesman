@@ -182,6 +182,56 @@ function boardText(board: any): string {
 	return parts.join("\n\n");
 }
 
+// A topic's source as the model reads it. A submission source names no
+// submission: its ID stays in the app; the API already leaves it out.
+function topicSource(s: any) {
+	const view: any = { id: s.id, kind: s.kind };
+	if (s.kind !== "submission" && s.ref) view.ref = s.ref;
+	if (s.agent) view.agent = s.agent;
+	if (s.role) view.role = s.role;
+	if (s.timestamp) view.timestamp = s.timestamp;
+	view.label = s.kind === "submission" ? s.label || "a message the user sent from this topic" : s.label;
+	return view;
+}
+
+function topicText(t: any): string {
+	const lines = [`${t.id} [${t.status}] ${t.title} (revision ${t.revision}, updated ${t.updatedAt}${t.updatedBy ? ` by ${t.updatedBy}` : ""})`];
+	if (t.summary) lines.push(`Summary:\n  ${String(t.summary).replace(/\n/g, "\n  ")}`);
+	const items = (label: string, list: any[]) => lines.push(`${label} (${list?.length ?? 0}):${list?.length ? "\n" + list.map((i) => `- ${i.id} ${String(i.text).replace(/\n/g, "\n  ")}`).join("\n") : " none"}`);
+	items("Confirmed conclusions", t.conclusions);
+	items("Open questions", t.questions);
+	const sources = (t.sources ?? []).map(topicSource);
+	if (sources.length) {
+		lines.push("Sources:\n" + sources.map((s: any) => `- ${s.id} ${s.kind}${s.ref ? ` ${s.ref}` : ""}${s.agent ? ` ${s.agent}` : ""}${s.role ? ` ${s.role} message` : ""}${s.label ? ` (${s.label})` : ""}`).join("\n"));
+	}
+	if (t.sendCount) lines.push(`Messages the user sent from this topic: ${t.sendCount}${t.lastSentAt ? `, the last at ${t.lastSentAt}` : ""}. They are in your conversation.`);
+	return lines.join("\n");
+}
+
+// What a tool result keeps of one topic: its content, never the app's records
+// of submissions (their IDs and receipts are not for the model or other hooks).
+function topicDetails(t: any) {
+	if (!t || typeof t !== "object") return {};
+	const items = (list: any[]) => (list ?? []).map((i) => ({ id: i.id, text: i.text }));
+	return {
+		id: t.id, title: t.title, status: t.status, summary: t.summary ?? "", revision: t.revision, updatedAt: t.updatedAt, updatedBy: t.updatedBy,
+		conclusions: items(t.conclusions), questions: items(t.questions),
+		sources: (t.sources ?? []).map(topicSource),
+		sendCount: typeof t.sendCount === "number" ? t.sendCount : 0,
+	};
+}
+
+// A list is an index: which topics there are, none of their content. A topic
+// is read in full with action read.
+function topicEntry(t: any) {
+	return { id: t.id, title: t.title, status: t.status, revision: t.revision, updatedAt: t.updatedAt, conclusions: Number(t.conclusions) || 0, questions: Number(t.questions) || 0 };
+}
+
+function topicIndex(topics: any[]): string {
+	if (!topics.length) return "No topics yet.";
+	return topics.map((t) => `- ${t.id} [${t.status}] ${t.title} (revision ${t.revision}${t.questions ? `, ${t.questions} open question${t.questions === 1 ? "" : "s"}` : ""})`).join("\n");
+}
+
 // Who wrote a user message: the user, the agent's lead, or yesman telling a
 // lead about its workers. See Origin in internal/agent/origin.go.
 type Origin = { source: "user" | "lead" | "yesman"; kind?: string; worker?: string; submission?: string };
@@ -453,6 +503,64 @@ export default function yesman(pi: ExtensionAPI) {
 	});
 
 	if (ROLE !== "lead") return;
+
+
+	const itemEdits = Type.Array(Type.Object({ id: Type.String({ description: "The item's ID, such as c2 or q3" }), text: Type.String() }));
+	pi.registerTool({
+		name: "yesman_topics",
+		label: "yesman: topics",
+		description:
+			"Read or keep this yesman's topics: the user's questions and discussions worth finding again, each with a summary, the conclusions the user confirmed, the questions still open and its sources. action list (default) lists them, read shows one, create adds one, update changes one at its current revision (only the fields given change; archive or restore it). A conclusion is only what the user agreed; put unconfirmed suggestions under questions or the summary. Not for task status (board), history (task log) or rules (Knowledge), and not for every notification or report.",
+		parameters: Type.Object({
+			action: Type.Optional(Type.String({ description: "list, read, create or update" })),
+			id: Type.Optional(Type.String({ description: "The topic's ID, such as tp3, for read and update" })),
+			revision: Type.Optional(Type.Number({ description: "For update: the revision you read. If the topic changed since, nothing is saved: read it again and apply your change to that" })),
+			title: Type.Optional(Type.String({ description: "A short title, up to 120 characters" })),
+			summary: Type.Optional(Type.String({ description: "What the question or discussion is about, in Markdown, up to 4000 characters" })),
+			status: Type.Optional(Type.String({ description: "open or resolved" })),
+			addConclusions: Type.Optional(Type.Array(Type.String(), { description: "Conclusions the user confirmed" })),
+			updateConclusions: Type.Optional(itemEdits),
+			removeConclusions: Type.Optional(Type.Array(Type.String(), { description: "IDs of conclusions to remove" })),
+			addQuestions: Type.Optional(Type.Array(Type.String(), { description: "Questions still open" })),
+			updateQuestions: Type.Optional(itemEdits),
+			removeQuestions: Type.Optional(Type.Array(Type.String(), { description: "IDs of questions to remove, such as one now answered" })),
+			addSources: Type.Optional(Type.Array(Type.Object({
+				kind: Type.String({ description: "task (ref t3), knowledge (ref a note's path under .yesman/knowledge), link (ref an http(s) URL), worker (agent: a worker whose report it came from), or conversation (this conversation, when no exact message is known)" }),
+				ref: Type.Optional(Type.String()),
+				agent: Type.Optional(Type.String({ description: "An agent's name, for worker and conversation" })),
+				label: Type.Optional(Type.String({ description: "A few words shown with it" })),
+			}))),
+			removeSources: Type.Optional(Type.Array(Type.String(), { description: "IDs of sources to remove" })),
+			archive: Type.Optional(Type.Boolean({ description: "Archive the topic; it can be restored" })),
+			restore: Type.Optional(Type.Boolean({ description: "Restore an archived topic" })),
+		}),
+		async execute(_id, params, signal) {
+			const action = (params.action ?? (params.id ? (params.revision === undefined ? "read" : "update") : "list")).toLowerCase();
+			if (action === "list") {
+				const r = await call("GET", "/v1/topics", undefined, signal);
+				const topics = (r.topics ?? []).map(topicEntry);
+				return result(`${topicIndex(topics)}${topics.length ? "\n\nRead one with action read and its id." : ""}`, { topics });
+			}
+			if (action === "read") {
+				if (!params.id) throw new Error("read needs id");
+				const t = await call("GET", `/v1/topics?id=${encodeURIComponent(params.id)}`, undefined, signal);
+				return result(topicText(t), topicDetails(t));
+			}
+			const { action: _a, id, revision, ...fields } = params as any;
+			const set = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined && !(Array.isArray(v) && !v.length)));
+			if (action === "create") {
+				const create = { title: set.title ?? "", summary: set.summary, status: set.status, conclusions: set.addConclusions, questions: set.addQuestions, sources: set.addSources };
+				const t = await call("POST", "/v1/topics", { create }, signal);
+				return result(`Created ${t.id}.\n\n${topicText(t)}`, topicDetails(t));
+			}
+			if (action === "update") {
+				if (!id || typeof revision !== "number") throw new Error("update needs id and the revision you read");
+				const t = await call("POST", "/v1/topics", { id, patch: { revision, ...set } }, signal);
+				return result(`Saved ${t.id} at revision ${t.revision}.\n\n${topicText(t)}`, topicDetails(t));
+			}
+			throw new Error(`unknown action ${action}: use list, read, create or update`);
+		},
+	});
 
 	pi.registerTool({
 		name: "yesman_worker_start",

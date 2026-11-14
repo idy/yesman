@@ -21,6 +21,7 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   isOpen()               whether the panel shows
 //   files()                what the files pane shows (files.shown())
 //   openKnowledge(), openTaskLog(), openWorktree(dir, show), checkout(y)
+//   pane(), openBoard(), openTopics()   the pane beside the conversation
 //   openURL(url)
 export function createInfo(host) {
   const data = new Map(); // yesman name -> what was read of it
@@ -116,6 +117,8 @@ export function createInfo(host) {
     aside.replaceChildren(
       knowledge(y, d),
       taskLog(y),
+      boardLink(y, d),
+      topicsLink(y, d),
       storage(y, d),
       worktrees(y, d));
     aside.scrollTop = top;
@@ -155,6 +158,34 @@ export function createInfo(host) {
         title: t('Read task and PR history in the files pane') },
       h('span', { class: 'info-link-label' }, t('Task log')),
       icon('chevron', 'mds-icon info-chevron')));
+  }
+
+  // The board and the topics open beside the conversation, with their counts.
+  function boardLink(y, d) {
+    const b = d.info?.board;
+    const aside = !b ? '' : b.error ? t('Unreadable') : b.open ? t('{n} open', { n: formatNumber(b.open) }) : t('Nothing open');
+    return h('section', { class: 'info-section info-section--link' },
+      h('button', { class: 'info-link', type: 'button', 'aria-current': host.pane() === 'board' ? 'page' : null, onclick: () => host.openBoard(),
+        title: b?.error || t('The tasks of the plan and who has each, beside the conversation') },
+      h('span', { class: 'info-link-label' }, t('Board')),
+      icon('chevron', 'mds-icon info-chevron'),
+      h('span', { class: 'info-aside' }, aside)));
+  }
+
+  function topicsLink(y, d) {
+    const c = d.info?.topics;
+    const aside = !c ? '' : c.error ? t('Unreadable') : c.open ? t('{n} open', { n: formatNumber(c.open) }) : c.resolved + c.archived ? t('Nothing open') : t('Empty');
+    return h('section', { class: 'info-section info-section--link' },
+      h('button', { class: 'info-link', type: 'button', 'aria-current': host.pane() === 'topics' ? 'page' : null, onclick: () => host.openTopics(),
+        title: c?.error || t('Questions and discussions worth keeping: conclusions and open questions, beside the conversation') },
+      h('span', { class: 'info-link-label' }, t('Topics')),
+      icon('chevron', 'mds-icon info-chevron'),
+      h('span', { class: 'info-aside' }, aside)));
+  }
+
+  // The board or topics changed: their counts are read again.
+  function onBoard(name) {
+    if (data.has(name)) soon(name, ['info'], 1500);
   }
 
   // ---------- Worktrees ----------
@@ -336,5 +367,5 @@ export function createInfo(host) {
     return (y.worktrees ?? []).map((w) => ({ ...w, dir: (w.dir ?? '').replace(/\\/g, '/') }));
   }
 
-  return { render, onChanged, onFiles, onAgentEvent, worktrees: listWorktrees };
+  return { render, onChanged, onFiles, onAgentEvent, onBoard, worktrees: listWorktrees };
 }

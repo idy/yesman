@@ -109,8 +109,30 @@ type WorktreeInfo struct {
 // YesmanInfo is what the info panel shows of a yesman, but for the pull
 // requests and storage, which take longer and arrive by themselves.
 type YesmanInfo struct {
-	Knowledge KnowledgeInfo  `json:"knowledge"`
-	Worktrees []WorktreeInfo `json:"worktrees"`
+	Knowledge KnowledgeInfo      `json:"knowledge"`
+	Board     BoardInfo          `json:"board"`
+	Topics    yesmen.TopicCounts `json:"topics"`
+	Worktrees []WorktreeInfo     `json:"worktrees"`
+}
+
+// BoardInfo counts a yesman's open tasks, for the info panel.
+type BoardInfo struct {
+	Open  int    `json:"open"`
+	Error string `json:"error,omitempty"`
+}
+
+func boardInfo(s *yesmen.Store, name string) BoardInfo {
+	b, err := s.Board(name)
+	if err != nil {
+		return BoardInfo{Error: err.Error()}
+	}
+	var info BoardInfo
+	for _, t := range b.Tasks {
+		if t.Open() {
+			info.Open++
+		}
+	}
+	return info
 }
 
 // Info reads a yesman's knowledge and its worktrees with their changes.
@@ -119,7 +141,7 @@ func (s *service) Info(ctx context.Context, name string) (YesmanInfo, error) {
 	if err != nil {
 		return YesmanInfo{}, err
 	}
-	info := YesmanInfo{Knowledge: knowledgeInfo(y), Worktrees: []WorktreeInfo{}}
+	info := YesmanInfo{Knowledge: knowledgeInfo(y), Board: boardInfo(s.app.yesmen, name), Topics: s.app.yesmen.TopicCounts(name), Worktrees: []WorktreeInfo{}}
 	snapshot, err := s.app.pool.Snapshot(ctx)
 	if err != nil && len(snapshot.Repos) == 0 {
 		return info, err

@@ -103,6 +103,10 @@ export function registerActions(shortcuts, host) {
       when: needAgent, run: () => host.togglePane('board'),
     },
     {
+      id: 'pane.topics', label: 'Show or hide the topics', group: 'Panels', keywords: ['questions', 'discussions', 'conclusions', 'qa'],
+      when: needAgent, run: () => host.togglePane('topics'),
+    },
+    {
       id: 'pane.info', label: 'Show or hide the info', group: 'Panels', keywords: ['worktrees', 'storage', 'panel'],
       when: needAgent, run: () => host.togglePanel(),
     },
