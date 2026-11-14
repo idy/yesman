@@ -102,6 +102,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       };
       window.fixture = {
         goDTO: bridgeDTO,
+        agents,
         saved,
         emit,
         update,
@@ -572,6 +573,32 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     assert.match(await row(retryID).innerText(), /交付已中断/);
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "en" }));
     await page.waitForTimeout(30);
+    // Preserve the merged main's WebKit mouse-Send focus fix as well as Enter.
+    await page.evaluate(() =>
+      window.events.agents(
+        window.fixture.agents.map((a) => ({
+          ...a,
+          status: a.name === "lead" ? "idle" : a.status,
+        })),
+      ),
+    );
+    await input.fill("mouse send");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await page.waitForFunction(
+      () => document.querySelector(".composer textarea").readOnly,
+    );
+    assert.equal(
+      await input.evaluate((el) => document.activeElement === el),
+      true,
+    );
+    const mouseID = await page.evaluate(() => window.sent.at(-1).args[1]);
+    await ack(mouseID, "accepted");
+    assert.equal(
+      await input.evaluate((el) => document.activeElement === el),
+      true,
+    );
+    await page.keyboard.type("next");
+    assert.equal(await input.inputValue(), "next");
     await page.setViewportSize({ width: 480, height: 700 });
     assert(
       await page

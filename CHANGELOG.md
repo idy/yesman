@@ -2,6 +2,22 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.23
+
+- Align the Model and Effort labels and dropdowns in Add a model. Keep long options within the form and stack the fields in narrow windows.
+
+## 0.1.22
+
+- Move the attachment button to the left of the message field. Keep one action on the right: Send while idle, or Stop during a run. Enter still sends a message during a run, and Shift+Enter adds a new line.
+- Keep the message field ready for the next message after clicking Send in WebKit, while respecting focus moved to another control or conversation.
+- Reduce shadow banding behind modal dialogs with a more compact shadow.
+- Remove the stray period below the saved configuration path in the Export completion message.
+
+## 0.1.21
+
+- Right-click a yesman and choose Rename to change its display name. The name is saved for future launches and updates throughout the app.
+- Renaming keeps the same workspace folder and agent identities, so existing conversations, active workers, boards and worktrees stay connected.
+
 ## 0.1.20
 
 - Show active workers above completed, stopped and failed workers in the sidebar, keeping the existing order within each group. Reactivated workers return to the active group.

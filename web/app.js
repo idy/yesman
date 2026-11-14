@@ -1000,6 +1000,7 @@ function renderDock({ focusComposer = false } = {}) {
   const a = selectedAgent();
   const keep = dock?.querySelector('textarea');
   const focused = keep && document.activeElement === keep;
+  const actionFocused = dock?.querySelector('.composer-action') === document.activeElement;
   const caret = focused ? [keep.selectionStart, keep.selectionEnd, keep.selectionDirection] : null;
   const control = dock?.contains(document.activeElement) && document.activeElement.getAttribute('role') === 'combobox'
     ? document.activeElement.getAttribute('aria-label') : null;
@@ -1054,13 +1055,16 @@ function renderDock({ focusComposer = false } = {}) {
     // Read-only keeps the caret/focus while RPC acceptance is pending. A
     // disabled textarea would drop focus to BODY before the next render.
     rows: 1, 'aria-label': t('Message'), readonly: attachments.sending,
+    title: working ? t('Enter to send after the current step; Shift+Enter for a new line') : '',
     placeholder: a.role === 'lead' ? t('Message {name}…', { name: yesmanLabel(a.yesman) }) : t('Message worker {name}…', { name: a.name }),
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
-  const send = h('button', { class: 'round', type: 'submit', 'aria-label': t('Send'), title: working ? t('Send: delivered after its current step') : t('Send') }, icon('enter'));
-  const stop = working ? h('button', { class: 'round round--stop', type: 'button', 'aria-label': t('Stop'), title: t('Stop the current run'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop')) : null;
+  const action = working
+    ? h('button', { class: 'round round--stop composer-action', type: 'button', 'aria-label': t('Stop'), title: t('Stop the current run'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop'))
+    : h('button', { class: 'round composer-action', type: 'submit', 'aria-label': t('Send'), title: t('Send') }, icon('enter'));
   const sync = () => {
-    send.disabled = (!textarea.value.trim() && !attachments.items.length) || busy || !!state.modelOptions.get(keyOf(a))?.busy;
+    // A run can be interrupted even with an empty draft or a pending image/send.
+    if (!working) action.disabled = (!textarea.value.trim() && !attachments.items.length) || busy || !!state.modelOptions.get(keyOf(a))?.busy;
     textarea.style.height = 'auto';
     textarea.style.height = `${textarea.scrollHeight}px`;
   };
@@ -1075,9 +1079,9 @@ function renderDock({ focusComposer = false } = {}) {
     const files = [...(e.clipboardData?.items ?? [])].filter((item) => item.kind === 'file' && item.type.startsWith('image/')).map((item) => item.getAsFile()).filter(Boolean);
     if (files.length) { e.preventDefault(); addImages(files); }
   });
-  const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea); } },
+  const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea, e.submitter); } },
     fileInput, previews,
-    h('div', { class: 'composer-input' }, textarea, h('div', { class: 'ask-actions' }, attach, stop, send)),
+    h('div', { class: 'composer-input' }, attach, textarea, action),
     h('div', { class: 'composer-controls' }, modelOptionsEl(a, working), contextViewer.mount(a)),
   );
   form.addEventListener('dragover', (e) => {
@@ -1095,7 +1099,8 @@ function renderDock({ focusComposer = false } = {}) {
   sync();
   const nextControl = composerSelects.find((select) => select.trigger.getAttribute('aria-label') === control);
   if (nextControl && !nextControl.trigger.disabled) nextControl.trigger.focus({ preventScroll: true });
-  else if (focusComposer || focused || !keep) {
+  else if (actionFocused && !focusComposer && !action.disabled) action.focus({ preventScroll: true });
+  else if (focusComposer || focused || actionFocused || !keep) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
   }
@@ -1104,7 +1109,7 @@ function renderDock({ focusComposer = false } = {}) {
 const sameSubmissionImages = (left, right) => left.length === right.length && left.every((image, i) =>
   image.type === right[i].type && image.mimeType === right[i].mimeType && image.data === right[i].data);
 
-async function sendMessage(a, textarea) {
+async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
   const text = textarea.value.trim();
@@ -1135,10 +1140,11 @@ async function sendMessage(a, textarea) {
     refreshDelivery(c, c.deliveries.get(messageID));
     scrollDown();
   }
-  // A keyboard submit or a click on Send intends to continue composing.
-  // Keep that focus through pending renders; subsequent renders follow the
-  // actual focus, so moving to another control or agent cancels restoration.
-  const focusComposer = document.activeElement === textarea ||
+  // SubmitEvent retains the activated Send button even after WebKit's mouse
+  // default action blurs the textarea without focusing the button. Use that
+  // submission intent only for the initial render; subsequent renders follow
+  // actual focus so moving to another control or agent cancels restoration.
+  const focusComposer = submitter?.matches('button[type="submit"]') || document.activeElement === textarea ||
     document.activeElement === textarea.form?.querySelector('button[type="submit"]');
   attachments.sending = true;
   renderDock({ focusComposer });
@@ -1619,7 +1625,7 @@ function renderConfig(inner) {
   const e = c.exported;
   const exportHint = e
     ? h('div', null,
-        h('p', null, tNodes('Exported {repos} and the settings to {path}.', { repos: repositories(e.repos), path: h('span', { class: 'path', title: e.path }, e.path) }),
+        h('p', null, tNodes('Exported {repos} and the settings to {path}', { repos: repositories(e.repos), path: h('span', { class: 'path', title: e.path }, e.path) }),
           e.skipped.length ? [' ', t('Left out, as they are not from GitHub: {names}.', { names: e.skipped.join(', ') })] : null),
         h('p', null, exportedEnv(e)))
     : h('p', null, t('The theme, the fetch schedule, every GitHub repository in the pool, the variables and the secrets with the password that opens them, as a TOML file. Keep it private.'));
