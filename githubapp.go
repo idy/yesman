@@ -30,6 +30,27 @@ type GitHubAppView struct {
 	Workspaces []GitHubAppWorkspace `json:"workspaces"`
 }
 
+// prepareGitHubAppRouting is deliberately non-fatal. A locked/missing wrapper
+// must not prevent the desktop or unrelated workspaces from starting. The shell
+// extension receives a separate fail-closed guard if a saved App mode needs it.
+func (a *app) prepareGitHubAppRouting(gh, executable string) (string, error) {
+	var shim string
+	var err error
+	if gh != "" {
+		if executable == "" {
+			err = errors.New("current executable is unavailable")
+		} else {
+			shim, err = githubapp.InstallShim(a.home.Runtime(), executable)
+		}
+	}
+	availableGH := gh
+	if shim == "" {
+		availableGH = ""
+	}
+	a.githubApp = githubapp.NewManager(filepath.Join(a.home.Root, "github-app"), a.keychain, availableGH)
+	return shim, err
+}
+
 func (s *service) GitHubApp() (GitHubAppView, error) {
 	a := s.app
 	if a.githubApp == nil {

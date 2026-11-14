@@ -116,19 +116,39 @@ func TestShimModesAndNoPersonalFallback(t *testing.T) {
 	if code != 0 || out != "https://github.com/idy/yesman/pull/77\n" || !strings.Contains(errout, "yesman-test[bot]") || creates != 1 {
 		t.Fatalf("App routing %d %s %s", code, out, errout)
 	}
-	code, out, _ = run([]string{"pr", "create", "--fill"})
-	if code == 0 || out != "" || creates != 1 {
-		t.Fatal("unsupported option fell through to personal")
+	variants := [][]string{
+		{"pr", "--repo", "idy/yesman", "create", "-H", "test/app", "-B", "main", "-t", "--help", "-F", "-", "--draft"},
+		{"--repo=idy/yesman", "pr", "create", "--head=test/app", "--base=main", "--title=--help", "--body-file=-"},
+		{"pr", "-Ridy/yesman", "create", "-Htest/app", "-Bmain", "-t--help", "-F-", "-d"},
+	}
+	for _, variant := range variants {
+		code, out, _ := run(variant)
+		if code != 0 || out != "https://github.com/idy/yesman/pull/77\n" {
+			t.Fatalf("flag placement changed the PR identity: %v", variant)
+		}
+	}
+	created := 1 + len(variants)
+	for _, nonCreate := range [][]string{{"pr", "--repo", "idy/yesman", "view", "--json", "create"}, {"issue", "create", "--title", "pr", "--body", "create"}, {"pr", "--repo", "idy/yesman", "create", "--help"}} {
+		code, out, _ := run(nonCreate)
+		if code != 0 || !strings.Contains(out, "personal-fixture-token") || creates != created {
+			t.Fatal("non-creation/help did not retain existing credentials")
+		}
+	}
+	for _, unsupported := range [][]string{{"pr", "create", "--fill"}, {"pr", "--future-option", "value", "create"}, {"pr", "create", "--future-option", "--help"}, {"--", "pr", "create"}} {
+		code, out, _ = run(unsupported)
+		if code == 0 || out != "" || creates != created {
+			t.Fatal("unsupported/ambiguous option fell through to personal")
+		}
 	}
 	t.Setenv("GH_HOST", "enterprise.example")
 	code, out, _ = run(args)
-	if code == 0 || out != "" || creates != 1 {
+	if code == 0 || out != "" || creates != created {
 		t.Fatal("conflicting host created a PR on github.com")
 	}
 	t.Setenv("GH_HOST", "")
 	status = 503
 	code, out, _ = run(args)
-	if code == 0 || out != "" || creates != 1 {
+	if code == 0 || out != "" || creates != created {
 		t.Fatal("service failure fell through to personal")
 	}
 	t.Setenv("YESMAN_API", "https://example.invalid")

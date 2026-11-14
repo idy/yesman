@@ -54,11 +54,12 @@ export function createGitHubAppPage({ call, shown, rerender, settingsSection, pr
       h('p', { class: 'toolbar-lead' }, t('Create agent pull requests with your own GitHub App name and avatar.')),
       h('button', { type: 'button', class: 'mds-icon-button', 'aria-label': t('Refresh'), onclick: load }, icon('reload'))));
     if (s.error || v?.error) page.append(h('p', { class: 'danger', role: 'alert' }, t(s.error || v.error)));
+    if (v && !v.routingAvailable) page.append(h('p', { class: 'danger', role: 'alert' }, t('GitHub App command routing is unavailable. Install GitHub CLI or repair the private runtime wrapper and restart. You can disable App identity to use the existing credentials.')));
     if (!v) { page.append(h('p', null, t('Reading…'))); return; }
     page.append(settingsSection(t('PR identity'), null,
       row(v.config.enabled ? 'App identity enabled' : 'Personal credentials',
         'Only gh pr create in the selected workspaces uses the App. Git push, other gh commands, merging and releases keep their existing credentials.',
-        button(v.config.enabled ? 'Disable App identity' : 'Enable App identity', 'EnableGitHubApp', [!v.config.enabled], !v.config.enabled && (!v.verified || !v.unlocked || s.dirty || !v.config.workspaces?.length || !v.config.repositories?.length))),
+        button(v.config.enabled ? 'Disable App identity' : 'Enable App identity', 'EnableGitHubApp', [!v.config.enabled], !v.config.enabled && (!v.verified || !v.unlocked || !v.routingAvailable || s.dirty || !v.config.workspaces?.length || !v.config.repositories?.length))),
       row('Credential priority',
         'Enabling explicitly overrides GH_TOKEN and GITHUB_TOKEN for PR creation in this scope. Locked keys and repositories outside the list fail without using a personal token.',
         h('span', { class: 'mds-hint' }, t('No global login changes')))));

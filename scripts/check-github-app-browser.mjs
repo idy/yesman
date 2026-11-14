@@ -113,6 +113,16 @@ try {
       await pageRoot.getByText('Key storage locked', { exact: true }).waitFor();
       await button('Unlock').click(); await button('Lock').waitFor();
       assert.equal((await pageRoot.innerText()).includes('BEGIN RSA PRIVATE KEY'), false);
+      await page.evaluate(() => { window.fixture.state.routingAvailable = false; window.fixture.state.config.enabled = true; });
+      await button('Refresh').click();
+      await pageRoot.getByRole('alert').filter({ hasText: 'command routing is unavailable' }).waitFor();
+      assert.equal(await button('Disable App identity').isDisabled(), false);
+      await button('Disable App identity').click();
+      await button('Enable App identity').waitFor();
+      assert.equal(await button('Enable App identity').isDisabled(), true);
+      await page.evaluate(() => { window.fixture.state.routingAvailable = true; });
+      await button('Refresh').click();
+      await pageRoot.getByRole('alert').filter({ hasText: 'command routing is unavailable' }).waitFor({ state: 'detached' });
       for (const language of ['en', 'zh-Hans']) {
         await page.evaluate((language) => window.events['mygo:locale']({ locale: language }), language);
         if (language === 'zh-Hans') assert.ok((await pageRoot.innerText()).includes('PR 身份'));
@@ -127,7 +137,7 @@ try {
       const calls = await page.evaluate(() => window.fixture.calls.filter((c) => ['ImportGitHubAppKey', 'ConfigureGitHubApp', 'EnableGitHubApp'].includes(c.method)));
       assert.deepEqual(calls.find((c) => c.method === 'ImportGitHubAppKey').args, ['123']);
       assert.equal(errors.length, 0, errors.join('\n'));
-      reports.push({ engine: engineName, passed: true, scopeAndPriority: true, deniedRepository: true, nativeImportWire: true, registration: true, staleRead: true, pendingNavigation: true, layouts: 8 });
+      reports.push({ engine: engineName, passed: true, scopeAndPriority: true, deniedRepository: true, nativeImportWire: true, registration: true, staleRead: true, pendingNavigation: true, unavailableRoutingRecovery: true, layouts: 8 });
     } finally { await browser.close(); }
   }
   if (out) await writeFile(join(out, 'results.json'), JSON.stringify(reports, null, 2));

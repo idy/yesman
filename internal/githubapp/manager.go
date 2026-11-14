@@ -35,14 +35,15 @@ type Config struct {
 }
 
 type View struct {
-	Config      Config        `json:"config"`
-	Configured  bool          `json:"configured"`
-	Unlocked    bool          `json:"unlocked"`
-	Keychain    bool          `json:"keychain"`
-	App         *Registration `json:"app,omitempty"`
-	Verified    bool          `json:"verified"`
-	Connections []Connection  `json:"connections"`
-	Error       string        `json:"error,omitempty"`
+	Config           Config        `json:"config"`
+	Configured       bool          `json:"configured"`
+	Unlocked         bool          `json:"unlocked"`
+	Keychain         bool          `json:"keychain"`
+	App              *Registration `json:"app,omitempty"`
+	Verified         bool          `json:"verified"`
+	RoutingAvailable bool          `json:"routingAvailable"`
+	Connections      []Connection  `json:"connections"`
+	Error            string        `json:"error,omitempty"`
 }
 
 // Manager owns a separate encrypted vault, never the shell Secrets vault.
@@ -164,11 +165,19 @@ func (m *Manager) closedError() error {
 }
 func (m *Manager) Configured() bool { return m.vault.Configured() }
 
+// With no wrapper, the extension must retain an existing App selection (or an
+// unreadable policy) as a failure, never silently launch personal gh creation.
+func (m *Manager) RequiresRouting() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cfg.Enabled || m.loadErr != nil
+}
+
 func (m *Manager) View() View {
 	hasKeychain := m.hasKeychain() // native stores may prompt; never hold the state lock
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v := View{Config: m.cfg, Configured: m.vault.Configured(), Unlocked: m.vault.Unlocked() && !m.closed, Keychain: hasKeychain, Verified: m.verified, Connections: slices.Clone(m.connections)}
+	v := View{Config: m.cfg, Configured: m.vault.Configured(), Unlocked: m.vault.Unlocked() && !m.closed, Keychain: hasKeychain, Verified: m.verified, RoutingAvailable: m.gh != "", Connections: slices.Clone(m.connections)}
 	v.Config.Repositories = slices.Clone(m.cfg.Repositories)
 	v.Config.Workspaces = slices.Clone(m.cfg.Workspaces)
 	v.Config.WorkspaceGenerations = maps.Clone(m.cfg.WorkspaceGenerations)
@@ -437,7 +446,7 @@ func (m *Manager) Enable(enabled bool) error {
 			return errors.New("test the selected repositories with the unlocked App before enabling")
 		}
 		if m.gh == "" {
-			return errors.New("install GitHub CLI before enabling App PR identity")
+			return errors.New("GitHub App command routing is unavailable; install GitHub CLI or repair the private runtime wrapper, then restart yesman")
 		}
 	}
 	cfg := m.cfg

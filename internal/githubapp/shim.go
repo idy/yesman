@@ -85,43 +85,139 @@ func IsShim(args []string) bool {
 	return name == "gh" || name == "gh.exe" || len(args) > 1 && args[1] == "--yesman-github-app-gh"
 }
 
-func createCommand(args []string) bool {
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "pr" && args[i+1] == "create" {
-			return true
+// createInvocation finds the command after persistent flags, rather than
+// assuming pr/create are adjacent. A command-looking flag value is still data.
+// Ambiguous unsupported flags in the pr group fail closed when create follows.
+func createInvocation(args []string) ([]string, bool) {
+	root := -1
+	ambiguous := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return possibleCreate(args)
+		}
+		if strings.HasPrefix(arg, "-") {
+			name, _, inline := optionParts(arg)
+			if takesValue(name) && !inline {
+				i++
+			} else if !inline && !booleanOption(name) {
+				ambiguous = true
+			}
+			continue
+		}
+		if root < 0 {
+			if arg != "pr" {
+				if ambiguous {
+					return possibleCreate(args)
+				}
+				return nil, false
+			}
+			root = i
+			continue
+		}
+		if arg != "create" {
+			// A recognized subcommand ends command discovery. Later strings
+			// named pr/create (e.g. a title) cannot change its identity.
+			if ambiguous {
+				return possibleCreate(args)
+			}
+			return nil, false
+		}
+		out := []string{"pr", "create"}
+		for j, value := range args {
+			if j != root && j != i {
+				out = append(out, value)
+			}
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// Unknown flag arity cannot be allowed to hide a create operation. Preserve
+// every ambiguous argument so ParseCreate rejects it in App mode.
+func possibleCreate(args []string) ([]string, bool) {
+	for i, arg := range args {
+		if arg != "pr" {
+			continue
+		}
+		for j := i + 1; j < len(args); j++ {
+			if args[j] == "create" {
+				out := []string{"pr", "create"}
+				for k, value := range args {
+					if k != i && k != j {
+						out = append(out, value)
+					}
+				}
+				return out, true
+			}
 		}
 	}
+	return nil, false
+}
+
+func optionParts(arg string) (name, value string, inline bool) {
+	name, value, inline = strings.Cut(arg, "=")
+	short := map[string]string{"-R": "--repo", "-H": "--head", "-B": "--base", "-t": "--title", "-b": "--body", "-F": "--body-file", "-d": "--draft", "-h": "--help"}
+	if len(name) > 2 && !strings.HasPrefix(name, "--") {
+		if full, ok := short[name[:2]]; ok && full != "--draft" && full != "--help" {
+			return full, name[2:], true
+		}
+	}
+	if full, ok := short[name]; ok {
+		name = full
+	}
+	return
+}
+
+func takesValue(name string) bool {
+	switch name {
+	case "--repo", "--head", "--base", "--title", "--body", "--body-file", "--assignee", "-a", "--reviewer", "-r", "--label", "-l", "--milestone", "-m", "--project", "-p", "--template", "-T", "--recover", "--hostname", "--json", "--jq":
+		return true
+	}
 	return false
+}
+
+func booleanOption(name string) bool {
+	switch name {
+	case "--help", "--draft", "--web", "-w", "--fill", "--fill-first", "--fill-verbose", "--no-maintainer-edit", "--dry-run", "--editor", "-e", "--version":
+		return true
+	}
+	return false
+}
+
+func helpRequested(args []string) bool {
+	requested := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			return false
+		}
+		name, value, inline := optionParts(args[i])
+		if strings.HasPrefix(args[i], "-") && !takesValue(name) && !booleanOption(name) {
+			return false
+		}
+		if name == "--help" && (!inline || value == "true") {
+			requested = true
+		}
+		if takesValue(name) && !inline {
+			i++
+		}
+	}
+	return requested
 }
 
 // ParseCreate handles noninteractive PR creation only. Unknown options fail
 // clearly instead of changing identity or allowing gh to push a branch.
 func ParseCreate(args []string, stdin io.Reader) (PullInput, error) {
 	var in PullInput
+	normalized, ok := createInvocation(args)
+	if !ok {
+		return in, errors.New("expected gh pr create with explicit flags")
+	}
+	args = normalized[2:]
 	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "pr" && i+1 < len(args) && args[i+1] == "create" {
-			i++
-			continue
-		}
-		name, value, hasValue := strings.Cut(arg, "=")
-		switch name {
-		case "-R":
-			name = "--repo"
-		case "-H":
-			name = "--head"
-		case "-B":
-			name = "--base"
-		case "-t":
-			name = "--title"
-		case "-b":
-			name = "--body"
-		case "-F":
-			name = "--body-file"
-		case "-d":
-			name = "--draft"
-		}
+		name, value, hasValue := optionParts(args[i])
 		if seen[name] {
 			return in, fmt.Errorf("App PR creation does not accept repeated %s", name)
 		}
@@ -260,10 +356,10 @@ func RunShim(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		}
 		return 0
 	}
-	if !createCommand(args) {
+	if _, create := createInvocation(args); !create {
 		return personal()
 	}
-	if len(args) == 3 && args[0] == "pr" && args[1] == "create" && (args[2] == "--help" || args[2] == "-h") {
+	if helpRequested(args) {
 		return personal()
 	}
 	var mode struct {

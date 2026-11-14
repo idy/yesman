@@ -173,6 +173,23 @@ function shellEnvironment(base: Record<string, string>, injected: Record<string,
 	return env;
 }
 
+// A saved App mode cannot fall back to an unwrapped gh if startup could not
+// install the wrapper (for example an orphan holds it open on Windows). The
+// desktop stays usable; only enabled/unknown scopes fail closed until repaired
+// or explicitly disabled. This flag is fixed for the current app instance.
+async function requireGitHubRouting(signal?: AbortSignal): Promise<void> {
+	if (process.env.YESMAN_GH_REQUIRED !== "1" || process.env.YESMAN_GH_SHIM) return;
+	let mode;
+	try {
+		const deadline = AbortSignal.timeout(5000);
+		mode = await call("GET", "/v1/github-app/mode", undefined, signal ? AbortSignal.any([signal, deadline]) : deadline);
+	} catch (err) {
+		if (signal?.aborted) throw err;
+		throw new Error("GitHub App routing is unavailable and its mode could not be verified. No command ran with fallback credentials; repair the runtime wrapper or disable App identity in Settings.");
+	}
+	if (mode?.mode !== "personal") throw new Error("GitHub App routing is unavailable for this workspace. Repair the runtime wrapper and restart, or explicitly disable App identity in Settings; no command ran with fallback credentials.");
+}
+
 // refreshHidden asks the app for the secrets' values to hide, keeping
 // those remembered when it does not answer.
 async function refreshHidden(signal?: AbortSignal) {
@@ -244,6 +261,7 @@ export default function yesman(pi: ExtensionAPI) {
 			...base,
 			defaultActive: false,
 			async execute(id, params, signal, onUpdate, ctx) {
+				await requireGitHubRouting(signal);
 				const { env, note } = await commandEnv(signal);
 				const tool = make(ctx.cwd, { spawnHook: (c) => ({ ...c, env: shellEnvironment(c.env, env) }) });
 				const update: typeof onUpdate = onUpdate && ((partial) => onUpdate({ ...partial, content: hideContent(partial.content ?? []) }));

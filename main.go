@@ -109,18 +109,15 @@ func main() {
 	} else {
 		gh = ""
 	}
-	shim := ""
-	if executable, err := os.Executable(); err == nil && gh != "" {
-		shim, err = githubapp.InstallShim(h.Runtime(), executable)
-		if err != nil {
-			log.Fatal("prepare GitHub CLI wrapper: ", err)
-		}
+	executable, _ := os.Executable()
+	shim, routingErr := a.prepareGitHubAppRouting(gh, executable)
+	if routingErr != nil {
+		log.Print("GitHub App command routing is unavailable: ", routingErr)
 	}
-	appGH := gh
-	if shim == "" {
-		appGH = ""
-	} // cannot enable without automatic routing
-	a.githubApp = githubapp.NewManager(filepath.Join(h.Root, "github-app"), a.keychain, appGH)
+	routingRequired := ""
+	if shim == "" && a.githubApp.RequiresRouting() {
+		routingRequired = "1"
+	}
 	if a.githubApp.Configured() {
 		go func() { _ = a.githubApp.Prepare("") }()
 	}
@@ -133,7 +130,7 @@ func main() {
 	a.agents = agent.New(agent.Config{
 		Pi:        a.pi,
 		Extension: extension,
-		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root, "YESMAN_GH_SHIM=" + shim, "YESMAN_GH_REAL=" + gh},
+		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root, "YESMAN_GH_SHIM=" + shim, "YESMAN_GH_REAL=" + gh, "YESMAN_GH_REQUIRED=" + routingRequired},
 		Yesmen:    a.yesmen,
 		OnEvent:   func(e agent.Event) { _ = agentEvent.Broadcast(e) },
 		OnChange:  a.agentsChanged,

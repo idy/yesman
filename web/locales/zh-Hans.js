@@ -2,6 +2,7 @@
 // web/i18n.js). A message left out shows in English.
 export default {
   "GitHub App": "GitHub App",
+  "GitHub App command routing is unavailable. Install GitHub CLI or repair the private runtime wrapper and restart. You can disable App identity to use the existing credentials.": "GitHub App 命令路由不可用。请安装 GitHub CLI，或修复私有 runtime wrapper 后重启。也可以停用 App 身份，继续使用原有凭据。",
   "App avatar": "App 头像",
   "Save App logo": "保存 App 图标",
   "Save the existing yesman logo, then upload it in the GitHub App’s Display information settings.": "保存现有 yesman 图标，然后在 GitHub App 的 Display information 设置中上传。",
