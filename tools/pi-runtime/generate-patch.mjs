@@ -20,6 +20,11 @@ async function patch(path, transform) {
 }
 const core = '@earendil-works/pi-agent-core/dist/';
 const app = '@earendil-works/pi-coding-agent/dist/';
+await patch(app+'bundle/cli.js', (change, source) => {
+  // npm's existing platform shim can still target the original bundled path.
+  // Keep that public path as a thin entry into the patched source modules.
+  change(source, '#!/usr/bin/env node\nimport "../cli.js";\n');
+});
 await patch(core+'agent.js', (change, source) => {
   const start = source.indexOf('class PendingMessageQueue {');
   const end = source.indexOf('/**\n * Stateful wrapper', start);

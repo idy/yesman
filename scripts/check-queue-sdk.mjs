@@ -2,8 +2,22 @@
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 const root=process.env.YESMAN_TEST_RUNTIME;
 if(!root)throw Error('Prepare YESMAN_TEST_RUNTIME first');
+const cliConfig=await mkdtemp(`${tmpdir()}/yesman-public-cli-`);
+try {
+ await writeFile(resolve(cliConfig,'settings.json'),JSON.stringify({packages:[],extensions:[],defaultProjectTrust:'no'}));
+ const p=spawnSync(process.execPath,[resolve(root,'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'),'--mode','rpc','--no-session','--no-extensions','--no-tools','--offline'],{
+  cwd:cliConfig,env:{PATH:process.env.PATH,HOME:cliConfig,PI_CODING_AGENT_DIR:cliConfig,...(process.env.SystemRoot?{SystemRoot:process.env.SystemRoot}:{})},
+  input:JSON.stringify({type:'get_pending_queue',id:'public-entry'})+'\n',encoding:'utf8',timeout:20000,
+ });
+ assert.equal(p.status,0,p.stderr);
+ const reply=p.stdout.trim().split('\n').map(line=>JSON.parse(line)).find(r=>r.id==='public-entry');
+ assert.equal(reply?.data?.capability,1,'npm public CLI still reaches an unpatched bundle');
+} finally {await rm(cliConfig,{recursive:true,force:true});}
 const {Agent}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-agent-core/dist/index.js')));
 const {createAssistantMessageEventStream}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-ai/dist/index.js')));
 const model={id:'fixture',name:'Fixture',api:'fixture',provider:'fixture',baseUrl:'',input:['text'],contextWindow:1000,maxTokens:10,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}};

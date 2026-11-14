@@ -67,7 +67,7 @@ func TestRecallBrowserBridge(t *testing.T) {
 	manager := agent.New(agent.Config{Pi: node, Command: func(context.Context) (string, []string, error) {
 		return node, []string{filepath.Join(runtime, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js")}, nil
 	}, Yesmen: store, Extension: filepath.Join(root, "pi", "yesman.ts"),
-		Env: append(isolatedRecallBridgeEnv(), []string{"HOME=" + temp, "PI_CODING_AGENT_DIR=" + config, "YESMAN_API=" + extensionAPI.URL, "DELIVERY_GATE=" + filepath.Join(temp, "gate"), "DELIVERY_AUDIT=" + filepath.Join(temp, "audit")}...), OnEvent: func(e agent.Event) { mu.Lock(); events = append(events, e); mu.Unlock() }})
+		Env: append(isolatedRecallBridgeEnv(), []string{"HOME=" + temp, "USERPROFILE=" + temp, "APPDATA=" + temp, "LOCALAPPDATA=" + temp, "PI_CODING_AGENT_DIR=" + config, "YESMAN_API=" + extensionAPI.URL, "DELIVERY_GATE=" + filepath.Join(temp, "gate"), "DELIVERY_AUDIT=" + filepath.Join(temp, "audit")}...), OnEvent: func(e agent.Event) { mu.Lock(); events = append(events, e); mu.Unlock() }})
 	defer manager.StopAll()
 	svc := &service{app: &app{yesmen: store, agents: manager, pool: pool.New(filepath.Join(temp, "pool"))}}
 	// Reserve a real active turn, so browser inputs use native steering.
@@ -202,7 +202,7 @@ func isolatedRecallBridgeEnv() []string {
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		switch strings.ToUpper(key) {
-		case "PATH", "PATHEXT", "SYSTEMROOT", "COMSPEC", "TMPDIR", "TEMP", "TMP":
+		case "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TMPDIR", "TEMP", "TMP":
 		default:
 			clear = append(clear, key+"=")
 		}

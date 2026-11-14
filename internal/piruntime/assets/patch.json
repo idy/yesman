@@ -3,6 +3,17 @@
   "revision": 1,
   "patches": [
     {
+      "path": "@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+      "before": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
+      "after": "1eb79219c3da2dc963216afd2373c30b7125abf8ff84927583c57fdb5c622744",
+      "edits": [
+        {
+          "before": "#!/usr/bin/env node\nimport { createRequire, enableCompileCache } from \"node:module\";\n\nenableCompileCache();\ncreateRequire(import.meta.url)(\"./cli-runtime.js\");\n",
+          "after": "#!/usr/bin/env node\nimport \"../cli.js\";\n"
+        }
+      ]
+    },
+    {
       "path": "@earendil-works/pi-agent-core/dist/agent.js",
       "before": "f45ae001e2b14fced8ae151f0a00303b5fbdb5fc4b25418d45de6a5546f48a8c",
       "after": "c2db0d09601c46ff9870b8f9c95f5db9125a12a32ce7b5a6ce312516b2d60cb9",

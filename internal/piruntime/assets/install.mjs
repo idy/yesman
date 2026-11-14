@@ -10,17 +10,19 @@ const root = fileURLToPath(new URL('.', import.meta.url));
 const sha = (s) => createHash('sha256').update(s).digest('hex');
 const [major, minor] = process.versions.node.split('.').map(Number);
 if (major < 22 || major === 22 && minor < 19) throw new Error('yesman requires Node.js 22.19 or later');
-if (!process.argv.includes('--patch-only')) {
-  // Invoke npm's script with this same Node, avoiding shell quoting and .cmd
-  // execution on Windows. npm_execpath is supplied explicitly by the Go host.
+const patchOnly = process.argv.includes('--patch-only');
+function npmCommand(command) {
+  // Invoke npm with this same Node, with an explicit local prefix. User npm
+  // defaults (including global=true) cannot redirect this build to global pi.
   const npm = process.env.YESMAN_RUNTIME_NPM;
   if (!npm) throw new Error('npm was not found; install Node.js with npm');
-  const result = spawnSync(process.execPath, [npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], {
+  const result = spawnSync(process.execPath, [npm, command, '--prefix', root, '--global=false', '--ignore-scripts', '--no-audit', '--no-fund'], {
     cwd: root, stdio: ['ignore', 'ignore', 'inherit'], env: process.env,
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`Pinned pi installation failed (${result.status})`);
+  if (result.status !== 0) throw new Error(`Pinned pi ${command} failed (${result.status})`);
 }
+if (!patchOnly) npmCommand('ci');
 const manifest = JSON.parse(await readFile(resolve(root, 'patch.json'), 'utf8'));
 for (const patch of manifest.patches) {
   const path = resolve(root, 'node_modules', patch.path);

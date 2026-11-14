@@ -45,9 +45,11 @@ The upstream npm version is `@earendil-works/pi-coding-agent@1.5.2`, MIT license
 upstream tag `v1.5.2` resolves to `b4afdddf44e059c67ccf5097e5317d913521b470`.
 `assets/LICENSE-pi` preserves the upstream license. Downloaded dependencies retain
 the files/licenses published in their integrity-pinned npm packages. The source
-patch covers nine files: core implementation/declarations; AgentSession
+patch covers ten files: core implementation/declarations; AgentSession
 implementation/declarations; RPC mode/types/client implementation/declarations;
-and the package CLI/RPC entrypoint paths. It adds one queue implementation module.
+and the package CLI/RPC entrypoint paths plus a thin entry at the original bundled
+CLI path (so npm's existing platform shims also reach patched code). It adds one
+queue implementation module.
 No dependency code is patched dynamically at runtime.
 
 Rebuild the same dependency as the application in an isolated cache:

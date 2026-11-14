@@ -59,7 +59,7 @@ func TestRecallWithManagedPi(t *testing.T) {
 	cfg := Config{Pi: node, Command: func(context.Context) (string, []string, error) {
 		return node, []string{filepath.Join(runtime, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js")}, nil
 	}, Extension: filepath.Join(root, "pi", "yesman.ts"), Yesmen: store,
-		Env: append(isolatedNativeEnv(), []string{"HOME=" + temp, "PI_CODING_AGENT_DIR=" + config, "YESMAN_API=" + api.URL, "DELIVERY_GATE=" + gate, "DELIVERY_AUDIT=" + filepath.Join(temp, "audit")}...)}
+		Env: append(isolatedNativeEnv(), []string{"HOME=" + temp, "USERPROFILE=" + temp, "APPDATA=" + temp, "LOCALAPPDATA=" + temp, "PI_CODING_AGENT_DIR=" + config, "YESMAN_API=" + api.URL, "DELIVERY_GATE=" + gate, "DELIVERY_AUDIT=" + filepath.Join(temp, "audit")}...)}
 	var failWrite atomic.Bool
 	cfg.deliveryWrite = func(path string, data []byte) error {
 		if failWrite.Load() {
@@ -75,8 +75,17 @@ func TestRecallWithManagedPi(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = m.Submit(ctx, info.ID, deliveryTestID(10000), "hold", nil, info.Since); err != nil {
-		t.Fatal(err)
+	initial, err := m.Submit(ctx, info.ID, deliveryTestID(10000), "hold", nil, info.Since)
+	if err != nil || initial.State != "accepted" {
+		// Preserve complete diagnostics only from this synthetic configuration,
+		// not from any user's pi, for platform startup failures.
+		probe := exec.CommandContext(ctx, node, filepath.Join(runtime, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"), "--mode", "rpc", "--no-session", "-e", cfg.Extension)
+		probe.Dir = temp
+		probe.Env = append(os.Environ(), cfg.Env...)
+		probe.Env = append(probe.Env, "YESMAN_ROLE=lead", "YESMAN_AGENT=alice/lead", "YESMAN_TOKEN=fixture")
+		probe.Stdin = strings.NewReader("{\"type\":\"get_state\",\"id\":\"diagnostic\"}\n")
+		output, probeErr := probe.CombinedOutput()
+		t.Fatalf("initial prompt state=%s err=%v detail=%s; isolated probe %v: %s", initial.State, err, initial.Error, probeErr, output)
 	}
 	image := Image{Type: "image", MimeType: "image/png", Data: "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg=="}
 	text := "original " + strings.Repeat("complete text 中文\n", 100)
@@ -235,7 +244,7 @@ func isolatedNativeEnv() []string {
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		switch strings.ToUpper(key) {
-		case "PATH", "PATHEXT", "SYSTEMROOT", "COMSPEC", "TMPDIR", "TEMP", "TMP":
+		case "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TMPDIR", "TEMP", "TMP":
 		default:
 			clear = append(clear, key+"=")
 		}

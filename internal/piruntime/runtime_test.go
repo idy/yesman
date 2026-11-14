@@ -46,7 +46,7 @@ func TestPinnedManifest(t *testing.T) {
 		}
 		seen[p.Path] = true
 	}
-	if len(seen) != 9 {
+	if len(seen) != 10 {
 		t.Fatalf("review changed source-file scope: %d", len(seen))
 	}
 }
