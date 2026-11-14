@@ -84,7 +84,12 @@ export function createCrew({ call, fail, shown, rerender, openPage, preferenceRo
         { top: formatNumber(view.top, { maximumFractionDigits: 1 }) })));
     return {
       el,
-      need(on) { el.hidden = !on; inputs[0].required = on; },
+      // Hidden fields are disabled too, so that a value left in them, out
+      // of range, does not hold back the form with nothing to show why.
+      need(on) {
+        el.hidden = !on;
+        for (const input of inputs) input.disabled = !on;
+      },
       read() {
         const out = {};
         FIELDS.forEach((f, i) => { if (inputs[i].value !== '') out[f.key] = Number(inputs[i].value); });
