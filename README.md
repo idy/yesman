@@ -225,4 +225,4 @@ Ready pull requests receive automated OpenAI/Codex review through the shared wor
 
 ## License
 
-[MIT](LICENSE). Magpie's files in `web/mds/` and CodeMirror in `web/vendor/codemirror/` keep their own licenses. The model scores in `internal/crew/scores/` are [Artificial Analysis](https://artificialanalysis.ai)'s, used under its terms, which ask that it be credited as their source; Settings › yesman does.
+[MIT](LICENSE). Magpie's files in `web/mds/`, the local Phosphor icon font in `web/icons/`, and CodeMirror in `web/vendor/codemirror/` keep their own licenses. The model scores in `internal/crew/scores/` are [Artificial Analysis](https://artificialanalysis.ai)'s, used under its terms, which ask that it be credited as their source; Settings › yesman does.

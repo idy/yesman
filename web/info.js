@@ -245,7 +245,7 @@ export function createInfo(host) {
     const [tone, glyph, text, title] = c.failed
       ? ['failed', icon('x'), t('{failed}/{total} failed', { failed: n(c.failed), total: n(c.total) }), t('{failed} of {total} checks failed', { failed: n(c.failed), total: n(c.total) })]
       : c.pending
-        ? ['pending', h('i', { class: 'info-checks-dot', 'aria-hidden': 'true' }), t('{done}/{total} done', { done: n(c.passed + c.failed), total: n(c.total) }), t('{pending} of {total} checks still running', { pending: n(c.pending), total: n(c.total) })]
+        ? ['pending', icon('record', 'mds-icon info-checks-dot'), t('{done}/{total} done', { done: n(c.passed + c.failed), total: n(c.total) }), t('{pending} of {total} checks still running', { pending: n(c.pending), total: n(c.total) })]
         : ['passed', icon('check'), tn(c.total, '{n} check', '{n} checks'), t('All {total} checks passed', { total: n(c.total) })];
     return h('span', { class: 'info-checks', 'data-checks': tone, title, 'aria-label': title }, glyph, text);
   }

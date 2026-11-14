@@ -1,0 +1,53 @@
+/* App UI icons. Keep vendored Magpie unchanged; see icons/README.md. */
+@font-face {
+  font-family: "yesman Phosphor";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("./icons/phosphor-regular.woff2") format("woff2");
+}
+.mds-icon, .mds-spinner, .mds-dot,
+.mds-select-option::before, .mds-select-caret {
+  font-family: "yesman Phosphor" !important;
+  font-style: normal;
+  font-weight: 400 !important;
+  font-variant: normal;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: none;
+  -webkit-font-smoothing: antialiased;
+}
+.mds-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 16px; vertical-align: middle;
+}
+.mds-icon::before { content: attr(data-glyph); }
+.mds-button .mds-icon, .mds-tabs .mds-icon, .mds-code-title .mds-icon { font-size: 14px; }
+.mds-pill .mds-icon { font-size: 13px; }
+.mds-pill--icon .mds-icon { font-size: 16px; }
+@media (max-width: 640px) {
+  .mds-pill--responsive .mds-icon { font-size: 16px; }
+}
+.mds-spinner {
+  background: none; -webkit-mask: none; mask: none;
+  color: var(--mds-accent-ink); font-size: 15px;
+}
+.mds-spinner::before { content: "\eb44" / ""; }
+.mds-dot {
+  background: none; border-radius: 0;
+  color: var(--mds-tone, var(--mds-faint)); font-size: 7px;
+}
+.mds-dot::before { content: "\e3ee" / ""; }
+/* initSelect wraps the composer's selects. Its trigger gets a font caret while
+   native selects retain Magpie's Phosphor SVG fallback. */
+.mds-select-control { position: relative; }
+.mds-select-trigger { background-image: none; }
+.mds-select-caret {
+  pointer-events: none; position: absolute;
+  right: 9px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; font-size: 14px;
+  color: var(--mds-muted);
+}
+.mds-select-option::before {
+  content: "\e182" / ""; background: none; -webkit-mask: none; mask: none;
+  color: var(--mds-accent-ink); font-size: 16px;
+}

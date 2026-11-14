@@ -16,7 +16,7 @@ function mark(status) {
     case 'done': return icon('check', 'mds-icon board-mark');
     case 'blocked': return icon('alert', 'mds-icon board-mark');
     case 'dropped': return icon('minimize', 'mds-icon board-mark');
-    default: return h('i', { class: 'board-mark board-dot', 'aria-hidden': 'true' });
+    default: return icon(status === 'doing' ? 'record' : 'circle', 'mds-icon board-mark board-dot');
   }
 }
 

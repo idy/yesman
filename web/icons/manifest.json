@@ -1,0 +1,251 @@
+{
+  "package": "@phosphor-icons/web",
+  "version": "2.1.2",
+  "weight": "regular",
+  "license": "MIT",
+  "source": "https://registry.npmjs.org/@phosphor-icons/web/-/web-2.1.2.tgz",
+  "integrity": "sha512-rPAR9o/bEcp4Cw4DEeZHXf+nlGCMNGkNDRizYHM47NLxz9vvEHp/Tt6FMK1NcWadzw/pFDPnRBGi/ofRya958A==",
+  "fontSHA256": "c2ea45ea05ff5c7df1936770c104725f2a68f43fd343f35f3da23a30b27de32a",
+  "icons": {
+    "link": {
+      "name": "link",
+      "codepoint": "e2e2"
+    },
+    "globe": {
+      "name": "globe",
+      "codepoint": "e288"
+    },
+    "route": {
+      "name": "path",
+      "codepoint": "e39c"
+    },
+    "device": {
+      "name": "desktop",
+      "codepoint": "e560"
+    },
+    "code": {
+      "name": "code",
+      "codepoint": "e1bc"
+    },
+    "copy": {
+      "name": "copy",
+      "codepoint": "e1ca"
+    },
+    "reload": {
+      "name": "arrow-clockwise",
+      "codepoint": "e036"
+    },
+    "check": {
+      "name": "check",
+      "codepoint": "e182"
+    },
+    "file": {
+      "name": "file-text",
+      "codepoint": "e23a"
+    },
+    "lock": {
+      "name": "lock-simple",
+      "codepoint": "e308"
+    },
+    "up": {
+      "name": "arrow-up",
+      "codepoint": "e08e"
+    },
+    "x": {
+      "name": "x",
+      "codepoint": "e4f6"
+    },
+    "alert": {
+      "name": "warning",
+      "codepoint": "e4e0"
+    },
+    "info": {
+      "name": "info",
+      "codepoint": "e2ce"
+    },
+    "palette": {
+      "name": "palette",
+      "codepoint": "e6c8"
+    },
+    "type": {
+      "name": "text-t",
+      "codepoint": "e48a"
+    },
+    "toggle": {
+      "name": "toggle-right",
+      "codepoint": "e676"
+    },
+    "layout": {
+      "name": "sidebar",
+      "codepoint": "eab6"
+    },
+    "bell": {
+      "name": "bell",
+      "codepoint": "e0ce"
+    },
+    "minimize": {
+      "name": "minus",
+      "codepoint": "e32a"
+    },
+    "maximize": {
+      "name": "square",
+      "codepoint": "e45e"
+    },
+    "caret-down": {
+      "name": "caret-down",
+      "codepoint": "e136"
+    },
+    "spinner": {
+      "name": "circle-notch",
+      "codepoint": "eb44"
+    },
+    "send": {
+      "name": "arrow-up",
+      "codepoint": "e08e"
+    },
+    "stop": {
+      "name": "stop",
+      "codepoint": "e46c"
+    },
+    "folder": {
+      "name": "folder",
+      "codepoint": "e24a"
+    },
+    "panel": {
+      "name": "sidebar",
+      "codepoint": "eab6"
+    },
+    "power": {
+      "name": "power",
+      "codepoint": "e3da"
+    },
+    "gear": {
+      "name": "gear",
+      "codepoint": "e270"
+    },
+    "sliders": {
+      "name": "sliders",
+      "codepoint": "e432"
+    },
+    "about": {
+      "name": "info",
+      "codepoint": "e2ce"
+    },
+    "branch": {
+      "name": "git-branch",
+      "codepoint": "e278"
+    },
+    "search": {
+      "name": "magnifying-glass",
+      "codepoint": "e30c"
+    },
+    "plus": {
+      "name": "plus",
+      "codepoint": "e3d4"
+    },
+    "chevron": {
+      "name": "caret-right",
+      "codepoint": "e13a"
+    },
+    "fileText": {
+      "name": "file-text",
+      "codepoint": "e23a"
+    },
+    "fileCode": {
+      "name": "file-code",
+      "codepoint": "e914"
+    },
+    "image": {
+      "name": "image",
+      "codepoint": "e2ca"
+    },
+    "tree": {
+      "name": "list",
+      "codepoint": "e2f0"
+    },
+    "collapse": {
+      "name": "arrows-in-line-vertical",
+      "codepoint": "e532"
+    },
+    "expand": {
+      "name": "arrows-out-simple",
+      "codepoint": "e0a6"
+    },
+    "restore": {
+      "name": "arrows-in-simple",
+      "codepoint": "e09e"
+    },
+    "transfer": {
+      "name": "arrows-down-up",
+      "codepoint": "e098"
+    },
+    "package": {
+      "name": "package",
+      "codepoint": "e390"
+    },
+    "trash": {
+      "name": "trash",
+      "codepoint": "e4a6"
+    },
+    "external": {
+      "name": "arrow-square-out",
+      "codepoint": "e5de"
+    },
+    "eye": {
+      "name": "eye",
+      "codepoint": "e220"
+    },
+    "eyeSlash": {
+      "name": "eye-slash",
+      "codepoint": "e224"
+    },
+    "more": {
+      "name": "dots-three",
+      "codepoint": "e1fe"
+    },
+    "users": {
+      "name": "users",
+      "codepoint": "e4d6"
+    },
+    "listDashes": {
+      "name": "list-dashes",
+      "codepoint": "e2f4"
+    },
+    "book": {
+      "name": "book-open",
+      "codepoint": "e0e6"
+    },
+    "arrowLeft": {
+      "name": "arrow-left",
+      "codepoint": "e058"
+    },
+    "pullRequest": {
+      "name": "git-pull-request",
+      "codepoint": "e282"
+    },
+    "merge": {
+      "name": "git-merge",
+      "codepoint": "e280"
+    },
+    "listChecks": {
+      "name": "list-checks",
+      "codepoint": "eadc"
+    },
+    "enter": {
+      "name": "arrow-bend-down-left",
+      "codepoint": "e018"
+    },
+    "circle": {
+      "name": "circle",
+      "codepoint": "e18a"
+    },
+    "record": {
+      "name": "record",
+      "codepoint": "e3ee"
+    },
+    "pencil": {
+      "name": "pencil-simple",
+      "codepoint": "e3b4"
+    }
+  }
+}
