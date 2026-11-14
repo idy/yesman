@@ -902,7 +902,7 @@ function renderDock({ focusComposer = false } = {}) {
     const files = [...(e.clipboardData?.items ?? [])].filter((item) => item.kind === 'file' && item.type.startsWith('image/')).map((item) => item.getAsFile()).filter(Boolean);
     if (files.length) { e.preventDefault(); addImages(files); }
   });
-  const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea); } },
+  const form = h('form', { class: 'composer', onsubmit: (e) => { e.preventDefault(); sendMessage(a, textarea, e.submitter); } },
     fileInput, previews,
     h('div', { class: 'composer-input' }, attach, textarea, action),
     h('div', { class: 'composer-controls' }, modelOptionsEl(a, working), contextViewer.mount(a)),
@@ -929,16 +929,17 @@ function renderDock({ focusComposer = false } = {}) {
   }
 }
 
-async function sendMessage(a, textarea) {
+async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
   const text = textarea.value.trim();
   if ((!text && !attachments?.items.length) || attachments?.reading || attachments?.sending || state.modelOptions.get(key)?.busy) return;
   const images = imagePayload(attachments?.items ?? []);
-  // A keyboard submit or a click on Send intends to continue composing.
-  // Keep that focus through pending renders; subsequent renders follow the
-  // actual focus, so moving to another control or agent cancels restoration.
-  const focusComposer = document.activeElement === textarea ||
+  // SubmitEvent retains the activated Send button even after WebKit's mouse
+  // default action blurs the textarea without focusing the button. Use that
+  // submission intent only for the initial render; subsequent renders follow
+  // actual focus so moving to another control or agent cancels restoration.
+  const focusComposer = submitter?.matches('button[type="submit"]') || document.activeElement === textarea ||
     document.activeElement === textarea.form?.querySelector('button[type="submit"]');
   attachments.sending = true;
   renderDock({ focusComposer });
