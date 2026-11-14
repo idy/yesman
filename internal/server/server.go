@@ -52,6 +52,9 @@ type Server struct {
 	worktreeLocks map[string]*sync.Mutex // serialize lifecycle operations per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
+	// beforeBoardChange, set only by tests, runs once a board change was
+	// admitted, just before it is written.
+	beforeBoardChange func()
 }
 
 // Start listens on a loopback port and serves in the background.
@@ -90,10 +93,13 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// caller is the agent a request comes from.
+// caller is the agent a request comes from, as it was when the request
+// arrived. token is the credential it was authenticated with, which names
+// the very process, so that a change can be refused once it is retired.
 type caller struct {
 	agent  agent.Info
 	yesman yesmen.Yesman
+	token  string
 }
 
 type handlerFunc func(ctx context.Context, c caller, r *http.Request) (any, error)
@@ -115,7 +121,11 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, err)
 			return
 		}
-		out, err := fn(r.Context(), caller{agent: info, yesman: y}, r)
+		out, err := fn(r.Context(), caller{agent: info, yesman: y, token: token}, r)
+		if errors.Is(err, agent.ErrRetired) {
+			writeError(w, http.StatusUnauthorized, err)
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -469,6 +479,12 @@ func (s *Server) board(_ context.Context, c caller, _ *http.Request) (any, error
 	return s.Yesmen.Board(c.yesman.Name)
 }
 
+// changeBoard changes the caller's yesman's board, unless the caller was
+// retired after its request arrived: its process stopped, or its yesman was
+// dismissed and maybe hired again, while the body was on its way. The body
+// is read before any lock is taken; the change is then written within the
+// workspace's Use and the caller's process's admission (agent.BeginChange),
+// so that it lands before that process finishes stopping, or not at all.
 func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any, error) {
 	var change yesmen.BoardChange
 	if err := decode(r, &change); err != nil {
@@ -479,7 +495,17 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 	}
 	var b yesmen.Board
 	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
-		var err error
+		if !y.HiredAt.Equal(c.yesman.HiredAt) {
+			return agent.ErrRetired
+		}
+		release, err := s.Agents.BeginChange(c.token, y)
+		if err != nil {
+			return err
+		}
+		defer release()
+		if s.beforeBoardChange != nil {
+			s.beforeBoardChange()
+		}
 		b, err = s.Yesmen.ChangeBoard(y.Name, change)
 		return err
 	}); err != nil {
