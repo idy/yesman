@@ -47,7 +47,8 @@ export function createGrants({ call, shown }) {
   let view = null;
   let epoch = 0;
   let serial = 0;
-  let loading = false;
+  let reading = null;
+  let refreshAgain = false; // one read after an action invalidates an in-flight snapshot
   let pending = null; // retained across tab switches until the system call settles
   let error = '';
   let feedback = null;
@@ -55,7 +56,7 @@ export function createGrants({ call, shown }) {
   function leave() {
     if (!root) return;
     epoch++; serial++;
-    root = null; loading = false; view = null; error = ''; feedback = null;
+    root = null; reading = null; refreshAgain = false; view = null; error = ''; feedback = null;
   }
   const active = (e) => e === epoch && shown() && root?.isConnected;
 
@@ -64,13 +65,13 @@ export function createGrants({ call, shown }) {
   function paint() {
     if (!root || !shown()) return;
     const focus = root.contains(document.activeElement) ? document.activeElement.dataset.grantFocus : null;
-    const refresh = h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-grant-focus': 'refresh', 'aria-disabled': String(loading || !!pending), onclick: refreshStatus },
-      loading ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload'), t('Refresh'));
+    const refresh = h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-grant-focus': 'refresh', 'aria-disabled': String(!!reading), onclick: refreshStatus },
+      reading ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload'), t('Refresh'));
     root.replaceChildren(...[
       h('div', { class: 'grant-toolbar' }, h('h2', { class: 'mds-heading' }, t('Grant')), refresh),
       h('p', { class: 'toolbar-lead' }, t('Choose the access your work needs. Permissions apply to this copy of yesman; independent terminals, runtimes and helper apps may need their own grants.')),
       error ? h('p', { class: 'danger', role: 'alert' }, t('Could not read permissions. Refresh to try again.'), ' ', error) : null,
-      !view && loading ? h('p', { role: 'status', class: 'toolbar-lead' }, t('Reading permissions…')) : null,
+      !view && (reading || pending) ? h('p', { role: 'status', class: 'toolbar-lead' }, t(pending ? 'Waiting for the system…' : 'Reading permissions…')) : null,
       view ? h('div', { class: 'mds-group grant-list', 'aria-label': t('Application permissions') }, view.items.map(row)) : null].filter(Boolean));
     if (focus) {
       const replacement = root.querySelector(`[data-grant-focus="${CSS.escape(focus)}"]`) ||
@@ -85,7 +86,7 @@ export function createGrants({ call, shown }) {
     const busy = pending?.id === item.id || item.busy;
     const note = feedback?.id === item.id ? feedback : null;
     const nativePending = view?.items.some(value => value.busy);
-    const blocked = (action) => !!pending || loading || (action === 'request' && nativePending);
+    const blocked = (action) => !!pending || !!reading || (action === 'request' && nativePending);
     const button = (action, label) => h('button', {
       class: 'mds-button mds-button--small', type: 'button', 'aria-disabled': String(blocked(action)),
       'data-grant-action': action, 'data-grant-focus': `${item.id}-${action}`, 'aria-label': t('{action}: {permission}', { action: t(label), permission: t(name) }),
@@ -102,21 +103,30 @@ export function createGrants({ call, shown }) {
       note ? h('p', { class: `grant-feedback${note.error ? ' danger' : ''}`, role: note.error ? 'alert' : 'status' }, note.text) : null);
   }
   async function refreshStatus() {
-    if (!shown() || !root || loading || pending) return;
-    const e = epoch, s = ++serial;
-    loading = true; error = '';
+    // Status reads are independent of a pending OS action. Coalesce repeated
+    // refresh/focus events; an action completion queues one genuinely new read.
+    if (!shown() || !root || reading) return;
+    const read = { epoch, serial };
+    reading = read; error = '';
     paint();
+    const current = () => reading === read && active(read.epoch) && read.serial === serial;
     try {
       const next = await call('Grants');
-      if (active(e) && s === serial) view = next;
+      if (current()) view = next;
     } catch (err) {
-      if (active(e) && s === serial) { error = errorText(err); view = null; }
+      if (current()) { error = errorText(err); view = null; }
     } finally {
-      if (active(e) && s === serial) { loading = false; paint(); }
+      // A departed visit's read must not clear the new visit's loading state.
+      if (reading === read) {
+        reading = null;
+        const again = refreshAgain;
+        refreshAgain = false;
+        if (active(read.epoch)) { paint(); if (again) refreshStatus(); }
+      }
     }
   }
   async function act(id, action) {
-    if (pending || loading || !shown()) return;
+    if (pending || reading || !shown()) return;
     const e = epoch;
     const operation = { id, action };
     pending = operation; feedback = null; serial++;
@@ -131,10 +141,14 @@ export function createGrants({ call, shown }) {
       if (active(e)) feedback = { id, error: true, text: t('Permission action failed. Refresh the status before trying again.' ) + ' ' + errorText(err) };
     } finally {
       if (pending === operation) pending = null;
-      if (active(e)) paint();
-      // Reopening the page while the old request was pending gets a fresh
-      // read, never that request's old feedback or result.
-      else if (shown() && root) { paint(); refreshStatus(); }
+      // Success, failure and timeout can all change native status/busy. Retire
+      // any earlier snapshot, including a read started on a newer page visit.
+      serial++;
+      if (shown() && root) {
+        refreshAgain = !!reading;
+        paint();
+        if (!reading) refreshStatus();
+      }
     }
   }
   function render(inner) {

@@ -1,0 +1,70 @@
+name: macOS draft startup
+
+# Publication gate: run this on the immutable tag after all draft assets exist.
+# It downloads the final archives; it does not rebuild or publish anything.
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Draft tag to verify, e.g. v0.1.31"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  startup:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, arch: arm64 }
+          - { os: macos-15-intel, arch: amd64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Download the exact draft archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess, tarfile
+          tag = os.environ['RELEASE_TAG']
+          assert re.fullmatch(r'v0\.1\.[0-9]+', tag), 'Expected a patch release tag'
+          repo = os.environ['GITHUB_REPOSITORY']
+          meta = json.loads(subprocess.check_output(['gh', 'release', 'view', tag, '--repo', repo, '--json', 'tagName,isDraft,assets']))
+          assert meta['isDraft'] and meta['tagName'] == tag, 'This gate verifies an unpublished draft'
+          name = f"yesman-{tag[1:]}-darwin-{os.environ['TARGET_ARCH']}.tar.gz"
+          asset = next(a for a in meta['assets'] if a['name'] == name)
+          folder = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft'
+          folder.mkdir()
+          subprocess.run(['gh', 'release', 'download', tag, '--repo', repo, '--pattern', name, '--dir', str(folder)], check=True)
+          digest = hashlib.sha256((folder / name).read_bytes()).hexdigest()
+          assert asset.get('digest') == 'sha256:' + digest, 'Draft asset digest differs'
+          with tarfile.open(folder / name) as archive:
+              archive.extractall(folder, filter='data')
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'startup-evidence'
+          evidence.mkdir()
+          (evidence / 'draft-asset.json').write_text(json.dumps({'tag': tag, 'asset': asset, 'sha256': digest, 'source': subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()}, indent=2))
+          PY
+      - name: Verify unchanged final app startup
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 scripts/check_macos_startup.py "$RUNNER_TEMP/draft/yesman.app" web "$RUNNER_TEMP/startup-evidence"
+      - name: Save the draft gate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: draft-startup-${{ matrix.arch }}
+          path: ${{ runner.temp }}/startup-evidence
+          if-no-files-found: error

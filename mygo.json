@@ -9,7 +9,7 @@
   "out": "build",
   "macos": {
     "minimumSystemVersion": "13.0",
-    "entitlements": "resources/permissions.entitlements.plist",
+    "entitlements": "packaging/macos/permissions.entitlements.plist",
     "infoPlist": {
       "NSBluetoothAlwaysUsageDescription": "yesman requests Bluetooth access for device tasks you choose to run. No devices are scanned or connected when granting access.",
       "NSMicrophoneUsageDescription": "yesman requests microphone access for audio tasks you choose to run. Granting access does not start recording.",

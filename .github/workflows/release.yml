@@ -63,6 +63,10 @@ jobs:
         if: matrix.name == 'Windows'
         run: sudo apt-get update && sudo apt-get install -y nsis
 
+      - name: Record macOS build tools
+        if: matrix.name == 'macOS'
+        run: xcodebuild -version && xcrun --show-sdk-version && sw_vers
+
       - name: Build and upload
         env:
           # The app-owned macOS permission bridge links Apple's frameworks.
