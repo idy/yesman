@@ -35,6 +35,9 @@ type Client struct {
 	flights  map[string]*tokenFlight
 	lifetime context.Context
 	stop     context.CancelFunc
+	// Tests can adapt gh's host without changing any OS trust store. The
+	// production constructor always uses the strict github.com environment.
+	ghEnv func(string, string) []string
 }
 
 type installationToken struct {
@@ -61,7 +64,7 @@ func NewClient(dir string, repositories []string) (*Client, error) {
 
 func newClient(app Registration, key *rsa.PrivateKey, repositories []string) (*Client, error) {
 	lifetime, stop := context.WithCancel(context.Background())
-	c := &Client{app: app, key: key, allowed: map[string]bool{}, http: safeHTTPClient(), base: githubAPI, now: time.Now, tokens: map[string]installationToken{}, flights: map[string]*tokenFlight{}, lifetime: lifetime, stop: stop}
+	c := &Client{app: app, key: key, allowed: map[string]bool{}, http: safeHTTPClient(), base: githubAPI, now: time.Now, tokens: map[string]installationToken{}, flights: map[string]*tokenFlight{}, lifetime: lifetime, stop: stop, ghEnv: ghEnvironment}
 	for _, repo := range repositories {
 		if !repoPattern.MatchString(repo) {
 			return nil, errors.New("App repositories must be explicit owner/repo names")

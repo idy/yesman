@@ -154,7 +154,7 @@ func (c *Client) CreateWithGH(ctx context.Context, gh string, in PullInput) (Pul
 	defer cancel()
 	cmd := exec.CommandContext(ctx, gh, args...)
 	cmd.Dir = dir
-	cmd.Env = ghEnvironment(dir, token.value)
+	cmd.Env = c.ghEnv(dir, token.value)
 	cmd.Stdin = strings.NewReader(in.Body)
 	var stdout, stderr limitedOutput
 	stdout.limit = 8192

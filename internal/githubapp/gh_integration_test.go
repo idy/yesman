@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -132,7 +133,8 @@ func TestRealGHAppSubprocess(t *testing.T) {
 	if err := os.WriteFile(caFile, certPEM, 0600); err != nil {
 		t.Fatal(err)
 	}
-	trustGHFixture(t, der)
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
 	t.Setenv("HTTPS_PROXY", proxy.URL)
 	t.Setenv("https_proxy", proxy.URL)
 	t.Setenv("NO_PROXY", "127.0.0.1,localhost")
@@ -146,8 +148,35 @@ func TestRealGHAppSubprocess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer client.Close()
 	client.base = upstream.URL
 	client.http = upstream.Client()
+	if runtime.GOOS == "windows" || os.Getenv("YESMAN_TEST_GH_SOCKET") == "1" {
+		// gh's supported http_unix_socket transport works on Windows without
+		// changing a trust store, hostname or production TLS configuration.
+		// Keep the socket path short enough for sockaddr_un on every OS.
+		socketDir, err := os.MkdirTemp("", "gh-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(socketDir)
+		socketPath := filepath.Join(socketDir, "s")
+		listener, err := net.Listen("unix", socketPath)
+		if err != nil {
+			t.Fatal("local gh socket fixture:", err)
+		}
+		socketServer := &http.Server{Handler: http.HandlerFunc(handler)}
+		served := make(chan struct{})
+		go func() { defer close(served); _ = socketServer.Serve(listener) }()
+		defer func() { _ = socketServer.Close(); <-served }()
+		client.ghEnv = func(dir, token string) []string {
+			config, _ := json.Marshal(map[string]string{"http_unix_socket": socketPath})
+			if err := os.WriteFile(filepath.Join(dir, "config.yml"), config, 0600); err != nil {
+				t.Fatal(err)
+			}
+			return ghEnvironment(dir, token)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	pull, err := client.CreateWithGH(ctx, gh, PullInput{Repository: "idy/yesman", Head: "test/app-identity", Base: "main", Title: "test: App identity fixture", Body: "Synthetic fixture body.\n", Draft: true})
