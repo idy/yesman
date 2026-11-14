@@ -274,12 +274,13 @@ read-only; agent switching remains available. Late results restore only the
 captured generation, never another agent or an intervening draft. Restore occurs
 once per client/agent generation, and resend is an explicit user action.
 
-ArrowUp uses the same path for the current agent's newest reliably pending item.
+ArrowUp is the default `composer.recall` context action in the shared shortcuts
+registry, using the same recall path for this agent's newest reliably pending item.
 It applies only to an empty native composer with no attachments and a collapsed
-selection at position zero. IME composition, modifiers, held-key repeat, pending
-image/send/recall, and visible dialog/menu/listbox/recording consumers take priority.
-It is a textarea-local handler, not a second global shortcut manager. Final
-integration must also preserve the shortcuts feature's recording/palette guards.
+selection at position zero. IME composition, held-key repeat, pending image/send/
+recall, and visible dialog/menu/listbox/recording consumers take priority. Settings
+can replace or remove this context binding; no competing textarea ArrowUp handler
+remains. Palette navigation and ordinary multi-line cursor movement never recall.
 
 Copy reads canonical raw text, preserving Markdown and line breaks, through the
 existing clipboard bridge. Pending original text is retrieved from the bounded

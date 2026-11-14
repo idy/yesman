@@ -10,6 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/idy/yesman/internal/usage"
+	"github.com/idy/yesman/internal/yesmen"
 )
 
 type preparationGate struct {
@@ -74,6 +77,24 @@ func prepareHistory(t *testing.T, m *Manager, ctx context.Context, agentID, id s
 	return n
 }
 
+// Read real .33 usage/board data, not queue counts or a fixture usage DTO.
+func prepareUsage(t *testing.T, f *promotionFixture, ctx context.Context, index *usage.Sessions) usage.Summary {
+	t.Helper()
+	y, err := f.store.Get(f.info.Yesman)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, stats, err := index.Scan(ctx, y.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	board, err := f.store.Board(f.info.Yesman)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return usage.Summarize([]usage.Workspace{{Name: y.Name, HiredAt: y.HiredAt, Agents: records, Stats: stats, Board: board}}, usage.Query{Leads: true, Workers: true})
+}
+
 // The sole asynchronous barrier is production yesman.ts's GET /v1/context.
 // No third-party input/before_agent_start hook is installed.
 func TestIdlePrepareProductionContextPreservesOriginal(t *testing.T) {
@@ -104,6 +125,13 @@ func TestIdlePrepareProductionContextPreservesOriginal(t *testing.T) {
 				return i.Status == Idle && q.PromoteAllowed
 			})
 			before := prepareQueue(f)
+			title, owner := "Queued fixture must remain todo", "lead"
+			boardBefore, err := f.store.ChangeBoard(f.info.Yesman, yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: &title, Owner: &owner}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var usageIndex usage.Sessions
+			usageBefore := prepareUsage(t, f, ctx, &usageIndex)
 			var original pendingItem
 			for _, i := range before.Items {
 				if i.SubmissionID == target {
@@ -156,6 +184,15 @@ func TestIdlePrepareProductionContextPreservesOriginal(t *testing.T) {
 			if prepareAudit(f) != audit {
 				t.Fatal("stopped/cancelled preparation called provider")
 			}
+			usageAfter := prepareUsage(t, f, ctx, &usageIndex)
+			usageCold := prepareUsage(t, f, ctx, &usage.Sessions{})
+			if usageAfter.Total.Tokens != usageBefore.Total.Tokens || usageAfter.Total.Responses != usageBefore.Total.Responses || usageAfter.Tasks != usageBefore.Tasks || !reflect.DeepEqual(usageAfter, usageCold) {
+				t.Fatalf("untaken input changed actual usage/task attribution: before=%+v after=%+v cold=%+v", usageBefore, usageAfter, usageCold)
+			}
+			boardAfter, err := f.store.Board(f.info.Yesman)
+			if err != nil || !reflect.DeepEqual(boardBefore, boardAfter) {
+				t.Fatalf("cancel/prepare Stop completed a task: %+v %v", boardAfter, err)
+			}
 			if prepareHistory(t, f.m, ctx, f.info.ID, target) != 0 {
 				t.Fatal("stopped/cancelled original reached history")
 			}
@@ -187,6 +224,10 @@ func TestIdlePrepareProductionContextPreservesOriginal(t *testing.T) {
 			prepareEventually(t, func() bool { i, _ := f.m.Get(f.info.ID); return i.Status == Idle })
 			if prepareHistory(t, f.m, ctx, f.info.ID, target) != 0 || prepareHistory(t, f.m, ctx, f.info.ID, edited) != 1 {
 				t.Fatal("edited resubmission duplicated or original revived")
+			}
+			afterExplicitSend := prepareUsage(t, f, ctx, &usageIndex)
+			if afterExplicitSend.Total.Total <= usageAfter.Total.Total || afterExplicitSend.Tasks != usageAfter.Tasks {
+				t.Fatalf("explicit provider usage/task boundary incorrect: %+v", afterExplicitSend)
 			}
 			f.m.StopAll()
 			again := New(f.cfg)

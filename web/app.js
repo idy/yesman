@@ -6,7 +6,7 @@
 
 import { orderWorkers } from './sidebar.js';
 import { messageActions, messageText, receiptText } from './message-actions.js';
-import { mayRecallWithArrow, restoredImages, supportsRecall } from './recall.js';
+import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
 import { renderMarkdown } from './markdown.js';
 import { project, originOf, FINISHED } from './conversation.js';
 import { $, h, icon } from './dom.js';
@@ -1506,11 +1506,6 @@ function renderDock({ focusComposer = false } = {}) {
   textarea.addEventListener('compositionstart', () => { composing = true; });
   textarea.addEventListener('compositionend', () => { composing = false; });
   textarea.addEventListener('keydown', (e) => {
-    if (mayRecallWithArrow(e, textarea, attachments, composing)) {
-      const c = convo(a);
-      const latest = [...c.deliveries.values()].filter((d) => d.canCancel).sort((a, b) => b.order - a.order)[0];
-      if (latest) { e.preventDefault(); recallMessage(c, latest.id); return; }
-    }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && !composing) {
       e.preventDefault();
       form.requestSubmit();
@@ -2948,6 +2943,15 @@ async function removeWorker(a) {
 const sidebarAgents = () => [...document.querySelectorAll('#yesmen .agent-row:is([data-sidebar-entry="yesman"], [data-sidebar-entry="worker"])')]
   .map((row) => agentById(row.dataset.agent)).filter(Boolean);
 
+function latestRecallCandidate() {
+  const a = selectedAgent();
+  const textarea = state.view.kind === 'agent' ? $('.composer textarea') : null;
+  if (!a || !mayRecallInComposer(textarea, state.attachments.get(keyOf(a)))) return null;
+  const c = convo(a);
+  const delivery = [...c.deliveries.values()].filter(d => d.canCancel && !c.recalled.has(d.id) && !c.actions.has(d.id)).sort((a,b) => b.order - a.order)[0];
+  return delivery ? { c, delivery } : null;
+}
+
 // What the actions do, by the window's own functions.
 const actionHost = {
   t,
@@ -2965,6 +2969,11 @@ const actionHost = {
   },
   selectAgent,
   composer: () => (state.view.kind === 'agent' ? $('#dock textarea') : null),
+  canRecall: ({ event } = {}) => !(event?.isComposing || event?.keyCode === 229) && !!latestRecallCandidate(),
+  recallLatest() {
+    const candidate = latestRecallCandidate();
+    if (candidate) return recallMessage(candidate.c, candidate.delivery.id);
+  },
   abort: (a) => call('Abort', a.id),
   sleep: (a) => call('Stop', a.id),
   // Another dialog than the palette, which closes before an action runs.

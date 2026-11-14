@@ -32,7 +32,7 @@ try { for(const [engineName,engine]of Object.entries({chromium,webkit})) for(con
   await page.route('**/*',route=>{const u=route.request().url();if(u.startsWith('http://127.0.0.1:')||u.startsWith('data:'))return route.continue();outside.push(u);return route.abort()});
   await page.addInitScript(({api,language})=>{
    localStorage.setItem('yesman.info','hidden');window.events={};window.sent=[];window.copied=[];
-   window.mygo={locale:language,on:(n,fn)=>window.events[n]=fn,call:async(method,...args)=>{window.sent.push({method,args});if(method==='Yesman.CopyValue'){window.copied.push(args[0]);return;}const r=await(await fetch(api,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({method,args})})).json();if(r.error)throw Error(r.error);return r.value;}};
+   window.mygo={platform:'darwin',locale:language,on:(n,fn)=>window.events[n]=fn,call:async(method,...args)=>{window.sent.push({method,args});if(method==='Yesman.CopyValue'){window.copied.push(args[0]);return;}const r=await(await fetch(api,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({method,args})})).json();if(r.error)throw Error(r.error);return r.value;}};
    let cursor=0,agents='',stopped=false,timer,inFlight=Promise.resolve();const pollErrors=[];
    const poll=()=>{if(stopped)return;inFlight=(async()=>{try{const response=await fetch(`${api}/events?cursor=${cursor}`);if(!response.ok)throw Error(`HTTP ${response.status}`);const r=await response.json();cursor=r.cursor;for(const e of r.events??[])window.events['agent-event']?.(e);const s=JSON.stringify(r.agents);if(s!==agents){agents=s;window.events.agents?.(r.agents)}}catch(e){pollErrors.push(String(e))}finally{if(!stopped)timer=setTimeout(poll,15)}})()};
    window.stopFixturePolling=async()=>{stopped=true;clearTimeout(timer);await inFlight;return pollErrors};window.addEventListener('pagehide',()=>{stopped=true;clearTimeout(timer)});timer=setTimeout(poll,30);
@@ -55,6 +55,28 @@ try { for(const [engineName,engine]of Object.entries({chromium,webkit})) for(con
   for(const id of ids){assert.equal(await row(id).count(),1);await row(id).locator('.message-recall').waitFor()}
   assert.equal(await row(ids[0]).locator('.msg-user').innerText(),long);
   assert.equal(await row(ids[0]).locator('img').count(),2);
+  // Exercise the real .32 registry, palette and recorder around an actual
+  // pending native input. The keyboard override adapter stores only settings.
+  const keyboardID=await submit('keyboard pending',1);
+  const cancelCount=()=>page.evaluate(()=>window.sent.filter(s=>s.method==='Yesman.CancelSubmission').length);
+  const noCancel=await cancelCount();
+  await input.focus();await page.keyboard.press('Meta+KeyK');await page.locator('dialog.palette-dialog[open]').waitFor();
+  await page.keyboard.press('ArrowUp');await page.keyboard.press('Escape');
+  assert.equal(await cancelCount(),noCancel,'palette navigation recalled input');
+  await page.keyboard.press('Meta+Slash');await page.locator('[data-action="composer.recall"] .shortcut-add').waitFor();
+  await page.locator('[data-action="composer.recall"] .shortcut-add').click();await page.locator('#shortcut-recorder').waitFor();
+  await page.keyboard.press('ArrowUp');assert.equal(await cancelCount(),noCancel,'recording ran recall');await page.keyboard.press('Escape');
+  await page.locator('[data-agent="alice/lead"]').first().click();await input.waitFor();await input.focus();
+  await input.dispatchEvent('compositionstart');await input.press('ArrowUp');await input.dispatchEvent('compositionend');
+  await input.dispatchEvent('keydown',{key:'ArrowUp',repeat:true,bubbles:true});
+  await input.fill('first line\nsecond line');await input.evaluate(el=>el.setSelectionRange(0,0));await input.press('ArrowUp');
+  assert.equal(await cancelCount(),noCancel,'IME/repeat/multiline input recalled');await input.fill('');
+  await control('SetShortcuts',{'composer.recall':['Mod+Shift+U']});await reload();await input.focus();
+  await input.press('ArrowUp');assert.equal(await cancelCount(),0,'disabled default ArrowUp still ran local handler');
+  await input.press('Meta+Shift+KeyU');await page.waitForFunction(()=>document.querySelector('.composer textarea').value==='keyboard pending');
+  assert.equal(await cancelCount(),1);assert.equal(await page.locator('.composer-image').count(),1);
+  assert.equal((await control('NativeSnapshot')).items.some(i=>i.submissionId===keyboardID),false);
+  await input.fill('');await page.locator('.composer-image button').click();await control('ResetShortcuts');await reload();
   const state=await control('State'),a=state.agents.find(a=>a.id==='alice/lead'),follow=[newID(),newID(),newID()];
   for(let i=0;i<3;i++)await control('FixtureFollowUp',a.id,follow[i],i===1?long:'same',[image,image],a.since);
   const target=follow[1];await row(target).locator('.message-promote').waitFor();
@@ -121,7 +143,7 @@ try { for(const [engineName,engine]of Object.entries({chromium,webkit})) for(con
   await page.waitForFunction(id=>!!document.querySelector(`[data-delivery="${id}"][data-bound=true]`),repaired);
   assert.equal(await page.locator(`[data-delivery="${prepareID}"][data-bound=true]`).count(),0);
   assert.deepEqual(await page.evaluate(()=>window.stopFixturePolling()),[]);assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);
-  reports.push({engine:engineName,language,pending:ids.length,followUp:follow,before,after,boundOrder,canonicalReload:true,originalPayload:true,cacheEviction:true,prepareStop:{id:prepareID,queueId:reserved.queueId,newIntent:repaired,originalImages:'exact',button:'actual Stop'},errors});
+  reports.push({engine:engineName,language,pending:ids.length,followUp:follow,before,after,boundOrder,canonicalReload:true,originalPayload:true,cacheEviction:true,registryRecall:{palette:true,recording:true,ime:true,multiline:true,override:true,exactCancelledID:keyboardID},prepareStop:{id:prepareID,queueId:reserved.queueId,newIntent:repaired,originalImages:'exact',button:'actual Stop'},errors});
  } catch(error){if(page)await page.screenshot({path:`${out}/${engineName}-${language}-failure.png`}).catch(()=>{});throw error}
  finally {await control('ReleaseContext').catch(()=>{});await browser.close();await fetch(`${api}/stop`).catch(()=>{});const deadline=Date.now()+15000;while(exit===undefined&&Date.now()<deadline)await new Promise(r=>setTimeout(r,25));if(exit===undefined)child.kill();await writeFile(`${out}/${engineName}-${language}-bridge.log`,log);await rm(temp,{recursive:true,force:true})}
  await writeFile(`${out}/results.json`,JSON.stringify(reports,null,2));

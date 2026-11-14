@@ -19,12 +19,19 @@ export function restoredImages(images) {
   });
 }
 
-export function mayRecallWithArrow(event, textarea, attachments, composing = false) {
-  if (event.defaultPrevented || event.key !== 'ArrowUp' || event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing || event.keyCode === 229 || composing) return false;
+export function mayRecallInComposer(textarea, attachments) {
+  if (!textarea || !attachments) return false;
   if (textarea.value !== '' || textarea.selectionStart !== 0 || textarea.selectionEnd !== 0 || textarea.readOnly || attachments.items.length || attachments.reading || attachments.sending || attachments.recalling) return false;
   // Native composer only. Editors and overlay consumers keep their own keys.
   for (const el of document.querySelectorAll('dialog[open], [role="dialog"], [role="menu"], [role="listbox"], [data-shortcut-recording="true"]')) {
     if (el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden') return false;
   }
   return true;
+}
+
+// Kept for standalone/native composer callers; the desktop registers its
+// context action with shortcuts.js so overrides and recording have one owner.
+export function mayRecallWithArrow(event, textarea, attachments, composing = false) {
+  if (event.defaultPrevented || event.key !== 'ArrowUp' || event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing || event.keyCode === 229 || composing) return false;
+  return mayRecallInComposer(textarea, attachments);
 }

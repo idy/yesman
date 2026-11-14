@@ -27,6 +27,7 @@ func TestQueueActionsBrowserBridge(t *testing.T) {
 	f := newPromotionFixtureWithContext(t, func(e Event) { mu.Lock(); events = append(events, e); mu.Unlock() }, gate.serve)
 	t.Cleanup(gate.open)
 	var promotes int
+	bindings := map[string][]string{}
 	done := make(chan struct{})
 	var once sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -136,6 +137,28 @@ func TestQueueActionsBrowserBridge(t *testing.T) {
 			value = statErr == nil
 		case "ReleaseProvider":
 			err = os.WriteFile(f.gate, []byte("release"), 0600)
+		case "Shortcuts", "SetShortcuts", "ResetShortcuts":
+			mu.Lock()
+			if strings.TrimPrefix(req.Method, "Yesman.") == "ResetShortcuts" {
+				bindings = map[string][]string{}
+			}
+			if strings.TrimPrefix(req.Method, "Yesman.") == "SetShortcuts" {
+				var changes map[string]*[]string
+				_ = json.Unmarshal(req.Args[0], &changes)
+				for key, list := range changes {
+					if list == nil {
+						delete(bindings, key)
+					} else {
+						bindings[key] = append([]string{}, (*list)...)
+					}
+				}
+			}
+			copyBindings := map[string][]string{}
+			for key, list := range bindings {
+				copyBindings[key] = append([]string{}, list...)
+			}
+			mu.Unlock()
+			value = copyBindings
 		case "Repos", "Clones":
 			value = []any{}
 		default:
