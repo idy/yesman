@@ -76,6 +76,8 @@ async function answer(m, args) {
   case 'Board': return {tasks:[]};
   case 'Crew': return {members:[],yesman:''};
   case 'Context': case 'Usage': return null;
+  // The info panel's Tasks entry: no scheduled tasks.
+  case 'Schedules': return {yesman:args[0],owner:true,plans:[],limits:{title:120,instructions:4000,minEvery:15,maxEvery:10080,history:60}};
   case 'ListFiles': return args[1] === '.' || args[1] === '' ? [{name:'main.js',path:'main.js',size:13}] : [];
   case 'ReadFile': return {path:args[1],size:fileText.length,modTime:'2026-11-14T00:00:00Z',kind:'text',text:fileText,hash:'h1'};
   case 'WriteFile': fileText = args[2]; return {path:args[1],size:args[2].length,modTime:'2026-11-14T00:00:01Z',kind:'text',text:args[2],hash:'h'+calls.length};
