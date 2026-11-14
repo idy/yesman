@@ -1,6 +1,7 @@
 package yesmen
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -363,43 +364,95 @@ func (s *Store) useTopics(name string, since time.Time, fn func(Yesman, *topicsF
 	}
 	unlock := s.lockTopics(name)
 	defer unlock()
-	f, err := readTopics(y.TopicsFile())
+	meta, err := openTopicsDir(y, false)
 	if err != nil {
 		return err
+	}
+	var f *topicsFile
+	if meta == nil {
+		f = &topicsFile{Version: topicsFileVersion, Topics: []Topic{}}
+	} else {
+		defer meta.Close()
+		if f, err = readTopics(meta); err != nil {
+			return err
+		}
 	}
 	changed, err := fn(y, f)
 	if err != nil || !changed {
 		return err
 	}
-	f.Version = max(f.Version, topicsFileVersion)
-	return writeTopics(y.TopicsFile(), f)
+	if meta == nil {
+		if meta, err = openTopicsDir(y, true); err != nil {
+			return err
+		}
+		defer meta.Close()
+	}
+	f.Version = topicsFileVersion
+	return writeTopics(meta, f)
 }
 
-func readTopics(file string) (*topicsFile, error) {
-	fh, err := os.Open(file)
+const topicsFileName = "topics.json"
+
+// openTopicsDir opens the workspace's .yesman directory through the
+// workspace itself, so neither it nor topics.json can lead outside: a link
+// out of the workspace is refused rather than followed. All reads and writes
+// then go through this one open directory. It returns nil, nil when the
+// directory does not exist and create is false.
+func openTopicsDir(y Yesman, create bool) (*os.Root, error) {
+	root, err := os.OpenRoot(y.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	if create {
+		if err := root.Mkdir(".yesman", 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+	}
+	meta, err := root.OpenRoot(".yesman")
+	if errors.Is(err, os.ErrNotExist) && !create {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s cannot be opened inside the workspace (%v); topics are left as they are", filepath.Join(".yesman", topicsFileName), err)
+	}
+	return meta, nil
+}
+
+func readTopics(meta *os.Root) (*topicsFile, error) {
+	fh, err := meta.Open(topicsFileName)
 	if errors.Is(err, os.ErrNotExist) {
 		return &topicsFile{Version: topicsFileVersion, Topics: []Topic{}}, nil
 	}
 	if err != nil {
+		return nil, fmt.Errorf("%s cannot be opened inside the workspace (%v); it is left as it is", topicsFileName, err)
+	}
+	defer fh.Close()
+	// What was opened is checked, not the name again: a file swapped in
+	// meanwhile is not the one read.
+	info, err := fh.Stat()
+	if err != nil {
 		return nil, err
 	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file; it is left as it is", topicsFileName)
+	}
 	data, err := io.ReadAll(io.LimitReader(fh, maxTopicsFileRead+1))
-	_ = fh.Close()
 	if err != nil {
 		return nil, err
 	}
 	if len(data) > maxTopicsFileRead {
-		return nil, fmt.Errorf("%s is larger than %d MiB; it is left as it is", filepath.Base(file), maxTopicsFileRead>>20)
+		return nil, fmt.Errorf("%s is larger than %d MiB; it is left as it is", topicsFileName, maxTopicsFileRead>>20)
 	}
 	var f topicsFile
 	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("%s cannot be read (%v); it is left as it is, fix or move it to use topics", filepath.Base(file), err)
+		return nil, fmt.Errorf("%s cannot be read (%v); it is left as it is, fix or move it to use topics", topicsFileName, err)
 	}
 	if f.Version > topicsFileVersion {
-		return nil, fmt.Errorf("%s was written by a newer yesman (version %d); it is left as it is", filepath.Base(file), f.Version)
+		return nil, fmt.Errorf("%s was written by a newer yesman (version %d); it is left as it is", topicsFileName, f.Version)
 	}
-	if f.Topics == nil {
-		f.Topics = []Topic{}
+	if err := f.check(); err != nil {
+		return nil, fmt.Errorf("%s is not a valid topics file (%v); it is left as it is, fix or move it to use topics", topicsFileName, err)
 	}
 	for i := range f.Topics {
 		f.Topics[i].normalizeLists()
@@ -410,14 +463,76 @@ func readTopics(file string) (*topicsFile, error) {
 	return &f, nil
 }
 
+// check rejects a file that parses but is not one yesman wrote: no version
+// (such as null or {}), no list of topics, or topics whose IDs, statuses or
+// revisions are missing or repeated. Fields it does not know are not checked;
+// they are kept.
+func (f *topicsFile) check() error {
+	if f.Version != topicsFileVersion {
+		return fmt.Errorf("version %d", f.Version)
+	}
+	if f.Topics == nil {
+		return errors.New("no topics list")
+	}
+	if f.Next < 0 {
+		return fmt.Errorf("next %d", f.Next)
+	}
+	ids := map[string]bool{}
+	for i := range f.Topics {
+		t := &f.Topics[i]
+		if !topicIDRE.MatchString(t.ID) || ids[t.ID] {
+			return fmt.Errorf("topic %d has a missing, invalid or repeated ID %q", i+1, t.ID)
+		}
+		ids[t.ID] = true
+		if !slices.Contains(TopicStatuses, t.Status) || t.Revision < 1 || t.NextItem < 0 {
+			return fmt.Errorf("topic %s has status %q, revision %d", t.ID, t.Status, t.Revision)
+		}
+		items := map[string]bool{}
+		item := func(id string, kind byte) error {
+			if !topicItemIDRE.MatchString(id) || id[0] != kind || items[id] {
+				return fmt.Errorf("topic %s has a missing, invalid or repeated item ID %q", t.ID, id)
+			}
+			items[id] = true
+			if n, _ := strconv.Atoi(id[1:]); n > t.NextItem {
+				t.NextItem = n
+			}
+			return nil
+		}
+		for _, c := range t.Conclusions {
+			if err := item(c.ID, 'c'); err != nil {
+				return err
+			}
+		}
+		for _, q := range t.Questions {
+			if err := item(q.ID, 'q'); err != nil {
+				return err
+			}
+		}
+		for _, src := range t.Sources {
+			if err := item(src.ID, 's'); err != nil {
+				return err
+			}
+		}
+		sends := map[string]bool{}
+		for _, send := range t.Sends {
+			if !topicSendIDRE.MatchString(send.ID) || sends[send.ID] {
+				return fmt.Errorf("topic %s has a missing, invalid or repeated message ID", t.ID)
+			}
+			sends[send.ID] = true
+		}
+	}
+	return nil
+}
+
 func topicNumber(id string) int {
 	n, _ := strconv.Atoi(strings.TrimPrefix(id, "tp"))
 	return n
 }
 
-// writeTopics replaces the file atomically through a temporary file of its
-// own in the same directory; a failed write leaves the old file in place.
-func writeTopics(file string, f *topicsFile) error {
+// writeTopics replaces topics.json atomically through a temporary file of its
+// own, created exclusively in the same open directory; a failed write leaves
+// the old file in place and removes only that temporary file.
+func writeTopics(meta *os.Root, f *topicsFile) error {
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
@@ -425,11 +540,21 @@ func writeTopics(file string, f *topicsFile) error {
 	if len(data) > maxTopicsFile {
 		return fmt.Errorf("topics would take more than %d MiB: archive doesn't shrink them, shorten or remove some content", maxTopicsFile>>20)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(file), ".topics-*.tmp")
+	var (
+		tmp  *os.File
+		name string
+	)
+	for range 10 {
+		var b [8]byte
+		_, _ = rand.Read(b[:])
+		name = fmt.Sprintf(".topics-%x.tmp", b)
+		if tmp, err = meta.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644); !errors.Is(err, os.ErrExist) {
+			break
+		}
+	}
 	if err != nil {
 		return err
 	}
-	name := tmp.Name()
 	_, err = tmp.Write(append(data, '\n'))
 	if err == nil {
 		err = tmp.Sync()
@@ -438,20 +563,20 @@ func writeTopics(file string, f *topicsFile) error {
 		err = cerr
 	}
 	if err == nil {
-		err = renameReplace(name, file)
+		err = renameReplace(meta, name, topicsFileName)
 	}
 	if err != nil {
-		_ = os.Remove(name)
+		_ = meta.Remove(name)
 	}
 	return err
 }
 
 // renameReplace retries briefly where another process's open handle can
 // block replacing a file (Windows).
-func renameReplace(from, to string) error {
+func renameReplace(dir *os.Root, from, to string) error {
 	var err error
 	for i := 0; i < 5; i++ {
-		if err = os.Rename(from, to); err == nil || runtime.GOOS != "windows" {
+		if err = dir.Rename(from, to); err == nil || runtime.GOOS != "windows" {
 			return err
 		}
 		time.Sleep(time.Duration(20*(i+1)) * time.Millisecond)

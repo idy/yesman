@@ -182,35 +182,54 @@ function boardText(board: any): string {
 	return parts.join("\n\n");
 }
 
+// A topic's source as the model reads it. A submission source names no
+// submission: its ID stays in the app; the API already leaves it out.
+function topicSource(s: any) {
+	const view: any = { id: s.id, kind: s.kind };
+	if (s.kind !== "submission" && s.ref) view.ref = s.ref;
+	if (s.agent) view.agent = s.agent;
+	if (s.role) view.role = s.role;
+	if (s.timestamp) view.timestamp = s.timestamp;
+	view.label = s.kind === "submission" ? s.label || "a message the user sent from this topic" : s.label;
+	return view;
+}
+
 function topicText(t: any): string {
 	const lines = [`${t.id} [${t.status}] ${t.title} (revision ${t.revision}, updated ${t.updatedAt}${t.updatedBy ? ` by ${t.updatedBy}` : ""})`];
 	if (t.summary) lines.push(`Summary:\n  ${String(t.summary).replace(/\n/g, "\n  ")}`);
 	const items = (label: string, list: any[]) => lines.push(`${label} (${list?.length ?? 0}):${list?.length ? "\n" + list.map((i) => `- ${i.id} ${String(i.text).replace(/\n/g, "\n  ")}`).join("\n") : " none"}`);
 	items("Confirmed conclusions", t.conclusions);
 	items("Open questions", t.questions);
-	if (t.sources?.length) {
-		lines.push("Sources:\n" + t.sources.map((s: any) => `- ${s.id} ${s.kind}${s.ref ? ` ${s.ref}` : ""}${s.agent ? ` ${s.agent}` : ""}${s.role ? ` ${s.role} message` : ""}${s.label ? ` (${s.label})` : ""}`).join("\n"));
+	const sources = (t.sources ?? []).map(topicSource);
+	if (sources.length) {
+		lines.push("Sources:\n" + sources.map((s: any) => `- ${s.id} ${s.kind}${s.ref ? ` ${s.ref}` : ""}${s.agent ? ` ${s.agent}` : ""}${s.role ? ` ${s.role} message` : ""}${s.label ? ` (${s.label})` : ""}`).join("\n"));
 	}
-	if (t.sends?.length) lines.push(`Messages the user sent from this topic: ${t.sends.length}, the last at ${t.sends[t.sends.length - 1].at}. They are in your conversation.`);
+	if (t.sendCount) lines.push(`Messages the user sent from this topic: ${t.sendCount}${t.lastSentAt ? `, the last at ${t.lastSentAt}` : ""}. They are in your conversation.`);
 	return lines.join("\n");
 }
 
-// What a tool result keeps of a topic: its content, not the app's records of
-// submissions (their IDs and receipts are not for the model or other hooks).
+// What a tool result keeps of one topic: its content, never the app's records
+// of submissions (their IDs and receipts are not for the model or other hooks).
 function topicDetails(t: any) {
-	if (!t || typeof t !== "object") return t;
+	if (!t || typeof t !== "object") return {};
 	const items = (list: any[]) => (list ?? []).map((i) => ({ id: i.id, text: i.text }));
 	return {
 		id: t.id, title: t.title, status: t.status, summary: t.summary ?? "", revision: t.revision, updatedAt: t.updatedAt, updatedBy: t.updatedBy,
 		conclusions: items(t.conclusions), questions: items(t.questions),
-		sources: (t.sources ?? []).map((s: any) => ({ id: s.id, kind: s.kind, ref: s.ref, agent: s.agent, role: s.role, label: s.label })),
-		sendCount: Array.isArray(t.sends) ? t.sends.length : 0,
+		sources: (t.sources ?? []).map(topicSource),
+		sendCount: typeof t.sendCount === "number" ? t.sendCount : 0,
 	};
+}
+
+// A list is an index: which topics there are, none of their content. A topic
+// is read in full with action read.
+function topicEntry(t: any) {
+	return { id: t.id, title: t.title, status: t.status, revision: t.revision, updatedAt: t.updatedAt, conclusions: Number(t.conclusions) || 0, questions: Number(t.questions) || 0 };
 }
 
 function topicIndex(topics: any[]): string {
 	if (!topics.length) return "No topics yet.";
-	return topics.map((t) => `- ${t.id} [${t.status}] ${t.title} (revision ${t.revision}${t.questions?.length ? `, ${t.questions.length} open question${t.questions.length === 1 ? "" : "s"}` : ""})`).join("\n");
+	return topics.map((t) => `- ${t.id} [${t.status}] ${t.title} (revision ${t.revision}${t.questions ? `, ${t.questions} open question${t.questions === 1 ? "" : "s"}` : ""})`).join("\n");
 }
 
 // Who wrote a user message: the user, the agent's lead, or yesman telling a
@@ -519,7 +538,8 @@ export default function yesman(pi: ExtensionAPI) {
 			const action = (params.action ?? (params.id ? (params.revision === undefined ? "read" : "update") : "list")).toLowerCase();
 			if (action === "list") {
 				const r = await call("GET", "/v1/topics", undefined, signal);
-				return result(topicIndex(r.topics ?? []), { topics: (r.topics ?? []).map(topicDetails) });
+				const topics = (r.topics ?? []).map(topicEntry);
+				return result(`${topicIndex(topics)}${topics.length ? "\n\nRead one with action read and its id." : ""}`, { topics });
 			}
 			if (action === "read") {
 				if (!params.id) throw new Error("read needs id");

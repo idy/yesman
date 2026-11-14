@@ -161,8 +161,19 @@ func TestTopicsPreserveUnknownAndRefuseBadFiles(t *testing.T) {
 	}
 
 	for name, content := range map[string]string{
-		"corrupt": `{"topics": [`,
-		"newer":   `{"version": 9, "topics": []}`,
+		"corrupt":          `{"topics": [`,
+		"newer":            `{"version": 9, "topics": []}`,
+		"null":             `null`,
+		"empty object":     `{}`,
+		"no version":       `{"topics": []}`,
+		"no topics":        `{"version": 1}`,
+		"repeated ID":      `{"version": 1, "topics": [{"id": "tp1", "title": "a", "status": "open", "revision": 1}, {"id": "tp1", "title": "b", "status": "open", "revision": 1}]}`,
+		"bad ID":           `{"version": 1, "topics": [{"id": "../x", "title": "a", "status": "open", "revision": 1}]}`,
+		"bad status":       `{"version": 1, "topics": [{"id": "tp1", "title": "a", "status": "gone", "revision": 1}]}`,
+		"no revision":      `{"version": 1, "topics": [{"id": "tp1", "title": "a", "status": "open"}]}`,
+		"repeated item":    `{"version": 1, "topics": [{"id": "tp1", "title": "a", "status": "open", "revision": 1, "conclusions": [{"id": "c1", "text": "x"}], "questions": [{"id": "c1", "text": "y"}]}]}`,
+		"repeated send":    `{"version": 1, "topics": [{"id": "tp1", "title": "a", "status": "open", "revision": 1, "sends": [{"id": "` + sendA + `"}, {"id": "` + sendA + `"}]}]}`,
+		"null topic entry": `{"version": 1, "topics": [null]}`,
 	} {
 		if err := os.WriteFile(y.TopicsFile(), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
@@ -180,6 +191,19 @@ func TestTopicsPreserveUnknownAndRefuseBadFiles(t *testing.T) {
 			t.Fatalf("%s: file was rewritten: %s", name, data)
 		}
 	}
+	// A valid file's item counter catches up with item IDs it already has.
+	valid := `{"version": 1, "topics": [{"id": "tp4", "title": "a", "status": "open", "revision": 1, "conclusions": [{"id": "c7", "text": "x"}]}]}`
+	if err := os.WriteFile(y.TopicsFile(), []byte(valid), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.PatchTopic("alice", y.HiredAt, TopicByUser, "tp4", TopicPatch{Revision: 1, AddQuestions: []string{"next"}})
+	if err != nil || got.Questions[0].ID != "q8" {
+		t.Fatalf("item IDs after c7: %+v %v", got.Questions, err)
+	}
+	if next, err := s.CreateTopic("alice", y.HiredAt, TopicByUser, TopicInput{Title: "after tp4"}); err != nil || next.ID != "tp5" {
+		t.Fatalf("topic IDs after tp4: %v %v", next.ID, err)
+	}
+
 	big := make([]byte, maxTopicsFileRead+10)
 	for i := range big {
 		big[i] = ' '
@@ -372,4 +396,111 @@ func TestTopicsGenerationsAndArchive(t *testing.T) {
 	if c := s.TopicCounts("alice"); c.Open != 0 || c.Error != "" {
 		t.Fatalf("counts %+v", c)
 	}
+}
+
+// Topics are read and written only inside the workspace: links out of it,
+// whether topics.json or the .yesman directory, are refused, and nothing
+// outside is read, created or changed.
+func TestTopicsStayInsideTheWorkspace(t *testing.T) {
+	outsideFile := func(t *testing.T, content string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "outside.json")
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	const outside = `{"version": 1, "topics": [{"id": "tp1", "title": "OUTSIDE-TITLE", "summary": "OUTSIDE-SECRET", "status": "open", "revision": 1}]}`
+
+	t.Run("linked file", func(t *testing.T) {
+		s, y := topicStore(t)
+		target := outsideFile(t, outside)
+		if err := os.Symlink(target, y.TopicsFile()); err != nil {
+			t.Skip("symlinks unavailable:", err)
+		}
+		if list, err := s.Topics("alice", y.HiredAt); err == nil {
+			t.Fatalf("read through a link out of the workspace: %+v", list)
+		}
+		if _, err := s.CreateTopic("alice", y.HiredAt, TopicByLead, TopicInput{Title: "x"}); err == nil {
+			t.Fatal("wrote through a link out of the workspace")
+		}
+		if c := s.TopicCounts("alice"); c.Error == "" {
+			t.Fatal("counts must report the link")
+		}
+		if data, _ := os.ReadFile(target); string(data) != outside {
+			t.Fatalf("outside file changed: %s", data)
+		}
+		if info, err := os.Lstat(y.TopicsFile()); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("the link was replaced: %v %v", info, err)
+		}
+	})
+
+	t.Run("linked metadata directory", func(t *testing.T) {
+		s, y := topicStore(t)
+		out := filepath.Join(t.TempDir(), "meta")
+		if err := os.Rename(y.MetaDir(), out); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(out, y.MetaDir()); err != nil {
+			t.Skip("symlinks unavailable:", err)
+		}
+		if _, err := s.CreateTopic("alice", y.HiredAt, TopicByLead, TopicInput{Title: "outside write"}); err == nil {
+			t.Fatal("wrote through a linked .yesman")
+		}
+		entries, _ := os.ReadDir(out)
+		for _, e := range entries {
+			if strings.Contains(e.Name(), "topics") {
+				t.Fatalf("created %s outside the workspace", e.Name())
+			}
+		}
+		if err := os.WriteFile(filepath.Join(out, "topics.json"), []byte(outside), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if list, err := s.Topics("alice", y.HiredAt); err == nil {
+			t.Fatalf("read through a linked .yesman: %+v", list)
+		}
+	})
+
+	t.Run("link inside the workspace", func(t *testing.T) {
+		// A link that stays inside the workspace's .yesman is followed for
+		// reading; a write replaces the link itself, never its target.
+		s, y := topicStore(t)
+		inner := filepath.Join(y.MetaDir(), "kept.json")
+		if err := os.WriteFile(inner, []byte(`{"version": 1, "topics": []}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("kept.json", y.TopicsFile()); err != nil {
+			t.Skip("symlinks unavailable:", err)
+		}
+		if _, err := s.CreateTopic("alice", y.HiredAt, TopicByUser, TopicInput{Title: "inside"}); err != nil {
+			t.Fatal(err)
+		}
+		if data, _ := os.ReadFile(inner); string(data) != `{"version": 1, "topics": []}` {
+			t.Fatalf("the link's target was written: %s", data)
+		}
+	})
+
+	t.Run("not a regular file", func(t *testing.T) {
+		s, y := topicStore(t)
+		if err := os.Mkdir(y.TopicsFile(), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sentinel := filepath.Join(y.TopicsFile(), "keep")
+		if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CreateTopic("alice", y.HiredAt, TopicByUser, TopicInput{Title: "x"}); err == nil || !strings.Contains(err.Error(), "topics.json") {
+			t.Fatalf("a directory taken for topics.json: %v", err)
+		}
+		if data, _ := os.ReadFile(sentinel); string(data) != "keep" {
+			t.Fatal("the directory's content changed")
+		}
+		entries, _ := os.ReadDir(y.MetaDir())
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".topics-") {
+				t.Fatalf("temporary file left: %s", e.Name())
+			}
+		}
+	})
+
 }

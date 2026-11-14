@@ -173,11 +173,30 @@ func TestTopicsWithLocalPi(t *testing.T) {
 	current := fmt.Sprintf(`FIXTURE-TOOL {"action":"update","id":"tp1","revision":%d,"addQuestions":["Is A kept per workspace?"]}`, up.Topic.Revision)
 	_, err = svc.SubmitTopic(ctx, "alice", y.HiredAt, tpA.ID, id("e5"), current, nil)
 	must(t, err)
-	settled(mark)
+	mark = settled(mark)
 	gotA, _ := store.Topic("alice", y.HiredAt, tpA.ID)
 	if gotA.UpdatedBy != yesmen.TopicByLead || len(gotA.Questions) != 1 || gotA.Summary != "User edited summary" {
 		t.Fatalf("lead tool change: %+v", gotA)
 	}
+
+	// Phase 3: the lead lists and reads topics with its real tool. The user
+	// cites topic A's own submission as a source, and topic C's content is
+	// never read: neither may reach the model through a tool result's content
+	// or details.
+	cite, err := svc.UpdateTopic("alice", y.HiredAt, tpA.ID, yesmen.TopicPatch{Revision: gotA.Revision, AddSources: []yesmen.TopicSource{{Kind: yesmen.SourceSubmission, Ref: idA}}})
+	if err != nil || cite.Conflict {
+		t.Fatalf("cite a submission %+v %v", cite, err)
+	}
+	_, err = svc.CreateTopic("alice", y.HiredAt, yesmen.TopicInput{Title: "Gamma unread", Summary: "LIST-ONLY-SUMMARY", Questions: []string{"LIST-ONLY-QUESTION"}, Conclusions: []string{"LIST-ONLY-CONCLUSION"}})
+	must(t, err)
+	idList, idRead := id("f6"), id("a7")
+	_, err = svc.Submit(ctx, lead, idList, `FIXTURE-TOOL {"action":"list"}`, nil, y.HiredAt)
+	must(t, err)
+	mark = settled(mark)
+	_, err = svc.Submit(ctx, lead, idRead, `FIXTURE-TOOL {"action":"read","id":"tp1"}`, nil, y.HiredAt)
+	must(t, err)
+	settled(mark)
+	gotA, _ = store.Topic("alice", y.HiredAt, tpA.ID)
 
 	var sentFrom map[string]map[string]bool
 	checkHistory := func(m *agent.Manager, label string) {
@@ -225,7 +244,7 @@ func TestTopicsWithLocalPi(t *testing.T) {
 				t.Fatalf("%s: unmarked message carries a topic: %q", label, text)
 			}
 		}
-		if len(byTopic["none"]) != 2 {
+		if len(byTopic["none"]) != 4 {
 			t.Fatalf("%s: main line and worker report: %q", label, byTopic["none"])
 		}
 	}
@@ -257,6 +276,18 @@ func TestTopicsWithLocalPi(t *testing.T) {
 	// the original summary can only have reached the model through the context.
 	if strings.Contains(string(data), "SUMMARY-BODY-SECRET") {
 		t.Fatal("a topic's body was injected into the lead's context")
+	}
+	for _, leak := range []string{idList, idRead, "LIST-ONLY-SUMMARY", "LIST-ONLY-QUESTION", "LIST-ONLY-CONCLUSION", `"sends"`} {
+		if i := strings.Index(string(data), leak); i >= 0 {
+			t.Fatalf("model request contains %q: …%s…", leak, string(data)[max(0, i-300):min(len(data), i+100)])
+		}
+	}
+	// The tool did run: the list named topic C and the read showed topic A's
+	// content and that a message was sent from it.
+	for _, want := range []string{"tp3 [open] Gamma unread", "Read one with action read", "User edited summary", "a message the user sent from this topic", "Messages the user sent from this topic: 3"} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("model requests lack %q", want)
+		}
 	}
 	if !strings.Contains(string(data), "## Topics") || !strings.Contains(string(data), "- tp1 Alpha storage") || !strings.Contains(string(data), "- tp2 Beta images") {
 		t.Fatal("the lead's context lacks the topic index")

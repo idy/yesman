@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/yesmen"
@@ -13,16 +14,99 @@ import (
 
 var errTopicsLeadOnly = errors.New("only the yesman's lead keeps its topics; report what is worth keeping to your lead")
 
-// topics returns the caller's yesman's topics, or one with ?id=.
+// topics returns the caller's yesman's topics as an index, or one in full
+// with ?id=. Agents get the topic's content and where it came from, never the
+// app's records of the messages sent from it: their submission IDs, previews
+// and states, and fields this version does not know, stay in the app.
 func (s *Server) topics(_ context.Context, c caller, r *http.Request) (any, error) {
 	if id := r.URL.Query().Get("id"); id != "" {
-		return s.Yesmen.Topic(c.yesman.Name, c.yesman.HiredAt, id)
+		t, err := s.Yesmen.Topic(c.yesman.Name, c.yesman.HiredAt, id)
+		if err != nil {
+			return nil, err
+		}
+		return agentTopicOf(t), nil
 	}
 	list, err := s.Yesmen.Topics(c.yesman.Name, c.yesman.HiredAt)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"topics": list}, nil
+	index := make([]AgentTopicEntry, len(list))
+	for i, t := range list {
+		index[i] = AgentTopicEntry{ID: t.ID, Title: t.Title, Status: t.Status, Revision: t.Revision, UpdatedAt: t.UpdatedAt, Conclusions: len(t.Conclusions), Questions: len(t.Questions)}
+	}
+	return map[string]any{"topics": index}, nil
+}
+
+// AgentTopicEntry is a topic in an agent's list: enough to choose one to
+// read, none of its content.
+type AgentTopicEntry struct {
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	Status      string    `json:"status"`
+	Revision    int64     `json:"revision"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	Conclusions int       `json:"conclusions"`
+	Questions   int       `json:"questions"`
+}
+
+// AgentTopic is one topic as an agent reads it.
+type AgentTopic struct {
+	ID          string             `json:"id"`
+	Title       string             `json:"title"`
+	Status      string             `json:"status"`
+	Summary     string             `json:"summary"`
+	Conclusions []yesmen.TopicItem `json:"conclusions"`
+	Questions   []yesmen.TopicItem `json:"questions"`
+	Sources     []AgentTopicSource `json:"sources"`
+	Revision    int64              `json:"revision"`
+	CreatedAt   time.Time          `json:"createdAt"`
+	UpdatedAt   time.Time          `json:"updatedAt"`
+	UpdatedBy   string             `json:"updatedBy,omitempty"`
+	// SendCount and LastSentAt say the user sent messages from the topic;
+	// the messages themselves are in the lead's conversation.
+	SendCount  int        `json:"sendCount"`
+	LastSentAt *time.Time `json:"lastSentAt,omitempty"`
+}
+
+// AgentTopicSource is a source as an agent reads it. A submission source
+// keeps its submission ID in the app: an agent only learns that the user sent
+// a message from this topic.
+type AgentTopicSource struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Agent     string `json:"agent,omitempty"`
+	Role      string `json:"role,omitempty"`
+	Timestamp int64  `json:"timestamp,omitempty"`
+	Ref       string `json:"ref,omitempty"`
+	Label     string `json:"label,omitempty"`
+}
+
+func agentTopicOf(t yesmen.Topic) AgentTopic {
+	out := AgentTopic{
+		ID: t.ID, Title: t.Title, Status: t.Status, Summary: t.Summary,
+		Conclusions: append([]yesmen.TopicItem{}, t.Conclusions...),
+		Questions:   append([]yesmen.TopicItem{}, t.Questions...),
+		Sources:     make([]AgentTopicSource, 0, len(t.Sources)),
+		Revision:    t.Revision, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt, UpdatedBy: t.UpdatedBy,
+		SendCount: len(t.Sends),
+	}
+	if n := len(t.Sends); n > 0 {
+		at := t.Sends[n-1].At
+		out.LastSentAt = &at
+	}
+	for _, src := range t.Sources {
+		a := AgentTopicSource{ID: src.ID, Kind: src.Kind, Agent: src.Agent, Role: src.Role, Timestamp: src.Timestamp, Label: src.Label}
+		switch src.Kind {
+		case yesmen.SourceSubmission:
+			if a.Label == "" {
+				a.Label = "a message the user sent from this topic"
+			}
+		default:
+			a.Ref = src.Ref
+		}
+		out.Sources = append(out.Sources, a)
+	}
+	return out
 }
 
 // TopicChange is one change the lead makes to its topics.
@@ -47,6 +131,9 @@ func (s *Server) changeTopics(_ context.Context, c caller, r *http.Request) (any
 		t   yesmen.Topic
 		err error
 	)
+	if req.Create != nil && hasSubmissionSource(req.Create.Sources) || req.Patch != nil && hasSubmissionSource(req.Patch.AddSources) {
+		return nil, errTopicSubmissionSource
+	}
 	switch {
 	case req.Create != nil && req.Patch == nil && req.ID == "":
 		in := *req.Create
@@ -65,7 +152,18 @@ func (s *Server) changeTopics(_ context.Context, c caller, r *http.Request) (any
 	if s.TopicsChanged != nil {
 		s.TopicsChanged(c.yesman.Name)
 	}
-	return t, nil
+	return agentTopicOf(t), nil
+}
+
+var errTopicSubmissionSource = errors.New("a submission source is recorded by the app when the user sends from a topic; cite the conversation or a message instead")
+
+func hasSubmissionSource(sources []yesmen.TopicSource) bool {
+	for _, src := range sources {
+		if strings.EqualFold(strings.TrimSpace(src.Kind), yesmen.SourceSubmission) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveSources ties cited agents to the generation they have now, so a
