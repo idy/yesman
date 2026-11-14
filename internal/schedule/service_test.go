@@ -593,6 +593,14 @@ func TestRejectedIsRetryable(t *testing.T) {
 	if r.State != StateFailed || !r.CanRetry || !r.Attempts[0].Definite {
 		t.Fatalf("rejected: %+v", r)
 	}
+	// Its board task waits, blocked, so nobody takes up a request the lead
+	// never got.
+	if tasks := e.scheduledTasks(id); len(tasks) != 1 || tasks[0].Status != yesmen.TaskBlocked || !strings.HasPrefix(tasks[0].Note, notDelivered) || !strings.Contains(tasks[0].Note, "rejected by the fixture") {
+		t.Fatalf("board task of a run not sent: %+v", tasks)
+	}
+	if r.Status != StateFailed {
+		t.Fatalf("status = %s, want failed", r.Status)
+	}
 	e.restart("")
 	if _, err := e.svc.Retry(ws, id); err != nil {
 		t.Fatal(err)
@@ -600,6 +608,9 @@ func TestRejectedIsRetryable(t *testing.T) {
 	e.svc.Wait()
 	if r := e.run(id); r.State != StateSent || len(r.Attempts) != 2 || len(e.scheduledTasks(id)) != 1 {
 		t.Fatalf("retried: %+v", r)
+	}
+	if task := e.scheduledTasks(id)[0]; task.Status != yesmen.TaskTodo || task.Note != "" {
+		t.Fatalf("board task after it was sent: %+v", task)
 	}
 	if n := len(e.prompts()); n != 2 {
 		t.Fatalf("%d prompts", n)
@@ -751,5 +762,38 @@ func TestValidation(t *testing.T) {
 	d, err := e.svc.Draft(ws, PlanInput{Title: "Lead's draft", Instructions: "x", Schedule: daily("09:00"), Timezone: "UTC", Enabled: true})
 	if err != nil || d.Enabled || d.CreatedBy != "lead" {
 		t.Fatalf("draft = %+v %v", d, err)
+	}
+}
+
+// A plan whose time zone or schedule in the file cannot be used shows why
+// and never runs; the rest of the workspace's plans go on.
+func TestInvalidPlanInTheFileNeverRuns(t *testing.T) {
+	e := newEnv(t, "", utc("2026-11-16T08:59:00Z"))
+	dir := filepath.Join(e.root, "yesmen", ws, ".yesman", "schedules")
+	_ = os.MkdirAll(dir, 0o755)
+	plans := `{"version":1,"next":3,"plans":[
+	 {"id":"s1","title":"Bad zone","instructions":"x","schedule":{"kind":"daily","time":"09:00"},"timezone":"Mars/Olympus","enabled":true,"revision":1,"activeSince":"2026-11-16T08:00:00Z"},
+	 {"id":"s2","title":"Bad time","instructions":"x","schedule":{"kind":"daily","time":"25:00"},"timezone":"UTC","enabled":true,"revision":1,"activeSince":"2026-11-16T08:00:00Z"},
+	 {"id":"s3","title":"Good","instructions":"x","schedule":{"kind":"daily","time":"09:00"},"timezone":"UTC","enabled":true,"revision":1,"activeSince":"2026-11-16T08:00:00Z"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "plans.json"), []byte(plans), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Set(utc("2026-11-16T09:00:05Z"))
+	e.tick()
+	e.waitPrompts(1)
+	for _, id := range []string{"s1", "s2"} {
+		if p := e.plan(id); p.State != "invalid" || p.Problem == "" || p.Next != nil || len(p.Runs) != 0 {
+			t.Fatalf("%s = %+v", id, p)
+		}
+	}
+	if p := e.plan("s3"); len(p.Runs) != 1 || p.Runs[0].Kind != RunScheduled {
+		t.Fatalf("s3 = %+v", p)
+	}
+	p := e.plan("s1")
+	if _, err := e.svc.SetEnabled(ws, "s1", false, p.Revision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.SetEnabled(ws, "s1", true, p.Revision+1); err == nil {
+		t.Fatal("turned on with a time zone it cannot use")
 	}
 }

@@ -899,7 +899,8 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 .sched-problem { margin: 0 8px 6px 32px; color: var(--mds-error); font-size: var(--mds-text-caption); }
 .sched-details { display: grid; gap: 8px; margin: 0 6px 8px 32px; font-size: var(--mds-text-note); }
 .sched-instructions { display: grid; gap: 2px; }
-.sched-instructions p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.sched-instructions p { max-height: calc(1.6em * 8); margin: 0; overflow-y: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; border-radius: var(--mds-radius-xs); }
+.sched-instructions p:focus-visible { outline: 2px solid var(--app-focus); outline-offset: 2px; }
 .sched-hint, .sched-empty, .sched-foot { margin: 0; color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; }
 .sched-foot { margin: 16px 8px 0; }
 .sched-actions { display: flex; flex-wrap: wrap; gap: 6px; }

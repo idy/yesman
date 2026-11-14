@@ -161,6 +161,11 @@ func runView(r Run, p Plan, tasks map[string]yesmen.Task, boardErr error, active
 	case StateClaimed, StateBoarded, StateSending:
 		v.Status = "sending"
 	case StateSent, StateQueued, StateUnknown:
+		// Queued while pi reports it in its queue; once the queue moved on,
+		// what is known is that pi accepted it.
+		if a := r.attempt(); r.State == StateQueued && a != nil && a.State != "queued" {
+			v.Status = StateSent
+		}
 		switch {
 		case onBoard && t.Status != yesmen.TaskTodo:
 			// The lead took it up: its board task says where it stands.

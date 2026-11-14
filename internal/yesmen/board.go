@@ -170,6 +170,39 @@ func (s *Store) AddScheduledTask(name string, link TaskSchedule, title, detail s
 	return b.Tasks[i], true, nil
 }
 
+// UpdateScheduledTask changes the board task of a scheduled run when fn
+// reports a change, and returns it. A task no longer on the board is left
+// alone; found reports whether it is there.
+func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task Task, changed bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.board(name)
+	if err != nil {
+		return Task{}, false, err
+	}
+	for i, t := range b.Tasks {
+		if t.Schedule == nil || t.Schedule.Run != run {
+			continue
+		}
+		if !fn(&t) {
+			return b.Tasks[i], false, nil
+		}
+		t.Note = clipRunes(t.Note, maxNoteLen)
+		if !slices.Contains(TaskStatuses, t.Status) {
+			return b.Tasks[i], false, fmt.Errorf("status %q is not one of %s", t.Status, strings.Join(TaskStatuses, ", "))
+		}
+		t.Schedule = b.Tasks[i].Schedule
+		t.UpdatedAt = time.Now().UTC()
+		b.Tasks[i] = t
+		y, _ := s.Get(name)
+		if err := writeJSON(y.BoardFile(), b); err != nil {
+			return Task{}, false, err
+		}
+		return t, true, nil
+	}
+	return Task{}, false, nil
+}
+
 func clipRunes(s string, n int) string {
 	if r := []rune(s); len(r) > n {
 		return string(r[:n-1]) + "…"

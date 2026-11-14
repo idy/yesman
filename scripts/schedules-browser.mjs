@@ -283,13 +283,20 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
     await pane.locator('.board-done summary').getByText(T(/Archived 1/, /已归档 1/)).waitFor();
     step('archive');
 
-    // Narrow window: nothing overflows the pane.
+    // Narrow window, the info panel hidden as there is no room for it (the
+    // board has the same limit): the pane fits and nothing overflows it.
     await page.setViewportSize({ width: 640, height: 860 });
+    await page.getByRole('button', { name: T('Hide the info', '隐藏信息栏') }).click();
     await page.waitForTimeout(100);
+    const box = await pane.evaluate((el) => { const r = el.getBoundingClientRect(); return { left: r.left, right: r.right, vw: innerWidth }; });
+    assert.ok(box.right <= box.vw + 1 && box.left >= 0, `the pane leaves the window at 640px: ${JSON.stringify(box)}`);
     const overflow = await pane.evaluate((el) => [...el.querySelectorAll('*')].filter((x) => x.scrollWidth > x.clientWidth + 1 && getComputedStyle(x).overflowX !== 'auto' && getComputedStyle(x).overflowX !== 'hidden' && x.clientWidth > 0).map((x) => x.className).slice(0, 5));
     assert.deepEqual(overflow, [], `overflow at 640px: ${overflow}`);
     await shot('narrow');
     step('narrow window');
+
+    await page.getByRole('button', { name: T('Show the info', '显示信息栏') }).click();
+    await page.setViewportSize({ width, height: 860 });
 
     // A tasks file that cannot be read is shown, not written over.
     await fx.post('/fixture/corrupt', { yesman: 'alice' });

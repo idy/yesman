@@ -321,7 +321,9 @@ export function createSchedules(host) {
     const meta = [p.id, describe(p.schedule), p.timezone];
     if (p.createdBy === 'lead') meta.push(t('Drafted by the lead'));
     return h('div', { class: 'sched-details' },
-      h('div', { class: 'sched-instructions' }, h('span', { class: 'board-label' }, t('Instructions')), h('p', null, p.instructions)),
+      h('div', { class: 'sched-instructions' }, h('span', { class: 'board-label', id: `${key}:instructions` }, t('Instructions')),
+        // Long instructions scroll in their own box, reachable by keyboard.
+        h('p', { tabindex: '0', 'aria-labelledby': `${key}:instructions` }, p.instructions)),
       h('p', { class: 'board-meta' }, meta.join(' · ')),
       p.createdBy === 'lead' && !p.enabled && writable ? h('p', { class: 'sched-hint' }, t('Your lead drafted this task when you asked. It runs only once you turn it on.')) : null,
       writable ? h('div', { class: 'sched-actions' },
@@ -366,7 +368,8 @@ export function createSchedules(host) {
     return h('li', { class: 'sched-run', 'data-status': r.status },
       h('div', { class: 'sched-run-line' },
         h('span', { class: 'sched-run-time' }, at),
-        h('span', { class: 'sched-run-kind' }, t(KIND[r.kind] ?? r.kind)),
+        // A missed or skipped record says what it is in its status.
+        r.kind === 'missed' || r.kind === 'skipped' ? null : h('span', { class: 'sched-run-kind' }, t(KIND[r.kind] ?? r.kind)),
         statusChip(r)),
       r.reason ? h('p', { class: 'sched-run-reason' }, reasonText(r)) : null,
       r.outcome?.note && (r.status === 'done' || r.status === 'blocked' || r.status === 'dropped') ? h('p', { class: 'sched-run-reason' }, r.outcome.note) : null,

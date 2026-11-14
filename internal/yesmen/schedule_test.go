@@ -42,3 +42,37 @@ func TestAddScheduledTaskIsIdempotentAndItsLinkIsTheSchedulers(t *testing.T) {
 		t.Fatal("a task without its run")
 	}
 }
+
+// The scheduler changes only its own run's task, and the link stays.
+func TestUpdateScheduledTask(t *testing.T) {
+	tmp := t.TempDir()
+	s := New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
+	if _, err := s.Hire("alice"); err != nil {
+		t.Fatal(err)
+	}
+	link := TaskSchedule{Plan: "s1", Run: "s1-m-0123456789abcdef"}
+	if _, _, err := s.AddScheduledTask("alice", link, "Run", ""); err != nil {
+		t.Fatal(err)
+	}
+	title := "Mine"
+	if _, err := s.ChangeBoard("alice", BoardChange{Add: []TaskEdit{{Title: &title}}}); err != nil {
+		t.Fatal(err)
+	}
+	task, changed, err := s.UpdateScheduledTask("alice", link.Run, func(t *Task) bool {
+		t.Status, t.Note, t.Schedule = TaskBlocked, strings.Repeat("n", 5000), nil
+		return true
+	})
+	if err != nil || !changed || task.Status != TaskBlocked || task.Schedule == nil || *task.Schedule != link || len(task.Note) > maxNoteLen*4 {
+		t.Fatalf("update: %+v %v %v", task, changed, err)
+	}
+	if _, changed, _ := s.UpdateScheduledTask("alice", "s9-none", func(*Task) bool { return true }); changed {
+		t.Fatal("changed a task of another run")
+	}
+	b, _ := s.Board("alice")
+	if b.Tasks[1].Status != TaskTodo || b.Tasks[1].Title != "Mine" {
+		t.Fatalf("another task changed: %+v", b.Tasks[1])
+	}
+	if _, _, err := s.UpdateScheduledTask("alice", link.Run, func(t *Task) bool { t.Status = "finished"; return true }); err == nil {
+		t.Fatal("an unknown status was saved")
+	}
+}

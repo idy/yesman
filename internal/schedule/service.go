@@ -425,8 +425,52 @@ func (s *Service) updateLocked(sp *space, y yesmen.Yesman, id string, fn func(*R
 	if err := s.writeRunLocked(y, &next); err != nil {
 		return rec.Run, err
 	}
+	before := rec.Run
 	*rec = next
+	s.markBoardLocked(y, before, rec.Run)
 	return rec.Run, nil
+}
+
+// notDelivered starts the note of a run's board task while the run was
+// definitely not delivered, so that the lead, and its reminders of open
+// tasks, do not take up a request it never got.
+const notDelivered = "Scheduled run not delivered to the lead:"
+
+// markBoardLocked keeps a run's board task in step with what is known of
+// its delivery: blocked with a note while it was definitely not delivered,
+// and back to do when it is sent again. A task the lead or the user changed
+// in between is left as they left it.
+func (s *Service) markBoardLocked(y yesmen.Yesman, before, after Run) {
+	if after.Board == "" || !after.fired() {
+		return
+	}
+	var fn func(*yesmen.Task) bool
+	switch {
+	case after.State == StateFailed && before.State != StateFailed:
+		note := fmt.Sprintf("%s %s. Send it again from Tasks.", notDelivered, strings.TrimSuffix(strings.TrimPrefix(after.Reason, "Not sent: "), "."))
+		fn = func(t *yesmen.Task) bool {
+			if t.Status != yesmen.TaskTodo {
+				return false
+			}
+			t.Status, t.Note = yesmen.TaskBlocked, note
+			return true
+		}
+	case before.State == StateFailed && after.State != StateFailed:
+		fn = func(t *yesmen.Task) bool {
+			if t.Status != yesmen.TaskBlocked || !strings.HasPrefix(t.Note, notDelivered) {
+				return false
+			}
+			t.Status, t.Note = yesmen.TaskTodo, ""
+			return true
+		}
+	default:
+		return
+	}
+	if _, changed, err := s.cfg.Yesmen.UpdateScheduledTask(y.Name, after.ID, fn); err != nil {
+		logf("board task of %s: %v", after.ID, err)
+	} else if changed {
+		s.cfg.BoardChanged(y.Name)
+	}
 }
 
 func (s *Service) changed(name string) { s.cfg.OnChange(name) }
@@ -1650,5 +1694,3 @@ func boardDetail(r Run) string {
 }
 
 func logf(format string, args ...any) { log.Printf("yesman schedules: "+format, args...) }
-
-var _ = logf
