@@ -123,20 +123,23 @@ test('a message sent while the agent works splits its work without moving or swa
 });
 
 test('stops, errors and failed tools are stated, and errors stay in the conversation', () => {
-  const bad = call('bash'), start = call('yesman_worker_start', { name: 'w1' });
+  const bad = call('bash'), start = call('yesman_worker_start', { name: 'w1' }), taken = call('yesman_worker_start', { name: 'w1' });
   const rows = project({
     messages: [
       user('go', { source: 'user' }),
-      assistant([thinking('try'), bad, start], 'toolUse'),
-      result(bad, true), result(start),
+      assistant([thinking('try'), bad, start, taken], 'toolUse'),
+      result(bad, true), result(start), result(taken, true),
       assistant([thinking('again')], 'aborted'),
       user('retry', { source: 'user' }),
       assistant([thinking('x')], 'error', { errorMessage: 'provider unavailable' }),
     ],
-    tools: tools([bad, 'error'], [start, 'done']),
+    tools: tools([bad, 'error'], [start, 'done'], [taken, 'error']),
   }, { status: 'idle' });
-  assert.deepEqual(shape(rows), ['user', 'work(thinking,tool,tool,thinking):stopped', 'note', 'user', 'work(thinking):error', 'note']);
-  assert.deepEqual(rows[1].counts, { thinking: 2, tools: 2, failed: 1, reports: 0, notices: 0, workers: 1 });
+  assert.deepEqual(shape(rows), ['user', 'work(thinking,tool,tool,tool,thinking):stopped', 'note', 'user', 'work(thinking):error', 'note']);
+  // A worker start that failed, or has not run, started no worker.
+  assert.deepEqual(rows[1].counts, { thinking: 2, tools: 3, failed: 2, reports: 0, notices: 0, workers: 1 });
+  const streaming = project({ messages: [assistant([call('yesman_worker_start')], 'toolUse')], tools: new Map() }, { status: 'working' });
+  assert.equal(streaming[0].counts.workers, 0);
   assert.equal(rows[2].stopped, true);
   assert.equal(rows[5].text, 'provider unavailable');
 });

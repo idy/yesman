@@ -176,7 +176,8 @@ try {
   // Queued while the model is held: a report, identical user texts, a person
   // typing yesman's own prefix, images, a slow lookup, the same text from two
   // writers, and an input another handler rewrites.
-  claim(report, { source: "yesman", kind: "report", worker: "w1" });
+  // Worker names may start with a digit.
+  claim(report, { source: "yesman", kind: "report", worker: "2nd-pass" });
   const queued = [
     { message: report.text, streamingBehavior: "followUp" },
     { message: "same", streamingBehavior: "steer", origin: { source: "user", submission: id(2) } },
@@ -211,7 +212,7 @@ try {
   const users = (await pi.call({ type: "get_messages" })).data.messages.filter((m) => m.role === "user");
   assert.deepEqual(users.map((m) => m.yesman ?? null), live.map((m) => m.yesman ?? null), "live and history disagree");
   const byText = (text) => users.filter((m) => firstText(m) === text || firstText(m).startsWith(`${text}\n\n`));
-  assert.deepEqual(byText(report.text).map((m) => m.yesman), [{ source: "yesman", kind: "report", worker: "w1" }]);
+  assert.deepEqual(byText(report.text).map((m) => m.yesman), [{ source: "yesman", kind: "report", worker: "2nd-pass" }]);
   // Two submissions of the same text are the user's, bound to neither receipt.
   assert.deepEqual(byText("same").map((m) => m.yesman), [{ source: "user" }, { source: "user" }]);
   // A person's text is never taken for yesman's by its prefix.
@@ -242,7 +243,7 @@ try {
   const logs = (await readdir(`${temp}/sessions`)).filter((f) => f.endsWith(".jsonl"));
   assert.equal(logs.length, 1);
   const log = await readFile(`${temp}/sessions/${logs[0]}`, "utf8");
-  assert(log.includes('"yesman":{"source":"yesman","kind":"report","worker":"w1"}'));
+  assert(log.includes('"yesman":{"source":"yesman","kind":"report","worker":"2nd-pass"}'));
   await pi.stop();
   pi = startPi("--continue");
   const resumed = (await pi.call({ type: "get_messages" })).data.messages.filter((m) => m.role === "user");

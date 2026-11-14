@@ -118,7 +118,8 @@ export function project(convo, agent = {}) {
         const status = convo.tools?.get(item.block.id)?.status ?? 'pending';
         if (status === 'error') counts.failed++;
         if (status === 'pending' || status === 'running') pending = true;
-        if (item.block.name === 'yesman_worker_start') counts.workers++;
+        // Only a start that succeeded started a worker.
+        if (item.block.name === 'yesman_worker_start' && status === 'done') counts.workers++;
       }
     }
     row.counts = counts;

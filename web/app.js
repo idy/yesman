@@ -431,7 +431,10 @@ function workItemEl(c, item) {
 
 function itemSig(c, item) {
   if (item.type === 'thinking') return item.live ? `l:${item.text}` : 'f';
-  if (item.type === 'tool') return c.tools.get(item.block.id)?.status ?? 'pending';
+  if (item.type === 'tool') {
+    const tool = c.tools.get(item.block.id);
+    return `${tool?.status ?? 'pending'}:${tool?.revision ?? 0}`;
+  }
   return 'f';
 }
 
@@ -793,6 +796,7 @@ function applyEvent(c, e, replaying,seq = 0) {
         tool.status = 'running';
         if (e.partialResult) tool.result = resultText(e.partialResult);
       }
+      tool.revision = (tool.revision ?? 0) + 1; // partial output changes a running tool
       c.tools.set(e.toolCallId, tool);
       break;
     }

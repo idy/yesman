@@ -218,9 +218,10 @@ function promptFingerprint(text: string, images: readonly { type?: string; mimeT
 // validOrigin keeps only the bounded fields the window reads.
 function validOrigin(o: any): Origin | undefined {
 	if (!o || typeof o !== "object" || !SOURCES.has(o.source)) return undefined;
-	const word = (s: unknown) => (typeof s === "string" && /^[a-z][a-z0-9._-]{0,63}$/.test(s) ? s : undefined);
+	const match = (s: unknown, re: RegExp) => (typeof s === "string" && re.test(s) ? s : undefined);
 	const out: Origin = { source: o.source };
-	const kind = word(o.kind), worker = word(o.worker);
+	// Worker names follow the app's rule for them (nameRE in internal/yesmen).
+	const kind = match(o.kind, /^[a-z]{1,16}$/), worker = match(o.worker, /^[a-z0-9][a-z0-9-]{0,31}$/);
 	if (kind) out.kind = kind;
 	if (worker) out.worker = worker;
 	if (typeof o.submission === "string" && /^[a-f0-9]{48}$/.test(o.submission)) out.submission = o.submission;

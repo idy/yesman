@@ -248,6 +248,13 @@ for (const [engine, type] of Object.entries({ chromium, webkit })) {
     assert.equal(await live.evaluate((el) => el.open), true);
     assert.equal(await live.locator(":scope > summary").evaluate((el) => document.activeElement === el), true);
     assert.equal(await live.locator(".tool").getAttribute("data-status"), "running");
+    // A running tool opened shows its output as it comes.
+    await live.locator(".tool > summary").click();
+    await page.waitForFunction(() => document.querySelector("#thread .work .tool .tool-body")?.textContent.includes("partial"));
+    await emit({ type: "tool_execution_update", toolCallId: "c9", toolName: "read", args: { path: "web/app.js" }, partialResult: { content: [{ type: "text", text: "partial, then more" }] } });
+    await frame();
+    assert.match(await live.locator(".tool .tool-body").innerText(), /partial, then more/);
+    await live.locator(":scope > summary").focus();
     // A message sent meanwhile shows as sent, then where pi took it.
     await emit({ type: "delivery_update", delivery: { id: sub(5), revision: 1, state: "steering", text: "also check the CSS", imageCount: 0, order: 5 } });
     assert.match(await page.locator(`[data-delivery="${sub(5)}"]`).innerText(), /also check the CSS[\s\S]*Accepted for steering/);
