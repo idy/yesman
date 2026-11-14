@@ -634,6 +634,7 @@ func TestSleepIfIdle(t *testing.T) {
 
 func TestSleepIfIdleLeavesPromptsAlone(t *testing.T) {
 	m, _ := newTestManager(t, 0, "FAKE_PI_HOLD_PROMPTS=1")
+	events := modelTestEvents(m)
 	id := ID("alice", yesmen.LeadName)
 	errc := make(chan error, 1)
 	go func() { errc <- m.Prompt(context.Background(), id, "hi") }()
@@ -660,6 +661,10 @@ func TestSleepIfIdleLeavesPromptsAlone(t *testing.T) {
 	if m.SleepIfIdle(id, time.Now().Add(time.Hour)) {
 		t.Fatal("slept an agent with a message on its way")
 	}
+	// The prompt is counted before it is written to pi: release what pi
+	// holds only once it holds the prompt, or the release could arrive
+	// first and the prompt be held for good.
+	waitModelEvent(t, events, "test_prompt_received")
 	p := m.running(id)
 	if _, err := p.call(context.Background(), map[string]any{"type": "test_release_prompts"}); err != nil {
 		t.Fatal(err)
