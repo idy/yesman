@@ -9,6 +9,7 @@ Each release's section is what installed copies show as its release notes.
 - Open the matching agent and request while preserving an unsent draft. Viewing a request leaves it pending until it is answered, completed or dismissed through its available action.
 - Show when long-term request memory approaches capacity. Start a new memory only after explicit confirmation, preserving current requests. A forgotten request can return if its tool call runs again, and each later reset can allow it to return again. Keep keyboard focus and confirmation dialogs tied to the correct view and request.
 - Prevent named pipes in workspace metadata from blocking the app. Report oversized historical metadata for the affected workspace while keeping healthy workspaces available.
+- Give earlier submission records a neutral heading with their count, and show their recorded outcomes in the expanded details. Keep current pending, failed and recoverable messages explicit, with their existing actions and original text and images.
 
 ## 0.1.34
 
