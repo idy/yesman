@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.36
+
+- Fold consecutive runs that end only with a model error into one closed row that shows the count and the error text. Expand it to see each distinct error with its provider, model and count, copy the error text, and open each run's time and original work. A person's message, a reply, a partial reply or a stop ends the fold, and text that only mentions an error never counts as one. History and submission records are unchanged.
+- Mark an agent whose last finished run ended with a model error with a red exclamation mark, a label and a tooltip in the sidebar and header; a yesman's entry follows its lead's own state. Working, waiting, Needs You and asking keep their own marks. Stopping the run, or a later run that ends any other way, clears the mark while the conversation keeps its error rows. The mark is not kept across an app restart. A crashed agent process shows the same red mark.
+- Show an error recorded without a message as "The model returned an error without a message." and fold such errors together.
+
 ## 0.1.35
 
 - Add a global Needs You inbox for explicit requests that need human action across yesmen and agents. Ordinary worker questions stay with their lead; blocked Board tasks and queued messages do not add inbox items.
