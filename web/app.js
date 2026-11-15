@@ -1215,12 +1215,12 @@ const requestWhat = (item) => item.title || t(typeLabel(item));
 
 function needsYouEntry(items) {
   const n = items.length;
-  const label = n ? t('Needs you: {n} waiting', { n: formatNumber(n) }) : t('Needs you: nothing waiting');
+  const label = n ? t('Needs You: {n} waiting', { n: formatNumber(n) }) : t('Needs You: nothing waiting');
   return h('button', {
     class: 'mds-nav-item needs-you-entry', type: 'button', 'data-sidebar-entry': 'needs-you-page', 'data-count': String(n),
     'aria-current': state.view.kind === 'needs-you' ? 'page' : null, 'aria-label': label, title: label,
     onclick: () => showNeedsYou(),
-  }, icon('bell'), h('span', { class: 'needs-you-label' }, t('Needs you')),
+  }, icon('bell'), h('span', { class: 'needs-you-label' }, t('Needs You')),
   n ? h('span', { class: 'needs-you-count', 'aria-hidden': 'true' }, formatNumber(n)) : null);
 }
 
@@ -1281,7 +1281,7 @@ function renderNeedsYou(body) {
   // The page names what it shows (view, opener, and the hire it is for), so
   // that a redraw puts focus back on a control only where it was.
   const inner = h('div', { class: 'page-inner needs-you-page', 'data-page': JSON.stringify([v.yesman ?? '', v.hiredAt ?? '', scope?.hiredAt ?? null, v.from ?? '']) },
-    h('h1', { class: 'mds-title', tabindex: '-1' }, t('Needs you')),
+    h('h1', { class: 'mds-title', tabindex: '-1' }, t('Needs You')),
     h('p', { class: 'needs-you-intro' }, t('What your yesmen handed to you: their questions only you can answer, decisions, and steps only you can take. Open one to handle it in its conversation.')));
   if (v.yesman) {
     // Opened for one yesman: say which, or that it is gone, and offer all.
@@ -1415,7 +1415,7 @@ function handoffEls(a) {
   const els = shown.map((item) => handoffEl(a, y, item));
   if (items.length > shown.length) {
     els.push(h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-more', type: 'button', onclick: () => showNeedsYou() },
-      t('{n} more under Needs you', { n: formatNumber(items.length - shown.length) })));
+      t('{n} more under Needs You', { n: formatNumber(items.length - shown.length) })));
   }
   return els;
 }
@@ -1482,7 +1482,7 @@ function locateRequest(dock, a) {
 }
 
 const backToNeedsYou = (key, scope) => h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-back', type: 'button', onclick: () => showNeedsYou(key, scope) },
-  icon('arrowLeft'), t('Back to Needs you'));
+  icon('arrowLeft'), t('Back to Needs You'));
 
 // backToConversation goes back to the conversation Needs you was opened
 // from, to the entry that opened it when the info panel shows.
@@ -1544,7 +1544,7 @@ function renderBar() {
     const page = SETTINGS.find((s) => s.page === state.view.page);
     crumbs.replaceChildren(h('span', null, t('Settings')), sep(), h('span', { 'aria-current': 'page' }, t(page.label)));
   } else if (state.view.kind === 'needs-you') {
-    crumbs.replaceChildren(h('span', { 'aria-current': 'page' }, t('Needs you')));
+    crumbs.replaceChildren(h('span', { 'aria-current': 'page' }, t('Needs You')));
   } else if (a) {
     const y = yesmanOf(a.id);
     const here = h('span', { 'aria-current': 'page', title: y?.path ?? '' }, a.role === 'lead' ? yesmanLabel(a.yesman) : a.name);
@@ -3411,6 +3411,13 @@ const actionHost = {
   entries: sidebarAgents,
   leads: () => state.snap.yesmen.map((y) => agentById(`${y.name}/lead`)).filter(Boolean),
   needsYou: () => state.snap.agents.find((a) => a.role === 'lead' && a.status === 'waiting') ?? null,
+  // Needs You, every yesman's requests; focus goes to its heading when the
+  // control that had it was drawn away.
+  showNeedsYou() {
+    showNeedsYou();
+    const now = document.activeElement;
+    if (!now || now === document.body) $('#body .needs-you-page h1')?.focus({ preventScroll: true });
+  },
   step(by) {
     const list = sidebarAgents();
     const at = list.findIndex((a) => a.id === state.view.id);

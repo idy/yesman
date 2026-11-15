@@ -39,7 +39,8 @@ function bridge() {
   localStorage.setItem('yesman.info', 'hidden');
   window.handlers = {};
   window.calls = [];
-  const forward = ['State', 'Messages', 'Answer', 'ResolveHandoff', 'ResetCallMemory', 'Info', 'ListFiles', 'ReadFile'];
+  window.unmocked = []; // the page called something this fixture does not answer
+  const forward = ['State', 'Messages', 'Answer', 'ResolveHandoff', 'ResetCallMemory', 'Info', 'Usage', 'Shortcuts', 'ListFiles', 'ReadFile'];
   window.mygo = {
     locale: localStorage.getItem('fixture.locale') || 'en',
     on: (name, fn) => { handlers[name] = fn; },
@@ -71,7 +72,9 @@ function bridge() {
         case 'Board': return { tasks: [] };
         case 'AgentMenu': return '';
         case 'WatchFiles': case 'Abort': case 'Stop': return;
-        default: throw Error('Unmocked method ' + m);
+        // Reading it would start the agent: its context is not measured here.
+        case 'Context': return null;
+        default: window.unmocked.push(m); throw Error('Unmocked method ' + m);
       }
     },
   };
@@ -115,11 +118,26 @@ async function scenario(engineName, page) {
 
   await entry.waitFor();
   assert.equal(await count(), 0);
-  assert.equal(await entry.getAttribute('aria-label'), 'Needs you: nothing waiting');
+  assert.equal(await entry.getAttribute('aria-label'), 'Needs You: nothing waiting');
   await entry.click();
   await page.locator('.needs-you-empty').waitFor();
-  assert.equal(await page.locator('#crumbs').innerText(), 'Needs you');
+  assert.equal(await page.locator('#crumbs').innerText(), 'Needs You');
   await shot('empty');
+
+  // The palette shows Needs You too, an action with no key of its own, and
+  // puts focus on its heading.
+  await page.locator('[data-agent="alice/lead"][data-sidebar-entry="yesman"]').click();
+  await page.locator('.composer textarea').waitFor();
+  await page.keyboard.press('ControlOrMeta+KeyK');
+  await page.locator('.palette-input').waitFor();
+  await page.keyboard.type('Show Needs You');
+  const option = page.locator('.palette-option', { hasText: 'Show Needs You' });
+  await option.waitFor();
+  assert.equal(await option.locator('.keycap').count(), 0);
+  await page.keyboard.press('Enter');
+  await page.locator('.needs-you-empty').waitFor();
+  await until('the heading focused', () => page.evaluate(() => document.activeElement?.matches('.needs-you-page h1')));
+  assert.equal(await page.locator('#crumbs').innerText(), 'Needs You');
 
   // A worker's question goes to its lead: it is not the user's.
   await ctl('start-worker', { yesman: 'alice', name: 'w1', message: ask({ id: 'q1', method: 'select', title: 'Allow rm -rf build?', options: ['Allow', 'Block'] }) });
@@ -183,7 +201,7 @@ async function scenario(engineName, page) {
   await tool.waitFor();
   assert.ok(await tool.evaluate((el) => { const r = el.getBoundingClientRect(); const s = document.querySelector('#scroll').getBoundingClientRect(); return r.bottom > s.top && r.top < s.bottom; }));
   await shot('handoff');
-  await page.getByRole('button', { name: 'Back to Needs you' }).click();
+  await page.getByRole('button', { name: 'Back to Needs You' }).click();
   await until('focus back on its card', async () => page.evaluate(() => document.activeElement?.matches('.needs-you-card[data-type="login"]')));
 
   // A handed-over worker question opens on that worker, answered there.
@@ -247,8 +265,8 @@ async function scenario(engineName, page) {
   await entry.waitFor();
   await until('count after reload', async () => (await count()) === 1);
 
-  // The info panel's one card of entries: Knowledge, Working logs and
-  // Needs you, each a row, with real counts.
+  // The info panel's one card of entries: Knowledge, Working Logs and
+  // Needs You, each a row, with real counts.
   const infoRow = (key) => page.locator(`#yesman-info [data-info-entry="${key}"]`);
   const lead = (name) => page.locator(`[data-agent="${name}/lead"][data-sidebar-entry="yesman"]`);
   await ctl('prompt', { agent: 'bob/lead', message: ask({ id: 'qb2', method: 'confirm', title: 'Ship bob?' }) });
@@ -262,8 +280,9 @@ async function scenario(engineName, page) {
   const entryCard = await page.locator('#yesman-info .info-section--entries').evaluateAll((els) => els.map((el) => [...el.querySelectorAll('[data-info-entry]')].map((row) => row.dataset.infoEntry)));
   assert.deepEqual(entryCard, [['knowledge', 'working-logs', 'needs-you']]);
   assert.equal(await page.locator('#yesman-info [data-info-entry]').count(), 3); // no separate Knowledge or log sections
-  assert.match(await infoRow('working-logs').innerText(), /^Working logs/);
-  assert.match(await infoRow('needs-you').innerText(), /Needs you[\s\S]*1 waiting/);
+  assert.match(await infoRow('knowledge').innerText(), /^Knowledge/);
+  assert.match(await infoRow('working-logs').innerText(), /^Working Logs/);
+  assert.match(await infoRow('needs-you').innerText(), /^Needs You[\s\S]*1 waiting/);
   await shot('info-card');
   // Working logs opens the original task log, read-only.
   await infoRow('working-logs').click();
@@ -288,7 +307,7 @@ async function scenario(engineName, page) {
   await page.evaluate(() => handlers.changed(true));
   await until('alice\'s Info held', async () => page.evaluate(() => !!window.releaseInfo));
   await lead('bob').click();
-  await until('bob\'s card', async () => /Needs you[\s\S]*1 waiting/.test(await infoRow('needs-you').innerText()) && /0 notes/.test(await infoRow('knowledge').innerText()));
+  await until('bob\'s card', async () => /Needs You[\s\S]*1 waiting/.test(await infoRow('needs-you').innerText()) && /0 notes/.test(await infoRow('knowledge').innerText()));
   await page.evaluate(() => { window.holdInfo = null; window.releaseInfo(); });
   await page.waitForTimeout(300);
   assert.match(await infoRow('knowledge').innerText(), /0 notes/);
@@ -383,7 +402,7 @@ async function scenario(engineName, page) {
   await shot('zh-dark-narrow-long');
   // The info card, in Chinese.
   if (!(await page.locator('#yesman-info [data-info-entry]').count())) await page.getByRole('button', { name: '显示信息栏' }).click();
-  await until('the Knowledge count in Chinese', async () => /知识[\s\S]*15 篇笔记/.test(await infoRow('knowledge').innerText()));
+  await until('the Knowledge count in Chinese', async () => /^知识库[\s\S]*15 篇笔记/.test(await infoRow('knowledge').innerText()));
   assert.match(await infoRow('working-logs').innerText(), /工作日志/);
   assert.match(await infoRow('needs-you').innerText(), /需要你[\s\S]*4 项等待中/);
   await shot('zh-dark-narrow-info');
@@ -589,6 +608,7 @@ try {
         throw err;
       });
       assert.deepEqual(errors, []);
+      assert.deepEqual(await page.evaluate(() => window.unmocked), []);
       results.push(`${engineName}: PASS`);
       console.log(`${engineName}: Needs you sources, count, jump/focus/draft, answer, done, expiry, archive/rehire, remove, reload, Info card rows/counts/scope/back/late response, focus across refresh, history re-read with a live reply, long handoffs, zh/dark/narrow, request memory near/full/pre-release with a keyboard reset, a stale confirmation, the lead told, a cancelled reset never answered by another's confirmation and a late reset not taking focus passed`);
     } finally {

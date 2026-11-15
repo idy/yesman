@@ -170,7 +170,7 @@ export function createInfo(host) {
   function workingLogsEntry(y) {
     const shown = host.files();
     return {
-      key: 'working-logs', label: t('Working logs'), title: t('Read task and PR history in the files pane'),
+      key: 'working-logs', label: t('Working Logs'), title: t('Read task and PR history in the files pane'),
       current: shown?.yesman === y.name && shown.path === '.yesman/task-log.md',
       open: () => host.openTaskLog(),
     };
@@ -181,7 +181,7 @@ export function createInfo(host) {
   function needsYouEntry(y) {
     const { count, error, refused } = host.needsYou(y);
     return {
-      key: 'needs-you', label: t('Needs you'), title: t('See what {name} needs from you', { name: y.displayName || y.name }),
+      key: 'needs-you', label: t('Needs You'), title: t('See what {name} needs from you', { name: y.displayName || y.name }),
       // A file that cannot be read is said, not counted as nothing; and so
       // is a lead that cannot hand over new requests.
       aside: error ? [count && tn(count, '{n} waiting', '{n} waiting'), t('Cannot be read')].filter(Boolean).join(' · ')

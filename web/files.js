@@ -628,7 +628,7 @@ export function createFiles(host) {
     const kind = p.scope.kind;
     return h('button', {
       class: 'files-crumb files-crumb--scope', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
-      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, Knowledge, the working logs or another worktree'),
+      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, Knowledge, the Working Logs or another worktree'),
       onclick: (e) => scopeMenu(e.currentTarget, p),
     }, icon(kind === 'worktree' ? 'branch' : kind === 'knowledge' ? 'book' : 'folder', 'mds-icon files-crumb-icon'), h('span', null, scopeLabel(p)));
   }
@@ -859,7 +859,7 @@ export function createFiles(host) {
       // Working logs, the task log, is a shortcut to a file in the
       // workspace, not another scope.
       h('button', { class: 'files-menu-item', type: 'button', role: 'menuitem', title: TASK_LOG,
-        onclick: () => { closeMenu(); openTaskLog(); } }, icon('fileText'), h('span', null, t('Working logs'))),
+        onclick: () => { closeMenu(); openTaskLog(); } }, icon('fileText'), h('span', null, t('Working Logs'))),
     ];
     const wts = host.worktrees?.(y) ?? [];
     if (wts.length) items.push(h('p', { class: 'files-menu-heading', role: 'presentation' }, t('Worktrees')));

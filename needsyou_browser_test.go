@@ -223,6 +223,15 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 			if err = arg(req.Args, 0, &id); err == nil {
 				value, err = s.Info(r.Context(), id)
 			}
+		case "Usage":
+			var refresh bool
+			if err = arg(req.Args, 0, &id); err == nil {
+				if err = arg(req.Args, 1, &refresh); err == nil {
+					value, err = s.Usage(r.Context(), id, refresh)
+				}
+			}
+		case "Shortcuts":
+			value = s.Shortcuts()
 		case "ListFiles", "ReadFile":
 			var path string
 			if err = arg(req.Args, 0, &id); err == nil {

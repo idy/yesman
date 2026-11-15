@@ -93,6 +93,11 @@ export function registerActions(shortcuts, host) {
       when: () => (host.needsYou() ? true : 'No yesman needs you now.'),
       run: () => host.selectAgent(host.needsYou().id),
     },
+    {
+      // Unbound: a key is the user's to give it in Settings › Shortcuts.
+      id: 'needs-you.show', label: 'Show Needs You', group: 'Go to', keywords: ['requests', 'inbox', 'waiting', 'handoffs'],
+      run: () => host.showNeedsYou(),
+    },
     ...GOTO.map((n) => ({
       id: `yesman.goto.${n}`, label: 'Go to yesman {n}', params: { n }, group: 'Go to', keys: [`Mod+${n}`], palette: false,
       when: () => (host.leads()[n - 1] ? true : host.t('There is no yesman {n}.', { n })),
@@ -126,7 +131,7 @@ export function registerActions(shortcuts, host) {
       when: needAgent, run: () => host.files().openKnowledge(),
     },
     {
-      id: 'files.task-log', label: 'Open the task log', group: 'Panels', keywords: ['history'],
+      id: 'files.task-log', label: 'Open Working Logs', group: 'Panels', keywords: ['task log', 'history'],
       when: needAgent, run: () => host.files().openTaskLog(),
     },
 
