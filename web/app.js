@@ -25,6 +25,8 @@ import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
 import { detectPlatform } from './keys.js';
 import { createShortcuts } from './shortcuts.js';
+import { createContextMenu } from './contextmenu.js';
+import { editorViewOf } from './editor.js';
 import { createPalette } from './palette.js';
 import { registerActions, paletteItems } from './actions.js';
 import { createShortcutsPage } from './shortcuts-page.js';
@@ -3579,6 +3581,9 @@ async function start() {
   buildSideFoot();
   buildRepoDialog();
   started = true;
+  // yesman answers every context menu: the rows' own, or the page's
+  // (contextmenu.js), never the web view's.
+  createContextMenu({ call, fail, platform: detectPlatform(mygo), editorOf: editorViewOf }).install();
   mygo.on('mygo:locale', (e) => onLocale(e.locale));
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href]');

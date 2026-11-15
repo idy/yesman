@@ -137,6 +137,14 @@ var zhHans = map[string]string{
 	"Copy Path":               "拷贝路径",
 	"Copy Relative Path":      "拷贝相对路径",
 
+	// The page's menu, as the Edit menu says them
+	"Open Link":  "打开链接",
+	"Copy Link":  "拷贝链接",
+	"Cut":        "剪切",
+	"Copy":       "拷贝",
+	"Paste":      "粘贴",
+	"Select All": "全选",
+
 	// Dialogs
 	"Choose a yesman folder":      "选择 yesman 文件夹",
 	"Choose folder":               "选择文件夹",
