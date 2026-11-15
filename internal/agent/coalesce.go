@@ -78,6 +78,11 @@ func (a *agent) rootDeliveryLocked(id string) (Delivery, bool) {
 	return d, true
 }
 
+// joinableText excludes slash input. pi expands /skill and /template inputs and
+// runs extension commands before queueing, so a merged message would mix an
+// expansion with ordinary text; such inputs always stay their own messages.
+func joinableText(text string) bool { return !strings.HasPrefix(strings.TrimSpace(text), "/") }
+
 // appendTargetLocked proposes the occurrence a composer submission may join.
 // Only the newest pending human occurrence qualifies, in the same lane, session
 // and agent generation, unclaimed by an idle preparation, with every member's
@@ -105,8 +110,8 @@ func (m *Manager) appendTargetLocked(a *agent, p *proc, d Delivery, behavior str
 		return nil, ""
 	}
 	payload, ok := a.recallPayloads[d.ID]
-	if !ok {
-		return nil, "" // the aggregate could not be restored completely
+	if !ok || !joinableText(payload.Text) {
+		return nil, "" // the aggregate could not be restored completely, or a slash input
 	}
 	images := len(payload.Images)
 	total := 0
@@ -116,7 +121,7 @@ func (m *Manager) appendTargetLocked(a *agent, p *proc, d Delivery, behavior str
 	for _, id := range append([]string{root.ID}, last.Segments...) {
 		member, ok := a.deliveries[id]
 		retained, held := a.recallPayloads[id]
-		if id == d.ID || !ok || !held || member.Session != session || !member.AgentSince.Equal(a.info.Since) {
+		if id == d.ID || !ok || !held || !joinableText(retained.Text) || member.Session != session || !member.AgentSince.Equal(a.info.Since) {
 			return nil, ""
 		}
 		images += len(retained.Images)

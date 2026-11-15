@@ -106,8 +106,9 @@ func TestCoalesceEventThenReplyThenTaken(t *testing.T) {
 	if again, _ := u.m.SubmissionPayload(u.a.info.ID, idA, u.a.info.Since); !reflect.DeepEqual(again.Images, want) {
 		t.Fatal("caller mutated the retained payload")
 	}
-	u.snapshot(3, nil, pendingItem{QueueID: "E:1", SubmissionID: idA, Kind: "steer", ItemRevision: 1, State: "taken", Segments: []string{idB}})
-	if u.get(idA).State != "dispatched" || u.get(idB).State != "dispatched" || len(u.a.recallPayloads) != 0 {
+	// commitDrain reports taken before it releases the claim: taken wins.
+	u.snapshot(3, nil, pendingItem{QueueID: "E:1", SubmissionID: idA, Kind: "steer", ItemRevision: 1, State: "taken", Segments: []string{idB}, Preparing: true})
+	if u.get(idA).State != "dispatched" || u.get(idB).State != "dispatched" || len(u.a.recallPayloads) != 0 || u.a.deliveryView(u.get(idA)).Preparing {
 		t.Fatalf("taken: A=%+v B=%+v payloads=%d", u.get(idA), u.get(idB), len(u.a.recallPayloads))
 	}
 }
@@ -132,8 +133,9 @@ func TestCoalesceTakenBeforeAppendedEventOrReply(t *testing.T) {
 		t.Fatalf("taken membership lost: A=%+v B=%+v", u.get(idA), u.get(idB))
 	}
 	u.reply(idB, `{"disposition":"queued","append":{"outcome":"appended","queueId":"E:1","itemRevision":1}}`)
-	if u.get(idB).State != "dispatched" {
-		t.Fatal("late reply downgraded a taken input")
+	u.snapshot(2, []pendingItem{{QueueID: "E:1", SubmissionID: idA, Kind: "steer", ItemRevision: 1, Segments: []string{idB}, Preparing: true}})
+	if u.get(idB).State != "dispatched" || u.get(idA).State != "dispatched" {
+		t.Fatal("late reply or stale preparing snapshot downgraded a taken input")
 	}
 }
 
@@ -204,6 +206,14 @@ func TestCoalesceTargetEligibility(t *testing.T) {
 		{"other session", func(u *coalesceUnit, idA, _ string) { d := u.get(idA); d.Session = "old:pi0"; u.a.deliveries[idA] = d }, false},
 		{"other generation", func(u *coalesceUnit, idA, _ string) { d := u.get(idA); d.AgentSince = time.Time{}; u.a.deliveries[idA] = d }, false},
 		{"missing payload", func(u *coalesceUnit, idA, _ string) { u.m.forgetRecallLocked(u.a, idA) }, false},
+		{"slash input", func(u *coalesceUnit, _, idB string) {
+			u.m.forgetRecallLocked(u.a, idB)
+			u.m.retainRecallLocked(u.a, idB, "  /template arg", nil)
+		}, false},
+		{"slash occurrence", func(u *coalesceUnit, idA, _ string) {
+			u.m.forgetRecallLocked(u.a, idA)
+			u.m.retainRecallLocked(u.a, idA, "/skill:x", []Image{testPNG(1, 0, 0)})
+		}, false},
 		{"five images", func(u *coalesceUnit, idA, _ string) {
 			u.m.forgetRecallLocked(u.a, idA)
 			u.m.retainRecallLocked(u.a, idA, "alpha", []Image{testPNG(1, 0, 0), testPNG(1, 1, 0), testPNG(1, 2, 0)})
@@ -262,5 +272,45 @@ func TestCoalesceLinksPersistAndValidate(t *testing.T) {
 		if validMergeLinks(bad) {
 			t.Fatalf("accepted %+v", bad)
 		}
+	}
+}
+
+func TestCoalesceFamilyRetiresTogether(t *testing.T) {
+	now := time.Now()
+	idA, idB, idC := deliveryTestID(82001), deliveryTestID(82002), deliveryTestID(82003)
+	expired := now.Add(-time.Second).UnixMilli()
+	records := map[string]Delivery{
+		// B's own record is old and expired; A's is still retained.
+		idA: {ID: idA, State: "cancelled", Order: 10, Merged: []string{idB}, created: now.UnixMilli(), expires: now.Add(time.Hour).UnixMilli()},
+		idB: {ID: idB, State: "cancelled", Order: 1, MergedInto: idA, created: now.UnixMilli(), expires: expired},
+		idC: {ID: idC, State: "dispatched", Order: 2, created: now.UnixMilli(), expires: expired},
+	}
+	var floor int64
+	removed := pruneDeliveryRecords(records, &floor, now)
+	if !slices.Equal(removed, []string{idC}) || records[idB].MergedInto != idA {
+		t.Fatalf("a member was retired without its occurrence: removed %v", removed)
+	}
+	a := records[idA]
+	a.expires = expired
+	records[idA] = a
+	removed = pruneDeliveryRecords(records, &floor, now)
+	slices.Sort(removed)
+	want := []string{idA, idB}
+	slices.Sort(want)
+	if !slices.Equal(removed, want) || len(records) != 0 {
+		t.Fatalf("family not retired together: %v", removed)
+	}
+	for _, id := range want {
+		if err := newDeliveryIDAllowed(id, floor, now); err == nil {
+			t.Fatalf("retired member %s could be submitted again", id)
+		}
+	}
+	// A pending member keeps an otherwise terminal primary (and itself) retained.
+	records = map[string]Delivery{
+		idA: {ID: idA, State: "unconfirmed", Order: 1, Merged: []string{idB}, expires: expired},
+		idB: {ID: idB, State: "steering", Order: 2, MergedInto: idA},
+	}
+	if removed = pruneDeliveryRecords(records, &floor, now); len(removed) != 0 {
+		t.Fatalf("pending family member retired: %v", removed)
 	}
 }

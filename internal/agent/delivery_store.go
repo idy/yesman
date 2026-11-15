@@ -339,18 +339,21 @@ func validMergeLinks(d Delivery) bool {
 	return true
 }
 func pruneDeliveryRecords(records map[string]Delivery, floor *int64, now time.Time) []string {
+	// Inputs appended into one occurrence form one family with it: they are
+	// retired together with that occurrence's receipt, never on their own, so
+	// a recall can never lose a member and a member's retry is never resent.
 	var terminal []Delivery
 	for _, d := range records {
-		if !pendingDelivery(d.State) {
+		if _, rooted := records[d.MergedInto]; rooted && d.MergedInto != "" {
+			continue
+		}
+		if !pendingDelivery(d.State) && !familyPending(records, d) {
 			terminal = append(terminal, d)
 		}
 	}
 	sort.Slice(terminal, func(i, j int) bool { return terminal[i].Order < terminal[j].Order })
 	var removed []string
-	for _, d := range terminal {
-		if len(records) <= maxDeliveryRecords && d.expires >= now.UnixMilli() {
-			continue
-		}
+	retire := func(d Delivery) {
 		delete(records, d.ID)
 		removed = append(removed, d.ID)
 		// A legacy ID may not contain a valid timestamp. Its unknown retries are
@@ -366,7 +369,28 @@ func pruneDeliveryRecords(records map[string]Delivery, floor *int64, now time.Ti
 			*floor = stamp
 		}
 	}
+	for _, d := range terminal {
+		if len(records) <= maxDeliveryRecords && d.expires >= now.UnixMilli() {
+			continue
+		}
+		retire(d)
+		for _, id := range d.Merged {
+			if member, ok := records[id]; ok && member.MergedInto == d.ID {
+				retire(member)
+			}
+		}
+	}
 	return removed
+}
+
+// familyPending reports a still-pending input appended into d's occurrence.
+func familyPending(records map[string]Delivery, d Delivery) bool {
+	for _, id := range d.Merged {
+		if member, ok := records[id]; ok && member.MergedInto == d.ID && pendingDelivery(member.State) {
+			return true
+		}
+	}
+	return false
 }
 func (m *Manager) pruneDeliveryEventLocked(a *agent) *Event {
 	if a.retiring {
