@@ -12,9 +12,13 @@
 // replies, part of a reply and receipts stay as they were; history read again
 // and new runs keep one row. The sidebar shows a red exclamation mark only
 // for an agent whose last finished run failed, never for one at work, asking,
-// needing you or asleep without an error. Set YESMAN_ERROR_FLOW_BEFORE to an
-// earlier page's web directory to draw the same history there; screenshots
-// and a JSON summary go to YESMAN_ERROR_FLOW_OUT (default: the temp dir).
+// needing you or asleep without an error, and not after the run is stopped,
+// while the conversation keeps the error. Errors pi recorded without a
+// message fold the same way and say they had none. Set
+// YESMAN_ERROR_FLOW_BEFORE to an earlier page's web directory to draw the
+// same history there, and YESMAN_ERROR_FLOW_PREVIOUS to another to draw the
+// errors without a message there; screenshots and a JSON summary go to
+// YESMAN_ERROR_FLOW_OUT (default: the temp dir).
 // A browser bridge is not the native window, pi or a real provider.
 const { chromium, webkit } = await import(process.env.YESMAN_TEST_PLAYWRIGHT_MODULE || "playwright");
 import { fileURLToPath } from "node:url";
@@ -38,7 +42,8 @@ const serve = (root) =>
   }).listen(0, "127.0.0.1");
 const after = serve(fileURLToPath(new URL("../web", import.meta.url)));
 const before = process.env.YESMAN_ERROR_FLOW_BEFORE ? serve(process.env.YESMAN_ERROR_FLOW_BEFORE) : null;
-await Promise.all([after, before].filter(Boolean).map((s) => new Promise((r) => (s.listening ? r() : s.on("listening", r)))));
+const previous = process.env.YESMAN_ERROR_FLOW_PREVIOUS ? serve(process.env.YESMAN_ERROR_FLOW_PREVIOUS) : null;
+await Promise.all([after, before, previous].filter(Boolean).map((s) => new Promise((r) => (s.listening ? r() : s.on("listening", r)))));
 
 const png = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg==";
 const sub = (n) => n.toString(16).padStart(48, "0");
@@ -59,6 +64,7 @@ function builder() {
   const report = (worker) => user(`[yesman] Worker "${worker}" finished a run. Its final message:\n\nserver_error: usage limit (429) — a report that mentions an error`, { source: "yesman", kind: "report", worker });
   // The run of the screenshot: a report, five thoughts, two tools, the error.
   const failedRun = (worker, message = LIMIT) => {
+    const error = message === null ? {} : { errorMessage: message }; // null: no errorMessage at all
     const a = call("yesman_board"), b = call("yesman_agents");
     return [
       report(worker),
@@ -66,7 +72,7 @@ function builder() {
       result(a),
       assistant([th("d"), th("e"), b], "toolUse"),
       result(b),
-      assistant([], "error", { errorMessage: message }),
+      assistant([], "error", error),
     ];
   };
   return { user, assistant, th, tx, report, failedRun };
@@ -78,6 +84,16 @@ function quotaHistory() {
     b.user("这些 worker 都报 429 了，帮我看看？", { source: "user", submission: sub(1) }, 1),
     b.assistant([b.tx("我先看一下各 worker 的报告。")]),
     ...Array.from({ length: 7 }, (_, i) => b.failedRun(`w${i + 1}`)).flat(),
+  ];
+}
+
+// The same runs, with errors pi recorded without a message.
+function blankHistory() {
+  const b = builder();
+  return [
+    b.user("这些 worker 都报 429 了，帮我看看？", { source: "user", submission: sub(1) }, 1),
+    b.assistant([b.tx("我先看一下各 worker 的报告。")]),
+    ...Array.from({ length: 7 }, (_, i) => b.failedRun(`w${i + 1}`, i % 2 ? "" : null)).flat(),
   ];
 }
 
@@ -113,7 +129,7 @@ const agents = () => [
   { id: "carol/lead", yesman: "carol", name: "lead", role: "lead", since: "1", status: "stopped", model: "m", provider: "p" },
 ];
 
-async function open(browser, server, { colorScheme = "light", width = 1000, height = 900, locale = "en", reducedMotion = "no-preference", history = quotaHistory(), receipts = deliveries() } = {}) {
+async function open(browser, server, { colorScheme = "light", width = 1000, height = 900, locale = "en", reducedMotion = "no-preference", history = quotaHistory(), receipts = deliveries(), lead = {} } = {}) {
   const page = await browser.newPage({ viewport: { width, height }, colorScheme, reducedMotion });
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -152,7 +168,7 @@ async function open(browser, server, { colorScheme = "light", width = 1000, heig
         }
       },
     };
-  }, { history, deliveries: receipts, agents: agents(), locale });
+  }, { history, deliveries: receipts, agents: agents().map((a) => (a.id === "alice/lead" ? { ...a, ...lead } : a)), locale });
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.locator('[data-agent="alice/lead"]').first().click();
   await page.locator("#thread .msg-user, #thread .work").first().waitFor();
@@ -290,9 +306,48 @@ for (const [engine, type] of Object.entries(engines)) {
     const recovered = (await sidebar(page)).find((r) => r.id === "alice/lead" && r.entry === "yesman");
     assert.deepEqual([recovered.status, recovered.red, recovered.label], ["idle", false, null]);
     assert(!/error/i.test(recovered.title));
-    results[`${engine}-after-en`] = { opened: { ...opened, runs: opened.runs.length }, sidebar: initial.map(({ id, entry, status, red, label }) => ({ id, entry, status, red, label })) };
+    // Stopped, failed again and stopped while waiting to retry: the server
+    // clears the error, so the lead is not red, and the conversation keeps
+    // the errors as they were.
+    await page.evaluate(() => window.fixture.agent("alice/lead", { status: "idle", runError: window.fixture.saved.agents.find((a) => a.id === "alice/w3").runError }));
+    assert.equal((await sidebar(page)).find((r) => r.id === "alice/lead" && r.entry === "yesman").red, true);
+    await page.evaluate(() => window.fixture.agent("alice/lead", { status: "working", runStartedAt: new Date().toISOString() }));
+    await page.evaluate(() => window.fixture.agent("alice/lead", { status: "idle", runStartedAt: undefined, runError: undefined }));
+    const stopped = (await sidebar(page)).find((r) => r.id === "alice/lead" && r.entry === "yesman");
+    assert.deepEqual([stopped.status, stopped.red, stopped.label], ["idle", false, null]);
+    assert.equal(await page.locator("#thread > .failures .failures-label").innerText(), "Ended with an error 8 times");
+    results[`${engine}-after-en`] = { opened: { ...opened, runs: opened.runs.length }, sidebar: initial.map(({ id, entry, status, red, label }) => ({ id, entry, status, red, label })), stopped: { status: stopped.status, red: stopped.red } };
     assert.deepEqual(errors, []);
     await page.close();
+
+    // Errors pi recorded without a message: the lead is red, and the
+    // conversation says so, folded like the others, rather than nothing.
+    const NONE = "The model returned an error without a message.";
+    const blankLead = { runError: { ...runError, message: "" } };
+    if (previous) {
+      const old = await open(browser, previous, { history: blankHistory(), lead: blankLead });
+      await old.page.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
+      results[`${engine}-previous-blank`] = { thread: await thread(old.page), lead: (await sidebar(old.page)).find((r) => r.entry === "yesman" && r.id === "alice/lead") };
+      await shot(old.page, `previous-blank-en-${engine}`);
+      await old.page.close();
+    }
+    const blank = await open(browser, after, { history: blankHistory(), lead: blankLead });
+    shape = await thread(blank.page);
+    assert.deepEqual(shape, { failures: 1, errorNotes: 0, errorWork: 0, people: 1, images: 1, replies: 1, receipts: 2 }, JSON.stringify(shape));
+    const brow = blank.page.locator("#thread > .failures");
+    assert.equal((await brow.locator(":scope > summary").innerText()).replace(/\s+/g, " ").trim(), `Ended with an error 7 times ${NONE}`);
+    await brow.locator(":scope > summary").focus();
+    await blank.page.keyboard.press("Enter");
+    await brow.locator(".failure").first().waitFor();
+    const said = await brow.evaluate((el) => [...el.querySelectorAll(".failure")].map((f) => [f.querySelector(".failure-count").textContent, f.querySelector(".failure-text").textContent, f.querySelector(".failure-text").classList.contains("failure-text--blank"), f.querySelectorAll(".failure-run").length]));
+    assert.deepEqual(said, [["7 times", NONE, true, 7]]);
+    const blead = (await sidebar(blank.page)).find((r) => r.id === "alice/lead" && r.entry === "yesman");
+    assert.deepEqual([blead.status, blead.red, blead.label], ["error", true, "Last run ended with an error"]);
+    assert(blead.title.endsWith(NONE), blead.title);
+    await shot(blank.page, `after-blank-en-${engine}`);
+    results[`${engine}-after-blank`] = { thread: shape, opened: said, lead: { status: blead.status, red: blead.red, label: blead.label } };
+    assert.deepEqual(blank.errors, []);
+    await blank.page.close();
 
     // Distinct errors, a person, a reply and part of a reply.
     const mixed = await open(browser, after, { history: mixedHistory(), receipts: [] });
@@ -341,7 +396,7 @@ for (const [engine, type] of Object.entries(engines)) {
     results[`${engine}-zh`] = { label: "出错结束 7 次", sidebar: lead.label, overflow };
     assert.deepEqual(zh.errors, []);
     await zh.page.close();
-    console.log(engine, "seven failed runs fold into one closed row/keyboard/copy/new run joins in place/reload/distinct errors/people, replies, partial reply and receipts kept/sidebar red only at rest/zh/dark/narrow/reduced motion PASS");
+    console.log(engine, "seven failed runs fold into one closed row/keyboard/copy/new run joins in place/reload/stopped run not red, errors kept/errors without a message stated and folded/distinct errors/people, replies, partial reply and receipts kept/sidebar red only at rest/zh/dark/narrow/reduced motion PASS");
   } finally {
     await browser.close();
   }
@@ -351,3 +406,4 @@ console.log(JSON.stringify(results));
 console.log(`screenshots: ${out}/error-flow-*.png`);
 after.close();
 before?.close();
+previous?.close();

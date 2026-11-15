@@ -36,13 +36,15 @@ func (m *Manager) follow(a *agent, p *proc, kind string, raw json.RawMessage) {
 			Aborted bool `json:"aborted"`
 		}
 		_ = json.Unmarshal(raw, &e)
-		// The run's outcome is its last assistant message. A run that said
-		// nothing leaves the last outcome as it was, unless the user
-		// stopped it.
-		if a.runSaid {
-			a.info.RunError = a.runEnd
-		} else if e.Aborted {
+		// A run the user stopped is no failure, even one stopped while pi
+		// waited to retry an error: pi then settles it aborted with no
+		// further message. Otherwise the run's outcome is its last
+		// assistant message, and a run that said nothing leaves the last
+		// outcome as it was. The conversation keeps the error either way.
+		if e.Aborted {
 			a.info.RunError = nil
+		} else if a.runSaid {
+			a.info.RunError = a.runEnd
 		}
 		a.runEnd, a.runSaid = nil, false
 		a.endRun()
@@ -64,10 +66,9 @@ func (m *Manager) follow(a *agent, p *proc, kind string, raw json.RawMessage) {
 				if e.Message.Timestamp > 0 {
 					at = time.UnixMilli(e.Message.Timestamp).UTC()
 				}
+				// pi may record no message for the error; the page says so
+				// in the person's language.
 				msg := strings.TrimSpace(e.Message.ErrorMessage)
-				if msg == "" {
-					msg = "The model returned an error."
-				}
 				a.runEnd = &RunError{Message: clipTo(msg, runErrorLimit), Provider: e.Message.Provider, Model: e.Message.Model, At: at}
 			}
 		}

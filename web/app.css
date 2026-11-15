@@ -229,6 +229,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .failure-source { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .failure-head > .message-copy { margin-left: auto; }
 .failure-text { margin: 0; padding: 8px 10px; border-radius: var(--mds-radius-sm); background: var(--mds-error-bg); color: var(--mds-error-detail); font-family: var(--mds-mono); font-size: var(--mds-text-caption); white-space: pre-wrap; overflow-wrap: anywhere; }
+.failure-text--blank { font-family: inherit; font-style: italic; }
 .failure-runs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
 .failure-run { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 8px; min-width: 0; }
 .failure-run > time { padding-top: 5px; color: var(--mds-muted); font-size: var(--mds-text-caption); font-variant-numeric: tabular-nums; white-space: nowrap; }

@@ -1193,4 +1193,5 @@ export default {
   "Last run ended with an error": "上次运行出错",
   "The last run ended with an error": "上次运行出错",
   "Stopped unexpectedly": "意外停止",
+  "The model returned an error without a message.": "模型返回了错误，但没有附带错误信息。",
 };

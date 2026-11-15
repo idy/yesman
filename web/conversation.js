@@ -28,7 +28,8 @@ const textOf = (content) =>
 //   user     a person's message, with its receipt when the message is bound to one
 //   lead     a worker's task or a message from its lead
 //   text     one text block of the agent's, shown as it is written
-//   note     an error, a stop, a summary of earlier conversation, an extension's message
+//   note     an error (blank when pi recorded no message for it), a stop, a
+//            summary of earlier conversation, an extension's message
 //   work     the work between those: thinking, tool calls and yesman's notices to a lead
 //   failures runs in a row that ended on nothing but an error, folded (see foldFailures)
 //   receipt  a submission the conversation does not show yet, as the person's message
@@ -92,7 +93,10 @@ export function project(convo, agent = {}) {
           } else if (block.type === 'thinking' && block.thinking?.trim()) step({ type: 'thinking', key: k, text: block.thinking, live });
           else if (block.type === 'toolCall' && block.id) step({ type: 'tool', key: k, block });
         });
-        if (m.stopReason === 'error' && m.errorMessage) {
+        if (m.stopReason === 'error') {
+          // pi may record an error with no message: the page says it gave
+          // none (blank), rather than show nothing or fold it away.
+          const text = typeof m.errorMessage === 'string' ? m.errorMessage : '';
           const before = work;
           if (work) work.error = true;
           // pi's record of the failed message: what may fold with others like
@@ -102,7 +106,7 @@ export function project(convo, agent = {}) {
             work: before, at: typeof m.timestamp === 'number' ? m.timestamp : null,
             provider: typeof m.provider === 'string' ? m.provider : '', model: typeof m.model === 'string' ? m.model : '',
           };
-          main({ type: 'note', key: `${key}:end`, tone: 'error', text: m.errorMessage, failure });
+          main({ type: 'note', key: `${key}:end`, tone: 'error', text, blank: !text.trim(), failure });
         } else if (m.stopReason === 'aborted') {
           if (work) work.stopped = true;
           main({ type: 'note', key: `${key}:end`, tone: 'quiet', stopped: true });
@@ -220,7 +224,7 @@ function foldFailures(rows) {
       const { provider } = run.note.failure;
       const id = `${provider}\n${run.note.text.trim().replace(/\s+/g, ' ')}`;
       let e = errors.get(id);
-      if (!e) errors.set(id, (e = { key: `${row.key}:${errors.size}`, text: run.note.text, provider, models: new Set(), runs: [] }));
+      if (!e) errors.set(id, (e = { key: `${row.key}:${errors.size}`, text: run.note.text, blank: run.note.blank, provider, models: new Set(), runs: [] }));
       if (run.note.failure.model) e.models.add(run.note.failure.model);
       e.runs.push(run);
     }

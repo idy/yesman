@@ -235,6 +235,28 @@ test('a person, a reply, part of a reply or a stop ends a fold, and none of them
   assert.deepEqual(shapes(live), ['failures(2)', 'work:error', 'note']);
 });
 
+test('an error pi recorded without a message is stated and folds like any other', () => {
+  // pi's stopReason says the run failed, whatever errorMessage holds.
+  const one = project({ messages: failedRun(1, '') }, { status: 'idle' });
+  assert.deepEqual(shapes(one), ['work:error', 'note']);
+  assert.equal(one[1].tone, 'error');
+  assert.equal(one[1].blank, true);
+  const missing = failedRun(1);
+  delete missing.at(-1).errorMessage;
+  assert.equal(project({ messages: missing }, { status: 'idle' })[1].blank, true);
+  // Seven of them fold into one row under one blank error; one with a
+  // message stays its own error.
+  const rows = project({ messages: [...Array.from({ length: 7 }, (_, i) => failedRun(i, i % 2 ? '' : '  ')).flat(), ...failedRun(8)] }, { status: 'idle' });
+  assert.deepEqual(shapes(rows), ['failures(7+1)']);
+  assert.equal(rows[0].errors[0].blank, true);
+  assert.equal(rows[0].errors[1].blank, false);
+  assert.equal(rows[0].errors[1].text, LIMIT);
+  // Part of a reply before it, or a person's message after it, stays apart.
+  const partial = project({ messages: [...failedRun(1, ''), assistant([text('So far: …')], 'error', { provider: 'codex' }), user('error?', { source: 'user' }), ...failedRun(2, ''), ...failedRun(3, '')] }, { status: 'idle' });
+  assert.deepEqual(shapes(partial), ['work:error', 'note', 'text', 'note', 'user', 'failures(2)']);
+  assert.equal(partial[3].failure, null);
+});
+
 test('a text that reads like an error is never a failure', () => {
   const rows = project({ messages: [
     user('error: 429 usage limit reached', { source: 'user' }),

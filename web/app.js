@@ -59,6 +59,8 @@ const asking = (a) => a.role === 'worker' && a.status === 'waiting';
 // or a request for the user is no failure. Each agent shows its own: a
 // yesman's entry is its lead's.
 const runFailed = (a) => !!a.runError && (a.status === 'idle' || a.status === 'stopped');
+// An error's text as pi recorded it, or that it recorded none.
+const runErrorText = (text) => (text?.trim() ? text : t('The model returned an error without a message.'));
 const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: yesmanLabel(a.yesman) }) : runFailed(a) ? t('Last run ended with an error') : statusText(a.status));
 const statusTone = (a) => (asking(a) ? 'asking' : runFailed(a) ? 'error' : a.status);
 
@@ -612,7 +614,7 @@ function leadRowEl(row) {
 function noteRowEl(row) {
   if (row.stopped) return h('div', { class: 'note note--quiet' }, t('Stopped.'));
   if (row.summary) return h('div', { class: 'note note--quiet' }, t('Earlier conversation was summarized to save context.'));
-  return h('div', { class: row.tone === 'error' ? 'note note--error' : 'note note--quiet' }, row.text);
+  return h('div', { class: row.tone === 'error' ? 'note note--error' : 'note note--quiet' }, row.tone === 'error' ? runErrorText(row.text) : row.text);
 }
 
 // The work row: one line saying what happened, opened to read it in order.
@@ -773,7 +775,7 @@ const oneLine = (text) => text.trim().replace(/\s+/g, ' ');
 
 function updateFailures(c, el, row) {
   const label = tn(row.runs.length, 'Ended with an error', 'Ended with an error {n} times');
-  const facts = row.errors.length === 1 ? oneLine(row.errors[0].text) : tn(row.errors.length, '{n} error', '{n} different errors');
+  const facts = row.errors.length === 1 ? oneLine(runErrorText(row.errors[0].text)) : tn(row.errors.length, '{n} error', '{n} different errors');
   const summary = `${label}|${facts}`;
   if (el._summary !== summary) {
     el._summary = summary;
@@ -820,8 +822,10 @@ function updateFailure(c, el, e) {
   const [head, text, runs] = el.children;
   head.children[0].textContent = tn(e.runs.length, 'Once', '{n} times');
   head.children[1].textContent = [e.provider, ...e.models].filter(Boolean).join(' · ');
-  head.children[2]._text = e.text;
-  if (text.textContent !== e.text) text.textContent = e.text;
+  const said = runErrorText(e.text);
+  head.children[2]._text = said;
+  text.classList.toggle('failure-text--blank', !!e.blank);
+  if (text.textContent !== said) text.textContent = said;
   patchChildren(runs, 'data-run', e.runs.map((run) => ({ type: 'run', key: run.key, run })), {
     make: (entry) => h('div', { class: 'failure-run' },
       h('time', null, failureTime(entry.run.note.failure.at)),
@@ -1168,7 +1172,7 @@ function agentRow(a, cls, label) {
   let status = done ? t('Done') : statusLabel(a);
   if (worker && a.status === 'failed') status = t('{status}; {name} was told', { status, name: yesmanLabel(a.yesman) });
   // While a later run is going, the error it may recover from stays in the tooltip.
-  const lastError = a.runError ? `\n${runFailed(a) ? '' : `${t('The last run ended with an error')}: `}${a.runError.message}` : '';
+  const lastError = a.runError ? `\n${runFailed(a) ? '' : `${t('The last run ended with an error')}: `}${runErrorText(a.runError.message)}` : '';
   return h('button', {
     class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': statusTone(a), 'data-done': done ? 'true' : null,
     'data-sidebar-entry': worker ? 'worker' : cls.includes('agent-row--yesman') ? 'yesman' : 'needs-you',

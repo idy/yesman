@@ -58,6 +58,7 @@ func fakePi() {
 		out.Flush()
 	}
 	stateChecks := 0
+	retrying := false
 	var heldPrompts, heldReports []string
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
@@ -187,6 +188,12 @@ func fakePi() {
 			write(map[string]any{"type": "thinking_level_changed", "level": effort})
 		}
 		write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": true, "data": data})
+		if cmd.Type == "abort" && retrying {
+			// pi's _finishCancelledRetry: the wait ends with no new message.
+			retrying = false
+			write(map[string]any{"type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled"})
+			write(map[string]any{"type": "agent_settled", "aborted": true})
+		}
 		if cmd.Type == "get_messages" && os.Getenv("FAKE_PI_TRAIL") != "" {
 			write(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant"}})
 		}
@@ -198,13 +205,24 @@ func fakePi() {
 			write(map[string]any{"type": "agent_start"})
 			if reason, ok := strings.CutPrefix(cmd.Message, "test-run:"); ok {
 				// A run that ends on its one assistant message, as pi records
-				// a provider's error, a stop by the user or a reply.
-				msg := map[string]any{"role": "assistant", "content": []any{}, "stopReason": reason, "provider": "codex", "model": "gpt-5", "timestamp": time.Now().UnixMilli()}
-				if reason == "error" {
+				// a provider's error, a stop by the user or a reply. "retry"
+				// fails and waits to retry until it is aborted; "blank" fails
+				// with no errorMessage.
+				stop := reason
+				if reason == "retry" || reason == "blank" {
+					stop = "error"
+				}
+				msg := map[string]any{"role": "assistant", "content": []any{}, "stopReason": stop, "provider": "codex", "model": "gpt-5", "timestamp": time.Now().UnixMilli()}
+				if reason == "error" || reason == "retry" {
 					msg["errorMessage"] = "server_error: Codex: The usage limit has been reached (429: you can retry your request)"
 				}
 				write(map[string]any{"type": "message_start", "message": msg})
 				write(map[string]any{"type": "message_end", "message": msg})
+				if reason == "retry" {
+					retrying = true
+					write(map[string]any{"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 60000, "errorMessage": msg["errorMessage"]})
+					continue
+				}
 				write(map[string]any{"type": "agent_settled", "aborted": reason == "aborted"})
 				continue
 			}

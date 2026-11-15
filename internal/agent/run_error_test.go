@@ -82,6 +82,35 @@ func TestRunErrorFollowsTheLastFinishedRun(t *testing.T) {
 		t.Errorf("a run that ended on a reply kept the error: %+v", i.RunError)
 	}
 
+	// A run the user stopped while pi waited to retry its error is no
+	// failure: pi settles it aborted, with no message after the error.
+	before := settled(lead)
+	if err := m.Prompt(ctx, lead, "test-run:retry"); err != nil {
+		t.Fatal(err)
+	}
+	waitActivity(t, m, lead, "Retrying after an error")
+	if i, _ := m.Get(lead); i.Status != Working || i.RunError != nil {
+		t.Errorf("while waiting to retry: status %s, error %+v", i.Status, i.RunError)
+	}
+	if err := m.Abort(ctx, lead); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); settled(lead) == before; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the stopped retry never settled")
+		}
+	}
+	waitStatus(t, m, lead, Idle)
+	if i, _ := m.Get(lead); i.RunError != nil {
+		t.Errorf("a run stopped while waiting to retry kept the error: %+v", i.RunError)
+	}
+	// An error pi recorded without a message still counts, with no text
+	// made up for it here.
+	if i := run("test-run:blank"); i.RunError == nil || i.RunError.Message != "" || i.RunError.Provider != "codex" {
+		t.Errorf("after an error with no message: %+v", i.RunError)
+	}
+	run("test-run:stop")
+
 	// A worker that finished on an error shows it, done or not; the same name
 	// hired again starts without it.
 	w := ID("alice", "w1")
@@ -150,10 +179,47 @@ func TestRunErrorWaitsForTheRunsEnd(t *testing.T) {
 	if e := step("agent_settled", `{"aborted":false}`); e != nil {
 		t.Errorf("a run that recovered kept the error: %+v", e)
 	}
+	// Stopping a run while pi waits to retry its error settles it aborted
+	// with no further message: the user's stop, not a failure.
+	step("agent_start", `{}`)
+	step("message_end", failed)
+	step("auto_retry_start", `{"attempt":1,"maxAttempts":3,"delayMs":2000,"errorMessage":"429 usage limit"}`)
+	step("auto_retry_end", `{"success":false,"attempt":1,"finalError":"Retry cancelled"}`)
+	if e := step("agent_settled", `{"aborted":true}`); e != nil {
+		t.Errorf("a run stopped while waiting to retry kept the error: %+v", e)
+	}
+	// Retries that run out end on the error.
+	step("agent_start", `{}`)
+	step("message_end", failed)
+	step("auto_retry_start", `{"attempt":1}`)
+	step("message_end", failed)
+	step("auto_retry_end", `{"success":false,"attempt":1,"finalError":"429 usage limit"}`)
+	if e := step("agent_settled", `{"aborted":false}`); e == nil || e.Message != "429 usage limit" {
+		t.Errorf("after retries ran out: %+v", e)
+	}
+	// An error without a message is one all the same.
+	step("agent_start", `{}`)
+	step("message_end", `{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"  ","provider":"codex"}}`)
+	if e := step("agent_settled", `{"aborted":false}`); e == nil || e.Message != "" || e.Provider != "codex" {
+		t.Errorf("after an error with no message: %+v", e)
+	}
 	// A long error is bounded in every snapshot of the agents.
 	step("agent_start", `{}`)
 	step("message_end", `{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"`+strings.Repeat("x", 5000)+`"}}`)
 	if e := step("agent_settled", `{}`); e == nil || len([]rune(e.Message)) != runErrorLimit {
 		t.Errorf("long error: %d runes", len([]rune(e.Message)))
 	}
+}
+
+func waitActivity(t *testing.T, m *Manager, id, want string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if i, err := m.Get(id); err == nil && i.Activity == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	i, _ := m.Get(id)
+	t.Fatalf("%s is doing %q, want %q", id, i.Activity, want)
 }

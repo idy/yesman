@@ -89,8 +89,9 @@ type Info struct {
 	// RunError is set while the last run this agent finished ended on a
 	// model error, such as a provider's usage limit: pi recorded its last
 	// assistant message with stopReason "error". A later run that ends
-	// otherwise clears it, including one the user stopped; starting a run
-	// does not. It belongs to this incarnation and is not kept on disk.
+	// otherwise clears it, as does stopping a run, even one waiting to
+	// retry the error; starting a run does not. It belongs to this
+	// incarnation and is not kept on disk.
 	RunError     *RunError `json:"runError,omitempty"`
 	Model        string    `json:"model,omitempty"`
 	Provider     string    `json:"provider,omitempty"`
@@ -102,6 +103,7 @@ type Info struct {
 // RunError is how an agent's last finished run failed, from pi's own record
 // of its last assistant message.
 type RunError struct {
+	// Message is pi's errorMessage, trimmed; empty when pi recorded none.
 	Message  string    `json:"message"`
 	Provider string    `json:"provider,omitempty"`
 	Model    string    `json:"model,omitempty"`
