@@ -2,6 +2,16 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.34
+
+- Show human submissions with their actual status and available actions, using original text and images while retained or the saved preview and image count otherwise. Fold older unmatched submission records into one collapsed section; uncertain delivery stays unconfirmed.
+- Use Send now on a selected pending follow-up to move it to Steering while preserving the other queued inputs. It takes effect at the next eligible input checkpoint after the current response and tool batch.
+- Cancel and edit eligible pending inputs to restore retained original text and images without overwriting a draft. Recover a recalled input after a missed reply while its original remains available, use the configurable composer recall shortcut, or copy complete message text. A whole app restart cannot recreate lost originals.
+- Fix accepted queued inputs silently stalling during slow preparation. They run once when preparation completes; Stop or cancellation before intake keeps the original pending input recoverable.
+- Prepare an isolated, verified runtime for supported queue actions. First preparation needs Node.js, npm and network access; a verified cache then needs only Node.js. Settings shows preparation and retry status, and unsupported external runtimes expose only the actions they support.
+- Align repository refresh buttons in the final column, keeping worktree information to their left and readable in narrow windows.
+- Prevent delayed requests from stopped, exited or archived agents from changing a replacement Board or its completion ownership. Exited processes lose authorization immediately; stopping an agent process waits for its already accepted Board writes to finish.
+
 ## 0.1.33
 
 - Add Settings › Model usage to compare actual usage by provider, full model ID and recorded effort: worker participation, current done board-task attribution, responses, and input, output, cache and total tokens. Filter by yesman, agent role and period.
