@@ -2,6 +2,14 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.35
+
+- Add a global Needs You inbox for explicit requests that need human action across yesmen and agents. Ordinary worker questions stay with their lead; blocked Board tasks and queued messages do not add inbox items.
+- Bring Knowledge, Working Logs and Needs You together in the current yesman's Info card. Knowledge and Working Logs open in the app's file viewer, and Needs You opens that yesman's requests; the sidebar inbox covers every yesman.
+- Open the matching agent and request while preserving an unsent draft. Viewing a request leaves it pending until it is answered, completed or dismissed through its available action.
+- Show when long-term request memory approaches capacity. Start a new memory only after explicit confirmation, preserving current requests. A forgotten request can return if its tool call runs again, and each later reset can allow it to return again. Keep keyboard focus and confirmation dialogs tied to the correct view and request.
+- Prevent named pipes in workspace metadata from blocking the app. Report oversized historical metadata for the affected workspace while keeping healthy workspaces available.
+
 ## 0.1.34
 
 - Show human submissions with their actual status and available actions, using original text and images while retained or the saved preview and image count otherwise. Fold older unmatched submission records into one collapsed section; uncertain delivery stays unconfirmed.
