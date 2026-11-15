@@ -64,7 +64,17 @@ try{for(const [name,engine] of Object.entries({chromium,webkit})){
   await page.keyboard.press('Meta+k');await page.locator('.palette-search input').fill('GitHub App');
   await page.locator('.palette-option').filter({hasText:'GitHub App'}).first().click();await pane.waitFor();
   assert.equal(await button('Enable App identity').isDisabled(),true);
-  await page.waitForFunction(()=>document.activeElement?.matches('#settings-nav [data-page="github-app"]'));
+  const appFocus=await page.evaluate(()=>({tag:document.activeElement?.tagName,page:document.activeElement?.dataset.page,connected:document.activeElement?.isConnected}));
+  console.log('App palette focus',name,appFocus);
+  // Compare with an existing Settings page through the same action host.
+  // Its policy preserves a still-connected previous nav button, rather than
+  // forcing focus away from every existing control after an async page load.
+  await page.locator('#settings-nav [data-page="usage"]').click();
+  await page.keyboard.press('Meta+k');await page.locator('.palette-search input').fill('Settings: Grant');
+  await page.locator('.palette-option').filter({hasText:'Grant'}).first().click();await page.locator('.grant-row').last().waitFor();
+  const mainFocus=await page.evaluate(()=>({tag:document.activeElement?.tagName,page:document.activeElement?.dataset.page,connected:document.activeElement?.isConnected}));
+  assert.deepEqual(appFocus,mainFocus);assert.equal(appFocus.connected,true);assert.notEqual(appFocus.tag,'BODY');
+  await page.locator('#settings-nav [data-page="github-app"]').click();await pane.waitFor();
   await button('Refresh').focus();assert.equal(await button('Refresh').evaluate(e=>e===document.activeElement),true);
   if(out)await page.screenshot({path:join(out,name+'-combined.png'),fullPage:true});
   assert.deepEqual(await page.evaluate(()=>window.unmocked),[]);assert.deepEqual(errors,[]);
