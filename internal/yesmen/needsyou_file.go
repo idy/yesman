@@ -128,7 +128,7 @@ func (f *handoffsFile) open(root string, y Yesman, metaMu *sync.Mutex) (Handoffs
 }
 
 // maxMetaBytes bounds the yesman.json read for the yesman's identity.
-const maxMetaBytes = 1 << 20
+const maxMetaBytes = maxYesmanMetadataBytes // the same bound as Get and List
 
 // hiredAt reads when the opened workspace's yesman was hired, from its own
 // yesman.json: a regular file of a bounded size, opened without blocking, so

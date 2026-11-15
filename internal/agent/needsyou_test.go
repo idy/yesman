@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -230,6 +231,74 @@ func TestCallerOperationFencesStop(t *testing.T) {
 		t.Errorf("the old credential after restart: %v", err)
 	}
 	if err := run(fresh, info); err != nil {
+		t.Errorf("the new credential: %v", err)
+	}
+}
+
+// A Needs you change is admitted as a board change is: a process that exits
+// by itself waits, before its restart, for the operation it admitted, and
+// admits none after; the old credential stays refused once the new one runs.
+func TestCallerOperationIsRetiredWithItsProcess(t *testing.T) {
+	m, _ := newTestManager(t, 0)
+	ctx := context.Background()
+	id := ID("alice", yesmen.LeadName)
+	if err := m.Prompt(ctx, id, "hi"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := m.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, p := credentialOf(t, m, id)
+	admitted, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	free := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(free) // before the manager's own cleanup stops the agent
+	opDone := make(chan error, 1)
+	go func() {
+		opDone <- m.CallerOperation(token, info, func() error {
+			close(admitted)
+			<-release
+			return nil
+		})
+	}()
+	<-admitted
+	if err := p.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	waitRetiring(t, p)
+	// Retiring the process waits for the operation: a moment later, it
+	// still does.
+	time.Sleep(50 * time.Millisecond)
+	if p.changes.TryRLock() {
+		p.changes.RUnlock()
+		t.Fatal("the exited process's retirement did not wait for its admitted operation")
+	}
+	restarted := make(chan struct{})
+	go func() {
+		if err := m.Prompt(ctx, id, "after the crash"); err != nil {
+			t.Error(err)
+		}
+		close(restarted)
+	}()
+	if err := m.CallerOperation(token, info, func() error { return nil }); !errors.Is(err, errCallerGone) {
+		t.Fatalf("the exited process admitted another operation: %v", err)
+	}
+	notReturned(t, restarted, "the restart")
+	free()
+	if err := <-opDone; err != nil {
+		t.Fatalf("the admitted operation: %v", err)
+	}
+	returns(t, restarted, "the restart")
+	renewed, _ := credentialOf(t, m, id)
+	if renewed == token {
+		t.Fatal("the restart kept the old credential")
+	}
+	if err := m.CallerOperation(token, info, func() error { return nil }); !errors.Is(err, errCallerGone) {
+		t.Errorf("the old credential after the restart: %v", err)
+	}
+	current, _ := m.Get(id)
+	if err := m.CallerOperation(renewed, current, func() error { return nil }); err != nil {
 		t.Errorf("the new credential: %v", err)
 	}
 }

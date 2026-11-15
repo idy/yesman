@@ -63,7 +63,10 @@ var errCallerGone = errors.New("the agent that sent this request was stopped or 
 // retiring. A request whose agent was stopped, restarted, removed or replaced
 // after it authenticated fails without running fn. Stop waits for an
 // operation already admitted, so nothing commits for a process after Stop
-// returns.
+// returns. fn also runs within the process's change admission, as a
+// BeginChange does: every path that retires the credential (Stop, the
+// process exiting, a failed start, quitting) waits for it and admits no
+// later one.
 //
 // Callers hold their workspace lease (Store.Use) around it, so Archive, which
 // stops agents under the exclusive lease, never waits on an admitted
@@ -72,17 +75,30 @@ var errCallerGone = errors.New("the agent that sent this request was stopped or 
 func (m *Manager) CallerOperation(token string, want Info, fn func() error) error {
 	m.mu.Lock()
 	a := m.agents[want.ID]
-	ok := token != "" && a != nil && m.tokens[token] == want.ID && a.token == token && a.proc != nil &&
+	var p *proc
+	if token != "" && a != nil && a.token == token {
+		p = a.tokenProc
+	}
+	m.mu.Unlock()
+	if p == nil {
+		return errCallerGone
+	}
+	// The gate before mu, as BeginChange takes it: retiring the credential
+	// holds the gate exclusively outside mu.
+	p.changes.RLock()
+	m.mu.Lock()
+	ok := m.tokens[token] == want.ID && a.token == token && a.tokenProc == p && a.proc == p && !p.changesClosed &&
 		!a.stopping && !a.retiring && !a.removing && !m.closed && a.info.Since.Equal(want.Since)
 	if ok {
 		select {
-		case <-a.proc.done:
+		case <-p.done:
 			ok = false // exited; watch has not cleared it yet
 		default:
 		}
 	}
 	if !ok {
 		m.mu.Unlock()
+		p.changes.RUnlock()
 		return errCallerGone
 	}
 	a.calls++
@@ -94,6 +110,7 @@ func (m *Manager) CallerOperation(token string, want Info, fn func() error) erro
 			m.callsDone.Broadcast()
 		}
 		m.mu.Unlock()
+		p.changes.RUnlock()
 	}()
 	return fn()
 }
