@@ -5,14 +5,16 @@
 // worktrees, the repo pool, Knowledge, the task-log path, the board and other
 // agents)
 // and tools to check repositories out of the pool, keep the board and, for
-// a lead, to run workers. Its shell tool sets the user's secrets and
+// a lead, to run workers and hand the user what only they can do (Needs you). Its shell tool sets the user's secrets and
 // variables in every command, asking the app for them each time, and what
-// tools return hides the secrets' values from the model. Everything is
-// done by the yesman app; this file only forwards.
+// tools return hides the secrets' values from the model. It also records in
+// the session who wrote each user message, as the app knows (trackOrigins).
+// Everything is done by the yesman app; this file only forwards.
 //
 // A lead delegates, so that it is always free to talk: it has no shell and
 // writes only Knowledge notes and the task log. Its tools are narrowed when
 // its session starts, and any call outside them is refused.
+import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -215,8 +217,56 @@ function boardText(board: any): string {
 	return parts.join("\n\n");
 }
 
+// Who wrote a user message: the user, the agent's lead, or yesman telling a
+// lead about its workers. See Origin in internal/agent/origin.go.
+type Origin = { source: "user" | "lead" | "yesman"; kind?: string; worker?: string; submission?: string };
+
+const SOURCES = new Set(["user", "lead", "yesman"]);
+// The custom entry type origins are recorded under (originEntry in Go).
+const ORIGIN_ENTRY = "yesman-origin";
+
+// validOrigin keeps only the bounded fields the window reads.
+function validOrigin(o: any): Origin | undefined {
+	if (!o || typeof o !== "object" || !SOURCES.has(o.source)) return undefined;
+	const match = (s: unknown, re: RegExp) => (typeof s === "string" && re.test(s) ? s : undefined);
+	const out: Origin = { source: o.source };
+	// Worker names follow the app's rule for them (nameRE in internal/yesmen).
+	const kind = match(o.kind, /^[a-z]{1,16}$/), worker = match(o.worker, /^[a-z0-9][a-z0-9-]{0,31}$/);
+	if (kind) out.kind = kind;
+	if (worker) out.worker = worker;
+	if (typeof o.submission === "string" && /^[a-f0-9]{48}$/.test(o.submission)) out.submission = o.submission;
+	return out;
+}
+
+// trackOrigins records in pi's session who wrote each user message, so the
+// window can still tell after a restart. The app decides it from pi's own
+// records of the prompt, in order, never from the text; this asks it as the
+// message ends, identifying the message by its timestamp and the digest of its
+// JSON, and appends the answer as a custom entry, which pi keeps beside the
+// message and never puts in a model's context. The message itself, its text,
+// images and every other extension's input, context and provider hooks are
+// left alone. When the app does not know, nothing is recorded, and the window
+// shows the message as a person's.
+function trackOrigins(pi: ExtensionAPI) {
+	pi.on("message_end", async (event) => {
+		const message = event.message as any;
+		if (message?.role !== "user" || typeof message.timestamp !== "number") return;
+		let origin: Origin | undefined;
+		try {
+			const digest = createHash("sha256").update(JSON.stringify(message)).digest("hex");
+			const r = await call("POST", "/v1/origin", { timestamp: message.timestamp, digest }, AbortSignal.timeout(3000));
+			origin = validOrigin(r?.origin);
+		} catch {}
+		// pi appends the message right after its message_end handlers, so this
+		// entry is the message's parent in the session.
+		if (origin) pi.appendEntry(ORIGIN_ENTRY, { timestamp: message.timestamp, origin });
+	});
+}
+
 export default function yesman(pi: ExtensionAPI) {
 	if (!API || !TOKEN || !AGENT) return; // not started by yesman
+
+	trackOrigins(pi);
 
 	if (ROLE === "lead") {
 		// Narrow the lead's tools before every run, in case something
@@ -491,6 +541,63 @@ export default function yesman(pi: ExtensionAPI) {
 		async execute(_id, params, signal) {
 			await call("POST", "/v1/workers/answer", params, signal);
 			return result(`Answered ${params.name}.`);
+		},
+	});
+
+	const handoffLine = (h: any) => `- ${h.id} (${h.type}): ${h.title}${h.task ? `, task ${h.task}` : ""}${h.worker ? `, worker ${h.worker}` : ""}, since ${h.createdAt}`;
+	pi.registerTool({
+		name: "yesman_needs_you",
+		label: "yesman: needs you",
+		description:
+			"What waits on the user, under Needs you in their window. Call it with no arguments to list it in short, or with id for one handoff in full. " +
+			"add registers something only the user can do or decide: a decision, information, logging in, installing, or another manual step; link it to the board task that waits on it, which you mark blocked. " +
+			"handOver gives the user a worker's question you cannot answer yourself (its requestId from the [yesman] message); you can still answer it. " +
+			"resolve closes a handoff that was settled otherwise. When the user marks one done or not needed, you hear of it. " +
+			"Never ask for passwords, keys, tokens or codes this way or in chat: point the user to Settings › Secrets.",
+		parameters: Type.Object({
+			id: Type.Optional(Type.String({ description: "A handoff's ID, such as n3, to read it in full" })),
+			add: Type.Optional(
+				Type.Object({
+					type: Type.String({ description: "decision, input, login, install or manual" }),
+					title: Type.String({ description: "What the user needs to do, in one line, up to 200 characters" }),
+					detail: Type.Optional(Type.String({ description: "How, in Markdown: the options and your recommendation, where to log in, what to install" })),
+					task: Type.Optional(Type.String({ description: "The board task waiting on it, such as t5" })),
+					worker: Type.Optional(Type.String({ description: "The worker whose work it concerns" })),
+				}),
+			),
+			handOver: Type.Optional(
+				Type.Object({
+					worker: Type.String({ description: "The worker's name" }),
+					requestId: Type.String({ description: "The question's requestId, from its notification; never substitute a newer question" }),
+				}),
+			),
+			resolve: Type.Optional(
+				Type.Object({
+					id: Type.String({ description: "The handoff's ID, such as n3" }),
+					note: Type.Optional(Type.String({ description: "How it was settled" })),
+				}),
+			),
+		}),
+		async execute(toolCallId, params, signal) {
+			if (params.add || params.handOver || params.resolve) {
+				const out = await call("POST", "/v1/needs-you", { add: params.add, handOver: params.handOver, resolve: params.resolve, toolCall: toolCallId }, signal);
+				if (params.handOver) return result(`Handed ${params.handOver.worker}'s question to the user.`, out);
+				if (params.resolve) return result(`Resolved ${out.id}.`, out);
+				const m = out.callMemory;
+				const memory = m ? `\nThe tool-call memory of Needs you holds ${m.used} of ${m.capacity} tool calls: ${m.used >= m.capacity ? "it is full, so" : "once it is full,"} add is refused until the user starts a new one under Needs you.` : "";
+				return result(`Registered ${out.id}: it shows under Needs you until the user acts on it.${memory}`, out);
+			}
+			if (params.id) {
+				const h = await call("GET", `/v1/needs-you?id=${encodeURIComponent(params.id)}`, undefined, signal);
+				return result(json(h), h);
+			}
+			const view = await call("GET", "/v1/needs-you", undefined, signal);
+			const memory = view.callMemory ? `Tool-call memory: ${view.callMemory.used} of ${view.callMemory.capacity} tool calls remembered (${view.callMemory.state}).\n` : "";
+			const lines = [
+				...view.handoffs.map(handoffLine),
+				...view.questions.map((q: any) => `- worker ${q.worker}'s question ${JSON.stringify(q.requestId)}: ${q.title}, since ${q.since}`),
+			];
+			return result(memory + (lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user."), {});
 		},
 	});
 

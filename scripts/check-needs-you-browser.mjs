@@ -1,0 +1,621 @@
+// Optional browser check of Needs you: the production page in Chromium and
+// WebKit, with the actual Go service, Store, Manager and the lead's API behind
+// a controlled MyGo bridge, and scripted pi processes (TestNeedsYouBrowserBridge).
+// Everything lives in temporary directories; no real workspace, setting or
+// model is used.
+//   YESMAN_PLAYWRIGHT=/absolute/path/to/playwright/index.mjs node scripts/check-needs-you-browser.mjs
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+const { chromium, webkit } = await import(process.env.YESMAN_PLAYWRIGHT || 'playwright');
+const cwd = fileURLToPath(new URL('..', import.meta.url));
+const fixtureDir = await mkdtemp(`${tmpdir()}/yesman-needs-you-browser-`);
+const shots = process.env.YESMAN_NEEDS_YOU_SHOTS || fixtureDir;
+const exe = `${fixtureDir}/needsyou.test${process.platform === 'win32' ? '.exe' : ''}`;
+
+async function fixture() {
+  const child = spawn(exe, ['-test.run=^TestNeedsYouBrowserBridge$', '-test.timeout=600s'], {
+    cwd, env: { ...process.env, YESMAN_TEST_NEEDS_YOU_BROWSER: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let output = '';
+  child.stderr.on('data', (data) => { output += data; });
+  const exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)));
+  const url = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(Error('Fixture did not start: ' + output)), 30000);
+    child.stdout.on('data', (data) => {
+      output += data;
+      const match = output.match(/NEEDS_YOU_BROWSER_URL=(http:\/\/[^\s]+)/);
+      if (match) { clearTimeout(timer); resolve(match[1]); }
+    });
+    child.once('error', reject);
+    child.once('exit', (code) => { clearTimeout(timer); reject(Error(`Fixture exited ${code}: ${output}`)); });
+  }).catch(async (err) => { child.kill(); await exited; throw err; });
+  return { url, close: async () => { child.stdin.end(); assert.equal(await exited, 0, output); } };
+}
+
+function bridge() {
+  localStorage.setItem('yesman.info', 'hidden');
+  window.handlers = {};
+  window.calls = [];
+  window.unmocked = []; // the page called something this fixture does not answer
+  const forward = ['State', 'Messages', 'Answer', 'ResolveHandoff', 'ResetCallMemory', 'Info', 'Usage', 'Shortcuts', 'ListFiles', 'ReadFile'];
+  window.mygo = {
+    locale: localStorage.getItem('fixture.locale') || 'en',
+    on: (name, fn) => { handlers[name] = fn; },
+    async call(method, ...args) {
+      const m = method.replace('Yesman.', '');
+      calls.push([m, ...args]);
+      if (forward.includes(m)) {
+        const response = await fetch('/fixture/call', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ method: m, args }) });
+        const body = await response.json();
+        // A test can hold a response read already, to return it late.
+        if (m === 'Messages' && window.holdMessages) {
+          window.heldSeq = body.value?.seq ?? 0;
+          await new Promise((resolve) => { window.releaseMessages = resolve; });
+        }
+        if (m === 'Info' && window.holdInfo === args[0]) await new Promise((resolve) => { window.releaseInfo = resolve; });
+        // A test can hold a reset's answer, the reset already made.
+        if (m === 'ResetCallMemory' && window.holdReset) await new Promise((resolve) => { window.releaseReset = resolve; });
+        if (body.error) throw Error(body.error);
+        if (m === 'State') { body.value.agents ??= []; window.fixtureState = body.value; }
+        return body.value;
+      }
+      switch (m) {
+        case 'Repos': case 'Clones': case 'Pulls': return [];
+        case 'Settings': return { appearance: 'system', autoFetch: 0 };
+        case 'Fetches': return { fetching: [], errors: {} };
+        case 'TakeFocus': return '';
+        case 'Update': return { enabled: false };
+        case 'Models': return { models: [], agent: fixtureState.agents.find((a) => a.id === args[0]) };
+        case 'Board': return { tasks: [] };
+        case 'AgentMenu': return '';
+        case 'WatchFiles': case 'Abort': case 'Stop': return;
+        // Reading it would start the agent: its context is not measured here.
+        case 'Context': return null;
+        default: window.unmocked.push(m); throw Error('Unmocked method ' + m);
+      }
+    },
+  };
+  window.control = async (op, fields = {}) => {
+    const response = await fetch('/fixture/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op, ...fields }) });
+    const body = await response.json();
+    if (body.error) throw Error(body.error);
+    return body.value;
+  };
+}
+
+const ask = (d) => 'ASK ' + JSON.stringify(d);
+const needsYou = (body) => 'NEEDSYOU ' + JSON.stringify(body);
+const results = [];
+
+async function scenario(engineName, page) {
+  const ctl = (op, fields) => page.evaluate(([op, fields]) => control(op, fields), [op, fields]);
+  const until = async (what, fn, timeout = 15000) => {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      const value = await fn();
+      if (value) return value;
+      if (Date.now() > deadline) throw Error(`${engineName}: timed out waiting for ${what}`);
+      await page.waitForTimeout(100);
+    }
+  };
+  const agentIs = (id, ok) => until(`${id} state`, async () => ok(await ctl('agent', { agent: id })));
+  const observed = () => ctl('observed');
+  const prompted = (id, prefix) => until(`${id} prompted ${prefix}`, async () => ((await observed()).prompts[id] ?? []).some((p) => p.startsWith(prefix)));
+  const prompts = async (id, prefix) => ((await observed()).prompts[id] ?? []).filter((p) => p.startsWith(prefix)).length;
+  const entry = page.locator('[data-sidebar-entry="needs-you-page"]');
+  const count = async () => Number(await entry.getAttribute('data-count'));
+  // The app pushes changes; the bridge refreshes its whole State instead.
+  const settle = (n) => until(`count ${n}`, async () => {
+    await page.evaluate(() => handlers.changed(true));
+    await page.waitForTimeout(250);
+    return (await count()) === n;
+  });
+  const shot = (name) => page.screenshot({ path: `${shots}/needs-you-${engineName}-${name}.png` });
+  const focusedRequest = () => page.evaluate(() => document.activeElement?.closest('[data-request]')?.dataset.request ?? null);
+
+  await entry.waitFor();
+  assert.equal(await count(), 0);
+  assert.equal(await entry.getAttribute('aria-label'), 'Needs You: nothing waiting');
+  await entry.click();
+  await page.locator('.needs-you-empty').waitFor();
+  assert.equal(await page.locator('#crumbs').innerText(), 'Needs You');
+  await shot('empty');
+
+  // The palette shows Needs You too, an action with no key of its own, and
+  // puts focus on its heading.
+  await page.locator('[data-agent="alice/lead"][data-sidebar-entry="yesman"]').click();
+  await page.locator('.composer textarea').waitFor();
+  await page.keyboard.press('ControlOrMeta+KeyK');
+  await page.locator('.palette-input').waitFor();
+  await page.keyboard.type('Show Needs You');
+  const option = page.locator('.palette-option', { hasText: 'Show Needs You' });
+  await option.waitFor();
+  assert.equal(await option.locator('.keycap').count(), 0);
+  await page.keyboard.press('Enter');
+  await page.locator('.needs-you-empty').waitFor();
+  await until('the heading focused', () => page.evaluate(() => document.activeElement?.matches('.needs-you-page h1')));
+  assert.equal(await page.locator('#crumbs').innerText(), 'Needs You');
+
+  // A worker's question goes to its lead: it is not the user's.
+  await ctl('start-worker', { yesman: 'alice', name: 'w1', message: ask({ id: 'q1', method: 'select', title: 'Allow rm -rf build?', options: ['Allow', 'Block'] }) });
+  await agentIs('alice/w1', (i) => i.status === 'waiting');
+  await prompted('alice/lead', '[yesman] Worker "w1" asks:');
+  await settle(0);
+  assert.equal(await page.locator('#yesmen [data-request^="d:alice/w1"]').count(), 0);
+
+  // A lead's own dialog is.
+  await ctl('prompt', { agent: 'bob/lead', message: ask({ id: 'qb', method: 'confirm', title: 'Deploy to staging?', message: 'The build passed.' }) });
+  await agentIs('bob/lead', (i) => i.status === 'waiting');
+  await settle(1);
+
+  // A manual handoff, through the lead's authenticated API; a retried tool
+  // call registers and announces nothing twice.
+  const login = { add: { type: 'login', title: 'Log in to the npm registry', detail: 'Run `npm login` in your own terminal. Never paste the token here.', task: '#1' }, toolCall: 'call-login' };
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou(login) });
+  await settle(2);
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou(login) });
+  await until('the retried call', async () => (await prompts('alice/lead', 'NEEDSYOU')) === 2);
+  await agentIs('alice/lead', (i) => i.status === 'idle');
+  await settle(2);
+  assert.equal((await observed()).notes.filter((n) => n.body === 'Log in to the npm registry').length, 1);
+
+  // The lead hands the worker's question to the user; a stale request ID
+  // changes nothing.
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou({ handOver: { worker: 'w1', requestId: 'q0' }, toolCall: 'call-stale' }) });
+  await until('the stale handover', async () => (await prompts('alice/lead', 'NEEDSYOU')) === 3);
+  await agentIs('alice/lead', (i) => i.status === 'idle');
+  await settle(2);
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou({ handOver: { worker: 'w1', requestId: 'q1' }, toolCall: 'call-hand' }) });
+  await settle(3);
+  const notes = (await observed()).notes;
+  assert.equal(notes.filter((n) => n.id === 'alice/w1').length, 1, JSON.stringify(notes));
+
+  // The list: what to do, where from, what kind, how long.
+  await entry.click();
+  await page.locator('.needs-you-card').nth(2).waitFor();
+  const cards = await page.locator('.needs-you-card').evaluateAll((els) => els.map((el) => ({ type: el.dataset.type, text: el.innerText })));
+  assert.deepEqual(cards.map((c) => c.type).sort(), ['confirm', 'login', 'select']);
+  const card = (type) => cards.find((c) => c.type === type).text;
+  assert.match(card('login'), /Log in[\s\S]*Log in to the npm registry[\s\S]*From Alice 团队[\s\S]*Waiting/);
+  assert.match(card('select'), /Choice[\s\S]*Allow rm -rf build\?[\s\S]*From Alice 团队 › a1 Clean the build output/);
+  assert.match(card('confirm'), /Yes or no[\s\S]*Deploy to staging\?[\s\S]*The build passed\.[\s\S]*From bob/);
+  assert.equal(await page.locator('#yesmen .needs-you-row').count(), 3);
+  await shot('list');
+
+  // Opening a handoff lands in its lead's conversation, on it, with the
+  // unsent draft kept; where it was asked is found in the work log.
+  await page.locator('[data-agent="alice/lead"][data-sidebar-entry="yesman"]').click();
+  await page.locator('.composer textarea').fill('unsent alice draft');
+  await entry.click();
+  await page.locator('.needs-you-card[data-type="login"]').click();
+  await until('the handoff focused', async () => (await focusedRequest())?.startsWith('h:alice@'));
+  assert.equal(await page.locator('#crumbs').innerText(), 'Alice 团队');
+  assert.equal(await page.locator('.composer textarea').inputValue(), 'unsent alice draft');
+  assert.equal(await page.locator('.ask.handoff.needs-you-target').count(), 1);
+  assert.match(await page.locator('.ask.handoff').innerText(), /npm login[\s\S]*Task t1[\s\S]*checks it before relying on it/);
+  await page.getByRole('button', { name: 'Show where it was asked' }).click();
+  const tool = page.locator('#thread [data-tool="call-login"].needs-you-target');
+  await tool.waitFor();
+  assert.ok(await tool.evaluate((el) => { const r = el.getBoundingClientRect(); const s = document.querySelector('#scroll').getBoundingClientRect(); return r.bottom > s.top && r.top < s.bottom; }));
+  await shot('handoff');
+  await page.getByRole('button', { name: 'Back to Needs You' }).click();
+  await until('focus back on its card', async () => page.evaluate(() => document.activeElement?.matches('.needs-you-card[data-type="login"]')));
+
+  // A handed-over worker question opens on that worker, answered there.
+  await page.locator('.needs-you-card[data-type="select"]').click();
+  await until('the question focused', async () => (await focusedRequest())?.startsWith('d:alice/w1@'));
+  assert.equal((await page.locator('#crumbs').innerText()).split(/\s*\n\s*/).join(''), 'Alice 团队/w1');
+  assert.match(await page.locator('.ask').innerText(), /Alice 团队 handed this question to you\./);
+  await page.locator('.ask').getByRole('button', { name: 'Block', exact: true }).click();
+  await agentIs('alice/w1', (i) => i.status !== 'waiting');
+  await settle(2);
+
+  // By keyboard from the sidebar: the lead's own question.
+  await page.locator('#yesmen [data-request^="d:bob/lead@"]').focus();
+  await page.keyboard.press('Enter');
+  await until('the dialog focused', async () => (await focusedRequest())?.startsWith('d:bob/lead@'));
+  await page.keyboard.press('Enter'); // Yes, the first action
+  await agentIs('bob/lead', (i) => i.status !== 'waiting');
+  await settle(1);
+
+  // Done reaches the lead as yesman's notice, and only then leaves the list.
+  await page.locator('#yesmen [data-request^="h:alice@"]').click();
+  await page.locator('.ask.handoff').getByRole('button', { name: 'Mark done' }).click();
+  await settle(0);
+  await prompted('alice/lead', '[yesman] The user marked n1 (login) "Log in to the npm registry", for task t1 as done. That is their own confirmation');
+  assert.equal(await page.locator('.composer textarea').inputValue(), 'unsent alice draft');
+  await entry.click();
+  await page.locator('.needs-you-empty').waitFor();
+  await page.locator('.needs-you-history summary').click();
+  assert.match(await page.locator('.needs-you-history').innerText(), /Log in to the npm registry[\s\S]*Marked done/);
+
+  // A dialog that times out is no longer offered, and cannot be answered late.
+  await ctl('prompt', { agent: 'alice/lead', message: ask({ id: 'qt', method: 'input', title: 'Pick a tag', timeout: 1500 }) });
+  await settle(1);
+  await settle(0);
+  await assert.rejects(page.evaluate(() => mygo.call('Yesman.Answer', 'alice/lead', 'qt', { value: 'late' })), /no longer waiting/);
+
+  // Archiving takes a yesman's handoffs with it; a stale window cannot close
+  // the same-name successor's, which starts with none.
+  await ctl('prompt', { agent: 'bob/lead', message: needsYou({ add: { type: 'manual', title: 'Plug in the test phone' }, toolCall: 'call-phone' }) });
+  await settle(1);
+  const oldHired = await page.evaluate(() => fixtureState.yesmen.find((y) => y.name === 'bob').hiredAt);
+  await ctl('dismiss', { yesman: 'bob' });
+  await settle(0);
+  await ctl('hire', { yesman: 'bob' });
+  await settle(0);
+  await assert.rejects(page.evaluate((hired) => mygo.call('Yesman.ResolveHandoff', 'bob', hired, 'n1', 'done'), oldHired), /replaced|no handoff/);
+  assert.deepEqual(await page.evaluate(() => fixtureState.yesmen.find((y) => y.name === 'bob').handoffs), []);
+
+  // Removing a worker ends its handed-over question.
+  await ctl('start-worker', { yesman: 'alice', name: 'w2', message: ask({ id: 'q2', method: 'confirm', title: 'Overwrite the lockfile?' }) });
+  await agentIs('alice/w2', (i) => i.status === 'waiting');
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou({ handOver: { worker: 'w2', requestId: 'q2' }, toolCall: 'call-w2' }) });
+  await settle(1);
+  await ctl('remove-worker', { agent: 'alice/w2' });
+  await settle(0);
+
+  // A reload counts what the app knows: persisted handoffs.
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou({ add: { type: 'decision', title: 'Choose the release channel', detail: 'Stable or beta. I recommend beta.' }, toolCall: 'call-channel' }) });
+  await settle(1);
+  await page.reload();
+  await entry.waitFor();
+  await until('count after reload', async () => (await count()) === 1);
+
+  // The info panel's one card of entries: Knowledge, Working Logs and
+  // Needs You, each a row, with real counts.
+  const infoRow = (key) => page.locator(`#yesman-info [data-info-entry="${key}"]`);
+  const lead = (name) => page.locator(`[data-agent="${name}/lead"][data-sidebar-entry="yesman"]`);
+  await ctl('prompt', { agent: 'bob/lead', message: ask({ id: 'qb2', method: 'confirm', title: 'Ship bob?' }) });
+  await agentIs('bob/lead', (i) => i.status === 'waiting');
+  await settle(2);
+  // Wide enough for the conversation, the info and the files side by side.
+  await page.setViewportSize({ width: 1500, height: 900 });
+  await lead('alice').click();
+  await page.getByRole('button', { name: 'Show the info' }).click();
+  await until('the Knowledge count', async () => (await infoRow('knowledge').innerText()).includes('15 notes'));
+  const entryCard = await page.locator('#yesman-info .info-section--entries').evaluateAll((els) => els.map((el) => [...el.querySelectorAll('[data-info-entry]')].map((row) => row.dataset.infoEntry)));
+  assert.deepEqual(entryCard, [['knowledge', 'working-logs', 'needs-you']]);
+  assert.equal(await page.locator('#yesman-info [data-info-entry]').count(), 3); // no separate Knowledge or log sections
+  assert.match(await infoRow('knowledge').innerText(), /^Knowledge/);
+  assert.match(await infoRow('working-logs').innerText(), /^Working Logs/);
+  assert.match(await infoRow('needs-you').innerText(), /^Needs You[\s\S]*1 waiting/);
+  await shot('info-card');
+  // Working logs opens the original task log, read-only.
+  await infoRow('working-logs').click();
+  await until('the task log', async () => (await page.locator('#files').innerText().catch(() => '')).includes('Task log'));
+  assert.equal(await infoRow('working-logs').getAttribute('aria-current'), 'page');
+  await infoRow('knowledge').click();
+  await until('the Knowledge page', async () => (await infoRow('knowledge').getAttribute('aria-current')) === 'page');
+  // Needs you, by keyboard: this yesman's requests only, then back.
+  await page.locator('.composer textarea').fill('unsent alice draft');
+  await infoRow('needs-you').focus();
+  await page.keyboard.press('Enter');
+  await page.locator('.needs-you-scope').waitFor();
+  assert.match(await page.locator('.needs-you-scope').innerText(), /From Alice 团队 only/);
+  assert.deepEqual(await page.locator('.needs-you-card').evaluateAll((els) => els.map((el) => el.dataset.request.split(':')[0] + ':' + el.dataset.request.split(':')[1].split('@')[0])), ['h:alice']);
+  assert.ok(await page.evaluate(() => document.activeElement?.matches('.needs-you-page h1')));
+  assert.equal(await count(), 2); // the sidebar still counts every yesman
+  await page.getByRole('button', { name: 'Back to the conversation' }).click();
+  await until('back on the entry', async () => page.evaluate(() => document.activeElement?.dataset.infoEntry === 'needs-you'));
+  assert.equal(await page.locator('.composer textarea').inputValue(), 'unsent alice draft');
+  // A late answer for the yesman left does not show in the next one's card.
+  await page.evaluate(() => { window.holdInfo = 'alice'; });
+  await page.evaluate(() => handlers.changed(true));
+  await until('alice\'s Info held', async () => page.evaluate(() => !!window.releaseInfo));
+  await lead('bob').click();
+  await until('bob\'s card', async () => /Needs You[\s\S]*1 waiting/.test(await infoRow('needs-you').innerText()) && /0 notes/.test(await infoRow('knowledge').innerText()));
+  await page.evaluate(() => { window.holdInfo = null; window.releaseInfo(); });
+  await page.waitForTimeout(300);
+  assert.match(await infoRow('knowledge').innerText(), /0 notes/);
+  assert.equal(await page.locator('#crumbs').innerText(), 'bob');
+  // A request answered elsewhere leaves the count; nothing waiting says so.
+  await page.locator('.ask').getByRole('button', { name: 'Yes', exact: true }).click();
+  await agentIs('bob/lead', (i) => i.status !== 'waiting');
+  await settle(1);
+  await until('bob has nothing waiting', async () => /Nothing waiting/.test(await infoRow('needs-you').innerText()));
+  // Opened for bob, then bob is archived and hired again: the page says so
+  // and shows every yesman, never the new bob's as the old one's.
+  await infoRow('needs-you').click();
+  await page.locator('.needs-you-scope').waitFor();
+  assert.match(await page.locator('.needs-you-empty').innerText(), /Nothing from bob needs you right now/);
+  await page.locator('.needs-you-scope').getByRole('button', { name: 'Show every yesman' }).focus();
+  await ctl('dismiss', { yesman: 'bob' });
+  await ctl('hire', { yesman: 'bob' });
+  await settle(1);
+  await until('the scope gone', async () => /bob is no longer here; showing every yesman\./.test(await page.locator('.needs-you-scope').innerText()));
+  // Its Show every yesman went with the old bob: focus is on the heading.
+  assert.ok(await page.evaluate(() => document.activeElement?.matches('.needs-you-page h1')), 'focus on a control gone with the old bob moves to the heading');
+  assert.equal(await page.locator('.needs-you-card').count(), 1);
+
+  // Focus on a request survives a full refresh, and moves to the one in its
+  // place when it is closed elsewhere, never to the page's body.
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou({ add: { type: 'manual', title: 'Unplug the dongle' }, toolCall: 'call-dongle' }) });
+  await settle(2);
+  await lead('alice').click();
+  const doneButton = (title) => page.locator('.ask.handoff', { hasText: title }).getByRole('button', { name: 'Mark done' });
+  await doneButton('Unplug the dongle').focus();
+  await page.evaluate(() => handlers.changed(true));
+  await page.waitForTimeout(400);
+  assert.equal(await page.evaluate(() => document.activeElement?.closest('.ask.handoff')?.innerText.includes('Unplug the dongle')), true);
+  const dongle = (await page.evaluate(() => fixtureState.yesmen.find((y) => y.name === 'alice').handoffs.find((h) => h.title === 'Unplug the dongle'))).id;
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou({ resolve: { id: dongle, note: 'done by the lead' }, toolCall: 'call-dongle-done' }) });
+  await settle(1);
+  assert.equal(await page.evaluate(() => document.activeElement?.closest('[data-request], .composer')?.matches('.ask.handoff, .composer')), true);
+
+  // Reading the history again keeps a reply that arrives meanwhile.
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou({ add: { type: 'manual', title: 'Find the receipt' }, toolCall: 'call-receipt' }) });
+  await settle(2);
+  await page.evaluate(() => { window.holdMessages = true; window.releaseMessages = null; });
+  await page.locator('.ask.handoff', { hasText: 'Find the receipt' }).getByRole('button', { name: 'Show where it was asked' }).click();
+  await until('the history held', async () => page.evaluate(() => !!window.releaseMessages));
+  await page.evaluate(() => {
+    const a = fixtureState.agents.find((a) => a.id === 'alice/lead');
+    const message = { role: 'assistant', timestamp: Date.now() + 60000, stopReason: 'stop', content: [{ type: 'text', text: 'AFTER-SNAPSHOT-LIVE-REPLY' }] };
+    handlers['agent-event']({ agent: a.id, agentSince: a.since, seq: window.heldSeq + 1000, data: { type: 'message_end', message } });
+  });
+  await page.getByText('AFTER-SNAPSHOT-LIVE-REPLY', { exact: true }).waitFor();
+  await page.evaluate(() => { window.holdMessages = false; window.releaseMessages(); });
+  await page.locator('#thread [data-tool="call-receipt"].needs-you-target').waitFor();
+  assert.equal(await page.getByText('AFTER-SNAPSHOT-LIVE-REPLY', { exact: true }).count(), 1);
+  const receipt = (await page.evaluate(() => fixtureState.yesmen.find((y) => y.name === 'alice').handoffs.find((h) => h.title === 'Find the receipt'))).id;
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou({ resolve: { id: receipt }, toolCall: 'call-receipt-done' }) });
+  await settle(1);
+
+  // Long handoffs keep the conversation and the composer in view.
+  const long = (n) => `Step ${n}. ` + 'Check the signing identity and the notarization log before continuing. '.repeat(52);
+  for (const n of [1, 2, 3]) {
+    await ctl('prompt', { agent: 'alice/lead', message: needsYou({ add: { type: 'manual', title: `Long step ${n}`, detail: long(n) }, toolCall: `call-long-${n}` }) });
+  }
+  await settle(4);
+
+  // Chinese, dark and narrow.
+  await page.evaluate(() => localStorage.setItem('fixture.locale', 'zh-Hans'));
+  await page.reload();
+  await entry.waitFor();
+  assert.match(await entry.innerText(), /需要你\s*4/);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.setViewportSize({ width: 640, height: 760 });
+  await lead('alice').click();
+  await page.locator('.dock-requests .ask.handoff').nth(2).waitFor();
+  const layout = await page.evaluate(() => {
+    const box = (sel) => { const r = document.querySelector(sel).getBoundingClientRect(); return { top: r.top, bottom: r.bottom, height: r.height }; };
+    return { scroll: box('#scroll'), requests: box('.dock-requests'), composer: box('.composer'), viewport: innerHeight, page: document.scrollingElement.scrollHeight,
+      details: [...document.querySelectorAll('.handoff-detail')].map((el) => el.tabIndex) };
+  });
+  assert.ok(layout.scroll.height >= 150, JSON.stringify(layout));
+  assert.ok(layout.requests.height <= 0.41 * layout.viewport, JSON.stringify(layout));
+  assert.ok(layout.composer.bottom <= layout.viewport && layout.page <= layout.viewport, JSON.stringify(layout));
+  // Three shown, the rest one step away; each long detail can be scrolled.
+  assert.equal(await page.locator('.dock-requests .ask.handoff').count(), 3);
+  assert.match(await page.locator('.needs-you-more').innerText(), /还有 1 项/);
+  assert.deepEqual(layout.details, [-1, 0, 0], JSON.stringify(layout));
+  await page.locator('.dock-requests .ask.handoff').last().getByRole('button', { name: '标记完成' }).focus();
+  const visible = await page.evaluate(() => {
+    const r = document.activeElement.getBoundingClientRect(); const c = document.querySelector('.dock-requests').getBoundingClientRect();
+    return r.top >= c.top - 1 && r.bottom <= c.bottom + 1;
+  });
+  assert.ok(visible);
+  await shot('zh-dark-narrow-long');
+  // The info card, in Chinese.
+  if (!(await page.locator('#yesman-info [data-info-entry]').count())) await page.getByRole('button', { name: '显示信息栏' }).click();
+  await until('the Knowledge count in Chinese', async () => /^知识库[\s\S]*15 篇笔记/.test(await infoRow('knowledge').innerText()));
+  assert.match(await infoRow('working-logs').innerText(), /工作日志/);
+  assert.match(await infoRow('needs-you').innerText(), /需要你[\s\S]*4 项等待中/);
+  await shot('zh-dark-narrow-info');
+  await entry.click();
+  await page.locator('.needs-you-card[data-type="decision"]').waitFor();
+  assert.match(await page.locator('.needs-you-card[data-type="decision"]').innerText(), /决定[\s\S]*Choose the release channel[\s\S]*来自 Alice 团队/);
+  const overflow = await page.evaluate(() => [...document.querySelectorAll('#yesmen, .needs-you-page')].some((el) => el.scrollWidth > el.clientWidth + 1));
+  assert.equal(overflow, false);
+  await shot('zh-dark-narrow');
+
+  // The request memory, in Chinese, dark and narrow: Bob's is full, which
+  // Needs you and his Info row say; the user starts a new one by keyboard,
+  // and his lead hears of it.
+  const memory = page.locator('.needs-you-memory[data-memory="bob"]');
+  const memoryState = () => page.evaluate(() => document.querySelector('.needs-you-memory[data-memory="bob"]')?.dataset.state ?? '');
+  const memoryIs = (state) => until(`Bob's memory ${state || 'fine'}`, async () => {
+    await page.evaluate(() => handlers.changed(true));
+    await page.waitForTimeout(250);
+    return (await memoryState()) === state;
+  });
+  const dialog = page.locator('#confirm-dialog');
+  const resets = () => page.evaluate(() => calls.filter((c) => c[0] === 'ResetCallMemory').length);
+  await ctl('call-memory', { yesman: 'bob', message: 'full' });
+  await memoryIs('full');
+  assert.equal(await memory.getAttribute('role'), 'alert');
+  assert.match(await memory.innerText(), /bob 的 lead 无法再交给你新请求[\s\S]*262,144 \/ 262,144[\s\S]*开始新的记忆…/);
+  assert.equal(await page.evaluate(() => [...document.querySelectorAll('#yesmen, .needs-you-page')].some((el) => el.scrollWidth > el.clientWidth + 1)), false);
+  await shot('zh-dark-narrow-memory-full');
+  await lead('bob').click();
+  await until('Bob\'s Info row', async () => /需要你[\s\S]*新请求被拒绝/.test(await infoRow('needs-you').innerText().catch(() => '')));
+  await entry.click();
+  await memory.waitFor();
+  await memory.getByRole('button').focus();
+  await page.keyboard.press('Enter');
+  await dialog.waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#confirm-title').innerText(), '为 bob 开始新的请求记忆？');
+  assert.match(await page.locator('#confirm-body').innerText(), /清除 bob 的 lead 交给你请求时用过的 262,144 条较早工具调用的去重记录[\s\S]*可能会再出现一次[\s\S]*以后再次重置，它还可能再出现一次/);
+  await page.locator('#confirm-ok').focus();
+  await page.keyboard.press('Enter');
+  await memoryIs('');
+  await until('focus on the page', () => page.evaluate(() => document.activeElement?.matches('.needs-you-page h1')));
+  assert.equal(await resets(), 1);
+  assert.equal((await ctl('call-memory', { yesman: 'bob' })).epoch, 1);
+  await prompted('bob/lead', '[yesman] The user started a new tool-call memory for Needs you: 262144 older tool-call records were forgotten');
+
+  // In English, light and wide: nearly full. Cancelling forgets nothing; a
+  // confirmation shown before the lead took another call forgets nothing
+  // either and shows the memory again; confirming that one resets it.
+  await page.evaluate(() => localStorage.removeItem('fixture.locale'));
+  await page.reload();
+  await entry.waitFor();
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await ctl('call-memory', { yesman: 'bob', message: 'near' });
+  await entry.click();
+  await memoryIs('near');
+  assert.equal(await memory.getAttribute('role'), 'status');
+  assert.match(await memory.innerText(), /bob's request memory is nearly full[\s\S]*235,926 of 262,144/);
+  await shot('memory-near');
+  await memory.getByRole('button').focus();
+  await page.keyboard.press('Enter');
+  await dialog.waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#confirm-title').innerText(), 'Start a new request memory for bob?');
+  assert.match(await page.locator('#confirm-body').innerText(), /This forgets 235,926 records[\s\S]*may show up once more[\s\S]*A later reset can let it back once more\./);
+  // Escape, then Enter again at once: the close event of the first opening
+  // can arrive after the second opened, and must not answer it.
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'hidden' });
+  assert.equal(await resets(), 0); // this page's, since the reload
+  await until('focus back on the button', () => page.evaluate(() => !!document.activeElement?.closest('.needs-you-memory[data-memory="bob"]')));
+  await page.keyboard.press('Enter');
+  await dialog.waitFor({ state: 'visible' });
+  await ctl('prompt', { agent: 'bob/lead', message: needsYou({ add: { type: 'manual', title: 'Rotate the signing key' }, toolCall: 'call-bob-key' }) });
+  await until('the call taken', async () => (await ctl('call-memory', { yesman: 'bob' })).used === 235927);
+  await page.locator('#confirm-ok').click();
+  await until('the refusal', async () => /changed since it was shown/.test(await page.locator('.mds-toast').innerText().catch(() => '')));
+  const kept = await ctl('call-memory', { yesman: 'bob' });
+  assert.equal(kept.epoch, 1);
+  assert.equal(kept.state, 'near');
+  await until('the memory shown again', async () => /235,927 of 262,144/.test(await memory.innerText()));
+  await until('focus kept on the button', () => page.evaluate(() => !!document.activeElement?.closest('.needs-you-memory[data-memory="bob"]')));
+  await page.keyboard.press('Enter');
+  await dialog.waitFor({ state: 'visible' });
+  await page.locator('#confirm-ok').click();
+  await memoryIs('');
+  const fresh = await ctl('call-memory', { yesman: 'bob' });
+  assert.equal(fresh.epoch, 2);
+  assert.equal(fresh.state ?? '', '');
+
+  // Kept by a pre-release version: nothing to count, and still the way out.
+  await ctl('call-memory', { yesman: 'bob', message: 'blocked' });
+  await memoryIs('blocked');
+  assert.match(await memory.innerText(), /bob's lead cannot hand you new requests[\s\S]*pre-release version/);
+  await shot('memory-blocked');
+  await memory.getByRole('button').click();
+  await dialog.waitFor({ state: 'visible' });
+  assert.match(await page.locator('#confirm-body').innerText(), /This forgets what a pre-release version remembered/);
+  await page.locator('#confirm-ok').click();
+  await memoryIs('');
+  await ctl('prompt', { agent: 'bob/lead', message: needsYou({ add: { type: 'manual', title: 'Confirm the release notes' }, toolCall: 'call-bob-after' }) });
+  await until('a new call taken after the reset', async () => (await ctl('call-memory', { yesman: 'bob' })).used === 2);
+
+  // Two resets asked in one turn, Alice's cancelled and Bob's confirmed,
+  // before the first close event: only Bob's memory starts anew.
+  const aliceMemory = page.locator('.needs-you-memory[data-memory="alice"]');
+  const epoch = async (name) => (await ctl('call-memory', { yesman: name })).epoch;
+  await ctl('call-memory', { yesman: 'alice', message: 'near' });
+  await ctl('call-memory', { yesman: 'bob', message: 'near' });
+  await memoryIs('near');
+  await aliceMemory.waitFor();
+  const before = { alice: await epoch('alice'), bob: await epoch('bob') };
+  await page.evaluate(() => {
+    const d = document.querySelector('#confirm-dialog');
+    document.querySelector('[data-memory="alice"] button').click();
+    d.close('cancel');
+    document.querySelector('[data-memory="bob"] button').click();
+    d.close('ok');
+  });
+  await memoryIs('');
+  assert.equal(await epoch('bob'), before.bob + 1);
+  assert.equal(await epoch('alice'), before.alice);
+  assert.equal(await aliceMemory.getAttribute('data-state'), 'near');
+
+  // A reset answered after the user went to Bob's requests and focused his
+  // request memory leaves focus where they put it.
+  await ctl('call-memory', { yesman: 'bob', message: 'near' });
+  await memoryIs('near');
+  await page.evaluate(() => { window.holdReset = true; });
+  await aliceMemory.getByRole('button').click();
+  await dialog.waitFor({ state: 'visible' });
+  await page.locator('#confirm-ok').click();
+  await until('the reset answer held', () => page.evaluate(() => !!window.releaseReset));
+  await lead('bob').click();
+  if (!(await page.locator('#yesman-info [data-info-entry]').count())) await page.getByRole('button', { name: 'Show the info' }).click();
+  await infoRow('needs-you').click();
+  await page.locator('.needs-you-scope').waitFor();
+  await memory.getByRole('button').focus();
+  await page.evaluate(() => { window.holdReset = false; window.releaseReset(); });
+  await until('Alice reset', async () => (await epoch('alice')) === before.alice + 1);
+  await page.evaluate(() => handlers.changed(true));
+  await page.waitForTimeout(400);
+  assert.equal(await page.evaluate(() => document.activeElement?.closest('[data-memory]')?.dataset.memory), 'bob', 'focus stayed on the control the user chose');
+  assert.match(await page.locator('.needs-you-scope').innerText(), /From bob only/);
+
+  // So does one on Show every yesman, and a redraw keeps it on either of the
+  // page's own controls; leaving by keyboard still goes where they say.
+  const navNames = { all: 'Show every yesman', back: 'Back to the conversation' };
+  const nav = (key) => page.locator('.needs-you-scope').getByRole('button', { name: navNames[key] });
+  const navFocused = () => page.evaluate((names) => {
+    const a = document.activeElement;
+    return Object.keys(names).find((k) => a?.closest('.needs-you-scope') && a.matches('button') && a.textContent.trim() === names[k]) ?? a?.tagName;
+  }, navNames);
+  await nav('all').focus();
+  await page.keyboard.press('Enter');
+  await until('every yesman', async () => !(await page.locator('.needs-you-scope').count()));
+  assert.ok(await page.evaluate(() => document.activeElement?.matches('.needs-you-page h1')), 'leaving the scope by keyboard lands on the heading');
+  await ctl('call-memory', { yesman: 'alice', message: 'near' });
+  await page.evaluate(() => handlers.changed(true));
+  await until('alice\'s memory near', async () => page.evaluate(() => document.querySelector('.needs-you-memory[data-memory="alice"]')?.dataset.state === 'near'));
+  const aliceBefore = await epoch('alice');
+  await page.evaluate(() => { window.holdReset = true; });
+  await aliceMemory.getByRole('button').click();
+  await dialog.waitFor({ state: 'visible' });
+  await page.locator('#confirm-ok').click();
+  await until('the reset answer held', () => page.evaluate(() => !!window.releaseReset));
+  await lead('bob').click();
+  if (!(await page.locator('#yesman-info [data-info-entry]').count())) await page.getByRole('button', { name: 'Show the info' }).click();
+  await infoRow('needs-you').click();
+  await page.locator('.needs-you-scope').waitFor();
+  await nav('all').focus();
+  await page.evaluate(() => { window.holdReset = false; window.releaseReset(); });
+  await until('Alice reset again', async () => (await epoch('alice')) === aliceBefore + 1);
+  await page.evaluate(() => handlers.changed(true));
+  await page.waitForTimeout(400);
+  assert.equal(await navFocused(), 'all', 'a late reset leaves focus on Show every yesman');
+  for (const key of ['all', 'back']) {
+    await nav(key).focus();
+    await ctl('prompt', { agent: 'bob/lead', message: needsYou({ add: { type: 'manual', title: `Check the ${key} control` }, toolCall: `call-bob-nav-${key}` }) });
+    await page.evaluate(() => handlers.changed(true));
+    await until(`the ${key} request`, async () => (await page.locator('.needs-you-card').allInnerTexts()).some((x) => x.includes(`Check the ${key} control`)));
+    assert.equal(await navFocused(), key, `a changed snapshot keeps focus on the ${key} control`);
+  }
+  await page.keyboard.press('Enter');
+  await until('back on the entry', async () => page.evaluate(() => document.activeElement?.dataset.infoEntry === 'needs-you'));
+  assert.equal(await page.locator('#crumbs').innerText(), 'bob');
+}
+
+try {
+  const built = spawnSync('go', ['test', '-c', '-o', exe, '.'], { cwd, encoding: 'utf8' });
+  assert.equal(built.status, 0, built.stderr || built.stdout);
+  for (const [engineName, engine] of [['chromium', chromium], ['webkit', webkit]]) {
+    const backend = await fixture();
+    let browser;
+    try {
+      browser = await engine.launch({ headless: true });
+      const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
+      const errors = [];
+      page.on('pageerror', (err) => { errors.push(err.message); console.error(err.stack); });
+      await page.addInitScript(bridge);
+      await page.goto(backend.url);
+      await scenario(engineName, page).catch(async (err) => {
+        await page.screenshot({ path: `${shots}/needs-you-${engineName}-failure.png` }).catch(() => {});
+        throw err;
+      });
+      assert.deepEqual(errors, []);
+      assert.deepEqual(await page.evaluate(() => window.unmocked), []);
+      results.push(`${engineName}: PASS`);
+      console.log(`${engineName}: Needs you sources, count, jump/focus/draft, answer, done, expiry, archive/rehire, remove, reload, Info card rows/counts/scope/back/late response, focus across refresh, history re-read with a live reply, long handoffs, zh/dark/narrow, request memory near/full/pre-release with a keyboard reset, a stale confirmation, the lead told, a cancelled reset never answered by another's confirmation and a late reset not taking focus passed`);
+    } finally {
+      await browser?.close();
+      await backend.close();
+    }
+  }
+} finally {
+  if (!process.env.YESMAN_NEEDS_YOU_SHOTS) await rm(fixtureDir, { recursive: true, force: true });
+}

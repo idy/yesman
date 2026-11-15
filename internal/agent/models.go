@@ -72,7 +72,17 @@ func ParseChoice(key string) (Choice, bool) {
 // loads the user's own extensions, which may add providers.
 func (m *Manager) Catalog(ctx context.Context, dir string) ([]Model, error) {
 	env := append(os.Environ(), m.cfg.Env...)
-	p, err := startProc(spec{Path: m.cfg.Pi, Args: []string{"--mode", "rpc", "--no-session"}, Dir: dir, Env: env},
+	path, args := m.cfg.Pi, []string{"--mode", "rpc", "--no-session"}
+	if m.cfg.Command != nil {
+		var prefix []string
+		var err error
+		path, prefix, err = m.cfg.Command(ctx)
+		if err != nil {
+			return nil, err
+		}
+		args = append(prefix, args...)
+	}
+	p, err := startProc(spec{Path: path, Args: args, Dir: dir, Env: env},
 		func(*proc, string, json.RawMessage) {})
 	if err != nil {
 		return nil, err
@@ -117,11 +127,19 @@ type ModelOptions struct {
 }
 
 type modelState struct {
-	Model         Model  `json:"model"`
-	ThinkingLevel string `json:"thinkingLevel"`
-	IsStreaming   bool   `json:"isStreaming"`
-	IsCompacting  bool   `json:"isCompacting"`
-	SessionID     string `json:"sessionId"`
+	Model         Model        `json:"model"`
+	ThinkingLevel string       `json:"thinkingLevel"`
+	IsStreaming   bool         `json:"isStreaming"`
+	IsCompacting  bool         `json:"isCompacting"`
+	SessionID     string       `json:"sessionId"`
+	PendingQueue  pendingQueue `json:"pendingQueue"`
+}
+
+// startupState fixes the process's provenance mode on its ordered reader,
+// before the startup response is published or a later event is observed. The
+// mode is immutable thereafter; model/session refreshes cannot race readers.
+func (p *proc) startupState(ctx context.Context) (modelState, error) {
+	return p.modelState(ctx, func(s modelState) { p.origins.native = s.PendingQueue.supportsPromotion() })
 }
 
 func (p *proc) modelState(ctx context.Context, at ...func(modelState)) (modelState, error) {
@@ -145,7 +163,7 @@ func (p *proc) modelState(ctx context.Context, at ...func(modelState)) (modelSta
 // syncModel reads back the effective selection: changing models may also clamp
 // the effort. Its caller serializes configuration with the agent's modelMu.
 func (m *Manager) syncModel(ctx context.Context, a *agent, p *proc) (Info, error) {
-	state, err := p.modelState(ctx, func(s modelState) { m.deliverySessionChanged(a, p, s.SessionID) })
+	state, err := p.modelState(ctx, func(s modelState) { m.deliverySessionChanged(a, p, s.SessionID); m.syncPending(a, p, s.PendingQueue) })
 	if err != nil {
 		return Info{}, err
 	}

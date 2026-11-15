@@ -6,63 +6,75 @@ import (
 	"time"
 )
 
-// externalOperation binds a backend side effect to this exact running actor.
-// Retirement cancels under mu and drains outside it; no network work holds mu
-// or the workspace's Use lease. The completion fence also covers child exit.
+// externalOperation shares the exact process's changes gate with Board and
+// CallerOperation. Unlike short local commits, network/gh work is cancellable:
+// revocation cancels it under mu before retiring that gate outside mu.
 type externalOperation struct {
-	cancel context.CancelFunc
-	done   chan struct{}
+	process *proc
+	cancel  context.CancelFunc
 }
 
-// BeginOperation revalidates a request after decoding its untrusted body. The
-// token, actor and workspace generation are the server's original snapshot.
-// It reserves only the live incarnation, never a replacement with the same name.
+// BeginOperation revalidates the server's original actor/token/workspace after
+// decoding. Only admission holds Store.Use; network work keeps the process gate
+// and releases it after the gh child and verification finish. No operation may
+// reacquire Store.Use while holding this gate (Archive may be draining it).
 func (m *Manager) BeginOperation(ctx context.Context, token string, expected Info, generation time.Time) (context.Context, func(), error) {
 	y, release, err := m.cfg.Yesmen.BeginUse(expected.Yesman)
 	if err != nil {
-		return nil, nil, errStopped
+		return nil, nil, ErrRetired
 	}
 	defer release()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	a := m.agents[expected.ID]
-	if token == "" || m.tokens[token] != expected.ID || a == nil || a.token != token ||
-		m.closed || a.retiring || a.removing || a.stopping || a.proc == nil ||
-		!a.info.Since.Equal(expected.Since) || !a.workspaceSince.Equal(generation) || !y.HiredAt.Equal(generation) {
-		return nil, nil, errStopped
+	var p *proc
+	if token != "" && a != nil && a.token == token {
+		p = a.tokenProc
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+	m.mu.Unlock()
+	if p == nil {
+		return nil, nil, ErrRetired
+	}
+	p.changes.RLock()
+	m.mu.Lock()
+	active := m.agents[expected.ID] == a && m.tokens[token] == expected.ID && a.token == token &&
+		a.tokenProc == p && a.proc == p && !p.changesClosed && !m.closed && !a.retiring && !a.removing && !a.stopping &&
+		a.info.Since.Equal(expected.Since) && a.workspaceSince.Equal(generation) && y.HiredAt.Equal(generation)
+	select {
+	case <-p.done:
+		active = false
+	default:
+	}
+	if !active || ctx.Err() != nil {
+		m.mu.Unlock()
+		p.changes.RUnlock()
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, ErrRetired
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	op := &externalOperation{cancel: cancel, done: make(chan struct{})}
+	op := &externalOperation{process: p, cancel: cancel}
 	if a.operations == nil {
 		a.operations = make(map[*externalOperation]struct{})
 	}
 	a.operations[op] = struct{}{}
+	m.mu.Unlock()
 	var once sync.Once
 	return ctx, func() {
 		once.Do(func() {
 			cancel()
 			m.mu.Lock()
 			delete(a.operations, op)
-			close(op.done)
 			m.mu.Unlock()
+			p.changes.RUnlock()
 		})
 	}, nil
 }
 
-func cancelOperationsLocked(a *agent) []*externalOperation {
-	operations := make([]*externalOperation, 0, len(a.operations))
+func cancelOperationsLocked(a *agent, p *proc) {
 	for op := range a.operations {
-		op.cancel()
-		operations = append(operations, op)
-	}
-	return operations
-}
-
-func drainOperations(operations []*externalOperation) {
-	for _, op := range operations {
-		<-op.done
+		if op.process == p {
+			op.cancel()
+		}
 	}
 }

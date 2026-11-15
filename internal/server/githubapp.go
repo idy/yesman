@@ -39,7 +39,7 @@ func (s *Server) githubAppPull(ctx context.Context, c caller, r *http.Request) (
 	// Revalidate after decoding, then bind token mint/gh execution to this
 	// actor's retirement fence. Archive/worker removal cancels and drains the
 	// operation without holding the workspace lock during network or gh I/O.
-	ctx, finish, err := s.Agents.BeginOperation(ctx, c.credential, c.agent, c.yesman.HiredAt)
+	ctx, finish, err := s.Agents.BeginOperation(ctx, c.token, c.agent, c.yesman.HiredAt)
 	if err != nil {
 		return nil, err
 	}

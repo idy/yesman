@@ -85,11 +85,11 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     return true;
   }
 
-  async function load() {
+  async function load(retry = false) {
     const seq = ++loads;
     let v;
     try {
-      v = await call('PiPackages');
+      v = await call(retry === true ? 'RetryPiRuntime' : 'PiPackages');
     } catch (err) {
       if (seq === loads) fail(err);
       return;
@@ -182,7 +182,8 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
       return;
     }
     if (s.tab === 'info') {
-      actions.replaceChildren();
+      actions.replaceChildren(h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => load(s.view?.runtimeState === 'failed') },
+        icon('reload'), t(s.view?.runtimeState === 'failed' ? 'Retry' : 'Refresh')));
       return;
     }
     const all = jobFor('update', '');
@@ -242,7 +243,11 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     const label = $('#pi-installed-label');
     if (label) label.textContent = v.packages.length ? t('Installed · {n}', { n: formatNumber(v.packages.length) }) : t('Installed');
     if (v.piError) {
-      list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, t('pi was not found')), h('span', { class: 'danger' }, v.piError)));
+      list.replaceChildren(h('div', { class: 'card-empty' }, h('strong', null, t('Unavailable')), h('span', { class: 'danger' }, v.piError)));
+      return;
+    }
+    if (v.packagesKnown === false && !v.listError) {
+      list.replaceChildren(h('div', { class: 'card-empty' }, t('Installed packages have not been read yet.')));
       return;
     }
     const rows = [];
@@ -511,7 +516,8 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     const panel = $('#pi-info');
     if (!panel) return;
     const v = s.view;
-    const status = h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : 'idle' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, v.piError ? t('Not found') : t('Found')));
+    const stateLabel = { preparing: 'Preparing…', unprepared: 'Not prepared', ready: 'Ready', failed: 'Unavailable', unknown: 'Version unknown', closed: 'Stopped.' }[v.runtimeState] ?? (v.piError ? 'Unavailable' : v.version ? 'Ready' : 'Version unknown');
+    const status = h('span', { class: 'mds-status', 'data-status': v.piError ? 'failed' : v.runtimeState === 'preparing' ? 'starting' : 'idle', role: 'status' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, t(stateLabel)));
     const installed = v.packages.filter((p) => p.path);
     const outdated = installed.filter((p) => p.kind === 'npm' && !pinned(p) && s.updates[p.name] && p.current && s.updates[p.name] !== p.current);
     const failed = jobs().filter((j) => j.state === 'failed').length;
@@ -526,10 +532,13 @@ export function createPiPage({ call, fail, confirm, agents, shown, rerender, ago
     ].filter(Boolean).join(' · ');
     const kinds = provides([...new Set(installed.flatMap((p) => p.provides ?? []))].sort((a, b) => Object.keys(KINDS).indexOf(a) - Object.keys(KINDS).indexOf(b)));
     panel.replaceChildren(h('div', { class: 'mds-group' },
-      preferenceRow(v.version ? `pi ${v.version}` : 'pi',
-        v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null, t('Every lead and worker runs this pi. Set YESMAN_PI to use another.'), ' ', h('span', { class: 'path' }, v.pi)),
-        status),
-      preferenceRow(t('Packages'), h('p', null, summary, kinds ? h('span', { class: 'pi-info-kinds' }, t('They give pi {kinds}.', { kinds })) : null),
+      preferenceRow(v.managed ? `${t('Managed pi')} ${v.version || v.pinnedVersion || ''}`.trim() : v.version ? `${t('External pi')} ${v.version}` : t('External pi'),
+        h('div', null,
+          v.piError ? h('p', { class: 'danger' }, v.piError) : h('p', null,
+            t(v.managed ? 'yesman uses this fixed pi version with your pi configuration and packages.' : 'Every lead and worker runs this pi. Set YESMAN_PI to use another.'),
+            !v.managed ? [' ', h('span', { class: 'path' }, v.pi)] : null),
+          v.managed ? h('p', null, t(v.runtimeState === 'preparing' ? 'Preparing the runtime. Refresh to check progress.' : 'To use a different pi version, set YESMAN_PI.')) : null), status),
+      preferenceRow(t('Packages'), h('p', null, v.packagesKnown === false ? t('Installed packages have not been read yet.') : summary, kinds ? h('span', { class: 'pi-info-kinds' }, t('They give pi {kinds}.', { kinds })) : null),
         h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => showTab(v.packages.length || running || failed ? 'installed' : 'browse') },
           v.packages.length || running || failed ? t('Manage') : t('Browse'))),
       preferenceRow(t('Settings'), h('p', null, t('pi’s own settings, which list the packages installed for you.'), ' ', h('span', { class: 'path' }, v.settingsFile)),

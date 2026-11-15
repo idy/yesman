@@ -128,7 +128,7 @@ func initializeHire(y Yesman) (_ Yesman, err error) {
 	if y.DisplayName != "" {
 		meta["displayName"] = y.DisplayName
 	}
-	if err := writeJSON(filepath.Join(staged.MetaDir(), "yesman.json"), meta); err != nil {
+	if err := writeYesmanMetadata(filepath.Join(staged.MetaDir(), "yesman.json"), meta); err != nil {
 		return Yesman{}, err
 	}
 	if err := os.Rename(staged.MetaDir(), y.MetaDir()); err != nil {

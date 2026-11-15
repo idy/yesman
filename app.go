@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"runtime"
 	"strconv"
@@ -13,6 +14,8 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/home"
+	"github.com/idy/yesman/internal/nativepermissions"
+	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
@@ -42,19 +45,24 @@ var (
 )
 
 type app struct {
-	home    home.Home
-	pool    *pool.Pool
-	clones  *clones
-	fetcher *fetcher
-	yesmen  *yesmen.Store
-	agents  *agent.Manager
-	pi      string
-	piErr   error
+	home      home.Home
+	pool      *pool.Pool
+	clones    *clones
+	fetcher   *fetcher
+	yesmen    *yesmen.Store
+	agents    *agent.Manager
+	pi        string
+	piErr     error
+	managedPi bool
+	piRuntime *piruntime.Runtime
 	// runPi runs a pi command for the user, outside any workspace.
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs
 	// catalog is pi's catalog of models, for the crew.
 	catalog *catalog
+	// usage is what Settings › Model usage read of agents' session logs.
+	usageOnce sync.Once
+	usage     *usageIndex
 	// vault and variables are what agents' commands get as environment
 	// variables, in Settings › Secrets and Settings › Variables.
 	vault     *secrets.Vault
@@ -75,8 +83,16 @@ type app struct {
 	last        map[string]agent.Status
 	release     func() // ends KeepRunning while no agent works
 	completions completionNotices
-	// working and waiting count the agents, for the tray's tooltip.
-	working, waiting int
+	// working and waiting count the agents, for the tray's tooltip; waiting
+	// counts everything under Needs you: agentWaiting agents, and the open
+	// handoffs.
+	working, waiting, agentWaiting int
+	handoffs                       map[string]int    // open handoffs per yesman
+	handed                         map[string]string // the handed-over dialog each worker was announced for
+	// notifier and keepAwake, when set, stand in for the system's
+	// notifications and power management, in tests.
+	notifier  func(id, title, body string)
+	keepAwake func(reason string) func()
 
 	fmu          sync.Mutex
 	pendingFocus string // the agent a notification click asked to show
@@ -98,6 +114,9 @@ type app struct {
 	updates *updates
 
 	files fileWatch // the workspace whose files the page shows
+
+	grantsOnce sync.Once
+	grants     *nativepermissions.Manager
 
 	infoOnce sync.Once
 	info     *infoCache // what the info panel measured
@@ -182,6 +201,23 @@ func (a *app) setupTray() {
 	}
 	mygo.App.OnLocaleChanged(func(string) { a.localeChanged() })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { t.Destroy() })
+	a.showCounts() // counted before the tray existed, such as kept handoffs
+}
+
+// showCounts shows what works and what waits in the tray, once it exists.
+func (a *app) showCounts() {
+	if a.tray == nil {
+		return
+	}
+	a.smu.Lock()
+	working, waiting := a.working, a.waiting
+	a.smu.Unlock()
+	title := ""
+	if waiting > 0 {
+		title = strconv.Itoa(waiting)
+	}
+	a.tray.SetTitle(title)
+	a.tray.SetToolTip(trayToolTip(working, waiting))
 }
 
 // trayMenu is the tray's menu, in the language yesman shows.
@@ -228,6 +264,9 @@ func (a *app) agentsChanged(list []agent.Info) {
 	if a.last == nil {
 		a.last = map[string]agent.Status{}
 	}
+	if a.handed == nil {
+		a.handed = map[string]string{}
+	}
 	for _, i := range list {
 		prev := a.last[i.ID]
 		a.last[i.ID] = i.Status
@@ -235,8 +274,17 @@ func (a *app) agentsChanged(list []agent.Info) {
 		switch {
 		case i.Status == agent.Working:
 			working++
-		case i.Status == agent.Waiting && lead:
+		case i.Status == agent.Waiting && (lead || i.HandedOver):
 			waiting++
+		}
+		// A worker's question reaches the user only when its lead hands it
+		// over: tell them once per question, which keeps its ID until it is
+		// answered or replaced, even if an older list is seen meanwhile.
+		if handed := handedOverDialog(i); handed != "" && handed != a.handed[i.ID] {
+			notes = append(notes, note{i.ID, tr("%s needs you", a.yesmanLabel(i.Yesman)), tr("A worker's question was handed to you.")})
+			a.handed[i.ID] = handed
+		} else if a.handed[i.ID] != "" && dialogRequest(i) != a.handed[i.ID] {
+			delete(a.handed, i.ID)
 		}
 		if !lead || prev == i.Status || prev == "" && i.Status != agent.Waiting {
 			continue
@@ -249,22 +297,19 @@ func (a *app) agentsChanged(list []agent.Info) {
 		}
 	}
 	if working > 0 && a.release == nil {
-		a.release = mygo.Power.KeepRunning("yesman agents are working")
+		keep := a.keepAwake
+		if keep == nil {
+			keep = mygo.Power.KeepRunning
+		}
+		a.release = keep("yesman agents are working")
 	} else if working == 0 && a.release != nil {
 		a.release()
 		a.release = nil
 	}
-	a.working, a.waiting = working, waiting
+	a.working, a.agentWaiting = working, waiting
+	a.waiting = waiting + a.openHandoffsLocked()
 	a.smu.Unlock()
-
-	if a.tray != nil {
-		title := ""
-		if waiting > 0 {
-			title = strconv.Itoa(waiting)
-		}
-		a.tray.SetTitle(title)
-		a.tray.SetToolTip(trayToolTip(working, waiting))
-	}
+	a.showCounts()
 	// A lead that ends a run often carries on at once, with a worker's
 	// report or a reminder of open tasks: tell the user only once the whole
 	// yesman has stayed settled for a moment.
@@ -276,6 +321,24 @@ func (a *app) agentsChanged(list []agent.Info) {
 	for _, n := range notes {
 		a.notify(n.id, n.title, n.body)
 	}
+}
+
+// handedOverDialog is the request ID of the dialog a worker's lead handed to
+// the user, or "".
+func handedOverDialog(i agent.Info) string {
+	if !i.HandedOver {
+		return ""
+	}
+	return dialogRequest(i)
+}
+
+// dialogRequest is the request ID of the dialog an agent waits on, or "".
+func dialogRequest(i agent.Info) string {
+	var d struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(i.Dialog, &d)
+	return d.ID
 }
 
 func (a *app) yesmanLabel(name string) string {
@@ -309,6 +372,10 @@ func (a *app) yesmanSettled(yesman string) bool {
 // notify shows a notification about an agent, unless the window has focus;
 // clicking it shows that agent.
 func (a *app) notify(id, title, body string) {
+	if a.notifier != nil {
+		a.notifier(id, title, body)
+		return
+	}
 	if a.windowFocused() {
 		return
 	}

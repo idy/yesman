@@ -37,6 +37,9 @@ type Server struct {
 	Changed func()
 	// BoardChanged is told when a yesman's board changes.
 	BoardChanged func(yesman string)
+	// NeedsYouChanged is told when what waits on a yesman's user changes,
+	// with the handoff a lead added, if it added one.
+	NeedsYouChanged func(yesman string, added *yesmen.Handoff)
 	// AddRepo, when set, clones a GitHub repository into the pool in place
 	// of resolving and cloning it here, so the app can show it cloning.
 	AddRepo func(ctx context.Context, repo string) (pool.Repo, error)
@@ -55,6 +58,9 @@ type Server struct {
 	worktreeLocks map[string]*sync.Mutex // serialize lifecycle operations per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
+	// beforeBoardChange, set only by tests, runs once a board change was
+	// admitted, just before it is written.
+	beforeBoardChange func()
 }
 
 // Start listens on a loopback port and serves in the background.
@@ -89,16 +95,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/github-app/mode", s.handle(s.githubAppMode))
 	mux.HandleFunc("POST /v1/github-app/pulls", s.handle(s.githubAppPull))
 	mux.HandleFunc("POST /v1/workers/answer", s.handle(s.answerWorker))
+	mux.HandleFunc("POST /v1/origin", s.origin)
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
+	mux.HandleFunc("GET /v1/needs-you", s.handle(s.needsYou))
+	mux.HandleFunc("POST /v1/needs-you", s.handle(s.changeNeedsYou))
 	return mux
 }
 
-// caller is the agent a request comes from.
+// caller is the agent a request comes from, as it was when the request
+// arrived. token is the credential it was authenticated with, which names
+// the very process, so that a change can be refused once it is retired.
 type caller struct {
-	agent      agent.Info
-	yesman     yesmen.Yesman
-	credential string // internal revalidation only; never serialized
+	agent  agent.Info
+	yesman yesmen.Yesman
+	// token is checked again before mutation by BeginChange, CallerOperation
+	// or the cancellable App BeginOperation. It never leaves this server.
+	token string
 }
 
 type handlerFunc func(ctx context.Context, c caller, r *http.Request) (any, error)
@@ -120,7 +133,11 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, err)
 			return
 		}
-		out, err := fn(r.Context(), caller{agent: info, yesman: y, credential: token}, r)
+		out, err := fn(r.Context(), caller{agent: info, yesman: y, token: token}, r)
+		if errors.Is(err, agent.ErrRetired) {
+			writeError(w, http.StatusUnauthorized, err)
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
@@ -133,6 +150,36 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	}
+}
+
+// origin tells yesman's extension who wrote the user message pi is ending,
+// so that it can record that in pi's session beside the message. The app
+// decided it from pi's records of the prompt (see agent.originTracker); this
+// reads only the credential and memory, never the workspace.
+func (s *Server) origin(w http.ResponseWriter, r *http.Request) {
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		writeError(w, http.StatusUnauthorized, errors.New("no agent credential"))
+		return
+	}
+	if _, err := s.Agents.Authenticate(token); err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+	var req struct {
+		Timestamp float64 `json:"timestamp"`
+		Digest    string  `json:"digest"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
+		return
+	}
+	out := map[string]any{}
+	if o, ok := s.Agents.MessageOrigin(r.Context(), token, req.Timestamp, req.Digest); ok {
+		out["origin"] = o
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func writeError(w http.ResponseWriter, code int, err error) {
@@ -390,7 +437,7 @@ func (s *Server) sendWorker(_ context.Context, c caller, r *http.Request) (any, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := s.Agents.Prompt(ctx, id, "[from your lead] "+req.Message); err != nil {
+	if err := s.Agents.PromptFromLead(ctx, id, "[from your lead] "+req.Message); err != nil {
 		return nil, err
 	}
 	return map[string]bool{"sent": true}, nil
@@ -444,6 +491,12 @@ func (s *Server) board(_ context.Context, c caller, _ *http.Request) (any, error
 	return s.Yesmen.Board(c.yesman.Name)
 }
 
+// changeBoard changes the caller's yesman's board, unless the caller was
+// retired after its request arrived: its process stopped, or its yesman was
+// dismissed and maybe hired again, while the body was on its way. The body
+// is read before any lock is taken; the change is then written within the
+// workspace's Use and the caller's process's admission (agent.BeginChange),
+// so that it lands before that process finishes stopping, or not at all.
 func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any, error) {
 	var change yesmen.BoardChange
 	if err := decode(r, &change); err != nil {
@@ -454,7 +507,17 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 	}
 	var b yesmen.Board
 	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
-		var err error
+		if !y.HiredAt.Equal(c.yesman.HiredAt) {
+			return agent.ErrRetired
+		}
+		release, err := s.Agents.BeginChange(c.token, y)
+		if err != nil {
+			return err
+		}
+		defer release()
+		if s.beforeBoardChange != nil {
+			s.beforeBoardChange()
+		}
 		b, err = s.Yesmen.ChangeBoard(y.Name, change)
 		return err
 	}); err != nil {
@@ -474,6 +537,9 @@ func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, e
 	}
 	if c.agent.Role == agent.RoleLead && s.Crew != nil {
 		text += CrewContext(s.Crew(ctx), c.agent)
+	}
+	if c.agent.Role == agent.RoleLead {
+		text += s.needsYouContext(c)
 	}
 	return text, nil
 }
@@ -553,16 +619,18 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are Knowledge notes under .yesman/knowledge/ and the task log at .yesman/task-log.md. Read files only to answer a quick question or maintain these shared documents from worker reports, not to investigate. ")
 		w("Hand everything else to workers with yesman_worker_start (changes, commands, tests, research across many files, reviews, releases), each with a title naming its subject, then end your run. Each worker is its own pi agent in this workspace; several can run at once. ")
 		w("Keep every run short: answer, delegate, end.\n")
+		w("Your text is what the user reads. The window folds your thinking, tool calls, board changes, worker reports and yesman's notices into a collapsed work log, so write text for the user: answers, results, questions and decisions for them, and progress that tells them something new. Do not narrate routine steps such as reading files, checking the board or starting a worker, and do not restate a worker's report: say what it means for the user.\n")
 		w("Never sleep, poll or read session logs to wait for a worker: end your run, and its report arrives as a new message that starts your next one. You also hear when a worker's run was stopped by the user or failed.\n")
 		w("\n## Seeing it through\n\n")
 		w("You answer for this yesman: what you take on, you see through to the end. The user should not have to look after the workers. ")
 		w("When a report arrives, check it against the board, mark the task, and start the next step yourself (follow-ups, fixes, reviews) until everything the user asked for is done.\n")
-		w("- A worker's question arrives as a [yesman] message: answer it with yesman_worker_answer, or with yesman_worker_send when the worker asked in its report.\n")
+		w("- A worker's question arrives as a [yesman] message: answer it with yesman_worker_answer, or with yesman_worker_send when the worker asked in its report. If only the user can answer it, hand it to them with yesman_needs_you handOver: it shows under Needs you in their window.\n")
 		w("- A worker whose process failed: message it with yesman_worker_send to start it again, or start a fresh worker. Tell the user only if it keeps failing.\n")
 		w("- A worker's run the user stopped: that was their call. Leave it stopped and mark its task blocked, unless they say otherwise.\n")
 		w("- When you end a run with tasks still todo or doing and no worker running, yesman reminds you once.\n")
 		w("Decide everything you can. Bring the user only what you cannot decide: what to build, trade-offs only they can weigh, taste, credentials, or anything irreversible they did not ask for. ")
 		w("Never hold the rest of the work for these: mark each task that waits on one blocked, with the question in its note, finish everything else, and then put the open decisions to the user together, each with the options and your recommendation.\n")
+		w("- Register each thing only the user can do or decide with yesman_needs_you add (a decision, information, logging in, installing, another manual step), linked to its board task: it shows under Needs you until they mark it done or not needed, and you hear when they do. Resolve it yourself when it is settled otherwise. Never ask for passwords, keys, tokens or codes in chat: point the user to Settings › Secrets.\n")
 	} else {
 		w("You are %q, a worker of the yesman named %q. Your lead started you for one task and receives your final message when you finish a run, so end each run with a short report: what you did, where (worktree, branch, PR) and what is left.\n", me.Name, y.Label())
 		w("Do not stop to ask. When something is unclear, make the reasonable choice, say so in your report, and go on. If you cannot go on without a decision, finish everything that does not depend on it, then end your run with the question in your report: your lead answers it, not the user. Questions your tools ask go to your lead too.\n")

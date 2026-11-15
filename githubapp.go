@@ -10,6 +10,7 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/idy/yesman/internal/githubapp"
+	"github.com/idy/yesman/internal/yesmen"
 )
 
 // GitHubAppSetup contains only an expiring entry URL and public status. Callback
@@ -77,7 +78,16 @@ func (s *service) GitHubApp() (GitHubAppView, error) {
 	if a.yesmen != nil {
 		list, err := a.yesmen.List()
 		if err != nil {
-			return v, err
+			var partial yesmen.MetadataErrors
+			if !errors.As(err, &partial) {
+				return v, err
+			}
+			// Keep valid workspace choices usable while reporting the same
+			// bounded metadata diagnostics as State. Invalid scopes still fail
+			// Get/Configure/Test; no missing generation is invented.
+			if v.Error == "" {
+				v.Error = partial.Error()
+			}
 		}
 		for _, y := range list {
 			v.Workspaces = append(v.Workspaces, GitHubAppWorkspace{Name: y.Name, Label: y.Label()})

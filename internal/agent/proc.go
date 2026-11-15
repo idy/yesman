@@ -59,6 +59,15 @@ type proc struct {
 	done   chan struct{}
 	err    error // why it exited, set before done closes
 	stderr tail
+
+	origins originTracker // who wrote its user messages
+
+	// changes orders the workspace changes that API requests with this
+	// process's credential make against the credential's retirement: each
+	// change holds it for reading, and retiring takes it for writing once,
+	// after which no change begins. See Manager.BeginChange.
+	changes       sync.RWMutex
+	changesClosed bool // guarded by changes
 }
 
 // startProc starts pi. Records that are not answers to commands, the

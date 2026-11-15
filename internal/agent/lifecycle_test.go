@@ -176,7 +176,7 @@ func TestDeliveryArchiveDrainsLastSnapshotBeforeRenameAndRehire(t *testing.T) {
 	m.mu.Lock()
 	m.persistDeliveriesLocked(old)
 	m.mu.Unlock()
-	if err = m.promptDelivery(ctx, "alice/lead", "old intent", "steer", id, old, &y.HiredAt); !errors.Is(err, errStopped) {
+	if err = m.promptDelivery(ctx, "alice/lead", "old intent", "steer", id, old, &y.HiredAt, Origin{Source: OriginUser, Submission: id}); !errors.Is(err, errStopped) {
 		t.Fatalf("old submission could resume new workspace: %v", err)
 	}
 	if d := archivedDelivery(t, dest, id); d.State != "interrupted" {

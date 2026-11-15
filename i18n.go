@@ -101,8 +101,9 @@ var zhHans = map[string]string{
 	// Notifications
 	"%s needs you": "%s 需要你",
 	"It asked a question and is waiting for your answer.": "它提了一个问题，正在等你回答。",
-	"%s stopped":                    "%s 已停止",
-	"Finished and waiting for you.": "已完成，等你继续。",
+	"A worker's question was handed to you.":              "一个助手的问题交给了你。",
+	"%s stopped":                                          "%s 已停止",
+	"Finished and waiting for you.":                       "已完成，等你继续。",
 
 	// The agent menu
 	"Show Done Workers":   "显示已完成的助手",
