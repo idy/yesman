@@ -1161,6 +1161,13 @@ function renderSidebar() {
       list.append(agentRow(w, 'agent-row--worker', w.name));
     }
   }
+  for (const issue of state.snap.workspaceErrors ?? []) {
+    list.append(h('div', { class: 'workspace-error', role: 'note', 'data-workspace-error': issue.name },
+      h('p', null, h('strong', null, issue.name), ': ', t('Workspace unavailable')),
+      h('p', null, t('Metadata is {size} bytes; the limit is {limit} bytes.', { size: issue.size, limit: issue.limit })),
+      h('p', { class: 'path' }, issue.path),
+      h('p', null, t('Quit yesman before editing. Back up this file, reduce its size, and preserve its hiredAt field.'))));
+  }
   restoreSidebarFocus(focusedRow);
   renderSideFoot();
 }

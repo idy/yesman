@@ -51,6 +51,9 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .side-group { display: flex; align-items: center; justify-content: space-between; min-height: 24px; margin: 14px 2px 4px 8px; color: var(--mds-muted); font-size: var(--mds-text-caption); font-family: var(--mds-font-heading); }
 .side-foot { padding: 8px 10px 12px; border-top: 1px solid var(--mds-line); }
 .side-foot .mds-nav-item { width: 100%; }
+.workspace-error { margin: 8px 10px; font-size: var(--mds-text-caption); color: var(--mds-error); overflow-wrap: anywhere; }
+.workspace-error p { margin: 4px 0; }
+.workspace-error .path { white-space: normal; font-size: inherit; }
 .settings-branch { gap: 0; }
 .settings-drawer { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 220ms var(--mds-ease); }
 .settings-branch[data-open] .settings-drawer { grid-template-rows: 1fr; }
