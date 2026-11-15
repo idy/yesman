@@ -1901,7 +1901,7 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   const textarea = h('textarea', {
     // Read-only keeps the caret/focus while RPC acceptance is pending. A
     // disabled textarea would drop focus to BODY before the next render.
-    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending || attachments.recalling,
+    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending || attachments.recalling, 'data-paste-images': true,
     title: working ? t('Enter to send after the current step; Shift+Enter for a new line') : '',
     placeholder: a.role === 'lead' ? t('Message {name}…', { name: yesmanLabel(a.yesman) }) : t('Message worker {name}…', { name: a.name }),
   });

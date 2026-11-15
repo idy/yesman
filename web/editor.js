@@ -20,11 +20,12 @@ async function load() {
   return cm;
 }
 
-// editorViewOf returns the editor view an element is in, or null, for the
-// page's context menu: it draws only the lines in view, so a selection's
-// whole text comes from its state, not the page's.
+// editorViewOf returns the editor view whose text (or gutter) an element is
+// in, or null, for the page's context menu: it draws only the lines in view,
+// so a selection's whole text comes from its state, not the page's. Its
+// panels, such as Find, are fields of their own.
 export function editorViewOf(el) {
-  const dom = el?.closest?.('.cm-editor');
+  const dom = el?.closest?.('.cm-scroller')?.closest('.cm-editor');
   return dom && cm ? cm.EditorView.findFromDOM(dom) : null;
 }
 

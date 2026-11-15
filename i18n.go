@@ -144,6 +144,11 @@ var zhHans = map[string]string{
 	"Copy":       "拷贝",
 	"Paste":      "粘贴",
 	"Select All": "全选",
+	// Images pasted from the page's menu, as the composer says them
+	"Attach at most 4 images.":                  "最多添加 4 张图片。",
+	"This image is empty.":                      "这张图片是空文件。",
+	"Each image must be 5 MB or smaller.":       "每张图片不能超过 5 MB。",
+	"Images must be 10 MB or smaller in total.": "图片合计不能超过 10 MB。",
 
 	// Dialogs
 	"Choose a yesman folder":      "选择 yesman 文件夹",

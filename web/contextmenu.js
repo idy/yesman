@@ -17,8 +17,14 @@
 //
 // Copy and Cut put the text the menu opened on through Yesman.CopyValue,
 // the clipboard's bridge; Paste inserts the text PageMenu read, as typing
-// does, with its undo. Nothing is copied out of a password or a secret's
-// value. The keyboard's own ⌘/Ctrl+C, V, X and A are untouched.
+// does, with its undo. For a field that takes images (the composer), Paste
+// hands the clipboard's images and text to the field's own paste handler, as
+// ⌘V does. Each item acts on the element and selection the menu opened on,
+// and does nothing once they changed. Nothing is copied out of a password or
+// a secret's value. The keyboard's own ⌘/Ctrl+C, V, X and A are untouched.
+//
+// On macOS a Control-click is a context click only: the click that follows
+// it never reaches the page, so it opens no link and sends no draft.
 
 // Inputs that hold no text.
 const NOT_TEXT = new Set(['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']);
@@ -29,6 +35,7 @@ export function createContextMenu({ call, fail, platform = 'mac', editorOf = () 
   const doc = win.document;
   let showing = false; // a menu is open: another only prevents the web view's
   let pressed = null; // a field's selection as a right button went down in it
+  let ctrlPress = false; // the last press was a Control-click on macOS
 
   const fieldOf = (el) => {
     const f = el?.closest?.('input, textarea');
@@ -58,6 +65,7 @@ export function createContextMenu({ call, fail, platform = 'mac', editorOf = () 
   // down, to keep the caret, the selection and Paste's place as they were.
   function onMouseDown(e) {
     pressed = null;
+    ctrlPress = platform === 'mac' && e.button === 0 && e.ctrlKey;
     if (!isRight(e)) return;
     const active = doc.activeElement;
     const field = fieldOf(active);
@@ -104,7 +112,9 @@ export function createContextMenu({ call, fail, platform = 'mac', editorOf = () 
   // while the menu is open.
   function targetOf(el) {
     const link = linkOf(el);
-    const view = editorOf(el);
+    // A field, such as the editor's Find box, is itself the target; the
+    // editor's text only when the menu opened on it.
+    const view = fieldOf(el) ? null : editorOf(el);
     if (view) {
       // The editor reads the page's selection after this: keep its own.
       const host = hostOf(el);
@@ -121,9 +131,10 @@ export function createContextMenu({ call, fail, platform = 'mac', editorOf = () 
       const selected = start !== null && end > start;
       return {
         kind: 'field', el: field, start, end, link: null, editable: true, secret, selection: selected,
-        // A secret's text never leaves its field.
+        // A secret's text never leaves its field (value stays in the page,
+        // only to see whether the field changed).
         text: selected && !secret ? field.value.slice(start, end) : '',
-        value: secret ? null : field.value,
+        value: field.value, images: !secret && field.hasAttribute('data-paste-images'),
         readOnly: field.readOnly || field.disabled, content: field.value.length > 0,
       };
     }
@@ -163,9 +174,9 @@ export function createContextMenu({ call, fail, platform = 'mac', editorOf = () 
     try {
       const choice = await call('PageMenu', Math.round(x), Math.round(y), {
         link: !!target.link, editable: target.editable, readOnly: !!target.readOnly, secret: !!target.secret,
-        selection: target.selection ?? target.text.length > 0, content: !!target.content,
+        selection: target.selection ?? target.text.length > 0, content: !!target.content, images: !!target.images,
       });
-      await act(target, choice?.action ?? '', choice?.text ?? '');
+      await act(target, choice?.action ?? '', choice?.text ?? '', choice?.images ?? []);
     } catch (err) {
       fail(err);
     } finally {
@@ -202,7 +213,7 @@ export function createContextMenu({ call, fail, platform = 'mac', editorOf = () 
       return;
     }
     t.el.focus({ preventScroll: true });
-    if (t.kind === 'host' && t.range && inputType === 'deleteByCut') {
+    if (t.kind === 'host' && t.range) {
       const sel = win.getSelection();
       sel.removeAllRanges();
       sel.addRange(t.range);
@@ -215,7 +226,28 @@ export function createContextMenu({ call, fail, platform = 'mac', editorOf = () 
     t.el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType, data: text || null }));
   }
 
-  async function act(t, action, pasted) {
+  // pasteEvent hands the clipboard's images, then its text, to the field's
+  // own paste handler, as ⌘V would, and says whether a handler took them.
+  function pasteEvent(t, text, images) {
+    let data;
+    try {
+      data = new DataTransfer();
+      if (text) data.setData('text/plain', text);
+      images.forEach((image) => {
+        const bytes = Uint8Array.from(atob(image.data), (c) => c.charCodeAt(0));
+        data.items.add(new File([bytes], 'image.png', { type: image.mimeType }));
+      });
+    } catch {
+      return false;
+    }
+    t.el.focus({ preventScroll: true });
+    const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true, composed: true, clipboardData: data });
+    if (event.clipboardData !== data) Object.defineProperty(event, 'clipboardData', { value: data });
+    t.el.dispatchEvent(event);
+    return event.defaultPrevented;
+  }
+
+  async function act(t, action, pasted, images = []) {
     switch (action) {
       case 'copy':
         if (t.text) await copy(t.text);
@@ -227,8 +259,13 @@ export function createContextMenu({ call, fail, platform = 'mac', editorOf = () 
         if (writable(t) && unchanged(t)) insert(t, '', 'deleteByCut');
         return;
       case 'paste':
-        if (!pasted || !writable(t)) return;
-        insert(t, pasted, 'insertFromPaste');
+        // Only where the menu opened: not after the field or its selection
+        // changed, nor into another field.
+        if ((!pasted && !images.length) || !writable(t) || !unchanged(t)) return;
+        if (images.length && t.kind !== 'editor' && pasteEvent(t, pasted, images)) return;
+        // A field that takes no images gets the text only; an image-only
+        // clipboard leaves it as it was.
+        if (pasted) insert(t, pasted, 'insertFromPaste');
         return;
       case 'select-all':
         if (t.kind === 'editor') {
@@ -273,8 +310,27 @@ export function createContextMenu({ call, fail, platform = 'mac', editorOf = () 
     el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, composed: true, clientX, clientY }));
   }
 
+  // The click (and double click) after a Control-click on macOS: the page
+  // never sees it, whether the menu is still open or already chosen from or
+  // dismissed. The page's own clicks, such as Open Link's, are not trusted
+  // events and go on.
+  function onClick(e) {
+    if (!ctrlPress || !e.isTrusted || e.button !== 0) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }
+
+  // A key other than a modifier ends a Control-click: a click it makes, such
+  // as Enter on a button, is the key's.
+  function onKeyCapture(e) {
+    if (!['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) ctrlPress = false;
+  }
+
   return {
     install() {
+      win.addEventListener('click', onClick, true);
+      win.addEventListener('dblclick', onClick, true);
+      win.addEventListener('keydown', onKeyCapture, true);
       win.addEventListener('mousedown', onMouseDown, true);
       win.addEventListener('keydown', onKeyDown);
       win.addEventListener('contextmenu', onContextMenu);

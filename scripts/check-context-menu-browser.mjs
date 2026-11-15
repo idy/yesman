@@ -1,7 +1,9 @@
 // The page's context menu, on the production DOM with a controlled MyGo
 // bridge in Chromium and WebKit: real right-clicks on text, Markdown, links,
 // code, fields, dialogs and empty space are prevented, so the web view shows
-// no menu of its own, and open one app menu. No OS clipboard, store, draft
+// no menu of its own, and open one app menu. A Control-click on macOS opens
+// the menu only (no link opened, no draft sent); the editor's Find box is a
+// field of its own; Paste hands clipboard images to the composer. No OS clipboard, store, draft
 // or agent is used: Yesman.PageMenu answers from the fixture, and CopyValue
 // records what would reach the clipboard bridge.
 //
@@ -90,6 +92,7 @@ try {
             menus: window.fixture.calls.slice(m.calls).filter((c) => ['PageMenu', 'AgentMenu', 'FileMenu'].includes(c.method)),
             copied: window.fixture.copied.slice(m.copied),
             opened: window.fixture.calls.slice(m.calls).filter((c) => c.method === 'OpenURL' || c.method === 'Reveal'),
+            submits: window.fixture.calls.slice(m.calls).filter((c) => c.method === 'Submit').length,
           }), m);
         };
         const next = (choice) => page.evaluate((c) => window.fixture.next.push(c), choice);
@@ -142,7 +145,7 @@ try {
           assert.deepEqual(r.prevented, [true]);
           assert.equal(r.menus.length, 1);
           assert.equal(r.menus[0].method, 'PageMenu');
-          assert.deepEqual(r.menus[0].args[2], { link: false, editable: false, readOnly: false, secret: false, selection: true, content: false });
+          assert.deepEqual(r.menus[0].args[2], { link: false, editable: false, readOnly: false, secret: false, selection: true, content: false, images: false });
         }
         assert.deepEqual(blank.prevented, [true]);
         assert.deepEqual(blank.menus.map((c) => [c.method, c.args[2].selection]), [['PageMenu', false]]);
@@ -240,7 +243,7 @@ try {
         await rightClick({ x: box.x + 90, y: box.y + 14 });
         r = record('composer caret', await since(m));
         assert.deepEqual(r.prevented, [true]);
-        assert.deepEqual(r.menus.map((c) => c.args[2]), [{ link: false, editable: true, readOnly: false, secret: false, selection: false, content: true }]);
+        assert.deepEqual(r.menus.map((c) => c.args[2]), [{ link: false, editable: true, readOnly: false, secret: false, selection: false, content: true, images: true }]);
         assert.deepEqual(await composer.evaluate((el) => [el.value, el.selectionStart, el.selectionEnd, document.activeElement === el]), [draft, 4, 4, true]);
         // Paste goes where the caret is, as typing does.
         await next({ action: 'paste', text: ' X\nY' });
@@ -262,6 +265,41 @@ try {
         const length = (await composer.inputValue()).length;
         assert.deepEqual(await composer.evaluate((el) => [el.selectionStart, el.selectionEnd]), [0, length]);
 
+        // ---- Pasted images go to the composer's own paste handling ----
+        const red = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg==';
+        await composer.fill('image draft');
+        await composer.evaluate((el) => { el.focus(); el.setSelectionRange(5, 5); });
+        await next({ action: 'paste', text: 'caption', images: [{ mimeType: 'image/png', data: red }, { mimeType: 'image/png', data: red }] });
+        m = await mark();
+        const one = await composer.boundingBox();
+        await rightClick({ x: one.x + 18, y: one.y + one.height / 2 });
+        r = record('composer image paste', await since(m));
+        await page.locator('.composer-image img').nth(1).waitFor();
+        assert.equal(r.menus[0].args[2].images, true);
+        // As ⌘V: the images are attached; the draft and its caret stay.
+        assert.equal(await page.locator('.composer-image img').count(), 2);
+        assert.deepEqual(await page.locator('.composer textarea').evaluate((el) => [el.value, el.selectionStart]), ['image draft', 5]);
+        await page.locator('.composer-image button').first().click();
+        await page.locator('.composer-image button').first().click();
+
+        // ---- A Control-click on macOS is the menu only ----
+        await page.evaluate(() => getSelection().removeAllRanges());
+        m = await mark();
+        await page.locator('#thread a[data-external]').first().click({ modifiers: ['Control'] });
+        r = record('Control-click link', await since(m));
+        assert.deepEqual(r.prevented, [true]);
+        assert.deepEqual(r.menus.map((c) => c.method), ['PageMenu']);
+        assert.deepEqual(r.opened, []);
+        await page.locator('.composer textarea').fill('ctrl draft');
+        await page.locator('.composer textarea').evaluate((el) => el.setSelectionRange(2, 5));
+        m = await mark();
+        await page.locator('.composer .composer-action').click({ modifiers: ['Control'] });
+        r = record('Control-click Send', await since(m));
+        assert.deepEqual(r.menus.map((c) => c.method), ['PageMenu']);
+        assert.equal(r.submits, 0);
+        assert.deepEqual(await page.locator('.composer textarea').evaluate((el) => [el.value, el.selectionStart, el.selectionEnd]), ['ctrl draft', 2, 5]);
+        await page.locator('.composer textarea').fill('');
+
         // ---- Read-only, password and secret fields; editable content ----
         await page.evaluate(() => {
           const box = document.createElement('div');
@@ -277,7 +315,7 @@ try {
         await rightClick(await center(page.locator('#ro')));
         r = record('read-only input', await since(m));
         assert.deepEqual(r.prevented, [true]);
-        assert.deepEqual(r.menus[0].args[2], { link: false, editable: true, readOnly: true, secret: false, selection: true, content: true });
+        assert.deepEqual(r.menus[0].args[2], { link: false, editable: true, readOnly: true, secret: false, selection: true, content: true, images: false });
         // Cut is disabled, and the page cuts nothing even if asked.
         assert.equal(await page.locator('#ro').inputValue(), 'read only text');
         assert.deepEqual(r.copied, []);
@@ -307,14 +345,15 @@ try {
         // ---- The files pane's editor: its state, not the lines drawn ----
         await page.evaluate(async () => {
           const { createEditor, editorViewOf } = await import('/editor.js');
-          const ed = await createEditor({ onChange() {}, onSave() {} });
+          window.editorChanges = 0;
+          const ed = await createEditor({ onChange() { window.editorChanges++; }, onSave() {} });
           const host = document.createElement('div');
           host.id = 'cm-host';
-          host.style.cssText = 'height: 120px; display: flex';
+          host.style.cssText = 'height: 200px; display: flex; flex-direction: column';
           host.append(ed.dom);
           document.querySelector('#body').prepend(host);
           ed.show('alice\nnotes.txt', { text: 'alpha line\nbeta line\ngamma line', lang: '', readOnly: false });
-          window.fixtureEditor = { ed, view: editorViewOf(ed.dom) };
+          window.fixtureEditor = { ed, view: editorViewOf(ed.dom.querySelector('.cm-content')) };
         });
         const cmLine = (n) => page.locator('#cm-host .cm-line').nth(n);
         const cmState = () => page.evaluate(() => { const { view } = window.fixtureEditor; const s = view.state.selection.main; return [view.state.doc.toString(), s.from, s.to]; });
@@ -324,7 +363,7 @@ try {
         await rightClick({ x: gamma.x + 20, y: gamma.y + gamma.height / 2 });
         r = record('editor caret', await since(m));
         assert.deepEqual(r.prevented, [true]);
-        assert.deepEqual(r.menus[0].args[2], { link: false, editable: true, readOnly: false, secret: false, selection: false, content: true });
+        assert.deepEqual(r.menus[0].args[2], { link: false, editable: true, readOnly: false, secret: false, selection: false, content: true, images: false });
         await page.waitForTimeout(100);
         assert.deepEqual(await cmState(), ['alpha line\nbeta line\ngamma line', 0, 0]);
         await page.evaluate(() => { const { view } = window.fixtureEditor; view.dispatch({ selection: { anchor: 11, head: 20 } }); });
@@ -332,6 +371,32 @@ try {
         m = await mark();
         await rightClick(await center(cmLine(1)));
         assert.deepEqual((await since(m)).copied, ['beta line']);
+        // The Find box is a field of its own: its Copy, Paste and Cut never
+        // touch the file (its text, its changes, hence its dirty state).
+        await page.keyboard.press('Meta+f');
+        const find = page.locator('#cm-host .cm-search input[name=search]');
+        await find.waitFor();
+        await find.fill('gamma');
+        await find.evaluate((el) => el.select());
+        await next({ action: 'copy' });
+        m = await mark();
+        await rightClick(await center(find));
+        r = record('editor Find box', await since(m));
+        assert.deepEqual(r.prevented, [true]);
+        assert.deepEqual(r.copied, ['gamma']);
+        assert.equal(r.menus[0].args[2].editable, true);
+        await next({ action: 'paste', text: 'ZZZ' });
+        await rightClick(await center(find));
+        await page.waitForTimeout(60);
+        await find.evaluate((el) => el.select());
+        await next({ action: 'cut' });
+        m = await mark();
+        await rightClick(await center(find));
+        assert.deepEqual((await since(m)).copied, ['ZZZ']);
+        assert.equal(await find.inputValue(), '');
+        assert.deepEqual([...(await cmState()), await page.evaluate(() => window.editorChanges)], ['alpha line\nbeta line\ngamma line', 11, 20, 0]);
+        await page.keyboard.press('Escape');
+        await page.evaluate(() => { const { view } = window.fixtureEditor; view.focus(); view.dispatch({ selection: { anchor: 11, head: 20 } }); });
         await next({ action: 'paste', text: 'BETA' });
         await rightClick(await center(cmLine(1)));
         await page.waitForTimeout(60);
@@ -341,7 +406,7 @@ try {
         m = await mark();
         await rightClick(await center(cmLine(0)));
         r = await since(m);
-        assert.deepEqual(r.menus[0].args[2], { link: false, editable: true, readOnly: true, secret: false, selection: true, content: true });
+        assert.deepEqual(r.menus[0].args[2], { link: false, editable: true, readOnly: true, secret: false, selection: true, content: true, images: false });
         assert.deepEqual(r.copied, []);
         assert.equal((await cmState())[0], 'alpha line\nBETA\ngamma line');
         await page.evaluate(() => document.querySelector('#cm-host').remove());
@@ -397,5 +462,5 @@ try {
   }
 } finally { await new Promise((resolve) => server.close(resolve)); }
 if (out) await writeFile(`${out}/results.json`, JSON.stringify(results, null, 2) + '\n');
-if (!probeOnly) console.log('PASS: selections, Markdown, links, code, empty space, sidebar, Needs You, dialog, fields, secrets, editor, own-menu rows and menu keys in Chromium/WebKit, en/zh-Hans, light/dark, wide/narrow (controlled bridge).');
+if (!probeOnly) console.log('PASS: selections, Markdown, links, code, empty space, sidebar, Needs You, dialog, fields, secrets, editor and its Find box, composer image Paste, macOS Control-click, own-menu rows and menu keys in Chromium/WebKit, en/zh-Hans, light/dark, wide/narrow (controlled bridge).');
 console.log(JSON.stringify(results.filter((r) => /selected (Chinese|English) word|empty space$/.test(r.case)).map((r) => [r.engine, r.language, r.case, r.prevented, r.menus.map((x) => x.method)])));
