@@ -87,11 +87,13 @@ func TestQueueActionsBrowserBridge(t *testing.T) {
 			value, err = f.m.Messages(r.Context(), text(0))
 		case "Models":
 			value, err = f.m.Models(r.Context(), text(0))
-		case "Submit", "FixtureFollowUp":
+		case "Submit", "SubmitCoalescing", "FixtureFollowUp":
 			var images []Image
 			json.Unmarshal(req.Args[3], &images)
 			if req.Method == "FixtureFollowUp" {
 				value, err = f.m.submit(r.Context(), text(0), text(1), text(2), images, "followUp", since(4))
+			} else if strings.HasSuffix(req.Method, "SubmitCoalescing") {
+				value, err = f.m.SubmitCoalescing(r.Context(), text(0), text(1), text(2), images, since(4))
 			} else {
 				value, err = f.m.Submit(r.Context(), text(0), text(1), text(2), images, since(4))
 			}

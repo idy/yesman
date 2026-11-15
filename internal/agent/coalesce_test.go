@@ -314,3 +314,41 @@ func TestCoalesceFamilyRetiresTogether(t *testing.T) {
 		t.Fatalf("pending family member retired: %v", removed)
 	}
 }
+
+// Without every original (after a restart, or once released) a family's kept
+// text is only the start of the whole message: it is never offered as the
+// complete message to copy, and counts every input's images.
+func TestCoalesceFamilyPreviewWithoutOriginals(t *testing.T) {
+	u, idA, idB := newCoalesceUnit(t)
+	u.m.forgetRecallLocked(u.a, idA)
+	u.m.forgetRecallLocked(u.a, idB)
+	u.m.mergeChildLocked(u.a, u.get(idA), u.get(idB))
+	a := u.get(idA)
+	if !a.Preview || a.Text != "alpha" || a.ImageCount != 3 || !slices.Equal(a.Merged, []string{idB}) {
+		t.Fatalf("family receipt without originals %+v", a)
+	}
+	if view := u.a.deliveryView(a); view.OriginalText || view.OriginalPayload || view.CanCancel {
+		t.Fatalf("incomplete family offered as whole: %+v", view)
+	}
+	if _, err := u.m.SubmissionPayload(u.a.info.ID, idA, u.a.info.Since); err == nil {
+		t.Fatal("partial family payload returned")
+	}
+	// With every original the receipt shows the whole message, and the page
+	// learns which inputs a payload joins.
+	v, idA2, idB2 := newCoalesceUnit(t)
+	v.m.mergeChildLocked(v.a, v.get(idA2), v.get(idB2))
+	if a := v.get(idA2); a.Preview || a.Text != "alpha\n\nbeta" || a.ImageCount != 3 {
+		t.Fatalf("family receipt %+v", a)
+	}
+	payload, err := v.m.SubmissionPayload(v.a.info.ID, idB2, v.a.info.Since)
+	if err != nil || !slices.Equal(payload.Members, []string{idA2, idB2}) || payload.Text != "alpha\n\nbeta" || len(payload.Images) != 3 {
+		t.Fatalf("family payload %+v %v", payload, err)
+	}
+	if status := pendingStatus(v.a.nativeQueue); !status.AppendSupported {
+		t.Fatalf("queue status %+v", status)
+	}
+	v.a.nativeQueue.AppendAllowed = false
+	if status := pendingStatus(v.a.nativeQueue); status.AppendSupported {
+		t.Fatalf("queue status while pi cannot append %+v", status)
+	}
+}

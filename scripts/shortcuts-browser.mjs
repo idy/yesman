@@ -80,7 +80,7 @@ async function answer(m, args) {
   case 'ReadFile': return {path:args[1],size:fileText.length,modTime:'2026-11-14T00:00:00Z',kind:'text',text:fileText,hash:'h1'};
   case 'WriteFile': fileText = args[2]; return {path:args[1],size:args[2].length,modTime:'2026-11-14T00:00:01Z',kind:'text',text:args[2],hash:'h'+calls.length};
   case 'FilesMenu': return '';
-  case 'Submit': return {id:args[1],revision:1,state:'accepted',agentSince:''};
+  case 'Submit': case 'SubmitCoalescing': return {id:args[1],revision:1,state:'accepted',agentSince:''};
   case 'Shortcuts': return saved();
   case 'SetShortcuts': {
     await hold();
@@ -580,9 +580,9 @@ async function context(x, check) {
   assert.equal(await x.prevented(), false);
   await page.keyboard.press('ArrowDown');
   await page.keyboard.press('Enter');
-  await page.waitForFunction(() => calls.some((c) => c[0] === 'Submit'));
+  await page.waitForFunction(() => calls.some((c) => c[0] === 'SubmitCoalescing'));
   await page.waitForTimeout(150); // a second send would have been issued by now
-  assert.deepEqual((await x.callsOf('Submit')).map((c) => [c[1], c[3]]), [['alice/lead', 'hello\nthere']]);
+  assert.deepEqual((await x.callsOf('SubmitCoalescing')).map((c) => [c[1], c[3]]), [['alice/lead', 'hello\nthere']]);
   // Steering during a run, with an image attached.
   await page.evaluate(() => setStatus('alice/lead', 'working'));
   await page.locator('.composer-action[aria-label="Stop"]').waitFor();
@@ -598,9 +598,9 @@ async function context(x, check) {
   assert.equal(await page.locator('.composer-image').count(), 1);
   assert.equal(await x.textarea.inputValue(), 'steer with image');
   await page.keyboard.press('Enter');
-  await page.waitForFunction(() => calls.filter((c) => c[0] === 'Submit').length === 2);
+  await page.waitForFunction(() => calls.filter((c) => c[0] === 'SubmitCoalescing').length === 2);
   await page.waitForTimeout(150);
-  const sent = await x.callsOf('Submit');
+  const sent = await x.callsOf('SubmitCoalescing');
   assert.equal(sent.length, 2);
   assert.deepEqual([sent[1][1], sent[1][3], sent[1][4].length], ['alice/lead', 'steer with image', 1]);
   assert.equal(await x.count('Abort'), 4);

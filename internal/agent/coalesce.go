@@ -156,8 +156,7 @@ func (m *Manager) appendedRootLocked(a *agent, p *proc, d Delivery, queueID stri
 func (m *Manager) mergeChildLocked(a *agent, root, child Delivery) []Event {
 	var events []Event
 	if !slices.Contains(root.Merged, child.ID) && len(root.Merged) < maxMergedInputs {
-		root.Merged = append(slices.Clone(root.Merged), child.ID)
-		m.refreshAggregatePreviewLocked(a, &root)
+		m.setMergedLocked(a, &root, append(slices.Clone(root.Merged), child.ID))
 		events = append(events, m.deliveryLocked(a, root))
 		root = a.deliveries[root.ID]
 	}
@@ -175,16 +174,37 @@ func (m *Manager) mergeChildLocked(a *agent, root, child Delivery) []Event {
 	return events
 }
 
+// setMergedLocked records an occurrence's appended inputs and what its
+// receipt shows of the whole message.
+func (m *Manager) setMergedLocked(a *agent, root *Delivery, merged []string) {
+	var added []string
+	for _, id := range merged {
+		if !slices.Contains(root.Merged, id) {
+			added = append(added, id)
+		}
+	}
+	root.Merged = merged
+	if !m.refreshAggregatePreviewLocked(a, root) {
+		// Without every original the kept text is only the start of the
+		// whole message: never present it, or copy it, as complete.
+		root.Preview = true
+		for _, id := range added {
+			root.ImageCount += a.deliveries[id].ImageCount
+		}
+	}
+}
+
 // refreshAggregatePreviewLocked shows what pi will take: the bounded preview
 // and image count of the whole logical message. The fingerprint stays the
 // primary input's own, so its ID's retry is still recognized.
-func (m *Manager) refreshAggregatePreviewLocked(a *agent, root *Delivery) {
+func (m *Manager) refreshAggregatePreviewLocked(a *agent, root *Delivery) bool {
 	payload, ok := a.aggregatePayloadLocked(*root)
 	if !ok || len(payload.Images) > maxImages {
-		return
+		return false
 	}
 	root.Text, root.Preview = deliveryClip(payload.Text, maxDeliveryPreview)
 	root.ImageCount = len(payload.Images)
+	return true
 }
 
 // acquireAppendGate serializes composer submissions to one agent, so a later

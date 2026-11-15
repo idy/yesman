@@ -16,6 +16,9 @@ const maxRecallRecords = 64
 type RecallPayload struct {
 	Text   string  `json:"text"`
 	Images []Image `json:"images"`
+	// Members lists, for the page only, the inputs a whole occurrence's
+	// payload joins, primary first. It is never sent to pi or a provider.
+	Members []string `json:"members,omitempty"`
 }
 type recallPayload struct {
 	RecallPayload
@@ -74,7 +77,7 @@ func (m *Manager) retainRecallLocked(a *agent, id, text string, images []Image) 
 	if a.recallPayloads == nil {
 		a.recallPayloads = map[string]recallPayload{}
 	}
-	a.recallPayloads[id] = recallPayload{RecallPayload{text, slices.Clone(images)}, size}
+	a.recallPayloads[id] = recallPayload{RecallPayload{Text: text, Images: slices.Clone(images)}, size}
 	a.recallBytes += size
 	m.recallBytes += size
 }
@@ -196,18 +199,21 @@ func (m *Manager) applyPendingLocked(a *agent, p *proc, q pendingQueue) []Event 
 			d.queueID, d.queueEpoch, d.State = item.QueueID, q.Epoch, state
 			d.queueRevision, d.queuePreparing = item.ItemRevision, item.Preparing
 			if !slices.Equal(d.Merged, merged) {
-				d.Merged = merged
-				m.refreshAggregatePreviewLocked(a, &d)
+				m.setMergedLocked(a, &d, merged)
 			}
 			events = append(events, m.deliveryLocked(a, d))
 		} else if d.queueID != "" {
 			change := changes[d.queueID]
 			d.queueID, d.queuePreparing = "", false
 			// pi reports the final members of an occurrence it took or cancelled.
+			final := slices.Clone(d.Merged)
 			for _, segment := range known(change.Segments) {
-				if !slices.Contains(d.Merged, segment) && len(d.Merged) < maxMergedInputs {
-					d.Merged = append(slices.Clone(d.Merged), segment)
+				if !slices.Contains(final, segment) && len(final) < maxMergedInputs {
+					final = append(final, segment)
 				}
+			}
+			if len(final) != len(d.Merged) {
+				m.setMergedLocked(a, &d, final)
 			}
 			switch change.State {
 			case "taken":
@@ -252,7 +258,7 @@ func (m *Manager) applyPendingLocked(a *agent, p *proc, q pendingQueue) []Event 
 	return events
 }
 func pendingStatus(q pendingQueue) QueueStatus {
-	status := QueueStatus{Known: q.supported(), RecallSupported: q.supported(), PromoteSupported: q.supportsPromotion()}
+	status := QueueStatus{Known: q.supported(), RecallSupported: q.supported(), PromoteSupported: q.supportsPromotion(), AppendSupported: q.supportsAppend() && q.AppendAllowed}
 	for _, item := range q.Items {
 		if item.Kind == "steer" {
 			status.Steering++
@@ -418,6 +424,9 @@ func (m *Manager) SubmissionPayload(agentID, id string, since time.Time) (Recall
 	payload, ok := a.aggregatePayloadLocked(root)
 	if !ok {
 		return RecallPayload{}, errors.New("the full original message is no longer available for editing")
+	}
+	if len(root.Merged) > 0 {
+		payload.Members = root.members()
 	}
 	return payload, nil
 }

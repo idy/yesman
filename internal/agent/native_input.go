@@ -112,15 +112,19 @@ func (m *Manager) reconcileRecordedInputs(a *agent, p *proc, session string, ref
 		// A recorded input on the canonical session branch proves intake even when
 		// compaction omitted its message from the current model context. It is not
 		// a replay permission and must never override a cancellation tombstone.
-		d.State = "dispatched"
 		d.queueID, d.queuePreparing = "", false
+		final := slices.Clone(d.Merged)
 		for _, segment := range ref.Identity.Segments {
-			if deliveryID.MatchString(segment) && segment != d.ID && !slices.Contains(d.Merged, segment) && len(d.Merged) < maxMergedInputs {
+			if deliveryID.MatchString(segment) && segment != d.ID && !slices.Contains(final, segment) && len(final) < maxMergedInputs {
 				if child, ok := a.deliveries[segment]; ok && child.Session == d.Session && child.AgentSince.Equal(d.AgentSince) {
-					d.Merged = append(slices.Clone(d.Merged), segment)
+					final = append(final, segment)
 				}
 			}
 		}
+		if len(final) != len(d.Merged) {
+			m.setMergedLocked(a, &d, final)
+		}
+		d.State = "dispatched"
 		events = append(events, m.deliveryLocked(a, d))
 		root := a.deliveries[d.ID]
 		for _, segment := range root.Merged {
