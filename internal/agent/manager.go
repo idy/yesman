@@ -113,6 +113,9 @@ type Conversation struct {
 type Config struct {
 	// Pi is the pi executable.
 	Pi string
+	// Command resolves a managed runtime outside Manager locks. Nil preserves
+	// the executable supplied by callers and tests.
+	Command func(context.Context) (string, []string, error)
 	// Extension is the path of yesman's pi extension, loaded with -e.
 	Extension string
 	// Env is added to every agent's environment, after the app's own.
@@ -143,6 +146,7 @@ type Manager struct {
 	closed          bool              // StopAll permanently prevents further starts; guarded by mu
 	worktreeCleanup map[string]bool   // reservations preventing owner startup/input during final removal
 	shutdown        chan struct{}     // closed by StopAll to wake pending report retries
+	recallBytes     int               // full payload memory across all agent generations; guarded by mu
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
 }
@@ -162,6 +166,7 @@ type agent struct {
 	seq                            uint64        // the last event's number
 	turn                           []Event       // the events of the assistant message in progress
 	starting                       chan struct{} // closed when a start finishes, nil otherwise
+	startCancel                    context.CancelFunc
 	stopping                       bool
 	dir                            string   // the workspace, to show paths in it relative to it
 	tools                          []string // the tool calls running, oldest first
@@ -176,6 +181,9 @@ type agent struct {
 	retiring, deliverySealed       bool
 	removing                       bool
 	queue                          QueueStatus
+	nativeQueue                    pendingQueue
+	recallPayloads                 map[string]recallPayload
+	recallBytes, recalls           int
 	deliverySettled                uint64 // sequence of last observed settled boundary
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
@@ -426,15 +434,22 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			continue
 		}
 		a.starting = make(chan struct{})
+		startContext, cancelStart := context.WithCancel(context.Background())
+		a.startCancel = cancelStart
 		a.stopping = false
 		a.info.Status, a.info.Detail, a.info.UpdatedAt = Starting, "", time.Now()
 		m.mu.Unlock()
 		m.changed()
 
 		started := time.Now()
-		p, state, err := m.spawn(a, y, name, role)
+		p, state, err := m.spawn(startContext, a, y, name, role)
+		cancelStart()
 
 		m.mu.Lock()
+		a.startCancel = nil
+		if (a.stopping || m.closed) && err != nil {
+			err = errStopped
+		}
 		if err == nil && (a.stopping || m.closed) {
 			// Stop came during the start: end what it started before
 			// letting Stop return.
@@ -461,6 +476,10 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		}
 		a.proc = p
 		p.piSession.Store(state.SessionID)
+		a.nativeQueue = state.PendingQueue
+		if state.PendingQueue.supported() {
+			a.queue = pendingStatus(state.PendingQueue)
+		}
 		a.info.StartedAt = started
 		a.info.Status, a.info.Model, a.info.UpdatedAt = Idle, state.Model.ID, time.Now()
 		a.info.Provider, a.info.Effort, a.info.EffortLevels = state.Model.Provider, state.ThinkingLevel, nil
@@ -471,7 +490,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 	}
 }
 
-func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, modelState, error) {
+func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman, name, role string) (*proc, modelState, error) {
 	sessions := y.SessionDir(name)
 	if err := os.MkdirAll(sessions, 0o755); err != nil {
 		return nil, modelState{}, err
@@ -493,7 +512,19 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 		"YESMAN_ROLE="+role,
 		"YESMAN_WORKSPACE="+y.Path,
 	)
-	p, err := startProc(spec{Path: m.cfg.Pi, Args: args, Dir: y.Path, Env: env}, func(p *proc, kind string, raw json.RawMessage) {
+	path := m.cfg.Pi
+	if m.cfg.Command != nil {
+		ctx, cancel := context.WithTimeout(startContext, 10*time.Minute)
+		var prefix []string
+		var err error
+		path, prefix, err = m.cfg.Command(ctx)
+		cancel()
+		if err != nil {
+			return nil, modelState{}, err
+		}
+		args = append(prefix, args...)
+	}
+	p, err := startProc(spec{Path: path, Args: args, Dir: y.Path, Env: env}, func(p *proc, kind string, raw json.RawMessage) {
 		m.record(a, p, kind, raw)
 	})
 	if err != nil {
@@ -504,9 +535,9 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 	m.tokens[token] = a.info.ID
 	m.mu.Unlock()
 	// get_state answers once pi has loaded its session and extensions.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(startContext, 60*time.Second)
 	defer cancel()
-	state, err := p.modelState(ctx)
+	state, err := p.startupState(ctx)
 	if err != nil {
 		p.stop(2 * time.Second)
 		m.retireCredential(a, p)
@@ -538,9 +569,14 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 	raw = p.origins.observe(kind, raw)
+	m.observeNativeInput(a, p, kind, raw)
 	m.observeDelivery(a, p, kind, raw)
 	m.follow(a, p, kind, raw)
 	switch kind {
+	case "queue_resume_start":
+		// Native Session reserved preparation; no message has been taken and no
+		// provider turn/usage is implied. Expose Stop while the app context loads.
+		m.setStatus(a, p, Working, "")
 	case "agent_start":
 		m.setStatus(a, p, Working, "")
 	case "agent_settled":
@@ -792,6 +828,15 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		}
 		m.mu.Lock()
 		retiring := a.retiring || a.proc != p
+		if a.nativeQueue.Capability == 3 {
+			cmd["hostOrigin"] = origin
+		}
+		if messageID != "" && a.nativeQueue.supported() {
+			cmd["submissionId"] = messageID
+		}
+		if !a.nativeQueue.supported() {
+			m.forgetRecallLocked(a, messageID)
+		}
 		m.mu.Unlock()
 		var err error
 		if retiring {
@@ -853,6 +898,7 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	_, _ = p.modelState(ctx, func(s modelState) {
 		session = s.SessionID
 		m.deliverySessionChanged(a, p, s.SessionID)
+		m.syncPending(a, p, s.PendingQueue)
 	})
 	// Origins recorded before this process are in the session's entries,
 	// read once per session; the reader adds later ones.
@@ -870,7 +916,16 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	// reader as the answer arrives: events it handles next are not in the
 	// history, and the client replays them.
 	var conv Conversation
-	r, err := p.callAt(ctx, map[string]any{"type": "get_messages"}, func() {
+	r, err := p.callObserved(ctx, map[string]any{"type": "get_messages"}, func(r response) {
+		if p.origins.native && r.Success {
+			var recorded struct {
+				HostSession    string         `json:"hostSession"`
+				RecordedInputs []hostInputRef `json:"recordedInputs"`
+			}
+			if json.Unmarshal(r.Data, &recorded) == nil {
+				m.reconcileRecordedInputs(a, p, recorded.HostSession, recorded.RecordedInputs)
+			}
+		}
 		m.mu.Lock()
 		pruned := m.pruneDeliveryEventLocked(a)
 		conv.Live, conv.Seq = append([]Event(nil), a.turn...), a.seq
@@ -884,12 +939,23 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 		return Conversation{}, err
 	}
 	var data struct {
-		Messages json.RawMessage `json:"messages"`
+		Messages       json.RawMessage `json:"messages"`
+		InputRefs      []hostInputRef  `json:"inputRefs"`
+		RecordedInputs []hostInputRef  `json:"recordedInputs"`
+		HostSession    string          `json:"hostSession"`
 	}
 	if err := json.Unmarshal(r.Data, &data); err != nil {
 		return Conversation{}, err
 	}
-	conv.Messages = p.origins.project(data.Messages)
+	if p.origins.native && data.HostSession == p.piSession.Load().(string) {
+		conv.Messages = projectNativeMessages(data.Messages, data.InputRefs)
+	} else if p.origins.native {
+		// v2 can move queues but cannot bind user events/history. Do not feed
+		// transfers into the legacy text/count provenance heuristic.
+		conv.Messages = projectNativeMessages(data.Messages, nil)
+	} else {
+		conv.Messages = p.origins.project(data.Messages)
+	}
 	return conv, nil
 }
 
@@ -940,6 +1006,9 @@ func (m *Manager) Stop(id string) {
 		return
 	}
 	a.stopping = true
+	if a.startCancel != nil {
+		a.startCancel()
+	}
 	wait := a.starting
 	m.mu.Unlock()
 	if wait != nil {
@@ -981,7 +1050,7 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
 	p := a.proc
-	idle := p != nil && a.starting == nil && a.prompts == 0 && a.reports == 0 && a.info.Status == Idle &&
+	idle := p != nil && a.starting == nil && a.prompts == 0 && a.recalls == 0 && a.reports == 0 && a.info.Status == Idle &&
 		!a.info.StartedAt.IsZero() && a.info.StartedAt.Before(startedBefore)
 	m.mu.Unlock()
 	if !idle {
@@ -1242,7 +1311,7 @@ func (m *Manager) closeIfFinished(a *agent, p *proc, finishedAt time.Time) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
-	idle := !a.retiring && a.proc == p && a.starting == nil && a.info.Status == Idle && a.prompts == 0
+	idle := !a.retiring && a.proc == p && a.starting == nil && a.info.Status == Idle && a.prompts == 0 && a.recalls == 0
 	yesman, name := a.info.Yesman, a.info.Name
 	m.mu.Unlock()
 	if !idle {

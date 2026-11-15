@@ -20,6 +20,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/server"
@@ -63,7 +64,23 @@ func main() {
 		log.Print("workspace task logs: ", err)
 	}
 	a.pi, a.piErr = findPi()
+	var piCommand func(context.Context) (string, []string, error)
+	var managedRuntime *piruntime.Runtime
+	if os.Getenv("YESMAN_PI") == "" && (a.piErr != nil || piruntime.OfficialNPM(a.pi)) {
+		a.managedPi = true
+		managed, err := piruntime.New(h.Runtime())
+		a.piErr = err
+		if err == nil {
+			a.pi = managed.Description()
+			piCommand = managed.Command
+			managedRuntime = managed
+			a.piRuntime = managed
+		}
+	}
 	a.runPi = runPi(a.pi, h.Runtime())
+	if piCommand != nil {
+		a.runPi = runPiCommand(piCommand, h.Runtime())
+	}
 	a.piJobs = newPiJobs(a.runPi, func(j PiJobs) { _ = piJobsEvent.Broadcast(j) })
 	a.settings = loadSettings(h.Settings())
 	a.setTheme = mygo.Theme.SetSource
@@ -96,6 +113,7 @@ func main() {
 	}
 	a.agents = agent.New(agent.Config{
 		Pi:        a.pi,
+		Command:   piCommand,
 		Extension: extension,
 		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root},
 		Yesmen:    a.yesmen,
@@ -125,7 +143,12 @@ func main() {
 	mygo.App.OnWindowAllClosed(func() {}) // keep running in the tray
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
-	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { a.agents.StopAll() })
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		if managedRuntime != nil {
+			managedRuntime.Close()
+		}
+		a.agents.StopAll()
+	})
 	mygo.App.WhenReady(func() {
 		if err := mygo.App.Dock.SetIcon(appIcon); err != nil {
 			log.Print("dock icon: ", err)

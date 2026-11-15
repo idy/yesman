@@ -143,6 +143,7 @@ func (m *Manager) sealDeliveriesLocked(a *agent) []Event {
 	if a.deliverySealed {
 		return nil
 	}
+	m.clearRecallLocked(a)
 	var events []Event
 	for _, d := range a.deliveries {
 		if !pendingDelivery(d.State) {
