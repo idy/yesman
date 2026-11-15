@@ -21,17 +21,56 @@ func (m *Manager) follow(a *agent, p *proc, kind string, raw json.RawMessage) {
 		m.mu.Unlock()
 		return
 	}
-	before, started := a.info.Activity, a.info.RunStartedAt
+	before, started, failed := a.info.Activity, a.info.RunStartedAt, a.info.RunError
 	switch kind {
 	case "agent_start":
 		if a.info.RunStartedAt.IsZero() {
 			a.info.RunStartedAt = time.Now()
+			a.runEnd, a.runSaid = nil, false
 		}
 		if a.info.Activity == "" {
 			a.info.Activity = waitingForModel
 		}
 	case "agent_settled":
+		var e struct {
+			Aborted bool `json:"aborted"`
+		}
+		_ = json.Unmarshal(raw, &e)
+		// The run's outcome is its last assistant message. A run that said
+		// nothing leaves the last outcome as it was, unless the user
+		// stopped it.
+		if a.runSaid {
+			a.info.RunError = a.runEnd
+		} else if e.Aborted {
+			a.info.RunError = nil
+		}
+		a.runEnd, a.runSaid = nil, false
 		a.endRun()
+	case "message_end":
+		var e struct {
+			Message struct {
+				Role         string `json:"role"`
+				StopReason   string `json:"stopReason"`
+				ErrorMessage string `json:"errorMessage"`
+				Provider     string `json:"provider"`
+				Model        string `json:"model"`
+				Timestamp    int64  `json:"timestamp"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(raw, &e) == nil && e.Message.Role == "assistant" {
+			a.runSaid, a.runEnd = true, nil
+			if e.Message.StopReason == "error" {
+				at := time.Now().UTC()
+				if e.Message.Timestamp > 0 {
+					at = time.UnixMilli(e.Message.Timestamp).UTC()
+				}
+				msg := strings.TrimSpace(e.Message.ErrorMessage)
+				if msg == "" {
+					msg = "The model returned an error."
+				}
+				a.runEnd = &RunError{Message: clipTo(msg, runErrorLimit), Provider: e.Message.Provider, Model: e.Message.Model, At: at}
+			}
+		}
 	case "message_start":
 		var e struct {
 			Message struct {
@@ -92,7 +131,7 @@ func (m *Manager) follow(a *agent, p *proc, kind string, raw json.RawMessage) {
 	case "auto_retry_start":
 		a.info.Activity = "Retrying after an error"
 	}
-	changed := a.info.Activity != before || !a.info.RunStartedAt.Equal(started)
+	changed := a.info.Activity != before || !a.info.RunStartedAt.Equal(started) || a.info.RunError != failed
 	m.mu.Unlock()
 	if changed {
 		m.changed()
@@ -203,10 +242,16 @@ func firstLine(s string) string {
 	return s
 }
 
-func clip(s string) string {
-	if utf8.RuneCountInString(s) <= activityLimit {
+func clip(s string) string { return clipTo(s, activityLimit) }
+
+// runErrorLimit bounds the error every snapshot of the agents carries; the
+// whole message stays in the conversation.
+const runErrorLimit = 600
+
+func clipTo(s string, limit int) string {
+	if utf8.RuneCountInString(s) <= limit {
 		return s
 	}
 	r := []rune(s)
-	return string(r[:activityLimit-1]) + "…"
+	return string(r[:limit-1]) + "…"
 }

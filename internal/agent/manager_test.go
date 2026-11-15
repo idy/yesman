@@ -196,6 +196,18 @@ func fakePi() {
 				os.Exit(3)
 			}
 			write(map[string]any{"type": "agent_start"})
+			if reason, ok := strings.CutPrefix(cmd.Message, "test-run:"); ok {
+				// A run that ends on its one assistant message, as pi records
+				// a provider's error, a stop by the user or a reply.
+				msg := map[string]any{"role": "assistant", "content": []any{}, "stopReason": reason, "provider": "codex", "model": "gpt-5", "timestamp": time.Now().UnixMilli()}
+				if reason == "error" {
+					msg["errorMessage"] = "server_error: Codex: The usage limit has been reached (429: you can retry your request)"
+				}
+				write(map[string]any{"type": "message_start", "message": msg})
+				write(map[string]any{"type": "message_end", "message": msg})
+				write(map[string]any{"type": "agent_settled", "aborted": reason == "aborted"})
+				continue
+			}
 			if os.Getenv("FAKE_PI_SLOW_RUNS") != "" {
 				// A real run takes a while: its prompt's answer is handled
 				// well before it settles.

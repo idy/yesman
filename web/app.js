@@ -53,8 +53,14 @@ const statusText = (status) => (STATUS[status] ? t(STATUS[status]) : status);
 // A worker's question goes to its lead, not to you: it shows as asking,
 // in the working colour, and only a lead can need you.
 const asking = (a) => a.role === 'worker' && a.status === 'waiting';
-const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: yesmanLabel(a.yesman) }) : statusText(a.status));
-const statusTone = (a) => (asking(a) ? 'asking' : a.status);
+// An agent whose last finished run ended on a model error, such as a usage
+// limit, shows it while at rest, until a later run ends otherwise. A run in
+// progress may be recovering and shows as working; a stopped run, a question
+// or a request for the user is no failure. Each agent shows its own: a
+// yesman's entry is its lead's.
+const runFailed = (a) => !!a.runError && (a.status === 'idle' || a.status === 'stopped');
+const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: yesmanLabel(a.yesman) }) : runFailed(a) ? t('Last run ended with an error') : statusText(a.status));
+const statusTone = (a) => (asking(a) ? 'asking' : runFailed(a) ? 'error' : a.status);
 
 const state = {
   snap: { yesmen: [], agents: [] },
@@ -102,6 +108,7 @@ class Convo {
     this.error = null;
     this.live = null; // { message }: the reply being written
     this.workOpen = new Set(); // keys of the work rows the user opened
+    this.failuresOpen = new Set(); // keys of the folded failed runs the user opened
     this.receiptsOpen = false; // the earlier submissions' row is open
     this.tools = new Map(); // toolCallId -> { args, status, result }
     this.recalled = new Set();
@@ -671,7 +678,7 @@ function patchChildren(parent, attr, entries, { make, sig, update }) {
     const s = sig(entry);
     if (el && el._kind === entry.type) {
       old.delete(entry.key);
-      if (el._sig !== s || entry.type === 'work' || entry.type === 'receipts') {
+      if (el._sig !== s || entry.type === 'work' || entry.type === 'receipts' || entry.type === 'failures' || entry.type === 'failure') {
         const fresh = update(el, entry);
         if (fresh && fresh !== el) {
           el.replaceWith(fresh);
@@ -745,6 +752,90 @@ function updateWork(c, el, row) {
   return el;
 }
 
+// Runs in a row that ended on nothing but an error: one line saying how many
+// and on what, opened to read each error in full under its count, when each
+// run failed and the work before it. It is no alert: the error is history.
+function failuresEl(c, row) {
+  const el = h('details', { class: 'failures' });
+  el.append(
+    h('summary', null, icon('error', 'mds-icon failures-mark'), h('span', { class: 'failures-label' }), h('span', { class: 'failures-facts' }), icon('chevron', 'mds-icon failures-caret')),
+    h('div', { class: 'failures-body' }));
+  el.open = c.failuresOpen.has(row.key);
+  el.addEventListener('toggle', () => {
+    if (el.open) c.failuresOpen.add(row.key);
+    else c.failuresOpen.delete(row.key);
+    if (el.open && el._row) patchFailures(c, el.lastElementChild, el._row);
+  });
+  return updateFailures(c, el, row);
+}
+
+const oneLine = (text) => text.trim().replace(/\s+/g, ' ');
+
+function updateFailures(c, el, row) {
+  const label = tn(row.runs.length, 'Ended with an error', 'Ended with an error {n} times');
+  const facts = row.errors.length === 1 ? oneLine(row.errors[0].text) : tn(row.errors.length, '{n} error', '{n} different errors');
+  const summary = `${label}|${facts}`;
+  if (el._summary !== summary) {
+    el._summary = summary;
+    const s = el.firstElementChild;
+    s.children[1].textContent = label;
+    s.children[2].textContent = facts;
+    s.title = t('Runs in a row that ended on nothing but an error. Open to read each error, when it happened and the work before it.');
+  }
+  el._row = row;
+  if (el.open) patchFailures(c, el.lastElementChild, row);
+  return el;
+}
+
+function patchFailures(c, body, row) {
+  patchChildren(body, 'data-error', row.errors.map((e) => ({ type: 'failure', key: e.key, error: e })), {
+    make: (entry) => updateFailure(c, failureEl(entry.error), entry.error),
+    sig: () => '',
+    update: (el, entry) => updateFailure(c, el, entry.error),
+  });
+}
+
+const failureTime = (ms) => (ms == null ? '' : new Intl.DateTimeFormat(locale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(ms)));
+
+// One error, as pi recorded it, with the runs that ended on it.
+function failureEl(e) {
+  const copy = h('button', {
+    class: 'message-copy', type: 'button', title: t('Copy error text'), 'aria-label': t('Copy error text'),
+    onclick: async () => {
+      try {
+        await call('CopyValue', copy._text);
+        toast(t('Copied.'));
+      } catch (err) {
+        fail(err);
+      }
+    },
+  }, icon('copy'));
+  return h('div', { class: 'failure' },
+    h('div', { class: 'failure-head' }, h('span', { class: 'failure-count' }), h('span', { class: 'failure-source' }), copy),
+    h('pre', { class: 'failure-text' }),
+    h('div', { class: 'failure-runs' }));
+}
+
+function updateFailure(c, el, e) {
+  const [head, text, runs] = el.children;
+  head.children[0].textContent = tn(e.runs.length, 'Once', '{n} times');
+  head.children[1].textContent = [e.provider, ...e.models].filter(Boolean).join(' · ');
+  head.children[2]._text = e.text;
+  if (text.textContent !== e.text) text.textContent = e.text;
+  patchChildren(runs, 'data-run', e.runs.map((run) => ({ type: 'run', key: run.key, run })), {
+    make: (entry) => h('div', { class: 'failure-run' },
+      h('time', null, failureTime(entry.run.note.failure.at)),
+      entry.run.work ? workEl(c, entry.run.work) : h('span', { class: 'failure-run-empty' }, t('No work before the error'))),
+    sig: () => '',
+    update: (el, entry) => {
+      const work = el.querySelector(':scope > .work');
+      if (work && entry.run.work) updateWork(c, work, entry.run.work);
+      return el;
+    },
+  });
+  return el;
+}
+
 function rowEl(c, row) {
   switch (row.type) {
     case 'user': return userRowEl(row, c);
@@ -752,6 +843,7 @@ function rowEl(c, row) {
     case 'text': return h('div', { class: 'msg-assistant' }, md(row.text));
     case 'note': return noteRowEl(row);
     case 'work': return workEl(c, row);
+    case 'failures': return failuresEl(c, row);
     case 'receipt': return receiptEl(c, row.delivery, { sent: row.sent });
     case 'receipts': return receiptsEl(c, row);
     default: return h('div');
@@ -791,6 +883,7 @@ function patchThread(c) {
     sig: (row) => `${rowSig(row)}:${c.actions.has(row.delivery?.id)}`,
     update: (el, row) => {
       if (row.type === 'work') return updateWork(c, el, row);
+      if (row.type === 'failures') return updateFailures(c, el, row);
       if (row.type === 'receipts') return updateReceipts(c, el, row);
       if (row.type === 'text') {
         el.firstElementChild.innerHTML = renderMarkdown(row.text);
@@ -996,6 +1089,7 @@ function applyEvent(c, e, replaying,seq = 0) {
         const after = `w:assistant:${m.timestamp ?? ''}:`;
         if (before !== after) {
           for (const key of [...c.workOpen]) if (key.startsWith(before)) { c.workOpen.delete(key); c.workOpen.add(after + key.slice(before.length)); }
+          for (const key of [...c.failuresOpen]) if (key.startsWith(`f:${before}`)) { c.failuresOpen.delete(key); c.failuresOpen.add(`f:${after}${key.slice(before.length + 2)}`); }
         }
       }
       const submission = originOf(m)?.submission;
@@ -1044,6 +1138,11 @@ function applyEvent(c, e, replaying,seq = 0) {
 // ---------- Sidebar ----------
 
 function statusDot(status) {
+  // A failure is a red exclamation mark, named for those who cannot see it.
+  if (status === 'error' || status === 'failed') {
+    const label = status === 'error' ? t('Last run ended with an error') : t('Stopped unexpectedly');
+    return h('span', { class: 'dot-wrap', 'data-status': status, role: 'img', 'aria-label': label, title: label }, icon('error', 'mds-icon status-error-mark'));
+  }
   return h('span', { class: 'dot-wrap', 'data-status': status }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }));
 }
 
@@ -1064,14 +1163,17 @@ function agentRow(a, cls, label) {
     ? h('span', { class: 'meta', 'data-since': a.runStartedAt, title: t('How long this run has gone on') }, elapsed(a.runStartedAt))
     : h('span', { class: 'meta' }, a.status === 'idle' || a.status === 'stopped' || a.status === 'working' ? '' : asking(a) ? t('Asking') : statusText(a.status));
   const worker = cls.includes('agent-row--worker');
-  const done = worker && a.finishedAt;
+  // A worker that finished on an error shows the error, not a check.
+  const done = worker && a.finishedAt && !runFailed(a);
   let status = done ? t('Done') : statusLabel(a);
   if (worker && a.status === 'failed') status = t('{status}; {name} was told', { status, name: yesmanLabel(a.yesman) });
+  // While a later run is going, the error it may recover from stays in the tooltip.
+  const lastError = a.runError ? `\n${runFailed(a) ? '' : `${t('The last run ended with an error')}: `}${a.runError.message}` : '';
   return h('button', {
     class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': statusTone(a), 'data-done': done ? 'true' : null,
     'data-sidebar-entry': worker ? 'worker' : cls.includes('agent-row--yesman') ? 'yesman' : 'needs-you',
     'aria-current': current ? 'page' : null, 'aria-haspopup': 'menu',
-    title: `${a.id}: ${status}${a.title ? `\n${a.title}` : ''}${a.detail ? `\n${a.detail}` : ''}`,
+    title: `${a.id}: ${status}${a.title ? `\n${a.title}` : ''}${a.detail ? `\n${a.detail}` : ''}${lastError}`,
     onclick: () => selectAgent(a.id),
     oncontextmenu: (e) => openAgentMenu(e, a),
     onkeydown: (e) => {
@@ -1495,7 +1597,16 @@ function backToConversation(id) {
 // folded work log of its conversation, when the loaded history has it.
 async function showToolCall(a, id) {
   const c = convo(a);
-  const find = () => project(c, a).find((r) => r.type === 'work' && r.items.some((item) => item.type === 'tool' && item.block?.id === id));
+  // The call's work row may be one of the failed runs folded together.
+  const has = (r) => r?.type === 'work' && r.items.some((item) => item.type === 'tool' && item.block?.id === id);
+  const find = () => {
+    for (const r of project(c, a)) {
+      if (has(r)) return { row: r, work: r };
+      const run = r.type === 'failures' ? r.runs.find((x) => has(x.work)) : null;
+      if (run) return { row: r, work: run.work };
+    }
+    return null;
+  };
   if (c.loading) await c.loading.catch(() => {});
   // A window can hold an older copy of the history: read it again once.
   if (!find() && !c.loading) {
@@ -1503,17 +1614,23 @@ async function showToolCall(a, id) {
     await c.loading;
   }
   if (selectedAgent()?.id !== a.id) return;
-  const row = find();
-  const rowEl = row && $(`#thread [data-row="${CSS.escape(row.key)}"]`);
+  const found = find();
+  const open = async (el) => {
+    if (el.open) return;
+    const opened = new Promise((resolve) => el.addEventListener('toggle', resolve, { once: true }));
+    el.open = true;
+    await opened;
+  };
+  let rowEl = found && $(`#thread [data-row="${CSS.escape(found.row.key)}"]`);
+  if (rowEl && found.work !== found.row) {
+    await open(rowEl);
+    rowEl = rowEl.querySelector(`[data-run="${CSS.escape(found.work.key)}"] > .work`);
+  }
   if (!rowEl) {
     toast(t('Where it was asked is not in the loaded conversation.'));
     return;
   }
-  if (!rowEl.open) {
-    const opened = new Promise((resolve) => rowEl.addEventListener('toggle', resolve, { once: true }));
-    rowEl.open = true;
-    await opened;
-  }
+  await open(rowEl);
   const el = rowEl.querySelector(`[data-tool="${CSS.escape(id)}"]`);
   if (!el) {
     toast(t('Where it was asked is not in the loaded conversation.'));
