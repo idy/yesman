@@ -69,6 +69,9 @@ func (m *Manager) retireCredential(a *agent, p *proc) {
 // authenticates. The credential of a process started since is not p's,
 // and stays.
 func (m *Manager) revokeLocked(a *agent, p *proc) {
+	// Cancel this exact process's network/gh operations before waiting on
+	// its shared changes gate. A late old watcher must not cancel a new run.
+	cancelOperationsLocked(a, p)
 	if a.tokenProc == p && a.token != "" {
 		delete(m.tokens, a.token)
 		a.token, a.tokenProc = "", nil

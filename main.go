@@ -14,12 +14,15 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
@@ -37,6 +40,16 @@ var extensionSource []byte
 var appName = "yesman"
 
 func main() {
+	if githubapp.IsShim(os.Args) {
+		args := os.Args[1:]
+		if len(args) > 0 && args[0] == "--yesman-github-app-gh" {
+			args = args[1:]
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := githubapp.RunShim(ctx, args, os.Stdin, os.Stdout, os.Stderr)
+		cancel()
+		os.Exit(code)
+	}
 	mygo.App.SetName(appName)
 	mygo.App.SetLanguages(languages...)
 	if !mygo.App.RequestSingleInstanceLock() {
@@ -105,10 +118,30 @@ func main() {
 	a.variables = secrets.NewVariables(h.Variables())
 	a.keychain = appKeychain()
 	go a.unlockFromKeychain() // the system may ask the user first
+	gh, ghErr := exec.LookPath("gh")
+	if ghErr != nil {
+		gh = ""
+	} else if absolute, err := filepath.Abs(gh); err == nil {
+		gh = absolute
+	} else {
+		gh = ""
+	}
+	executable, _ := os.Executable()
+	shim, routingErr := a.prepareGitHubAppRouting(gh, executable)
+	if routingErr != nil {
+		log.Print("GitHub App command routing is unavailable: ", routingErr)
+	}
+	routingRequired := ""
+	if shim == "" && a.githubApp.RequiresRouting() {
+		routingRequired = "1"
+	}
+	if a.githubApp.Configured() {
+		go func() { _ = a.githubApp.Prepare("") }()
+	}
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
 		BoardChanged:    func(yesman string) { _ = boardEvent.Broadcast(yesman) },
 		NeedsYouChanged: func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
-		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew}
+		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew, GitHubApp: a.githubApp}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}
@@ -116,7 +149,7 @@ func main() {
 		Pi:        a.pi,
 		Command:   piCommand,
 		Extension: extension,
-		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root},
+		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root, "YESMAN_GH_SHIM=" + shim, "YESMAN_GH_REAL=" + gh, "YESMAN_GH_REQUIRED=" + routingRequired},
 		Yesmen:    a.yesmen,
 		OnEvent:   func(e agent.Event) { _ = agentEvent.Broadcast(e) },
 		OnChange:  a.agentsChanged,
@@ -146,6 +179,8 @@ func main() {
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		a.stopGitHubAppSetup()
+		a.githubApp.Close()
 		if managedRuntime != nil {
 			managedRuntime.Close()
 		}
