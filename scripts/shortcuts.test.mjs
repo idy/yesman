@@ -342,7 +342,7 @@ function actionTable(platform, shown = null) {
   const host = {
     t: (text) => text, selectedAgent: () => shown, yesmanOf: (a) => (a ? { name: a.yesman } : null), label: (n) => n,
     entries: () => [lead, ...(shown && shown !== lead ? [shown] : [])], leads: () => [lead], needsYou: () => null,
-    step() {}, selectAgent() {}, composer: () => (shown ? {} : null), abort() {}, sleep() {}, dialogOpen: () => false,
+    step() {}, selectAgent() {}, composer: () => (shown ? {} : null), canRecall: () => false, recallLatest() {}, abort() {}, sleep() {}, dialogOpen: () => false,
     showSettings() {}, settingsPages: () => [{ page: 'general', label: 'General' }, { page: 'shortcuts', label: 'Shortcuts' }],
     openHire() {}, togglePane() {}, togglePanel() {}, files: () => ({ current: () => false }), openCheckout() {}, renameYesman() {},
     removeWorker() {}, dismiss() {}, addRepos() {}, fetchAll() {}, palette: () => ({ open() {} }),
@@ -360,7 +360,7 @@ test('the action table registers stable IDs Go accepts, with usable, distinct de
   for (const platform of ['mac', 'windows', 'linux']) {
     const s = actionTable(platform);
     const ids = s.actions().map((a) => a.id);
-    assert.equal(ids.length, 35, platform); // 33 actions and two Settings pages here
+    assert.equal(ids.length, 36, platform); // 34 actions (including contextual recall) and two Settings pages here
     for (const id of ids) assert.ok(idRE.test(id) && id.length <= 64, id);
     // The IDs settings.json keeps: the three renamed ones, and none in camelCase.
     for (const id of ['agent.needs-you', 'files.task-log', 'repos.fetch-all']) assert.ok(ids.includes(id), id);
@@ -375,6 +375,10 @@ test('the action table registers stable IDs Go accepts, with usable, distinct de
       }
     }
     assert.deepEqual(s.defaultsOf('palette.open'), ['Mod+K', 'Mod+Shift+P']);
+    assert.deepEqual(s.defaultsOf('composer.recall'), ['ArrowUp']);
+    assert.equal(s.action('composer.recall').context.id, 'composer');
+    assert.deepEqual(s.action('composer.recall').context.bare, ['ArrowUp']);
+    assert.equal(s.action('composer.recall').palette, false);
     assert.deepEqual(s.defaultsOf('agent.next'), platform === 'mac' ? ['Mod+Alt+ArrowDown'] : ['Ctrl+PageDown']);
     // The native files menu shows these two actions' keys (files_menu.go).
     assert.equal(s.primary('files.find'), 'Mod+P');

@@ -255,6 +255,25 @@ func (s *service) Submit(ctx context.Context, id, messageID, text string, images
 	return s.app.agents.Submit(ctx, id, messageID, text, images, since)
 }
 
+// CancelSubmission removes one native pending occurrence and restores only its
+// exact original payload. Capability and generation are checked by the Manager.
+func (s *service) CancelSubmission(ctx context.Context, id, messageID string, since time.Time) (agent.RecallResult, error) {
+	return s.app.agents.CancelSubmission(ctx, id, messageID, since)
+}
+func (s *service) PromoteSubmission(ctx context.Context, id, messageID string, since time.Time) (agent.PromotionResult, error) {
+	return s.app.agents.PromoteSubmission(ctx, id, messageID, since)
+}
+
+func (s *service) SubmissionPayload(id, messageID string, since time.Time) (agent.RecallPayload, error) {
+	return s.app.agents.SubmissionPayload(id, messageID, since)
+}
+func (s *service) SubmissionText(id, messageID string, since time.Time) (string, error) {
+	return s.app.agents.SubmissionText(id, messageID, since)
+}
+func (s *service) AckRecall(id, messageID string, since time.Time) error {
+	return s.app.agents.AckRecall(id, messageID, since)
+}
+
 // Models lists pi's available models and this agent's effective selection.
 // The user may run an agent as any of them; the crew is what yesman starts
 // agents as.

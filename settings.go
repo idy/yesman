@@ -19,6 +19,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/crew"
+	"github.com/idy/yesman/internal/piruntime"
 )
 
 // Settings are the user's choices in the Settings pages, kept in
@@ -288,15 +289,17 @@ func (a *app) putSettingsLocked(next Settings) error {
 type AboutView struct {
 	// Version is the module version of a released build, empty for a
 	// development build, which the revision identifies instead.
-	Version  string `json:"version,omitempty"`
-	Revision string `json:"revision,omitempty"`
-	Time     string `json:"time,omitempty"` // the revision's commit time, RFC 3339
-	Modified bool   `json:"modified,omitempty"`
-	Go       string `json:"go"`
-	MyGo     string `json:"mygo,omitempty"`
-	Magpie   string `json:"magpie,omitempty"`
-	Pi       string `json:"pi,omitempty"`
-	PiError  string `json:"piError,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Revision  string `json:"revision,omitempty"`
+	Time      string `json:"time,omitempty"` // the revision's commit time, RFC 3339
+	Modified  bool   `json:"modified,omitempty"`
+	Go        string `json:"go"`
+	MyGo      string `json:"mygo,omitempty"`
+	Magpie    string `json:"magpie,omitempty"`
+	Pi        string `json:"pi,omitempty"`
+	PiError   string `json:"piError,omitempty"`
+	PiState   string `json:"piState,omitempty"`
+	PiManaged bool   `json:"piManaged,omitempty"`
 }
 
 // releaseVersion is a tagged module version, or "" for a development build:
@@ -343,17 +346,36 @@ func (s *service) About(ctx context.Context) AboutView {
 		}
 	}
 	a := s.app
+	v.PiManaged = a.managedPi
+	if a.piRuntime != nil {
+		v.PiState = a.piRuntime.State()
+		if v.PiState == "ready" {
+			v.Pi = piruntime.Version
+		}
+		if v.PiState == "failed" {
+			v.PiError = a.piRuntime.PreparationError()
+		}
+		return v // observational; About never starts or waits for installation
+	}
 	if a.piErr != nil {
 		v.PiError = a.piErr.Error()
 		return v
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, a.pi, "--version").Output()
+	var out string
+	var err error
+	if a.runPi != nil {
+		out, err = a.runPi(ctx, "--version")
+	} else {
+		var data []byte
+		data, err = exec.CommandContext(ctx, a.pi, "--version").Output()
+		out = string(data)
+	}
 	if err != nil {
 		v.PiError = "pi --version failed: " + err.Error()
 	} else {
-		v.Pi = strings.TrimSpace(string(out))
+		v.Pi = strings.TrimSpace(out)
 	}
 	return v
 }

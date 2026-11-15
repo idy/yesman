@@ -13,6 +13,7 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/home"
 	"github.com/idy/yesman/internal/nativepermissions"
+	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
@@ -42,14 +43,16 @@ var (
 )
 
 type app struct {
-	home    home.Home
-	pool    *pool.Pool
-	clones  *clones
-	fetcher *fetcher
-	yesmen  *yesmen.Store
-	agents  *agent.Manager
-	pi      string
-	piErr   error
+	home      home.Home
+	pool      *pool.Pool
+	clones    *clones
+	fetcher   *fetcher
+	yesmen    *yesmen.Store
+	agents    *agent.Manager
+	pi        string
+	piErr     error
+	managedPi bool
+	piRuntime *piruntime.Runtime
 	// runPi runs a pi command for the user, outside any workspace.
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs

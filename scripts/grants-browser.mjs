@@ -9,7 +9,7 @@ const root = fileURLToPath(new URL('../web/', import.meta.url));
 const out = process.env.YESMAN_GRANT_EVIDENCE || '/tmp/yesman-grants-evidence/browser';
 await mkdir(out, { recursive: true });
 const bridge = `<script>
-const handlers={};window.calls=[];window.failRead=false;window.failAction=false;window.holdRead=false;window.holdAction=false;
+const handlers={};window.calls=[];window.unmocked=[];window.failRead=false;window.failAction=false;window.holdRead=false;window.holdAction=false;
 window.fixture={platform:'darwin',items:[
  {id:'bluetooth',state:'not-determined',request:true,settings:true},
  {id:'notifications',state:'limited',detail:'notification-alerts-off',settings:true},
@@ -47,7 +47,7 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
   item.state=nextState;item.request=['not-determined','not-granted'].includes(nextState);
   return {item:structuredClone(item),outcome:['granted','denied','restricted'].includes(nextState)?nextState:'unchanged'};
  }
- default:throw Error('Unmocked method '+m);
+ default:unmocked.push(m);throw Error('Unmocked method '+m);
  }
 }};
 window.changeLocale=lang=>{mygo.locale=lang;handlers['mygo:locale']?.({locale:lang});};
@@ -185,7 +185,7 @@ try {
     assert.equal(await page.locator('.grant-toolbar h2').innerText(),lang==='en'?'Grant':'授权');
     await page.screenshot({path:out+'/'+[name,lang,theme,width].join('-')+'.png'});
     const navigation=await page.locator('#settings-nav').evaluate(el=>({items:el.children.length,pages:[...el.children].map(c=>c.dataset.page),height:el.getBoundingClientRect().height,scroll:el.scrollHeight,branch:el.closest('.settings-branch').outerHTML}));
-    assert.deepEqual(navigation.pages,['general','shortcuts','grant','yesman','repositories','secrets','variables','storage','pi','config','about']);
+    assert.deepEqual(navigation.pages,['general','shortcuts','grant','yesman','usage','repositories','secrets','variables','storage','pi','config','about']);
     assert(navigation.height>250,JSON.stringify({name,lang,theme,width,navigation}));
     results.push({engine:name,lang,theme,width,geometry,navigation});
    }
@@ -193,6 +193,7 @@ try {
    await page.evaluate(()=>holdAction=true);
    await action('full-disk','settings').click();
    assert.deepEqual(errors,[]);
+   assert.deepEqual(await page.evaluate(()=>unmocked),[]);
    await page.close();
   }finally{await browser.close();}
  }

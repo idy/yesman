@@ -224,7 +224,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.match(await folded.locator(":scope > summary").getAttribute("title"), /cannot tie to a message above/);
     assert.equal(await folded.evaluate((el) => el.open), false);
     assert.equal(await folded.locator(".receipts-body > *").count(), 0, "a folded line draws what it folds");
-    for (const id of [sub(101), sub(102)]) assert.equal(await page.locator(`[data-delivery="${id}"][data-bound="true"] .delivery-status`).innerText(), "Delivered");
+    for (const id of [sub(101), sub(102)]) assert.equal(await page.locator(`[data-delivery="${id}"][data-bound="true"] .delivery-status`).innerText(), "Taken by pi");
     // The local icon font, decorative; nothing fetched from outside.
     const caret = folded.locator(":scope > summary [data-icon=chevron]");
     assert.equal(await caret.getAttribute("aria-hidden"), "true");
@@ -295,7 +295,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     const now = await seen(page);
     assert.equal(now.ownReceipts, 0, "a receipt tied to a message keeps a row of its own");
     assert.deepEqual(now.people.filter((p) => p.text === "看一下这两张图"), [{ text: "看一下这两张图", images: [png.slice(-12), png1.slice(-12)] }]);
-    assert.equal(await page.locator(`[data-delivery="${pics}"][data-bound="true"] .delivery-status`).innerText(), "Delivered");
+    assert.equal(await page.locator(`[data-delivery="${pics}"][data-bound="true"] .delivery-status`).innerText(), "Taken by pi");
 
     // Two with the same text are two, each tied by its own ID, never by text.
     await page.evaluate(() => window.fixture.agents[0].status = "working");
@@ -370,8 +370,8 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await row(lost).locator(".delivery-status").innerText(), "Delivery unconfirmed");
     assert.equal(await row(lost).locator(".delivery-status").getAttribute("title"), "the bridge lost its answer");
     assert.equal(await input.inputValue(), "did this arrive?");
-    // An edited draft is a new submission, and its own row; the earlier
-    // uncertain one, superseded, folds with the earlier ones.
+    // Editing is a new intent. The current uncertain failure remains visible
+    // even after the payload display cache lets go of it.
     await input.fill("did this arrive? (edited)");
     count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
@@ -381,8 +381,8 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), edited);
     await settled();
     assert.match(await row(edited).innerText(), /^did this arrive\? \(edited\)\s*Accepted for steering/);
-    assert.equal(await row(lost).count(), 0);
-    assert.equal(await folded.locator(`[data-delivery="${lost}"]`).count(), 1);
+    assert.equal(await row(lost).count(), 1);
+    assert.equal(await folded.locator(`[data-delivery="${lost}"]`).count(), 0);
     // One the server never heard of, superseded by an edited draft the server
     // answers for, folds too: it is no longer the latest.
     await page.evaluate(() => (window.fixture.bridgeDown = true));
@@ -401,11 +401,10 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await settled();
     assert.equal(await row(unheard).count(), 0, "a submission the server never heard of stays the latest");
     assert.match(await folded.locator(`[data-delivery="${unheard}"]`).innerText(), /Submission: never heard of\s*Delivery unconfirmed/);
-    assert.deepEqual(await folded.locator(".receipts-body > [data-delivery]").evaluateAll((els) => els.slice(-2).map((el) => el.dataset.delivery)), [lost, unheard]);
+    assert.deepEqual(await folded.locator(".receipts-body > [data-delivery]").evaluateAll((els) => els.slice(-1).map((el) => el.dataset.delivery)), [unheard]);
     assert.match(await row(reworded).innerText(), /^never heard of \(edited\)\s*Accepted for steering/);
 
-    // A refusal while it is the latest is in view, with its error, and the
-    // draft kept; a new submission supersedes it.
+    // A current refusal stays visible with its error after later submissions.
     await input.fill("this will be refused");
     count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
@@ -429,8 +428,8 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "queued"), alone);
     await settled();
     assert.equal(await row(alone).locator(".delivery-status").innerText(), "Accepted for follow-up · delivery unconfirmed");
-    assert.equal(await row(refused).count(), 0, "a superseded refusal stays in view");
-    assert.equal((await seen(page)).foldedSummary, "30 earlier submissions | 28 delivery unconfirmed · 1 handled by an extension · 1 not sent");
+    assert.equal(await row(refused).count(), 1, "a later submission hid the current refusal");
+    assert.equal((await seen(page)).foldedSummary, "28 earlier submissions | 27 delivery unconfirmed · 1 handled by an extension");
     // The uncertain answer from the server, the latest now, is in view.
     await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed", { error: "pi stopped before answering" }), alone);
     await frame(page);
@@ -484,7 +483,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await folded.waitFor();
     assert.equal(await folded.evaluate((el) => el.open), true);
     assert.deepEqual(await seen(page), live);
-    assert.equal(await folded.locator(".receipts-body > [data-delivery]").count(), 30);
+    assert.equal(await folded.locator(".receipts-body > [data-delivery]").count(), 28);
 
     // History reads the same, without what only this window had: the folded
     // line closed again, the latest uncertain one in view from its preview.
