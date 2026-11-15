@@ -204,7 +204,11 @@ func TestCoalesceTargetEligibility(t *testing.T) {
 		}, false},
 		{"stale revision", func(u *coalesceUnit, _, _ string) { u.a.nativeQueue.Items[0].ItemRevision = 4 }, false},
 		{"other session", func(u *coalesceUnit, idA, _ string) { d := u.get(idA); d.Session = "old:pi0"; u.a.deliveries[idA] = d }, false},
-		{"other generation", func(u *coalesceUnit, idA, _ string) { d := u.get(idA); d.AgentSince = time.Time{}; u.a.deliveries[idA] = d }, false},
+		{"other generation", func(u *coalesceUnit, idA, _ string) {
+			d := u.get(idA)
+			d.AgentSince = time.Time{}
+			u.a.deliveries[idA] = d
+		}, false},
 		{"missing payload", func(u *coalesceUnit, idA, _ string) { u.m.forgetRecallLocked(u.a, idA) }, false},
 		{"slash input", func(u *coalesceUnit, _, idB string) {
 			u.m.forgetRecallLocked(u.a, idB)

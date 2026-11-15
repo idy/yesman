@@ -195,7 +195,7 @@ type agent struct {
 	recallPayloads                 map[string]recallPayload
 	recallBytes, recalls           int
 	appendGate                     chan struct{} // serializes composer submissions that may join an occurrence
-	deliverySettled                uint64 // sequence of last observed settled boundary
+	deliverySettled                uint64        // sequence of last observed settled boundary
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
 	nudged bool

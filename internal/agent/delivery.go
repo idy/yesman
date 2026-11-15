@@ -15,23 +15,23 @@ import (
 // Therefore no receipt claims that its message was consumed. Native transcript
 // messages remain independent, including transformed inputs and identical text.
 type Delivery struct {
-	ID                  string    `json:"id"`
-	Session             string    `json:"session"`
-	Revision            uint64    `json:"revision"`
-	State               string    `json:"state"`
-	Text                string    `json:"text"`
-	Images              []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
-	ImageCount          int       `json:"imageCount"`
-	Preview             bool      `json:"preview,omitempty"`
-	Error               string    `json:"error,omitempty"`
-	Order               uint64    `json:"order"`
-	AgentSince          time.Time `json:"agentSince,omitzero"`
-	CanCancel           bool      `json:"canCancel,omitempty"` // view only; never persisted as authority
-	CanRestore          bool      `json:"canRestore,omitempty"`
-	OriginalText        bool      `json:"originalText,omitempty"`
-	OriginalPayload     bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
-	NativePending       bool      `json:"nativePending,omitempty"`
-	CanPromote          bool      `json:"canPromote,omitempty"` // live native membership/admission only
+	ID              string    `json:"id"`
+	Session         string    `json:"session"`
+	Revision        uint64    `json:"revision"`
+	State           string    `json:"state"`
+	Text            string    `json:"text"`
+	Images          []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
+	ImageCount      int       `json:"imageCount"`
+	Preview         bool      `json:"preview,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	Order           uint64    `json:"order"`
+	AgentSince      time.Time `json:"agentSince,omitzero"`
+	CanCancel       bool      `json:"canCancel,omitempty"` // view only; never persisted as authority
+	CanRestore      bool      `json:"canRestore,omitempty"`
+	OriginalText    bool      `json:"originalText,omitempty"`
+	OriginalPayload bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
+	NativePending   bool      `json:"nativePending,omitempty"`
+	CanPromote      bool      `json:"canPromote,omitempty"` // live native membership/admission only
 	// MergedInto names the still-pending submission this input was appended to;
 	// pi takes both as one message. Merged lists, in order, the inputs appended to
 	// this submission. Both are bounded private receipt links, never pi input.

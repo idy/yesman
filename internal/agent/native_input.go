@@ -9,9 +9,9 @@ import (
 type hostIdentity struct {
 	SubmissionID string   `json:"submissionId"`
 	Segments     []string `json:"segments"` // inputs pi appended into this one occurrence
-	Origin       Origin `json:"origin"`
-	Epoch        string `json:"epoch"`
-	QueueID      string `json:"queueId"`
+	Origin       Origin   `json:"origin"`
+	Epoch        string   `json:"epoch"`
+	QueueID      string   `json:"queueId"`
 }
 type hostInputRef struct {
 	Native   bool          `json:"native"`

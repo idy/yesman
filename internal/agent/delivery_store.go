@@ -324,6 +324,7 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 	pruneDeliveryRecords(records, &floor, now)
 	return records, floor, nil
 }
+
 // validMergeLinks bounds the private links between inputs pi took as one message.
 func validMergeLinks(d Delivery) bool {
 	if d.MergedInto != "" && (len(d.Merged) > 0 || !deliveryID.MatchString(d.MergedInto) || d.MergedInto == d.ID) || len(d.Merged) > maxMergedInputs {

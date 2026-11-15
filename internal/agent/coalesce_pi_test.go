@@ -78,6 +78,7 @@ func introduced(calls [][]auditMessage, want string) []auditMessage {
 	}
 	return out
 }
+
 // awaitProvider waits until the provider has been called with every wanted
 // user message: pi takes an input at a checkpoint before the next call starts.
 func (f *promotionFixture) awaitProvider(t *testing.T, want ...string) ([][]auditMessage, string) {

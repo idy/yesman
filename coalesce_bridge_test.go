@@ -83,7 +83,7 @@ func TestCoalesceBrowserBridge(t *testing.T) {
 	manager := agent.New(agent.Config{Pi: node, Command: func(context.Context) (string, []string, error) {
 		return node, []string{filepath.Join(runtime, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js")}, nil
 	}, Yesmen: store, Extension: filepath.Join(root, "pi", "yesman.ts"),
-		Env: append(isolatedRecallBridgeEnv(), []string{"HOME=" + temp, "USERPROFILE=" + temp, "APPDATA=" + temp, "LOCALAPPDATA=" + temp, "PI_CODING_AGENT_DIR=" + config, "YESMAN_API=" + extensionAPI.URL, "APPEND_GATE=" + gate, "APPEND_AUDIT=" + audit}...),
+		Env:     append(isolatedRecallBridgeEnv(), []string{"HOME=" + temp, "USERPROFILE=" + temp, "APPDATA=" + temp, "LOCALAPPDATA=" + temp, "PI_CODING_AGENT_DIR=" + config, "YESMAN_API=" + extensionAPI.URL, "APPEND_GATE=" + gate, "APPEND_AUDIT=" + audit}...),
 		OnEvent: func(e agent.Event) { mu.Lock(); events = append(events, e); mu.Unlock() }})
 	defer manager.StopAll()
 	svc := &service{app: &app{yesmen: store, agents: manager, pool: pool.New(filepath.Join(temp, "pool"))}}
