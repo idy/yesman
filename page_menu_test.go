@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"io/fs"
 	"slices"
 	"strings"
 	"testing"
@@ -66,8 +68,10 @@ func TestPageMenuItems(t *testing.T) {
 }
 
 // fakeClipboard is a controlled clipboard: items with the representations
-// given, read as MyGo's Clipboard.Read reads them, keeping only the formats
-// asked for. It records the formats of each read.
+// given, read as MyGo's Clipboard.Read reads them (transfer.Data.Materialize):
+// only the formats asked for, transfer.ErrFormat when it has none of them, and
+// a representation that fails fails the read. It records the formats of each
+// read.
 type fakeClipboard struct {
 	items [][]transfer.Representation
 	err   error
@@ -79,21 +83,11 @@ func (c *fakeClipboard) read(formats ...transfer.Format) (transfer.Data, error) 
 	if c.err != nil {
 		return transfer.Data{}, c.err
 	}
-	var items []transfer.Item
-	for _, reps := range c.items {
-		var kept []transfer.Representation
-		for _, r := range reps {
-			for _, f := range formats {
-				if transfer.NewItem(r).Formats()[0] == f {
-					kept = append(kept, r)
-				}
-			}
-		}
-		if len(kept) > 0 {
-			items = append(items, transfer.NewItem(kept...))
-		}
+	items := make([]transfer.Item, len(c.items))
+	for i, reps := range c.items {
+		items[i] = transfer.NewItem(reps...)
 	}
-	return transfer.New(items...), nil
+	return transfer.New(items...).Materialize(formats)
 }
 
 var (
@@ -170,6 +164,59 @@ func TestPageMenuPasteImages(t *testing.T) {
 		}
 		if len(clip.reads) != 1 || !slices.Equal(clip.reads[0], c.reads) {
 			t.Errorf("%s: reads %v, want one of %v", c.name, clip.reads, c.reads)
+		}
+	}
+}
+
+// A clipboard with nothing Paste takes pastes nothing, with no error, so the
+// page leaves the field, its selection and caret as they were and shows no
+// message; a read that fails still says so.
+func TestPageMenuPasteNothingToPaste(t *testing.T) {
+	field := PageMenuTarget{Editable: true, Content: true, Selection: true}
+	composer := PageMenuTarget{Editable: true, Content: true, Images: true}
+	imageOnly := [][]transfer.Representation{{transfer.Bytes(transfer.PNG, pngA)}}
+	fileOnly := [][]transfer.Representation{{transfer.Bytes(transfer.FileList, []byte("/tmp/a.png"))}}
+	jpegOnly := [][]transfer.Representation{{transfer.Bytes("image/jpeg", []byte{0xff, 0xd8, 0xff})}}
+	for _, c := range []struct {
+		name   string
+		target PageMenuTarget
+		items  [][]transfer.Representation
+	}{
+		{"empty, field", field, nil},
+		{"empty, composer", composer, nil},
+		{"image only, field", field, imageOnly},
+		{"image only, secret", PageMenuTarget{Editable: true, Secret: true, Images: true}, imageOnly},
+		{"files only, composer", composer, fileOnly},
+		{"JPEG only, composer", composer, jpegOnly},
+	} {
+		got, err := pageMenuChoice("paste", c.target, (&fakeClipboard{items: c.items}).read)
+		if err != nil || got.Action != "paste" || got.Text != "" || got.Images != nil {
+			t.Errorf("%s: %+v, %v; want nothing to paste", c.name, got, err)
+		}
+	}
+	// What there is still pastes, past items without it.
+	got, err := pageMenuChoice("paste", composer, (&fakeClipboard{items: [][]transfer.Representation{
+		fileOnly[0], {transfer.Bytes(transfer.PNG, pngB)}, jpegOnly[0], {transfer.Bytes(transfer.Text, []byte("note"))}, {transfer.Bytes(transfer.PNG, pngA)},
+	}}).read)
+	b64 := base64.StdEncoding.EncodeToString
+	if err != nil || got.Text != "note" || !slices.Equal(got.Images, []PageMenuImage{{"image/png", b64(pngB)}, {"image/png", b64(pngA)}}) {
+		t.Errorf("mixed clipboard: %+v, %v", got, err)
+	}
+	// Failed reads are not "nothing to paste".
+	changed := errors.New("clipboard changed while it was read")
+	for _, c := range []struct {
+		name string
+		clip *fakeClipboard
+		want error
+	}{
+		{"read fails", &fakeClipboard{err: changed}, changed},
+		{"read refused", &fakeClipboard{err: fmt.Errorf("pasteboard: %w", fs.ErrPermission)}, fs.ErrPermission},
+		{"text fails", &fakeClipboard{items: [][]transfer.Representation{{transfer.Lazy(transfer.Text, func() ([]byte, error) { return nil, fs.ErrPermission })}}}, fs.ErrPermission},
+		{"image fails", &fakeClipboard{items: [][]transfer.Representation{{transfer.Lazy(transfer.PNG, func() ([]byte, error) { return nil, changed })}}}, changed},
+	} {
+		got, err := pageMenuChoice("paste", composer, c.clip.read)
+		if !errors.Is(err, c.want) || got.Text != "" || got.Images != nil {
+			t.Errorf("%s: %+v, %v; want %v", c.name, got, err, c.want)
 		}
 	}
 }

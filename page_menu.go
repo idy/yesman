@@ -93,13 +93,18 @@ var clipboardRead = func(formats ...transfer.Format) (transfer.Data, error) {
 
 // pasteContents reads the clipboard for Paste: its text, "" when it holds
 // none, and, when images is set, each item's PNG in the clipboard's order.
-// Only the formats asked for are read.
+// Only the formats asked for are read. A clipboard with none of them (empty,
+// or only files or another image type) pastes nothing, which is not an error;
+// a failed read is.
 func pasteContents(read func(...transfer.Format) (transfer.Data, error), images bool) (string, []PageMenuImage, error) {
 	formats := []transfer.Format{transfer.Text}
 	if images {
 		formats = append(formats, transfer.PNG)
 	}
 	d, err := read(formats...)
+	if errors.Is(err, transfer.ErrFormat) {
+		return "", nil, nil
+	}
 	if err != nil {
 		return "", nil, err
 	}
