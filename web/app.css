@@ -988,7 +988,17 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 
 /* Board: the yesman's task list, beside the conversation in place of the
    files. Rows keep their place; a finished task folds into Done. */
-.board { grid-column: 4; grid-row: 1 / -1; display: flex; flex-direction: column; width: var(--board-width, 340px); max-width: calc(100vw - 320px); min-width: 0; min-height: 0; border-left: 1px solid var(--mds-line); background: var(--app-pane); }
+.board { grid-column: 4; grid-row: 1 / -1; display: flex; flex-direction: column; width: clamp(240px, calc(100vw - var(--side-width) - var(--info-beside) - 280px), var(--board-width, 340px)); max-width: calc(100vw - 320px); min-width: 0; min-height: 0; border-left: 1px solid var(--mds-line); background: var(--app-pane); }
+/* The place the board and Needs you share leaves the conversation 280px:
+   beside the info panel it narrows, down to 240px; once even that does not
+   fit (264 + 288 + 240 + 280 = 1072px), the info panel makes way for it, as
+   it does for a wide file, and shows again when the pane closes. */
+:root { --info-beside: 0px; }
+:root[data-info="open"] { --info-beside: var(--info-width); }
+@media (max-width: 1071px) {
+  :root:is([data-board="open"], [data-needs-you="open"]) { --info-beside: 0px; }
+  :root:is([data-board="open"], [data-needs-you="open"]) .info-panel { display: none; }
+}
 .board .files-title { flex: 0 0 auto; }
 .board-count { color: var(--mds-muted); font-size: var(--mds-text-caption); white-space: nowrap; }
 .board-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 8px 24px; }
@@ -1031,10 +1041,6 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 /* Needs you: a pane as the board, of what the yesman shown waits on the user
    for, each request a row of what it asks, a line of its text, its kind and
    wait, and who asks. */
-/* Beside the info panel it leaves the conversation room; in a narrow window
-   it takes the info panel's place, as a wide file does. */
-.needs-you-pane { width: clamp(240px, calc(100vw - var(--side-width) - 280px), var(--board-width, 340px)); }
-@media (max-width: 1000px) { :root[data-needs-you="open"] .info-panel { display: none; } }
 .needs-you-heading { margin: 0; }
 .needs-you-heading:focus { outline: none; }
 .board-count[data-tone="waiting"] { color: var(--mds-warn); }
