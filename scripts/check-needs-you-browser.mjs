@@ -303,10 +303,13 @@ async function scenario(engineName, page) {
   await infoRow('needs-you').click();
   await page.locator('.needs-you-scope').waitFor();
   assert.match(await page.locator('.needs-you-empty').innerText(), /Nothing from bob needs you right now/);
+  await page.locator('.needs-you-scope').getByRole('button', { name: 'Show every yesman' }).focus();
   await ctl('dismiss', { yesman: 'bob' });
   await ctl('hire', { yesman: 'bob' });
   await settle(1);
   await until('the scope gone', async () => /bob is no longer here; showing every yesman\./.test(await page.locator('.needs-you-scope').innerText()));
+  // Its Show every yesman went with the old bob: focus is on the heading.
+  assert.ok(await page.evaluate(() => document.activeElement?.matches('.needs-you-page h1')), 'focus on a control gone with the old bob moves to the heading');
   assert.equal(await page.locator('.needs-you-card').count(), 1);
 
   // Focus on a request survives a full refresh, and moves to the one in its
@@ -524,6 +527,48 @@ async function scenario(engineName, page) {
   await page.waitForTimeout(400);
   assert.equal(await page.evaluate(() => document.activeElement?.closest('[data-memory]')?.dataset.memory), 'bob', 'focus stayed on the control the user chose');
   assert.match(await page.locator('.needs-you-scope').innerText(), /From bob only/);
+
+  // So does one on Show every yesman, and a redraw keeps it on either of the
+  // page's own controls; leaving by keyboard still goes where they say.
+  const navNames = { all: 'Show every yesman', back: 'Back to the conversation' };
+  const nav = (key) => page.locator('.needs-you-scope').getByRole('button', { name: navNames[key] });
+  const navFocused = () => page.evaluate((names) => {
+    const a = document.activeElement;
+    return Object.keys(names).find((k) => a?.closest('.needs-you-scope') && a.matches('button') && a.textContent.trim() === names[k]) ?? a?.tagName;
+  }, navNames);
+  await nav('all').focus();
+  await page.keyboard.press('Enter');
+  await until('every yesman', async () => !(await page.locator('.needs-you-scope').count()));
+  assert.ok(await page.evaluate(() => document.activeElement?.matches('.needs-you-page h1')), 'leaving the scope by keyboard lands on the heading');
+  await ctl('call-memory', { yesman: 'alice', message: 'near' });
+  await page.evaluate(() => handlers.changed(true));
+  await until('alice\'s memory near', async () => page.evaluate(() => document.querySelector('.needs-you-memory[data-memory="alice"]')?.dataset.state === 'near'));
+  const aliceBefore = await epoch('alice');
+  await page.evaluate(() => { window.holdReset = true; });
+  await aliceMemory.getByRole('button').click();
+  await dialog.waitFor({ state: 'visible' });
+  await page.locator('#confirm-ok').click();
+  await until('the reset answer held', () => page.evaluate(() => !!window.releaseReset));
+  await lead('bob').click();
+  if (!(await page.locator('#yesman-info [data-info-entry]').count())) await page.getByRole('button', { name: 'Show the info' }).click();
+  await infoRow('needs-you').click();
+  await page.locator('.needs-you-scope').waitFor();
+  await nav('all').focus();
+  await page.evaluate(() => { window.holdReset = false; window.releaseReset(); });
+  await until('Alice reset again', async () => (await epoch('alice')) === aliceBefore + 1);
+  await page.evaluate(() => handlers.changed(true));
+  await page.waitForTimeout(400);
+  assert.equal(await navFocused(), 'all', 'a late reset leaves focus on Show every yesman');
+  for (const key of ['all', 'back']) {
+    await nav(key).focus();
+    await ctl('prompt', { agent: 'bob/lead', message: needsYou({ add: { type: 'manual', title: `Check the ${key} control` }, toolCall: `call-bob-nav-${key}` }) });
+    await page.evaluate(() => handlers.changed(true));
+    await until(`the ${key} request`, async () => (await page.locator('.needs-you-card').allInnerTexts()).some((x) => x.includes(`Check the ${key} control`)));
+    assert.equal(await navFocused(), key, `a changed snapshot keeps focus on the ${key} control`);
+  }
+  await page.keyboard.press('Enter');
+  await until('back on the entry', async () => page.evaluate(() => document.activeElement?.dataset.infoEntry === 'needs-you'));
+  assert.equal(await page.locator('#crumbs').innerText(), 'bob');
 }
 
 try {

@@ -1062,7 +1062,9 @@ function renderNeedsYou(body) {
   const scope = needsYouScope();
   const inScope = (name) => !scope || name === scope.name;
   const items = needsYouItems(state.snap).filter((item) => inScope(item.yesman));
-  const inner = h('div', { class: 'page-inner needs-you-page' },
+  // The page names what it shows (view, opener, and the hire it is for), so
+  // that a redraw puts focus back on a control only where it was.
+  const inner = h('div', { class: 'page-inner needs-you-page', 'data-page': JSON.stringify([v.yesman ?? '', v.hiredAt ?? '', scope?.hiredAt ?? null, v.from ?? '']) },
     h('h1', { class: 'mds-title', tabindex: '-1' }, t('Needs you')),
     h('p', { class: 'needs-you-intro' }, t('What your yesmen handed to you: their questions only you can answer, decisions, and steps only you can take. Open one to handle it in its conversation.')));
   if (v.yesman) {
@@ -1070,8 +1072,8 @@ function renderNeedsYou(body) {
     const from = v.from && agentById(v.from);
     inner.append(h('div', { class: 'needs-you-scope', role: 'status' },
       h('span', null, scope ? t('From {name} only', { name: yesmanLabel(scope.name) }) : t('{name} is no longer here; showing every yesman.', { name: v.yesman })),
-      scope ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => showNeedsYou() }, t('Show every yesman')) : null,
-      from ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => backToConversation(from.id) },
+      scope ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-needs-you-nav': 'all', onclick: () => showNeedsYou() }, t('Show every yesman')) : null,
+      from ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-needs-you-nav': 'back', onclick: () => backToConversation(from.id) },
         icon('arrowLeft'), t('Back to the conversation')) : null));
   }
   for (const y of state.snap.yesmen) {
@@ -1548,6 +1550,8 @@ function renderBody() {
   const held = requestFocus($('#dock'));
   const cards = [...body.querySelectorAll('.needs-you-card')];
   const cardAt = cards.indexOf(active?.closest?.('.needs-you-card'));
+  const nav = active?.closest?.('[data-needs-you-nav]')?.dataset.needsYouNav;
+  const page = active?.closest?.('.needs-you-page')?.dataset.page;
   contextViewer.close();
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
@@ -1565,7 +1569,10 @@ function renderBody() {
     renderNeedsYou(body);
     // A refresh keeps focus on the request it was on, or, when that one is
     // gone, on the one now in its place, or the page's heading; and on a
-    // yesman's request memory, or the heading once it is gone.
+    // yesman's request memory, or the heading once it is gone; and on the
+    // page's own Show every yesman or Back to the conversation while the page
+    // is still the one it was (the same view, opener and hire), or else, the
+    // control gone with it, the heading.
     const key = active?.closest?.('[data-request]')?.dataset.request;
     const again = key && body.querySelector(`[data-request="${CSS.escape(key)}"]`);
     const memory = active?.closest?.('[data-memory]')?.dataset.memory;
@@ -1575,6 +1582,9 @@ function renderBody() {
       (now[Math.min(cardAt, now.length - 1)] ?? body.querySelector('.needs-you-page h1'))?.focus();
     } else if (memory !== undefined) {
       (body.querySelector(`[data-memory="${CSS.escape(memory)}"] button`) ?? body.querySelector('.needs-you-page h1'))?.focus();
+    } else if (nav !== undefined) {
+      const same = page === body.querySelector('.needs-you-page')?.dataset.page;
+      ((same && body.querySelector(`[data-needs-you-nav="${CSS.escape(nav)}"]`)) || body.querySelector('.needs-you-page h1'))?.focus();
     } else if (active?.matches?.('.needs-you-page h1')) body.querySelector('.needs-you-page h1')?.focus();
     return;
   }
