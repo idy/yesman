@@ -565,7 +565,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     // Untied and only accepted: open the earlier records to read its preview.
     if (!(await page.locator('#thread > .receipts').evaluate(el => el.open))) await page.locator('#thread > .receipts > summary').click();
     assert.equal(await row(two).locator(".msg-user").count(), 0);
-    assert.match(await row(two).innerText(), /Submission: same[\s\S]*Delivery unconfirmed/);
+    assert.match(await row(two).innerText(), /Submission: same[\s\S]*No confirmation recorded at the time/);
     await page.evaluate(() => {
       window.fixture.saved.queues["alice/lead"] = { known: false };
       window.fixture.emit("alice/lead", {
@@ -578,7 +578,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       window.events["mygo:locale"]({ locale: "zh-Hans" }),
     );
     await page.waitForTimeout(30);
-    assert.match(await row(two).innerText(), /交付状态尚未确认/);
+    assert.match(await row(two).innerText(), /当时未记录确认/);
     assert.match(await row(one).innerText(), /pi 已取走/);
     assert.match(await row(retryID).innerText(), /交付已中断/);
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "en" }));
@@ -643,7 +643,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await page.locator('[data-agent="alice/worker"]').click();
     // After a reload only the receipt is left of it: a record, folded.
     await page.locator("#thread > .receipts").waitFor();
-    assert.equal((await page.locator("#thread > .receipts > summary").innerText()).trim().split(/\s*\n\s*/).join(" | "), "1 earlier submission | Handled by an extension");
+    assert.equal((await page.locator("#thread > .receipts > summary").innerText()).trim().split(/\s*\n\s*/).join(" | "), "Earlier submission records · 1");
     assert.equal(await page.locator("#thread .msg-delivery").count(), 0);
     assert.equal(await page.locator("#thread > .msg-user").count(), 0);
     assert.equal(await page.locator("#thread .thread-empty").count(), 0);

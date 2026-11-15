@@ -386,9 +386,9 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     // opened to read what was kept of it.
     assert.match(await page.locator(`#thread > [data-delivery="${sub(4)}"]`).innerText(), /a rejected submission[\s\S]*Not sent/);
     assert.equal(await page.locator(`[data-delivery="${sub(3)}"]`).count(), 0);
-    assert.equal(await page.locator("#thread > .receipts > summary").innerText().then((s) => s.trim().split(/\s*\n\s*/).join(" | ")), "1 earlier submission | Delivery unconfirmed");
+    assert.equal(await page.locator("#thread > .receipts > summary").innerText().then((s) => s.trim().split(/\s*\n\s*/).join(" | ")), "Earlier submission records · 1");
     await page.locator("#thread > .receipts > summary").click();
-    assert.match(await page.locator(`#thread > .receipts [data-delivery="${sub(3)}"]`).innerText(), /Submission: an older submission[\s\S]*Delivery unconfirmed/);
+    assert.match(await page.locator(`#thread > .receipts [data-delivery="${sub(3)}"]`).innerText(), /Submission: an older submission[\s\S]*No confirmation recorded at the time/);
     assert.equal(await page.locator(`[data-delivery="${sub(3)}"] .msg-user`).count(), 0);
 
     // Keyboard: open a stretch of work and read it in order, focus kept.

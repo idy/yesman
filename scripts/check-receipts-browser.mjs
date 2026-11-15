@@ -4,9 +4,9 @@
 //   YESMAN_TEST_PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node scripts/check-receipts-browser.mjs
 //
 // The history is synthetic, shaped like a lead's after an upgrade and a
-// summary of earlier conversation: two dozen questions and answers whose
-// messages carry no submission, the receipts the server still keeps for them,
-// and messages tied to their receipts. It checks the earlier receipts are one
+// summary of earlier conversation: 42 retained receipts, 27 unconfirmed, beside
+// questions and answers whose messages carry no submission, and messages tied
+// to their receipts. It checks the earlier receipts are one
 // folded line that opens to all of them while every message, image and reply
 // stays as it was, and that what is sent now reads as the person's message
 // with its state: sending, accepted, refused, uncertain and retried, two with
@@ -19,7 +19,9 @@ const { chromium, webkit } = await import(process.env.YESMAN_TEST_PLAYWRIGHT_MOD
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdir, writeFile } from "node:fs/promises";
+const out = process.env.YESMAN_RECEIPTS_OUT || tmpdir();
+await mkdir(out, { recursive: true });
 import assert from "node:assert/strict";
 
 const root = process.env.YESMAN_RECEIPTS_WEB || fileURLToPath(new URL("../web", import.meta.url));
@@ -38,7 +40,8 @@ await new Promise((r) => (server.listening ? r() : server.on("listening", r)));
 const png = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg==";
 const png1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 const sub = (n) => n.toString(16).padStart(48, "0");
-const LEGACY = 24;
+const LEGACY = 39;
+const EARLIER = 42;
 const XSS = '<img src=x onerror="window.pwned=1"> **not bold** & 历史问题';
 const imagesOf = (n) => (n === 18 ? 2 : n % 6 === 0 ? 1 : 0);
 const textOf = (n) => (n === 18 ? "" : `历史问题摘要 #${n}：为什么这里会有 Submission？`);
@@ -59,9 +62,10 @@ function history() {
 function deliveries() {
   const d = (n, state, extra = {}) => ({ id: sub(n), session: "s", revision: 3, state, text: textOf(n), imageCount: imagesOf(n), order: n, ...extra });
   return [
-    ...Array.from({ length: LEGACY }, (_, i) => d(i + 1, "unconfirmed", i === 6 ? { preview: true } : {})),
-    d(25, "unconfirmed", { text: XSS, imageCount: 0 }),
-    d(26, "handled", { text: "/status", imageCount: 0 }),
+    ...Array.from({ length: LEGACY }, (_, i) => d(i + 1, i < 27 ? "unconfirmed" : "dispatched", i === 6 ? { preview: true } : {})),
+    d(40, "cancelled", { text: XSS, imageCount: 0 }),
+    d(41, "dispatched", { text: "/status", imageCount: 0 }),
+    d(42, "cancelled", { text: "an earlier recalled input", imageCount: 0 }),
     d(101, "unconfirmed", { text: "a question tied to its receipt", imageCount: 1, order: 101 }),
     d(102, "accepted", { text: "another tied one", imageCount: 0, order: 102 }),
   ];
@@ -77,12 +81,13 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
     return route.abort();
   });
   const page = await context.newPage();
-  const errors = [];
+  const errors = [], unsupported = [];
   page.on("pageerror", (e) => errors.push(String(e)));
+  await page.exposeFunction("unsupportedCall", (method) => unsupported.push(method));
   await page.addInitScript(({ history, deliveries }) => {
     localStorage.setItem("yesman.info", "hidden");
     const saved = JSON.parse(sessionStorage.getItem("fixture") ?? "null") ?? {
-      seq: 0, order: 200,
+      seq: 0, order: 200, payloads: {},
       messages: { "alice/lead": history, "alice/w1": [] },
       receipts: { "alice/lead": deliveries, "alice/w1": [] },
     };
@@ -93,6 +98,8 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
     const pending = {};
     window.events = {};
     window.sent = [];
+    window.payloadReads = [];
+    window.promoted = [];
     const save = () => sessionStorage.setItem("fixture", JSON.stringify(saved));
     const emit = (agent, data) => {
       if (data.type === "message_end") (saved.messages[agent] ??= []).push(data.message);
@@ -150,15 +157,30 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
             }
             const known = receipt(agent, id);
             if (known) return { ...known };
-            const d = { id, session: "s", revision: 1, state: "sending", text: text.slice(0, 512), imageCount: images.length, preview: text.length > 512, order: ++saved.order };
+            saved.payloads[id] = { text, images };
+            const d = { id, agentSince: "1", session: "s", revision: 1, state: "sending", text: text.slice(0, 512), imageCount: images.length, preview: text.length > 512, order: ++saved.order };
             emit(agent, { type: "delivery_update", delivery: d });
             return new Promise((resolve, reject) => (pending[id] = { resolve, reject }));
           }
+          case "SubmissionPayload": {
+            window.payloadReads.push(args[1]);
+            if (!saved.payloads[args[1]]) throw new Error("original payload unavailable");
+            return structuredClone(saved.payloads[args[1]]);
+          }
+          case "SubmissionText": return saved.payloads[args[1]]?.text ?? "";
+          case "PromoteSubmission": {
+            window.promoted.push(args[1]);
+            return { delivery: window.fixture.set(args[0], args[1], "steering", { canPromote: false }) };
+          }
+          case "Settings": return { appearance: "system", locale: "en" };
+          case "Context": return { available: false };
+          case "NeedsYou": return { items: [] };
+          case "Update": return {};
           case "TakeFocus": return "";
           case "Shortcuts": return {};
           case "Grants": return { platform: "darwin", items: [] };
-          case "ModelUsage": throw new Error("no usage in this check");
-          default: return {};
+          case "ModelUsage": return { rows: [], coverage: {}, totals: {} };
+          default: { await window.unsupportedCall(method); throw new Error(`Unsupported bridge call: ${method}`); }
         }
       },
     };
@@ -167,7 +189,7 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
   await page.locator('[data-agent="alice/lead"]').first().click();
   await page.locator("#thread .msg-user").first().waitFor();
   await page.waitForTimeout(150);
-  return { page, errors, outside, context };
+  return { page, errors, outside, context, unsupported };
 }
 
 // What a reader sees at the foot of the thread and in it: the receipts drawn
@@ -183,20 +205,20 @@ const seen = (page) =>
       submissionLines: own.filter((el) => el.querySelector(".delivery-compact")).length,
       folded: thread.querySelectorAll(":scope > .receipts").length,
       foldedSummary: thread.querySelector(":scope > .receipts > summary")?.innerText.trim().split(/\s*\n\s*/).join(" | ") ?? null,
-      people: people.map((el) => ({ text: el.firstChild?.nodeType === 3 ? el.firstChild.textContent : "", images: [...el.querySelectorAll("img")].map((i) => i.getAttribute("src").slice(-12)) })),
+      people: people.map((el) => ({ text: el.firstChild?.nodeType === 3 ? el.firstChild.textContent : "", images: [...el.querySelectorAll("img")].map((i) => i.getAttribute("src")) })),
       replies: thread.querySelectorAll(":scope > .msg-assistant").length,
       nodes: thread.querySelectorAll("*").length,
     };
   });
 const frame = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
-const shot = (page, name, engine) => page.screenshot({ path: `${tmpdir()}/yesman-receipts-${name}-${engine}.png` });
+const shot = (page, name, engine) => page.screenshot({ path: `${out}/${engine}-${name}.png` });
 
 const results = {};
 const engines = process.env.YESMAN_TEST_ENGINES?.split(",") ?? ["chromium", "webkit"];
 for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) => engines.includes(e))) {
   const browser = await type.launch({ headless: true });
   try {
-    const { page, errors, outside, context } = await open(browser);
+    const { page, errors, outside, context, unsupported } = await open(browser);
     const emit = (data, agent = "alice/lead") => page.evaluate(([a, d]) => window.fixture.emit(a, d), [agent, data]);
     const input = page.getByRole("textbox", { name: "Message", exact: true });
     const sentID = () => page.evaluate(() => window.sent.at(-1).id);
@@ -204,15 +226,18 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     const row = (id) => page.locator(`#thread > [data-delivery="${id}"]`);
     const folded = page.locator("#thread > .receipts");
 
-    // History: two dozen answered questions and the receipts kept for them.
+    // Reproduce the reported 42 old receipts / 27 unconfirmed headline.
+    assert.equal(deliveries().filter((d) => d.id < sub(100)).length, EARLIER);
+    assert.equal(deliveries().filter((d) => d.id < sub(100) && d.state === "unconfirmed").length, 27);
     const first = await seen(page);
     results[`${engine}-history`] = { ...first, people: first.people.length };
     console.log(engine, "history", JSON.stringify(results[`${engine}-history`]));
     await page.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
     await shot(page, "history", engine);
+    await writeFile(`${out}/${engine}-history.json`, JSON.stringify(first, null, 2));
     // Every message, image and reply as it was, in order.
-    const expected = [...Array.from({ length: LEGACY }, (_, i) => ({ text: textOf(i + 1), images: Array.from({ length: imagesOf(i + 1) }, (_, k) => (k ? png1 : png).slice(-12)) })),
-      { text: XSS, images: [] }, { text: "a question tied to its receipt", images: [png.slice(-12)] }, { text: "another tied one", images: [] }];
+    const expected = [...Array.from({ length: LEGACY }, (_, i) => ({ text: textOf(i + 1), images: Array.from({ length: imagesOf(i + 1) }, (_, k) => `data:image/png;base64,${k ? png1 : png}`) })),
+      { text: XSS, images: [] }, { text: "a question tied to its receipt", images: [`data:image/png;base64,${png}`] }, { text: "another tied one", images: [] }];
     assert.deepEqual(first.people, expected);
     assert.equal(first.replies, LEGACY + 3);
     assert.equal(await page.locator("#thread .msg-assistant strong", { hasText: "回答 7" }).count(), 1, "replies keep their Markdown");
@@ -220,7 +245,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(first.submissionLines, 0, `${first.submissionLines} Submission lines in the conversation`);
     assert.equal(first.ownReceipts, 0);
     assert.equal(first.folded, 1);
-    assert.equal(first.foldedSummary, "26 earlier submissions | 25 delivery unconfirmed · 1 handled by an extension");
+    assert.equal(first.foldedSummary, "Earlier submission records · 42");
     assert.match(await folded.locator(":scope > summary").getAttribute("title"), /cannot tie to a message above/);
     assert.equal(await folded.evaluate((el) => el.open), false);
     assert.equal(await folded.locator(".receipts-body > *").count(), 0, "a folded line draws what it folds");
@@ -238,14 +263,17 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await page.keyboard.press("Enter");
     await page.waitForFunction(() => document.querySelector("#thread > .receipts")?.open && document.querySelector("#thread > .receipts .receipts-body > [data-delivery]"));
     const items = folded.locator(".receipts-body > [data-delivery]");
-    assert.equal(await items.count(), 26);
-    assert.deepEqual(await items.evaluateAll((els) => els.map((el) => el.dataset.delivery)), Array.from({ length: 26 }, (_, i) => sub(i + 1)));
+    assert.equal(await items.count(), EARLIER);
+    assert.deepEqual(await items.evaluateAll((els) => els.map((el) => el.dataset.delivery)), Array.from({ length: EARLIER }, (_, i) => sub(i + 1)));
     const lines = await items.allInnerTexts();
-    assert.match(lines[0], /^Submission: 历史问题摘要 #1：为什么这里会有 Submission？\s*Delivery unconfirmed$/);
-    assert.match(lines[5], /Submission: 历史问题摘要 #6[^\n]* · 1 image submitted\s*Delivery unconfirmed/);
-    assert.match(lines[17], /^Submission: Attached images · 2 images submitted\s*Delivery unconfirmed$/);
-    assert.match(lines[24], /Submission: <img src=x onerror="window.pwned=1"> \*\*not bold\*\*/);
-    assert.match(lines[25], /Submission: \/status\s*Handled by an extension/);
+    assert.match(lines[0], /^Submission: 历史问题摘要 #1：为什么这里会有 Submission？\s*No confirmation recorded at the time$/);
+    assert.match(lines[5], /Submission: 历史问题摘要 #6[^\n]* · 1 image submitted\s*No confirmation recorded at the time/);
+    assert.match(lines[17], /^Submission: Attached images · 2 images submitted\s*No confirmation recorded at the time$/);
+    assert.match(lines[39], /Submission: <img src=x onerror="window.pwned=1"> \*\*not bold\*\*/);
+    assert.match(lines[40], /Submission: \/status\s*Recorded as taken by pi/);
+    assert.match(lines[41], /Submission: an earlier recalled input\s*Recorded as recalled/);
+    assert.match(await folded.locator(".receipts-note").innerText(), /Missing confirmation does not establish whether pi processed/);
+    assert.equal(await folded.locator('[role="status"], [aria-live], button, img').count(), 0, "historical records neither announce live statuses nor grant actions");
     assert.equal(await items.nth(6).locator(".delivery-compact").getAttribute("title"), `${textOf(7)}…`, "a truncated preview says so");
     assert.equal(await folded.locator("img, strong").count(), 0, "a preview is text");
     assert.equal(await page.evaluate(() => window.pwned), undefined);
@@ -264,7 +292,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     }
     await frame(page);
     assert.deepEqual(await seen(page), before);
-    assert.equal(await items.count(), 26);
+    assert.equal(await items.count(), EARLIER);
     assert.equal(await folded.locator(":scope > summary").evaluate((el) => document.activeElement === el), true, "repeated records moved focus");
 
     // Sent now, with two images: the person's message as sent, its state under it.
@@ -294,7 +322,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await frame(page);
     const now = await seen(page);
     assert.equal(now.ownReceipts, 0, "a receipt tied to a message keeps a row of its own");
-    assert.deepEqual(now.people.filter((p) => p.text === "看一下这两张图"), [{ text: "看一下这两张图", images: [png.slice(-12), png1.slice(-12)] }]);
+    assert.deepEqual(now.people.filter((p) => p.text === "看一下这两张图"), [{ text: "看一下这两张图", images: [`data:image/png;base64,${png}`, `data:image/png;base64,${png1}`] }]);
     assert.equal(await page.locator(`[data-delivery="${pics}"][data-bound="true"] .delivery-status`).innerText(), "Taken by pi");
 
     // Two with the same text are two, each tied by its own ID, never by text.
@@ -341,7 +369,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed"), early);
     await frame(page);
     assert.equal(await row(early).count(), 0, "a submission a later one followed kept its own row once it finished");
-    assert.match(await folded.locator(`[data-delivery="${early}"]`).innerText(), /^Submission: first while working · 1 image submitted\s*Delivery unconfirmed$/);
+    assert.match(await folded.locator(`[data-delivery="${early}"]`).innerText(), /^Submission: first while working · 1 image submitted\s*No confirmation recorded at the time$/);
     assert.match(await row(later).innerText(), /^second while working\s*Accepted for steering/);
     await page.evaluate((id) => window.fixture.native("alice/lead", id, "second while working"), later);
     await frame(page);
@@ -400,7 +428,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), reworded);
     await settled();
     assert.equal(await row(unheard).count(), 0, "a submission the server never heard of stays the latest");
-    assert.match(await folded.locator(`[data-delivery="${unheard}"]`).innerText(), /Submission: never heard of\s*Delivery unconfirmed/);
+    assert.match(await folded.locator(`[data-delivery="${unheard}"]`).innerText(), /Submission: never heard of\s*No confirmation recorded at the time/);
     assert.deepEqual(await folded.locator(".receipts-body > [data-delivery]").evaluateAll((els) => els.slice(-1).map((el) => el.dataset.delivery)), [unheard]);
     assert.match(await row(reworded).innerText(), /^never heard of \(edited\)\s*Accepted for steering/);
 
@@ -429,7 +457,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await settled();
     assert.equal(await row(alone).locator(".delivery-status").innerText(), "Accepted for follow-up · delivery unconfirmed");
     assert.equal(await row(refused).count(), 1, "a later submission hid the current refusal");
-    assert.equal((await seen(page)).foldedSummary, "28 earlier submissions | 27 delivery unconfirmed · 1 handled by an extension");
+    assert.equal((await seen(page)).foldedSummary, "Earlier submission records · 44");
     // The uncertain answer from the server, the latest now, is in view.
     await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed", { error: "pi stopped before answering" }), alone);
     await frame(page);
@@ -483,7 +511,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await folded.waitFor();
     assert.equal(await folded.evaluate((el) => el.open), true);
     assert.deepEqual(await seen(page), live);
-    assert.equal(await folded.locator(".receipts-body > [data-delivery]").count(), 28);
+    assert.equal(await folded.locator(".receipts-body > [data-delivery]").count(), 44);
 
     // History reads the same, without what only this window had: the folded
     // line closed again, the latest uncertain one in view from its preview.
@@ -495,7 +523,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.deepEqual(reloaded.people, live.people);
     assert.equal(reloaded.replies, live.replies);
     // The one the server never heard of was only ever this window's.
-    assert.equal(reloaded.foldedSummary, "29 earlier submissions | 27 delivery unconfirmed · 1 handled by an extension · 1 not sent");
+    assert.equal(reloaded.foldedSummary, "Earlier submission records · 43");
     assert.equal(await folded.evaluate((el) => el.open), false);
     assert.equal(await row(alone).locator(".delivery-image-count").innerText(), "1 image submitted");
     assert.equal(await row(alone).locator("img").count(), 0, "an image was made up from a receipt");
@@ -503,20 +531,22 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     // The steering one, still to come, from what its receipt keeps.
     assert.match(await row(edited).innerText(), /^did this arrive\? \(edited\)\s*Accepted for steering/);
     assert.match(await row(reworded).innerText(), /^never heard of \(edited\)\s*Accepted for steering/);
-    assert.equal(reloaded.ownReceipts, 3);
+    assert.equal(reloaded.ownReceipts, 5);
+    for (const id of [lost, refused, alone]) assert.equal(await row(id).count(), 1, "current uncertain/failed receipts survive reload");
 
     // Chinese.
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
     await page.waitForTimeout(50);
-    assert.equal((await seen(page)).foldedSummary, "较早的提交记录 · 29 条 | 27 条交付状态尚未确认 · 1 条已由扩展处理 · 1 条未发送");
+    assert.equal((await seen(page)).foldedSummary, "较早的提交记录 · 43 条");
     assert.deepEqual(errors, []);
     assert.deepEqual(outside, []);
+    assert.deepEqual(unsupported, []);
     await context.close();
 
     // Dark and narrow, opened.
     const dark = await open(browser, { colorScheme: "dark", width: 480, height: 800 });
     await dark.page.locator("#thread > .receipts > summary").click();
-    await dark.page.waitForFunction(() => document.querySelectorAll("#thread > .receipts [data-delivery]").length === 26);
+    await dark.page.waitForFunction(() => document.querySelectorAll("#thread > .receipts [data-delivery]").length === 42);
     const overflow = await dark.page.evaluate(() => {
       const scroll = document.querySelector("#scroll");
       const edge = scroll.getBoundingClientRect().right;
@@ -526,13 +556,103 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.deepEqual(overflow, { scroll: 0, wide: [] });
     await dark.page.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
     await shot(dark.page, "dark-narrow", engine);
+    await dark.page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
+    await frame(dark.page);
+    assert.equal((await seen(dark.page)).foldedSummary, "较早的提交记录 · 42 条");
+    assert.equal(await dark.page.locator('.receipts [data-state="unconfirmed"]').first().innerText(), "当时未记录确认");
+    await shot(dark.page, "zh-dark-narrow", engine);
+    await writeFile(`${out}/${engine}-zh-dark-narrow.json`, JSON.stringify(await seen(dark.page), null, 2));
     assert.deepEqual(dark.errors, []);
+    assert.deepEqual(dark.outside, []);
+    assert.deepEqual(dark.unsupported, []);
     await dark.context.close();
-    console.log(engine, "earlier receipts folded/messages and replies whole/opened in order/repeats/sent as sent/states/same text/late native/retry/edit/refusal/images/agents/palette/keys/Settings/reload/i18n/dark/narrow/local icons PASS");
+
+    // Twelve real composer submissions exceed the eight-payload display cache.
+    // Controlled DTOs describe native membership and recoverable payloads; no
+    // historical row gains those controls merely because its confirmation is missing.
+    const mixed = await open(browser);
+    const mp = mixed.page;
+    const mi = mp.getByRole("textbox", { name: "Message", exact: true });
+    const mf = mp.locator("#thread > .receipts");
+    const mr = (id) => mp.locator(`#thread > [data-delivery="${id}"]`);
+    const canonical = await seen(mp);
+    const ids = [];
+    const fullText = "  original current input\n" + "全文 ".repeat(200);
+    for (let i = 0; i < 12; i++) {
+      await mi.fill(i === 0 ? fullText : `current input ${i}`);
+      if (i === 0 || i === 3) {
+        await mp.locator("input[type=file]").setInputFiles([
+          { name: "current.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") },
+          { name: "second.png", mimeType: "image/png", buffer: Buffer.from(png1, "base64") },
+        ]);
+        await mp.waitForFunction(() => document.querySelectorAll(".composer-image").length === 2);
+      }
+      await mi.press("Enter");
+      await mp.waitForFunction((n) => window.sent.length === n, i + 1);
+      const id = await mp.evaluate(() => window.sent.at(-1).id);
+      ids.push(id);
+      await mp.evaluate((id) => window.fixture.ack("alice/lead", id, "queued", {
+        nativePending: true, canCancel: true, canPromote: true, originalPayload: true, originalText: true,
+      }), id);
+      await mp.waitForFunction(() => !document.querySelector(".composer textarea").readOnly);
+    }
+    await mp.evaluate((ids) => {
+      window.fixture.set("alice/lead", ids[1], "failed", { error: "current rejection", nativePending: false, canCancel: false, canPromote: false, originalPayload: false, originalText: false });
+      window.fixture.set("alice/lead", ids[2], "unconfirmed", { error: "current uncertainty", nativePending: false, canCancel: false, canPromote: false, originalPayload: false, originalText: false });
+      window.fixture.set("alice/lead", ids[3], "cancelled", { nativePending: false, canCancel: false, canPromote: false, canRestore: true });
+      const unknown = { id: "f".repeat(48), revision: 1, order: 199, state: "future-state", text: "unknown older receipt", preview: true, imageCount: 1 };
+      window.fixture.emit("alice/lead", { type: "delivery_update", delivery: unknown });
+    }, ids);
+    await frame(mp);
+    await mf.locator("summary").click();
+    await mp.waitForFunction(() => document.querySelectorAll(".receipts-body > [data-delivery]").length === 42);
+    assert.equal((await seen(mp)).foldedSummary, "Earlier submission records · 42");
+    assert.equal((await seen(mp)).ownReceipts, 13);
+    for (const id of ids) assert.equal(await mr(id).count(), 1);
+    assert.equal(await mf.locator("button").count(), 0);
+    assert.equal(await mr(ids[1]).locator(".delivery-status").innerText(), "Not sent");
+    assert.equal(await mr(ids[2]).locator(".delivery-status").innerText(), "Delivery unconfirmed");
+    assert.equal(await mr(ids[3]).getByRole("button", { name: "Return recalled message to input", exact: true }).count(), 1);
+    assert.equal(await mr("f".repeat(48)).locator("img, button:not(:disabled)").count(), 0);
+    // A higher revision updates one historical record in place, without focus
+    // movement, a live announcement or another item in the count.
+    await mf.locator("summary").focus();
+    await mp.evaluate(() => window.fixture.set("alice/lead", "5".padStart(48, "0"), "unconfirmed"));
+    await frame(mp);
+    assert.equal(await mf.locator(".receipts-body > [data-delivery]").count(), 42);
+    assert.equal(await mf.locator("summary").evaluate((el) => document.activeElement === el), true);
+    assert.equal(await mf.locator('[role="status"], [aria-live]').count(), 0);
+    await mp.reload();
+    await mp.locator('[data-agent="alice/lead"]').first().click();
+    await mr(ids[0]).locator('[data-original], .msg-user img').first().waitFor();
+    await mp.waitForFunction(() => document.querySelectorAll('#thread > [data-original="true"]').length === 10);
+    const afterReload = await seen(mp);
+    assert.equal(afterReload.foldedSummary, "Earlier submission records · 42");
+    assert.equal(afterReload.ownReceipts, 13);
+    assert.deepEqual(afterReload.people, canonical.people);
+    assert.equal(afterReload.replies, 42);
+    assert.equal(await mr(ids[0]).locator(".msg-user").evaluate((el) => el.firstChild.textContent), fullText);
+    assert.deepEqual(await mr(ids[0]).locator("img").evaluateAll((els) => els.map((el) => el.src)), [`data:image/png;base64,${png}`, `data:image/png;base64,${png1}`]);
+    for (const id of [ids[0], ids[3]]) assert((await mp.evaluate(() => window.payloadReads)).includes(id), "originals outside the display cache were not read");
+    await mr(ids[0]).getByRole("button", { name: "Send now", exact: true }).click();
+    await frame(mp);
+    assert.deepEqual(await mp.evaluate(() => window.promoted), [ids[0]]);
+    assert.equal(await mr(ids[0]).locator(".delivery-status").innerText(), "Steering · waiting for input checkpoint");
+    assert.equal(await mr(ids[1]).locator(".delivery-status").innerText(), "Not sent");
+    assert.equal(await mr(ids[2]).locator(".delivery-status").innerText(), "Delivery unconfirmed");
+    results[`${engine}-mixed-current`] = { ...afterReload, people: afterReload.people.length, payloadsRestored: 10, exactPromotion: ids[0] };
+    await mp.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
+    await shot(mp, "mixed-current", engine);
+    assert.deepEqual(mixed.errors, []);
+    assert.deepEqual(mixed.unsupported, []);
+    assert.deepEqual(mixed.outside, []);
+    await mixed.context.close();
+    console.log(engine, "earlier receipts folded/messages and replies whole/opened in order/repeats/sent as sent/states/same text/late native/retry/edit/refusal/images/agents/palette/keys/Settings/reload/i18n/dark/narrow/local icons/cache8/current failures PASS");
   } finally {
     await browser.close();
   }
 }
 console.log(JSON.stringify(results));
-console.log(`screenshots: ${tmpdir()}/yesman-receipts-*.png`);
+await writeFile(`${out}/results.json`, JSON.stringify(results, null, 2));
+console.log(`screenshots and JSON: ${out}`);
 server.close();
