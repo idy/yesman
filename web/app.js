@@ -333,6 +333,18 @@ function receiptBody(d, sent) {
     !images.length && imageCount ? imageNote(imageCount) : null, deliveryStatus(d, false));
 }
 
+// Historical receipts keep their recorded state without announcing it as a
+// current delivery status. Missing confirmation never establishes consumption.
+const HISTORICAL_DELIVERY_LABELS = {
+  unconfirmed: 'No confirmation recorded at the time', failed: 'Recorded as not sent',
+  interrupted: 'Recorded as interrupted', handled: 'Recorded as handled by an extension',
+  dispatched: 'Recorded as taken by pi', cancelled: 'Recorded as recalled',
+};
+function historicalDeliveryStatus(d) {
+  return h('div', { class: 'delivery-status delivery-status--historical', 'data-state': d.state, title: d.error || null },
+    t(HISTORICAL_DELIVERY_LABELS[d.state] ?? 'Status not recorded'));
+}
+
 function receiptLine(d) {
   const imageCount = d.imageCount ?? d.images?.length ?? 0;
   const preview = d.text ? (d.preview ? `${d.text}…` : d.text) : '';
@@ -340,7 +352,7 @@ function receiptLine(d) {
   return h('div', { class: 'msg-delivery msg-delivery--compact', 'data-delivery': d.id, 'data-sending': 'false' },
     h('div', { class: 'delivery-compact', title: preview || null }, t('Submission: {text}', { text: short }),
       imageCount ? ` · ${tn(imageCount, '{n} image submitted', '{n} images submitted')}` : ''),
-    deliveryStatus(d, false));
+    historicalDeliveryStatus(d));
 }
 
 // receiptEl brought up to date: a receipt changing state keeps its element
@@ -348,7 +360,7 @@ function receiptLine(d) {
 function updateReceipt(c, el, d, options = {}) {
   if (el._variant === receiptForm(d, options.sent, options.line) && !d.images?.length) {
     el.dataset.sending = String(!options.line && d.state === 'sending');
-    el.querySelector('.delivery-status').replaceWith(deliveryStatus(d, false));
+    el.querySelector('.delivery-status').replaceWith(options.line ? historicalDeliveryStatus(d) : deliveryStatus(d, false));
     if (!options.line) {
       el.querySelector('.message-actions')?.replaceWith(copyActions(el._payload?.text ?? options.sent?.text ?? receiptText(d), c, d));
       if (!options.sent && d.originalPayload && !el._hydration) hydrateReceipt(c, el, d);
@@ -360,12 +372,13 @@ function updateReceipt(c, el, d, options = {}) {
 
 const receiptSig = (d, sent) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}:${!!d.originalPayload}:${!!d.canPromote}:${!!d.canCancel}:${!!d.canRestore}`;
 
-// The earlier submissions no message is tied to, folded into one line. Opened,
-// each is one light line with what yesman kept of it and its state.
+// The earlier submissions no message is tied to, folded into one neutral
+// record count. Recorded outcomes belong in the historical details.
 function receiptsEl(c, row) {
   const el = h('details', { class: 'receipts' });
   el.append(
-    h('summary', null, h('span', { class: 'receipts-label' }), h('span', { class: 'receipts-facts' }), icon('chevron', 'mds-icon receipts-caret')),
+    h('summary', null, h('span', { class: 'receipts-label' }), icon('chevron', 'mds-icon receipts-caret')),
+    h('div', { class: 'receipts-note' }, t('These statuses reflect what was recorded at the time. Missing confirmation does not establish whether pi processed the input.')),
     h('div', { class: 'receipts-body' }));
   el.open = c.receiptsOpen;
   el.addEventListener('toggle', () => {
@@ -375,26 +388,13 @@ function receiptsEl(c, row) {
   return updateReceipts(c, el, row);
 }
 
-const RECEIPT_FACTS = {
-  unconfirmed: ['{n} delivery unconfirmed', '{n} delivery unconfirmed'],
-  handled: ['{n} handled by an extension', '{n} handled by an extension'],
-  failed: ['{n} not sent', '{n} not sent'],
-  interrupted: ['{n} delivery interrupted', '{n} delivery interrupted'],
-};
-
 function updateReceipts(c, el, row) {
-  const counts = new Map();
-  for (const d of row.deliveries) counts.set(d.state, (counts.get(d.state) ?? 0) + 1);
-  const label = tn(row.deliveries.length, '{n} earlier submission', '{n} earlier submissions');
-  const facts = counts.size === 1 ? t(DELIVERY_LABELS[[...counts.keys()][0]] ?? '')
-    : [...counts].map(([state, n]) => (RECEIPT_FACTS[state] ? tn(n, ...RECEIPT_FACTS[state]) : '')).filter(Boolean).join(' · ');
-  const summary = `${label}|${facts}`;
-  if (el._summary !== summary) {
-    el._summary = summary;
+  const label = t('Earlier submission records · {n}', { n: row.deliveries.length });
+  if (el._summary !== label) {
+    el._summary = label;
     const s = el.firstElementChild;
     s.children[0].textContent = label;
-    s.children[1].textContent = facts;
-    s.title = t('Earlier submissions that yesman cannot tie to a message above, kept for a while as a record. pi reported nothing more about them, and any that was not sent was followed by a later submission. Open to see what was kept of each.');
+    s.title = t('Earlier submission receipts that yesman cannot tie to a message above. Open to see the retained previews and recorded statuses.');
   }
   el._deliveries = row.deliveries;
   if (el.open) patchReceipts(c, el.lastElementChild, row.deliveries);
