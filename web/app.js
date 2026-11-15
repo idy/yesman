@@ -3238,10 +3238,38 @@ const board = createBoard({
   openAgent: (id) => selectAgent(id),
 });
 
+// Where focus was when opening a pane hid it (an info panel row, in a
+// narrow window), to go back to when the pane closes.
+let paneFocusFrom = null;
+
 function setPane(pane) {
+  const had = document.activeElement;
+  const shown = (el) => !!el?.isConnected && el.getClientRects().length > 0;
+  const visible = had && had !== document.body && shown(had);
+  const inPane = !!had?.closest?.('#board, #needs-you, #files');
+  const entry = had?.closest?.('#yesman-info [data-info-entry]')?.dataset.infoEntry;
   state.pane = pane;
   renderInfo();
   renderBarActions();
+  // Only focus this change hid moves: to the pane opened, or, once it
+  // closes, back to where it was or to the message box. Focus the user can
+  // still see stays where it is.
+  const now = document.activeElement;
+  if (!visible || (now && now !== document.body && shown(now))) {
+    if (!pane) paneFocusFrom = null;
+    return;
+  }
+  let target = null;
+  if (pane) {
+    target = pane === 'needs-you' ? $('#needs-you .needs-you-heading') : pane === 'board' ? $('#board .files-head-actions button') : null;
+    if (target && !inPane) paneFocusFrom = entry ? { entry } : had;
+  } else {
+    const from = paneFocusFrom;
+    paneFocusFrom = null;
+    target = (from?.entry ? $(`#yesman-info [data-info-entry="${CSS.escape(from.entry)}"]`) : from) ?? null;
+    if (!shown(target)) target = $('#dock textarea');
+  }
+  if (shown(target)) target.focus({ preventScroll: true });
 }
 
 function togglePane(pane) {
