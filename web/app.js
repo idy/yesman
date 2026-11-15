@@ -5,11 +5,12 @@
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
 import { orderWorkers } from './sidebar.js';
+import { needsYouItems, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
 import { messageActions, messageText, receiptText } from './message-actions.js';
 import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
 import { renderMarkdown } from './markdown.js';
 import { project, originOf, FINISHED } from './conversation.js';
-import { $, h, icon } from './dom.js';
+import { $, h, icon, openModal } from './dom.js';
 import { createFiles } from './files.js';
 import { createInfo } from './info.js';
 import { createBoard } from './board.js';
@@ -78,6 +79,11 @@ const state = {
   fetches: { fetching: [], errors: {} }, // Yesman.Fetches: repositories being fetched, and their last errors
   clones: [], // Yesman.Clones: repositories on their way into the pool
   update: null, // Yesman.Update: where updating yesman stands
+  // The Needs-you request being opened in its conversation: { key, agent,
+  // back (opened from the Needs you page), pending (still to be located) }.
+  request: null,
+  resolving: new Set(), // keys of handoffs being closed
+  resetting: new Set(), // yesmen whose request memory is being reset
 };
 
 const agentById = (id) => state.snap.agents.find((a) => a.id === id);
@@ -912,10 +918,11 @@ function onAgentEvent(ev) {
   if (contextEvents.has(e.type)) contextViewer.refresh(agent);
   const c = agent && state.convos.get(keyOf(agent));
   if (!c) return;
-  if (!c.loaded) {
-    c.queue?.push(ev);
-    return;
-  }
+  // While the history is read, every record is kept to replay over it:
+  // before the first read, and when a loaded conversation is read again,
+  // whose records also show at once.
+  c.queue?.push(ev);
+  if (!c.loaded) return;
   if (ev.seq <= c.seq || c.eventSeqs.has(ev.seq)) return;
   c.eventSeqs.add(ev.seq);
   if (e.type === 'queue_update' || e.type === 'delivery_queue') {
@@ -1042,7 +1049,10 @@ function statusDot(status) {
 
 // How long a run has gone on: 8s, 4m, 1h 5m.
 function elapsed(since) {
-  const s = Math.max(0, Math.floor((Date.now() - new Date(since).getTime()) / 1000));
+  return span(Math.max(0, Math.floor((Date.now() - new Date(since).getTime()) / 1000)));
+}
+
+function span(s) {
   if (s < 60) return t('{n}s', { n: formatNumber(s) });
   if (s < 3600) return t('{n}m', { n: formatNumber(Math.floor(s / 60)) });
   return t('{hours}h {minutes}m', { hours: formatNumber(Math.floor(s / 3600)), minutes: formatNumber(Math.floor((s % 3600) / 60)) });
@@ -1083,6 +1093,7 @@ const workerNumber = (a) => (a.number ? `a${a.number}` : a.name);
 // Run times count up while agents work.
 setInterval(() => {
   for (const el of document.querySelectorAll('.agent-row .meta[data-since]')) el.textContent = elapsed(el.dataset.since);
+  for (const el of document.querySelectorAll('[data-elapsed]')) el.textContent = elapsed(el.dataset.elapsed);
 }, 1000);
 
 async function openAgentMenu(e, a) {
@@ -1127,12 +1138,18 @@ async function openAgentMenu(e, a) {
 // if it disappears, use the other entry, then the workspace's lead for a
 // hidden/removed worker. Keep focus unchanged when the workspace is gone.
 function restoreSidebarFocus(row) {
-  if (!row?.dataset.agent) return;
   const list = $('#yesmen');
+  if (row?.dataset.sidebarEntry === 'needs-you-page') {
+    list.querySelector('[data-sidebar-entry="needs-you-page"]')?.focus({ preventScroll: true });
+    return;
+  }
+  if (!row?.dataset.agent) return;
   const agent = `[data-agent="${CSS.escape(row.dataset.agent)}"]`;
   const entry = `[data-sidebar-entry="${CSS.escape(row.dataset.sidebarEntry)}"]`;
   const lead = `${row.dataset.agent.split('/')[0]}/lead`;
-  const target = list.querySelector(agent + entry) ?? list.querySelector(agent)
+  // A Needs-you request keeps its row while it is open, by its own key.
+  const request = row.dataset.request ? list.querySelector(`[data-request="${CSS.escape(row.dataset.request)}"]`) : null;
+  const target = request ?? list.querySelector(agent + entry) ?? list.querySelector(agent)
     ?? list.querySelector(`[data-agent="${CSS.escape(lead)}"][data-sidebar-entry="yesman"]`);
   target?.focus({ preventScroll: true });
 }
@@ -1141,10 +1158,13 @@ function renderSidebar() {
   const list = $('#yesmen');
   const focusedRow = list.contains(document.activeElement) ? document.activeElement : null;
   list.replaceChildren();
-  const waiting = state.snap.agents.filter((a) => a.status === 'waiting' && a.role === 'lead');
-  if (waiting.length) {
-    list.append(h('p', { class: 'side-group' }, t('Needs you')));
-    for (const a of waiting) list.append(agentRow(a, '', a.role === 'lead' ? yesmanLabel(a.yesman) : a.id));
+  // What waits on you, from every yesman: always there, with its count.
+  const items = needsYouItems(state.snap);
+  list.append(needsYouEntry(items));
+  for (const item of items.slice(0, SIDE_REQUESTS)) list.append(needsYouRow(item));
+  if (items.length > SIDE_REQUESTS) {
+    list.append(h('button', { class: 'needs-you-more', type: 'button', onclick: () => showNeedsYou() },
+      t('{n} more', { n: formatNumber(items.length - SIDE_REQUESTS) })));
   }
   list.append(h('div', { class: 'side-group' }, h('span', null, t('Yesmen')),
     h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: shortcuts.hint(t('Hire a yesman'), 'yesman.hire'), 'aria-label': t('Hire a yesman'),
@@ -1172,6 +1192,339 @@ function renderSidebar() {
   renderSideFoot();
 }
 
+// ---------- Needs you ----------
+
+const SIDE_REQUESTS = 5;
+const REQUEST_ICONS = {
+  confirm: 'check', select: 'listChecks', input: 'pencil', editor: 'pencil',
+  decision: 'listChecks', login: 'lock', install: 'package', manual: 'info',
+};
+const requestIcon = (item) => icon(REQUEST_ICONS[item.type] ?? 'bell', 'mds-icon');
+const RESOLUTIONS = { done: 'Marked done', 'not-needed': 'Marked not needed', resolved: 'Resolved by the lead' };
+
+// Where a request comes from: the yesman, and for a worker its number and
+// subject, by stable IDs.
+function requestFrom(item) {
+  const label = yesmanLabel(item.yesman);
+  if (item.role === 'lead') return label;
+  const a = agentById(item.agent);
+  return `${label} › ${a ? workerNumber(a) : item.agent.split('/')[1]}${a?.title ? ` ${a.title}` : ''}`;
+}
+
+const requestWhat = (item) => item.title || t(typeLabel(item));
+
+function needsYouEntry(items) {
+  const n = items.length;
+  const label = n ? t('Needs You: {n} waiting', { n: formatNumber(n) }) : t('Needs You: nothing waiting');
+  return h('button', {
+    class: 'mds-nav-item needs-you-entry', type: 'button', 'data-sidebar-entry': 'needs-you-page', 'data-count': String(n),
+    'aria-current': state.view.kind === 'needs-you' ? 'page' : null, 'aria-label': label, title: label,
+    onclick: () => showNeedsYou(),
+  }, icon('bell'), h('span', { class: 'needs-you-label' }, t('Needs You')),
+  n ? h('span', { class: 'needs-you-count', 'aria-hidden': 'true' }, formatNumber(n)) : null);
+}
+
+// A request in the sidebar: where it is from, and what it asks.
+function needsYouRow(item) {
+  const a = agentById(item.agent);
+  const current = state.view.kind === 'agent' && state.view.id === item.agent;
+  return h('button', {
+    class: 'agent-row needs-you-row', type: 'button', 'data-agent': item.agent, 'data-sidebar-entry': 'needs-you',
+    'data-request': item.key, 'data-status': 'waiting', 'aria-current': current ? 'page' : null, 'aria-haspopup': 'menu',
+    title: `${requestFrom(item)}: ${requestWhat(item)} (${t(typeLabel(item))})`,
+    onclick: () => openRequest(item),
+    oncontextmenu: (e) => { if (a) openAgentMenu(e, a); },
+    onkeydown: (e) => {
+      if (a && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) openAgentMenu(e, a);
+    },
+  }, statusDot('waiting'), h('span', { class: 'name' }, requestFrom(item)),
+  h('span', { class: 'meta' }, t(typeLabel(item))), h('span', { class: 'needs-you-what' }, requestWhat(item)));
+}
+
+// showNeedsYou shows what waits on the user: from every yesman, or, with a
+// scope, from one ({ yesman, hiredAt }), opened from where (from, an agent's
+// conversation to go back to).
+function showNeedsYou(focusKey = null, scope = null) {
+  state.view = scope?.yesman ? { kind: 'needs-you', yesman: scope.yesman, hiredAt: scope.hiredAt ?? '', from: scope.from ?? null } : { kind: 'needs-you' };
+  state.request = null;
+  render();
+  // The sidebar's entry keeps focus; going back to a request, or opening
+  // one yesman's, moves it to the page.
+  if (focusKey || scope?.yesman) ((focusKey && $(`#body [data-request="${CSS.escape(focusKey)}"]`)) || $('#body .needs-you-page h1'))?.focus();
+}
+
+// The yesman Needs you shows, while it is still the one it was opened for.
+function needsYouScope() {
+  const v = state.view;
+  if (v.kind !== 'needs-you' || !v.yesman) return null;
+  const y = state.snap.yesmen.find((y) => y.name === v.yesman);
+  return y && (y.hiredAt ?? '') === v.hiredAt ? y : null;
+}
+
+// Open a request where it was asked: its agent's conversation, with the
+// request found and focused there.
+function openRequest(item, back = state.view.kind === 'needs-you' ? { yesman: state.view.yesman, hiredAt: state.view.hiredAt, from: state.view.from } : null) {
+  if (!agentById(item.agent)) {
+    toast(t('This request is no longer open.'));
+    refreshSoon();
+    return;
+  }
+  state.request = { key: item.key, agent: item.agent, back, pending: true };
+  selectAgent(item.agent);
+}
+
+function renderNeedsYou(body) {
+  const v = state.view;
+  const scope = needsYouScope();
+  const inScope = (name) => !scope || name === scope.name;
+  const items = needsYouItems(state.snap).filter((item) => inScope(item.yesman));
+  // The page names what it shows (view, opener, and the hire it is for), so
+  // that a redraw puts focus back on a control only where it was.
+  const inner = h('div', { class: 'page-inner needs-you-page', 'data-page': JSON.stringify([v.yesman ?? '', v.hiredAt ?? '', scope?.hiredAt ?? null, v.from ?? '']) },
+    h('h1', { class: 'mds-title', tabindex: '-1' }, t('Needs You')),
+    h('p', { class: 'needs-you-intro' }, t('What your yesmen handed to you: their questions only you can answer, decisions, and steps only you can take. Open one to handle it in its conversation.')));
+  if (v.yesman) {
+    // Opened for one yesman: say which, or that it is gone, and offer all.
+    const from = v.from && agentById(v.from);
+    inner.append(h('div', { class: 'needs-you-scope', role: 'status' },
+      h('span', null, scope ? t('From {name} only', { name: yesmanLabel(scope.name) }) : t('{name} is no longer here; showing every yesman.', { name: v.yesman })),
+      scope ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-needs-you-nav': 'all', onclick: () => showNeedsYou() }, t('Show every yesman')) : null,
+      from ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-needs-you-nav': 'back', onclick: () => backToConversation(from.id) },
+        icon('arrowLeft'), t('Back to the conversation')) : null));
+  }
+  for (const y of state.snap.yesmen) {
+    if (!inScope(y.name)) continue;
+    if (y.handoffsError) {
+      inner.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+        h('strong', null, t('What {name} handed to you cannot be read', { name: y.displayName || y.name })), h('p', null, y.handoffsError))));
+    }
+    const memory = callMemoryNotice(y);
+    if (memory) inner.append(memory);
+  }
+  if (!items.length) {
+    inner.append(h('div', { class: 'needs-you-empty', role: 'status' }, icon('check', 'mds-icon'),
+      h('p', null, scope ? t('Nothing from {name} needs you right now.', { name: yesmanLabel(scope.name) }) : t('Nothing needs you right now.')),
+      h('p', { class: 'needs-you-hint' }, t('When a yesman needs your answer, a decision or a step only you can take, it shows here.'))));
+  } else {
+    inner.append(h('ul', { class: 'needs-you-list', 'aria-label': t('Waiting for you') }, items.map((item) => h('li', null, requestCard(item)))));
+  }
+  const closed = closedHandoffs(state.snap, 20, scope?.name);
+  if (closed.length) {
+    inner.append(h('details', { class: 'needs-you-history' },
+      h('summary', null, t('Recently handled ({n})', { n: formatNumber(closed.length) })),
+      h('ul', null, closed.map(({ yesman, handoff }) => h('li', null,
+        h('span', { class: 'needs-you-history-title' }, handoff.title),
+        h('span', { class: 'needs-you-history-meta' },
+          `${yesmanLabel(yesman)} · ${t(RESOLUTIONS[handoff.resolution] ?? 'Closed')} · ${t('{time} ago', { time: elapsed(handoff.closedAt) })}`))))));
+  }
+  body.append(h('div', { class: 'page' }, inner));
+}
+
+// What a yesman's memory of its lead's tool calls means for the user, when
+// it matters: nearly full, full, or kept by a pre-release version; with the
+// way to start a new one, which only the user can.
+const CALL_MEMORY = {
+  near: { tone: 'warn', title: "{name}'s request memory is nearly full", body: 'It remembers {used} of {capacity} of the tool calls its lead used to hand you requests, so that none registers twice. Once it is full, its lead cannot hand you new requests until you start a new memory.' },
+  full: { tone: 'error', title: "{name}'s lead cannot hand you new requests", body: 'Its request memory is full: it remembers {used} of {capacity} tool calls. Start a new memory to let its lead hand you requests again.' },
+  blocked: { tone: 'error', title: "{name}'s lead cannot hand you new requests", body: 'Its requests were kept by a pre-release version of yesman, which forgot some of its lead\'s tool calls without a trace, so a new one cannot be told from a repeat. Start a new memory to let its lead hand you requests again.' },
+  legacy: { tone: 'warn', title: "{name}'s requests were kept by a pre-release version", body: 'It remembers older tool calls of its lead in a way that may refuse some new requests. If its lead says a request was refused, start a new memory.' },
+  'legacy-full': { tone: 'error', title: "{name}'s lead cannot hand you most new requests", body: 'Its requests were kept by a pre-release version of yesman, whose memory of older tool calls is so full that it refuses most new ones. Start a new memory to let its lead hand you requests again.' },
+};
+
+function callMemoryNotice(y) {
+  const m = y.callMemory;
+  const text = m && CALL_MEMORY[m.state];
+  if (!text) return null;
+  const name = yesmanLabel(y.name);
+  const busy = state.resetting.has(y.name);
+  return h('div', { class: 'mds-notice needs-you-memory', role: m.state === 'near' || m.state === 'legacy' ? 'status' : 'alert', 'data-tone': text.tone, 'data-memory': y.name, 'data-state': m.state },
+    h('div', null,
+      h('strong', null, t(text.title, { name })),
+      h('p', null, t(text.body, { used: formatNumber(m.used), capacity: formatNumber(m.capacity) }))),
+    h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: busy, onclick: () => resetCallMemory(y, m) }, t('Start a new memory…')));
+}
+
+async function resetCallMemory(y, m) {
+  if (state.resetting.has(y.name)) return;
+  const name = yesmanLabel(y.name);
+  const forgets = m.forgettable > 0
+    ? t('This forgets {n} records of older tool calls {name}\'s lead used to hand you requests.', { n: formatNumber(m.forgettable), name })
+    : t('This forgets what a pre-release version remembered of the tool calls {name}\'s lead used to hand you requests.', { name });
+  const body = [forgets,
+    t('Requests waiting for you, recently handled ones and the latest tool calls stay.'),
+    t('A request handled long ago may show up once more if its lead repeats an old tool call; it is remembered again then. A later reset can let it back once more.')].join(' ');
+  if (!(await confirmAction(t('Start a new request memory for {name}?', { name }), body, t('Start a new memory')))) return;
+  // Where the reset was asked: focus goes back there only if the user is
+  // still on that page and has not put it on something else meanwhile.
+  const asked = needsYouPageKey();
+  state.resetting.add(y.name);
+  render();
+  try {
+    await call('ResetCallMemory', y.name, y.hiredAt, m.epoch, m.used, m.forgettable);
+    toast(t('{name}\'s lead can hand you new requests again.', { name }));
+  } catch (err) {
+    fail(err);
+  } finally {
+    state.resetting.delete(y.name);
+    await refreshState();
+    if (asked && needsYouPageKey() === asked && focusIsFree(y.name)) {
+      const same = state.snap.yesmen.some((v) => v.name === y.name && (v.hiredAt ?? '') === (y.hiredAt ?? ''));
+      ((same && $(`#body [data-memory="${CSS.escape(y.name)}"] button`)) || $('#body .needs-you-page h1'))?.focus();
+    }
+  }
+}
+
+// needsYouPageKey names the Needs you page shown: every yesman's, or one's
+// (by name and hire); null when another view is shown.
+function needsYouPageKey() {
+  const v = state.view;
+  return v.kind === 'needs-you' ? JSON.stringify([v.yesman ?? '', v.hiredAt ?? '']) : null;
+}
+
+// focusIsFree reports whether focus is on nothing the user chose: nowhere,
+// left in a closed dialog (WebKit keeps it on the confirmation a click
+// closed), the page's heading, or this yesman's request memory.
+function focusIsFree(name) {
+  const a = document.activeElement;
+  const dialog = a?.closest('dialog');
+  return !a || a === document.body || (dialog && !dialog.open) || a.matches('.needs-you-page h1') || !!a.closest(`#body [data-memory="${CSS.escape(name)}"]`);
+}
+
+function requestCard(item) {
+  const text = requestSummary(item.summary);
+  return h('button', { class: 'needs-you-card', type: 'button', 'data-request': item.key, 'data-type': item.type, onclick: () => openRequest(item) },
+    h('span', { class: 'needs-you-type' }, requestIcon(item), t(typeLabel(item))),
+    h('span', { class: 'needs-you-title' }, requestWhat(item)),
+    text ? h('span', { class: 'needs-you-summary' }, text) : null,
+    h('span', { class: 'needs-you-meta' },
+      h('span', null, t('From {from}', { from: requestFrom(item) })),
+      item.since ? h('span', null, t('Waiting'), ' ', h('span', { 'data-elapsed': item.since }, elapsed(item.since))) : null,
+      item.timeout ? h('span', null, t('Goes on without you after {time}', { time: span(Math.round(item.timeout / 1000)) })) : null));
+}
+
+// The handoffs of a lead's yesman, in its conversation, the one being opened
+// first among them.
+function handoffEls(a) {
+  const y = yesmanOf(a.id);
+  if (!y || a.role !== 'lead') return [];
+  const items = needsYouItems({ agents: [], yesmen: [y] });
+  if (!items.length) return [];
+  const focus = state.request?.agent === a.id ? items.find((item) => item.key === state.request.key) : null;
+  let shown = items.slice(0, 3);
+  if (focus && !shown.includes(focus)) shown = [focus, ...shown.slice(0, 2)];
+  const els = shown.map((item) => handoffEl(a, y, item));
+  if (items.length > shown.length) {
+    els.push(h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-more', type: 'button', onclick: () => showNeedsYou() },
+      t('{n} more under Needs You', { n: formatNumber(items.length - shown.length) })));
+  }
+  return els;
+}
+
+function handoffEl(a, y, item) {
+  const ho = item.handoff;
+  const busy = state.resolving.has(item.key);
+  const resolve = async (resolution) => {
+    if (state.resolving.has(item.key)) return;
+    state.resolving.add(item.key);
+    renderDock();
+    let closed = false;
+    try {
+      await call('ResolveHandoff', y.name, y.hiredAt, ho.id, resolution);
+      closed = true;
+      await refreshState();
+    } catch (err) {
+      fail(err);
+    } finally {
+      state.resolving.delete(item.key);
+      if (selectedAgent()?.id === a.id) {
+        renderDock();
+        if (closed) $('#dock textarea')?.focus();
+      }
+    }
+  };
+  const confirmedByUser = ['login', 'install', 'manual'].includes(ho.type);
+  const facts = [ho.task && t('Task {id}', { id: ho.task }), ho.worker && t('Worker {name}', { name: ho.worker })].filter(Boolean).join(' · ');
+  return h('div', { class: 'ask handoff', role: 'group', 'aria-label': `${t(typeLabel(item))}: ${ho.title}`, 'data-request': item.key, 'data-type': ho.type },
+    h('span', { class: 'needs-you-type' }, requestIcon(item), t(typeLabel(item))),
+    h('strong', null, ho.title),
+    ho.detail ? h('div', { class: 'md handoff-detail', html: renderMarkdown(ho.detail) }) : null,
+    facts ? h('p', { class: 'ask-hint' }, facts) : null,
+    h('p', { class: 'ask-hint' }, confirmedByUser
+      ? t('Mark it done once you have done it yourself; {name} checks it before relying on it.', { name: yesmanLabel(y.name) })
+      : t('Answer in the message box below if it needs words, then mark it done.')),
+    h('div', { class: 'ask-actions' },
+      h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', disabled: busy, onclick: () => resolve('done') }, t('Mark done')),
+      h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: busy, onclick: () => resolve('not-needed') }, t('Not needed')),
+      ho.toolCall ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => showToolCall(a, ho.toolCall) }, t('Show where it was asked')) : null));
+}
+
+// locateRequest marks the request being opened in the dock and, once, moves
+// focus and the view to it. A request answered meanwhile says so instead.
+function locateRequest(dock, a) {
+  const r = state.request;
+  if (!r || r.agent !== a.id) return;
+  const target = dock.querySelector(`[data-request="${CSS.escape(r.key)}"]`);
+  if (!target) {
+    if (r.pending) {
+      r.pending = false;
+      dock.prepend(h('div', { class: 'mds-notice needs-you-gone', role: 'status' }, h('div', null,
+        h('p', null, t('This request is no longer open: it was answered, cancelled or timed out.')),
+        r.back ? backToNeedsYou(r.key, r.back) : null)));
+    }
+    return;
+  }
+  target.classList.add('needs-you-target');
+  if (r.back) target.append(backToNeedsYou(r.key, r.back));
+  if (!r.pending) return;
+  r.pending = false;
+  target.scrollIntoView({ block: 'nearest' });
+  target.querySelector('input, textarea, button')?.focus({ preventScroll: true });
+}
+
+const backToNeedsYou = (key, scope) => h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-back', type: 'button', onclick: () => showNeedsYou(key, scope) },
+  icon('arrowLeft'), t('Back to Needs You'));
+
+// backToConversation goes back to the conversation Needs you was opened
+// from, to the entry that opened it when the info panel shows.
+function backToConversation(id) {
+  selectAgent(id);
+  $('#yesman-info [data-info-entry="needs-you"]')?.focus();
+}
+
+// showToolCall finds the lead's tool call that registered a handoff in the
+// folded work log of its conversation, when the loaded history has it.
+async function showToolCall(a, id) {
+  const c = convo(a);
+  const find = () => project(c, a).find((r) => r.type === 'work' && r.items.some((item) => item.type === 'tool' && item.block?.id === id));
+  if (c.loading) await c.loading.catch(() => {});
+  // A window can hold an older copy of the history: read it again once.
+  if (!find() && !c.loading) {
+    c.loading = loadConvo(c).finally(() => { c.loading = null; });
+    await c.loading;
+  }
+  if (selectedAgent()?.id !== a.id) return;
+  const row = find();
+  const rowEl = row && $(`#thread [data-row="${CSS.escape(row.key)}"]`);
+  if (!rowEl) {
+    toast(t('Where it was asked is not in the loaded conversation.'));
+    return;
+  }
+  if (!rowEl.open) {
+    const opened = new Promise((resolve) => rowEl.addEventListener('toggle', resolve, { once: true }));
+    rowEl.open = true;
+    await opened;
+  }
+  const el = rowEl.querySelector(`[data-tool="${CSS.escape(id)}"]`);
+  if (!el) {
+    toast(t('Where it was asked is not in the loaded conversation.'));
+    return;
+  }
+  for (const old of document.querySelectorAll('#thread .needs-you-target')) old.classList.remove('needs-you-target');
+  el.classList.add('needs-you-target');
+  el.scrollIntoView({ block: 'center' });
+  el.querySelector('summary')?.focus({ preventScroll: true });
+}
+
 // Whether a yesman's done workers are hidden, kept across launches.
 function setHideDone(yesman, hide) {
   if (hide) state.hideDone.add(yesman);
@@ -1190,6 +1543,8 @@ function renderBar() {
   if (state.view.kind === 'settings') {
     const page = SETTINGS.find((s) => s.page === state.view.page);
     crumbs.replaceChildren(h('span', null, t('Settings')), sep(), h('span', { 'aria-current': 'page' }, t(page.label)));
+  } else if (state.view.kind === 'needs-you') {
+    crumbs.replaceChildren(h('span', { 'aria-current': 'page' }, t('Needs You')));
   } else if (a) {
     const y = yesmanOf(a.id);
     const here = h('span', { 'aria-current': 'page', title: y?.path ?? '' }, a.role === 'lead' ? yesmanLabel(a.yesman) : a.name);
@@ -1411,6 +1766,11 @@ function renderBody() {
   const body = $('#body');
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
+  const held = requestFocus($('#dock'));
+  const cards = [...body.querySelectorAll('.needs-you-card')];
+  const cardAt = cards.indexOf(active?.closest?.('.needs-you-card'));
+  const nav = active?.closest?.('[data-needs-you-nav]')?.dataset.needsYouNav;
+  const page = active?.closest?.('.needs-you-page')?.dataset.page;
   contextViewer.close();
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
@@ -1424,17 +1784,55 @@ function renderBody() {
     }
     return;
   }
+  if (state.view.kind === 'needs-you') {
+    renderNeedsYou(body);
+    // A refresh keeps focus on the request it was on, or, when that one is
+    // gone, on the one now in its place, or the page's heading; and on a
+    // yesman's request memory, or the heading once it is gone; and on the
+    // page's own Show every yesman or Back to the conversation while the page
+    // is still the one it was (the same view, opener and hire), or else, the
+    // control gone with it, the heading.
+    const key = active?.closest?.('[data-request]')?.dataset.request;
+    const again = key && body.querySelector(`[data-request="${CSS.escape(key)}"]`);
+    const memory = active?.closest?.('[data-memory]')?.dataset.memory;
+    if (again) again.focus();
+    else if (cardAt >= 0) {
+      const now = body.querySelectorAll('.needs-you-card');
+      (now[Math.min(cardAt, now.length - 1)] ?? body.querySelector('.needs-you-page h1'))?.focus();
+    } else if (memory !== undefined) {
+      (body.querySelector(`[data-memory="${CSS.escape(memory)}"] button`) ?? body.querySelector('.needs-you-page h1'))?.focus();
+    } else if (nav !== undefined) {
+      const same = page === body.querySelector('.needs-you-page')?.dataset.page;
+      ((same && body.querySelector(`[data-needs-you-nav="${CSS.escape(nav)}"]`)) || body.querySelector('.needs-you-page h1'))?.focus();
+    } else if (active?.matches?.('.needs-you-page h1')) body.querySelector('.needs-you-page h1')?.focus();
+    return;
+  }
   const a = selectedAgent();
   if (!a) return renderWelcome(body);
 
   const scroller = h('div', { class: 'scroll', id: 'scroll' }, h('div', { class: 'thread', id: 'thread' }));
   scroller.addEventListener('scroll', () => { scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false'; });
   body.append(scroller, h('div', { class: 'dock' }, h('div', { class: 'dock-inner', id: 'dock' })));
-  renderDock();
+  renderDock({ held });
   renderThread();
 }
 
-function renderDock({ focusComposer = false } = {}) {
+// requestFocus is where focus is in a request of the dock, to keep across a
+// redraw: the request, which of its controls, what was typed in it, and its
+// place among the requests.
+function requestFocus(dock) {
+  const el = dock?.contains(document.activeElement) ? document.activeElement : null;
+  const request = el?.closest('[data-request]');
+  if (!request) return null;
+  return {
+    key: request.dataset.request,
+    index: [...request.querySelectorAll('button, input, textarea')].indexOf(el),
+    value: request.querySelector('input, textarea')?.value,
+    at: [...dock.querySelectorAll('[data-request]')].indexOf(request),
+  };
+}
+
+function renderDock({ focusComposer = false, held = null } = {}) {
   const dock = $('#dock');
   const a = selectedAgent();
   const keep = dock?.querySelector('textarea');
@@ -1443,17 +1841,25 @@ function renderDock({ focusComposer = false } = {}) {
   const caret = focused ? [keep.selectionStart, keep.selectionEnd, keep.selectionDirection] : null;
   const control = dock?.contains(document.activeElement) && document.activeElement.getAttribute('role') === 'combobox'
     ? document.activeElement.getAttribute('aria-label') : null;
+  // A request being handled keeps its focus and typed answer across redraws,
+  // also when the whole body was drawn again (held).
+  const heldAt = held ?? requestFocus(dock);
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
   if (!dock || !a) return;
   dock.replaceChildren();
 
+  // What waits above the composer takes at most part of the window, and
+  // scrolls, so that the conversation and the composer stay in view.
+  const requests = [];
   if (a.status === 'failed' && a.detail) {
-    dock.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('This agent stopped')), h('p', null, a.detail))));
+    requests.push(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('This agent stopped')), h('p', null, a.detail))));
   } else if (a.detail) {
-    dock.append(h('div', { class: 'mds-notice', role: 'status' }, h('div', null, h('strong', null, t('Needs a look')), h('p', null, a.detail))));
+    requests.push(h('div', { class: 'mds-notice', role: 'status' }, h('div', null, h('strong', null, t('Needs a look')), h('p', null, a.detail))));
   }
-  if (a.status === 'waiting' && a.dialog) dock.append(askEl(a));
+  if (a.status === 'waiting' && a.dialog) requests.push(askEl(a));
+  requests.push(...handoffEls(a));
+  if (requests.length) dock.append(h('div', { class: 'dock-requests' }, ...requests));
 
   const working = a.status === 'working' || a.status === 'waiting';
   const key = keyOf(a);
@@ -1549,6 +1955,29 @@ function renderDock({ focusComposer = false } = {}) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
   }
+  // A long detail scrolls in its request; then it can be reached and
+  // scrolled with the keyboard too.
+  for (const detail of dock.querySelectorAll('.handoff-detail')) {
+    if (detail.scrollHeight <= detail.clientHeight + 1) continue;
+    Object.assign(detail, { tabIndex: 0 });
+    detail.setAttribute('role', 'region');
+    detail.setAttribute('aria-label', t('Details'));
+  }
+  if (heldAt) {
+    const again = dock.querySelector(`[data-request="${CSS.escape(heldAt.key)}"]`);
+    const field = again?.querySelector('input, textarea');
+    if (field && heldAt.value !== undefined) field.value = heldAt.value;
+    const control = again?.querySelectorAll('button, input, textarea')[heldAt.index];
+    if (control && !control.disabled) control.focus({ preventScroll: true });
+    else if (!again) {
+      // It was answered or closed elsewhere: the request now in its place,
+      // or the composer.
+      const rest = dock.querySelectorAll('[data-request]');
+      const next = rest[Math.min(heldAt.at, rest.length - 1)]?.querySelector('button:not(:disabled), input, textarea');
+      (next ?? textarea).focus({ preventScroll: true });
+    }
+  }
+  locateRequest(dock, a);
 }
 
 // holdSent keeps what this window submitted, exactly as it was sent, to show
@@ -1648,8 +2077,11 @@ async function sendMessage(a, textarea, submitter = null) {
 function askEl(a) {
   const d = a.dialog;
   const answer = (payload) => call('Answer', a.id, d.id, payload).catch(fail);
-  const box = h('div', { class: 'ask', role: 'alert' }, h('strong', null, d.title || t('Question')), d.message ? h('p', null, d.message) : null,
-    a.role === 'worker' ? h('p', { class: 'ask-hint' }, t('{name} has this question and answers it. You can answer here instead.', { name: yesmanLabel(a.yesman) })) : null);
+  const box = h('div', { class: 'ask', role: 'alert', 'data-request': `d:${a.id}@${a.since ?? ''}:${d.id ?? ''}` },
+    h('strong', null, d.title || t('Question')), d.message ? h('p', null, d.message) : null,
+    a.role === 'worker' ? h('p', { class: 'ask-hint' }, a.handedOver
+      ? t('{name} handed this question to you.', { name: yesmanLabel(a.yesman) })
+      : t('{name} has this question and answers it. You can answer here instead.', { name: yesmanLabel(a.yesman) })) : null);
   const actions = h('div', { class: 'ask-actions' });
   if (d.method === 'confirm') {
     actions.append(
@@ -2771,6 +3203,14 @@ const info = createInfo({
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
+  // The same requests as Needs you shows, of this yesman only.
+  needsYou: (y) => ({
+    count: needsYouItems(state.snap).filter((item) => item.yesman === y.name).length,
+    error: state.snap.yesmen.find((v) => v.name === y.name)?.handoffsError ?? '',
+    // New requests are refused until the user starts a new memory.
+    refused: ['full', 'blocked', 'legacy-full'].includes(state.snap.yesmen.find((v) => v.name === y.name)?.callMemory?.state),
+  }),
+  openNeedsYou: (y) => showNeedsYou(null, { yesman: y.name, hiredAt: y.hiredAt ?? '', from: state.view.kind === 'agent' ? state.view.id : null }),
   openWorktree: (dir, show) => files.openWorktree(dir, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
@@ -2841,6 +3281,7 @@ async function openCheckout(y) {
 // ---------- Actions ----------
 
 function selectAgent(id) {
+  if (state.request?.agent !== id) state.request = null;
   state.view = { kind: 'agent', id };
   const a = agentById(id);
   if (!a) {
@@ -2916,7 +3357,9 @@ async function confirmAction(title, body, ok) {
   $('#confirm-title').textContent = title;
   $('#confirm-body').textContent = body;
   $('#confirm-ok').textContent = ok;
-  return (await openDialog(dialog)) === 'ok';
+  // Not openDialog: a close that arrives late must not answer the next
+  // confirmation.
+  return (await openModal(dialog)) === 'ok';
 }
 
 async function dismiss(name) {
@@ -2968,6 +3411,13 @@ const actionHost = {
   entries: sidebarAgents,
   leads: () => state.snap.yesmen.map((y) => agentById(`${y.name}/lead`)).filter(Boolean),
   needsYou: () => state.snap.agents.find((a) => a.role === 'lead' && a.status === 'waiting') ?? null,
+  // Needs You, every yesman's requests; focus goes to its heading when the
+  // control that had it was drawn away.
+  showNeedsYou() {
+    showNeedsYou();
+    const now = document.activeElement;
+    if (!now || now === document.body) $('#body .needs-you-page h1')?.focus({ preventScroll: true });
+  },
   step(by) {
     const list = sidebarAgents();
     const at = list.findIndex((a) => a.id === state.view.id);
@@ -3073,10 +3523,15 @@ async function refreshState() {
 function onAgents(agents) {
   const before = selectedAgent();
   const ids = state.snap.agents.map((a) => a.id).join();
+  const requests = needsYouItems(state.snap).map((item) => item.key).join();
   state.snap.agents = agents;
   pruneCaches();
   renderSidebar();
   palette.refresh();
+  if (needsYouItems(state.snap).map((item) => item.key).join() !== requests) {
+    if (state.view.kind === 'needs-you') renderBody();
+    info.render(); // its Needs you row counts them
+  }
   // The board links a task's owner while it is one of the agents.
   if (state.pane === 'board' && agents.map((a) => a.id).join() !== ids) board.render();
   piPage.onAgents();

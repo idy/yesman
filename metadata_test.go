@@ -20,6 +20,10 @@ import (
 // The real Manager starts this test binary as a deterministic RPC child.
 // It reads no pi configuration and makes no model/provider request.
 func TestMain(m *testing.M) {
+	if os.Getenv("YESMAN_NEEDS_YOU_FAKE_PI") != "" {
+		needsYouFakePi() // the scripted pi of needsyou_browser_test.go
+		os.Exit(0)
+	}
 	if os.Getenv("YESMAN_TEST_METADATA_RPC_CHILD") == "1" {
 		in, out := bufio.NewScanner(os.Stdin), json.NewEncoder(os.Stdout)
 		for in.Scan() {

@@ -106,8 +106,9 @@ func main() {
 	a.keychain = appKeychain()
 	go a.unlockFromKeychain() // the system may ask the user first
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
-		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) },
-		Secrets:      a.vault, Variables: a.variables, Crew: a.leadCrew}
+		BoardChanged:    func(yesman string) { _ = boardEvent.Broadcast(yesman) },
+		NeedsYouChanged: func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
+		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}
@@ -121,6 +122,7 @@ func main() {
 		OnChange:  a.agentsChanged,
 	})
 	srv.Agents = a.agents
+	a.countHandoffs() // for the tray, before the first change of the agents
 	a.catalog = newCatalog(func(ctx context.Context) ([]agent.Model, error) {
 		if a.piErr != nil {
 			return nil, a.piErr

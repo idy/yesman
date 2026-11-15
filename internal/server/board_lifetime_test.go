@@ -27,6 +27,10 @@ import (
 // prompt "exit" makes it exit after answering, as a crash would; when its
 // input closes, as Stop closes it, it marks that before exiting.
 func TestMain(m *testing.M) {
+	if os.Getenv("YESMAN_SERVER_FAKE_PI") != "" {
+		serverFakePi() // the scripted pi of fakepi_test.go
+		os.Exit(0)
+	}
 	if dir := os.Getenv("YESMAN_TEST_RPC_CHILD"); dir != "" {
 		rpcChild(dir)
 		return

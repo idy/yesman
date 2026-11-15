@@ -74,8 +74,13 @@ type Info struct {
 	StartedAt time.Time `json:"startedAt,omitzero"`
 	// Detail explains a failure.
 	Detail string `json:"detail,omitempty"`
-	// Dialog is the extension_ui_request a Waiting agent waits on.
-	Dialog json.RawMessage `json:"dialog,omitempty"`
+	// Dialog is the extension_ui_request a Waiting agent waits on, and
+	// DialogAt when it was asked.
+	Dialog   json.RawMessage `json:"dialog,omitempty"`
+	DialogAt time.Time       `json:"dialogAt,omitzero"`
+	// HandedOver: the lead handed this worker's Dialog to the user, who
+	// sees it under Needs you. A worker's other questions stay with its lead.
+	HandedOver bool `json:"handedOver,omitempty"`
 	// Activity says what a working agent is doing now, from the events of
 	// its run, such as "Running go test ./...". Empty between steps.
 	Activity string `json:"activity,omitempty"`
@@ -149,6 +154,9 @@ type Manager struct {
 	recallBytes     int               // full payload memory across all agent generations; guarded by mu
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
+	// callsDone is signalled, under mu, when an agent's last caller
+	// operation ends; Stop waits for them.
+	callsDone *sync.Cond
 }
 
 type agent struct {
@@ -170,6 +178,8 @@ type agent struct {
 	stopping                       bool
 	dir                            string   // the workspace, to show paths in it relative to it
 	tools                          []string // the tool calls running, oldest first
+	handedOver                     string   // the dialog ID the lead handed to the user
+	calls                          int      // CallerOperations in progress; guarded by mu
 	labels                         map[string]string
 	deliveries                     map[string]Delivery // bounded receipt metadata; pi owns scheduling
 	deliveryOnce                   sync.Once
@@ -206,6 +216,7 @@ func New(cfg Config) *Manager {
 		cfg.OnChange = func([]Info) {}
 	}
 	m := &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}, shutdown: make(chan struct{}), notify: make(chan struct{}, 1)}
+	m.callsDone = sync.NewCond(&m.mu)
 	go func() {
 		for range m.notify {
 			m.cfg.OnChange(m.List())
@@ -289,6 +300,10 @@ func (m *Manager) infoLocked(id, role string, w yesmen.Worker, subject string) I
 	i := Info{ID: id, Status: Stopped}
 	if a := m.agents[id]; a != nil && (a.info.Since.Equal(w.StartedAt) || a.info.Since.IsZero() && !a.retiring) {
 		i = a.info
+		i.HandedOver = a.handedOver != "" && dialogID(i.Dialog) == a.handedOver
+	}
+	if i.Dialog == nil {
+		i.DialogAt = time.Time{}
 	}
 	i.Yesman, i.Name, _ = SplitID(id)
 	i.Role, i.Number, i.Title, i.Task, i.Since, i.FinishedAt = role, w.Number, subject, w.Task, w.StartedAt, w.FinishedAt
@@ -641,14 +656,25 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 		_ = json.Unmarshal(raw, &e)
 		switch e.Method {
 		case "select", "confirm", "input", "editor":
+			var d dialog
+			_ = json.Unmarshal(raw, &d)
 			m.mu.Lock()
 			current := a.proc == p || a.proc == nil
 			if current {
-				a.info.Status, a.info.Dialog, a.info.UpdatedAt = Waiting, raw, time.Now()
+				now := time.Now()
+				a.info.Status, a.info.Dialog, a.info.DialogAt, a.info.UpdatedAt = Waiting, raw, now, now
+				if a.handedOver != d.ID {
+					a.handedOver = ""
+				}
 			}
 			worker := a.info.Role == RoleWorker
 			m.mu.Unlock()
 			m.changed()
+			if current && d.Timeout > 0 && d.ID != "" {
+				// pi answers a dialog itself when its timeout passes, and says
+				// nothing: stop offering it then, so no late answer is taken.
+				time.AfterFunc(time.Duration(d.Timeout)*time.Millisecond, func() { m.expireDialog(a, p, d.ID) })
+			}
 			if current && worker {
 				// The lead answers for its workers; the user hears of it only
 				// if the lead cannot decide.
@@ -976,6 +1002,7 @@ func (m *Manager) Answer(id, requestID string, answer map[string]any) error {
 	p, raw := a.proc, a.info.Dialog
 	// Reserve the question before sending. A second answer cannot consume
 	// it, and events after the response (including a new question) stay put.
+	handedOver := a.handedOver
 	a.info.Status, a.info.Dialog, a.info.UpdatedAt = Working, nil, time.Now()
 	m.mu.Unlock()
 	msg := map[string]any{}
@@ -987,6 +1014,7 @@ func (m *Manager) Answer(id, requestID string, answer map[string]any) error {
 		m.mu.Lock()
 		if a.proc == p && a.info.Status == Working && a.info.Dialog == nil {
 			a.info.Status, a.info.Dialog = Waiting, raw
+			a.handedOver = handedOver
 		}
 		m.mu.Unlock()
 		m.changed()
@@ -1008,6 +1036,11 @@ func (m *Manager) Stop(id string) {
 	a.stopping = true
 	if a.startCancel != nil {
 		a.startCancel()
+	}
+	// Caller operations already admitted finish first; stopping admits no
+	// more, so none commits for this process after Stop returns.
+	for a.calls > 0 {
+		m.callsDone.Wait()
 	}
 	wait := a.starting
 	m.mu.Unlock()
@@ -1074,6 +1107,7 @@ func (m *Manager) clearLocked(a *agent, p *proc) {
 		a.proc = nil
 	}
 	a.turn = nil
+	a.handedOver = ""
 	if events := m.interruptDeliveriesLocked(a); len(events) > 0 {
 		go func() {
 			for _, ev := range events {
