@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -42,12 +43,13 @@ const configLimit = 1 << 20
 // configFile is the file as TOML has it. Pointers tell a key left out from
 // one set to its zero value.
 type configFile struct {
-	Version    int               `toml:"version"`
-	Appearance *string           `toml:"appearance"`
-	AutoFetch  *int              `toml:"auto_fetch"`
-	Repos      *[]string         `toml:"repos"`
-	Variables  *[]configVariable `toml:"variables"`
-	Secrets    *configSecrets    `toml:"secrets"`
+	Version    int                  `toml:"version"`
+	Appearance *string              `toml:"appearance"`
+	AutoFetch  *int                 `toml:"auto_fetch"`
+	Repos      *[]string            `toml:"repos"`
+	Variables  *[]configVariable    `toml:"variables"`
+	Shortcuts  *map[string][]string `toml:"shortcuts"`
+	Secrets    *configSecrets       `toml:"secrets"`
 }
 
 // configVariable is a variable as the file has it.
@@ -74,6 +76,9 @@ type config struct {
 	// leaves those here as they are, merging or replacing.
 	variables *[]secrets.Entry
 	secrets   *configSecrets
+	// shortcuts are the keys chosen instead of the defaults, or nil when the
+	// file leaves them out, which leaves those here alone.
+	shortcuts *Shortcuts
 	ignored   []string // keys this yesman does not know
 }
 
@@ -137,6 +142,15 @@ repos = [`)
 	for _, v := range vars {
 		b.WriteString("\n[[variables]]\nname = " + tomlString(v.Name) + "\nvalue = " + tomlString(v.Value) +
 			"\ndescription = " + tomlString(v.Description) + "\n")
+	}
+	b.WriteString("\n# Keyboard shortcuts changed from their defaults, by action: its keys, or [] for\n" +
+		"# none. Mod is Command on macOS and Ctrl on Windows and Linux.\n[shortcuts]\n")
+	for _, id := range slices.Sorted(maps.Keys(s.Shortcuts)) {
+		keys := make([]string, len(s.Shortcuts[id]))
+		for i, k := range s.Shortcuts[id] {
+			keys[i] = tomlString(k)
+		}
+		b.WriteString(tomlString(id) + " = [" + strings.Join(keys, ", ") + "]\n")
 	}
 	if sec != nil {
 		b.WriteString("\n# Secrets: the vault's key file and secrets file, encrypted, and the password\n# that opens the key.\n[secrets]\npassword = " + tomlString(sec.Password) +
@@ -244,6 +258,13 @@ func parseConfig(data []byte) (config, error) {
 		}
 		c.secrets = &s
 	}
+	if f.Shortcuts != nil {
+		s, err := checkShortcuts(*f.Shortcuts)
+		if err != nil {
+			return config{}, fmt.Errorf("shortcuts: %w", err)
+		}
+		c.shortcuts = &s
+	}
 	for _, k := range md.Undecoded() {
 		c.ignored = append(c.ignored, k.String())
 	}
@@ -271,14 +292,28 @@ func readConfig(path string) (config, error) {
 func (c config) settings(current Settings, mode importMode) Settings {
 	next := current
 	if mode == importReplace {
-		// The file does not carry the crew, so replacing keeps it.
-		next = Settings{Appearance: mygo.ThemeSystem, Crew: current.Crew}
+		// The file does not carry the crew, so replacing keeps it, and the
+		// shortcuts unless it has them, and settings a newer yesman keeps.
+		next = Settings{Appearance: mygo.ThemeSystem, Crew: current.Crew, Shortcuts: current.Shortcuts, extra: current.extra}
 	}
 	if c.appearance != nil {
 		next.Appearance = *c.appearance
 	}
 	if c.autoFetch != nil {
 		next.AutoFetch = *c.autoFetch
+	}
+	if c.shortcuts != nil {
+		shortcuts := current.Shortcuts.clone()
+		if mode == importReplace || shortcuts == nil {
+			shortcuts = Shortcuts{}
+		}
+		for id, keys := range *c.shortcuts {
+			shortcuts[id] = slices.Clone(keys)
+		}
+		if len(shortcuts) == 0 {
+			shortcuts = nil
+		}
+		next.Shortcuts = shortcuts
 	}
 	return next
 }
@@ -331,6 +366,14 @@ type ImportPlan struct {
 	Ignored []string    `json:"ignored"` // keys this yesman does not know
 	// Env is what it does to the variables and secrets.
 	Env EnvChanges `json:"env"`
+	// Shortcuts lists the actions whose keys merging and replacing change.
+	Shortcuts ShortcutChanges `json:"shortcuts"`
+}
+
+// ShortcutChanges are the actions whose keys an import changes.
+type ShortcutChanges struct {
+	Merge   []string `json:"merge"`
+	Replace []string `json:"replace"`
 }
 
 // ExtraRepo is a pool repository a configuration file leaves out.
@@ -357,6 +400,10 @@ func planImport(c config, current Settings, repos []pool.Repo, clones []Clone, i
 		Merge:   settingsValues(c.settings(current, importMerge)),
 		Replace: settingsValues(c.settings(current, importReplace)),
 		Add:     []string{}, Present: []string{}, Extra: []ExtraRepo{}, Ignored: []string{},
+		Shortcuts: ShortcutChanges{
+			Merge:   changedShortcuts(current.Shortcuts, c.settings(current, importMerge).Shortcuts),
+			Replace: changedShortcuts(current.Shortcuts, c.settings(current, importReplace).Shortcuts),
+		},
 	}
 	plan.Ignored = append(plan.Ignored, c.ignored...)
 	have, pooled := map[string]bool{}, map[string]bool{}

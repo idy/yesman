@@ -93,6 +93,7 @@ type originSlot struct {
 // final text is pushed, so they cannot move an origin to another message.
 type originTracker struct {
 	mu        sync.Mutex
+	native    bool         // capability fixed for this process; native inputs never use text heuristics
 	inflight  int          // prompts sent and not yet answered
 	lost      bool         // a queue changed in a way not followed; nothing is claimed until no prompt is in flight
 	queues    [2][]*queued // pi's queues, mirrored from queue_update
@@ -166,6 +167,12 @@ func (t *originTracker) answered(o Origin, behavior string, r *response) {
 // should get it: user messages with their origin, if known, and never with an
 // origin field that did not come from here.
 func (t *originTracker) observe(kind string, raw json.RawMessage) json.RawMessage {
+	if t.native {
+		if kind == "message_start" || kind == "message_end" {
+			return projectNativeEvent(raw)
+		}
+		return raw
+	}
 	switch kind {
 	case "queue_update":
 		var e struct {

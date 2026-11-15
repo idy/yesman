@@ -282,7 +282,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     assert.equal(await row(one).count(), 1);
     assert.equal(await row(one).getAttribute("data-bound"), "true");
     assert.equal(await row(one).locator(".msg-user").innerText(), "same");
-    assert.equal(await row(one).locator(".delivery-status").innerText(), "Delivered");
+    assert.equal(await row(one).locator(".delivery-status").innerText(), "Taken by pi");
     assert.equal(await page.locator("#thread > .msg-user, #thread > [data-bound] > .msg-user").count(), 2); // identical text and timestamps remain two real messages
     await page.evaluate(() =>
       window.fixture.emit("alice/lead", {
@@ -326,7 +326,10 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
         window.sent.filter((s) => s.method === "Yesman.Submit").length === 1,
     );
     const imageID = await idAt(0);
-    assert.match(await row(imageID).innerText(), /2 images submitted/);
+    // What this window sent shows as sent: its images, not a count of them.
+    assert.equal(await row(imageID).locator(".message-images img").count(), 2);
+    assert.doesNotMatch(await row(imageID).innerText(), /images submitted/);
+    assert.match(await row(imageID).innerText(), /Sending/);
     await ack(imageID);
     assert.equal(await page.locator(".composer-image").count(), 0);
     await page.evaluate(
@@ -420,6 +423,9 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await ack(newID);
     assert.equal(await input.inputValue(), "");
     assert.equal(await page.locator(".composer-image").count(), 0);
+    // A current interrupted input remains visible after later submissions.
+    assert.equal(await page.locator(`#thread > [data-delivery="${retryID}"]`).count(), 1);
+    assert.match(await page.locator(`#thread > [data-delivery="${retryID}"]`).innerText(), /Delivery interrupted/);
     // A compacted receipt cannot be resurrected by an unseen older notification.
     await page.evaluate((id) => {
       const d = window.fixture.saved.receipts["alice/lead"][id];
@@ -556,7 +562,8 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       two,
     );
     assert((await page.locator("#scroll").evaluate((el) => el.scrollTop)) < 10);
-    // Untied and only accepted: one light line with the preview, not a bubble.
+    // Untied and only accepted: open the earlier records to read its preview.
+    if (!(await page.locator('#thread > .receipts').evaluate(el => el.open))) await page.locator('#thread > .receipts > summary').click();
     assert.equal(await row(two).locator(".msg-user").count(), 0);
     assert.match(await row(two).innerText(), /Submission: same[\s\S]*Delivery unconfirmed/);
     await page.evaluate(() => {
@@ -572,7 +579,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     );
     await page.waitForTimeout(30);
     assert.match(await row(two).innerText(), /交付状态尚未确认/);
-    assert.match(await row(one).innerText(), /已送达/);
+    assert.match(await row(one).innerText(), /pi 已取走/);
     assert.match(await row(retryID).innerText(), /交付已中断/);
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "en" }));
     await page.waitForTimeout(30);
@@ -629,12 +636,15 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await page.waitForFunction(
       () => !document.querySelector(".composer textarea").readOnly,
     );
+    assert.equal(await page.locator("#thread > .msg-delivery > .msg-user").innerText(), "/receipt-only");
+    assert.match(await page.locator("#thread > .msg-delivery").innerText(), /Handled by an extension/);
     await page.reload();
     await input.waitFor();
     await page.locator('[data-agent="alice/worker"]').click();
-    await page.waitForFunction(
-      () => document.querySelectorAll("#thread .msg-delivery").length === 1,
-    );
+    // After a reload only the receipt is left of it: a record, folded.
+    await page.locator("#thread > .receipts").waitFor();
+    assert.equal((await page.locator("#thread > .receipts > summary").innerText()).trim().split(/\s*\n\s*/).join(" | "), "1 earlier submission | Handled by an extension");
+    assert.equal(await page.locator("#thread .msg-delivery").count(), 0);
     assert.equal(await page.locator("#thread > .msg-user").count(), 0);
     assert.equal(await page.locator("#thread .thread-empty").count(), 0);
     await page.evaluate(() =>

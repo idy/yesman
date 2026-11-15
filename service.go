@@ -22,11 +22,12 @@ type service struct{ app *app }
 
 // State is everything the sidebar shows.
 type State struct {
-	Home    string       `json:"home"`
-	Pool    string       `json:"pool"`
-	PiError string       `json:"piError,omitempty"`
-	Yesmen  []YesmanView `json:"yesmen"`
-	Agents  []agent.Info `json:"agents"`
+	Home            string                 `json:"home"`
+	Pool            string                 `json:"pool"`
+	PiError         string                 `json:"piError,omitempty"`
+	Yesmen          []YesmanView           `json:"yesmen"`
+	Agents          []agent.Info           `json:"agents"`
+	WorkspaceErrors []yesmen.MetadataError `json:"workspaceErrors,omitempty"`
 }
 
 // YesmanView is a yesman with its worktrees, and its handoffs: what its lead
@@ -52,7 +53,11 @@ func (s *service) State(ctx context.Context) (State, error) {
 	}
 	ys, err := a.yesmen.List()
 	if err != nil {
-		return st, err
+		var metadataErrors yesmen.MetadataErrors
+		if !errors.As(err, &metadataErrors) {
+			return st, err
+		}
+		st.WorkspaceErrors = metadataErrors
 	}
 	if len(ys) > 0 {
 		snapshot, scanErr := a.pool.Snapshot(ctx)
@@ -265,6 +270,25 @@ func (s *service) Submit(ctx context.Context, id, messageID, text string, images
 		return agent.Delivery{}, s.app.piErr
 	}
 	return s.app.agents.Submit(ctx, id, messageID, text, images, since)
+}
+
+// CancelSubmission removes one native pending occurrence and restores only its
+// exact original payload. Capability and generation are checked by the Manager.
+func (s *service) CancelSubmission(ctx context.Context, id, messageID string, since time.Time) (agent.RecallResult, error) {
+	return s.app.agents.CancelSubmission(ctx, id, messageID, since)
+}
+func (s *service) PromoteSubmission(ctx context.Context, id, messageID string, since time.Time) (agent.PromotionResult, error) {
+	return s.app.agents.PromoteSubmission(ctx, id, messageID, since)
+}
+
+func (s *service) SubmissionPayload(id, messageID string, since time.Time) (agent.RecallPayload, error) {
+	return s.app.agents.SubmissionPayload(id, messageID, since)
+}
+func (s *service) SubmissionText(id, messageID string, since time.Time) (string, error) {
+	return s.app.agents.SubmissionText(id, messageID, since)
+}
+func (s *service) AckRecall(id, messageID string, since time.Time) error {
+	return s.app.agents.AckRecall(id, messageID, since)
 }
 
 // Models lists pi's available models and this agent's effective selection.

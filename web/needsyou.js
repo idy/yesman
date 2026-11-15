@@ -17,7 +17,7 @@ export const TYPE_LABELS = {
   decision: 'Decision', information: 'Information', login: 'Log in', install: 'Install', manual: 'Manual step',
 };
 // A handoff of type "input" asks for information, unlike a text dialog.
-export const typeLabel = (item) => TYPE_LABELS[item.kind === 'handoff' && item.type === 'input' ? 'information' : item.type] ?? 'Request';
+export const typeLabel = (item) => TYPE_LABELS[item.kind === 'handoff' && item.type === 'input' ? 'information' : item.type] ?? 'Other request';
 
 const time = (s) => {
   const v = Date.parse(s ?? '');

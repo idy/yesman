@@ -84,6 +84,8 @@ export const ICONS = Object.freeze({
   circle: '\ue18a', // circle
   record: '\ue3ee', // record
   pencil: '\ue3b4', // pencil-simple
+  keyboard: '\ue2d8', // keyboard
+  chart: '\ue150', // chart-bar
 });
 
 // The opening of each dialog still waiting for its close.

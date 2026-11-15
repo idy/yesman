@@ -6,8 +6,10 @@
 
 import { orderWorkers } from './sidebar.js';
 import { needsYouItems, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
+import { messageActions, messageText, receiptText } from './message-actions.js';
+import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
 import { renderMarkdown } from './markdown.js';
-import { project } from './conversation.js';
+import { project, originOf, FINISHED } from './conversation.js';
 import { $, h, icon, openModal } from './dom.js';
 import { createFiles } from './files.js';
 import { createInfo } from './info.js';
@@ -16,9 +18,16 @@ import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
 import { createCrew } from './crew.js';
+import { createGrants } from './grants.js';
+import { createUsagePage } from './usage.js';
 import { createEnvPage } from './env.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
+import { detectPlatform } from './keys.js';
+import { createShortcuts } from './shortcuts.js';
+import { createPalette } from './palette.js';
+import { registerActions, paletteItems } from './actions.js';
+import { createShortcutsPage } from './shortcuts-page.js';
 import { toast, openDialog, initSelect } from './mds/js/magpie.js';
 import { t, tn, tNodes, formatNumber, setLocale, locale, translatePage, LANGUAGES } from './i18n.js';
 
@@ -26,6 +35,10 @@ const mygo = window.mygo;
 const call = (method, ...args) => mygo.call(`Yesman.${method}`, ...args);
 const errorText = (err) => (err && (err.message || err.error)) || String(err);
 const fail = (err) => toast(errorText(err), { duration: 6000 });
+
+// The window's actions and their keys: shortcuts.js, with the actions in
+// actions.js, the command palette and Settings › Shortcuts below.
+const shortcuts = createShortcuts({ platform: detectPlatform(mygo), call, fail, t, builtIn: ['Mod+S'] });
 
 const STATUS = {
   stopped: 'Asleep',
@@ -89,8 +102,16 @@ class Convo {
     this.error = null;
     this.live = null; // { message }: the reply being written
     this.workOpen = new Set(); // keys of the work rows the user opened
+    this.receiptsOpen = false; // the earlier submissions' row is open
     this.tools = new Map(); // toolCallId -> { args, status, result }
+    this.recalled = new Set();
+    this.submitted = new Set(); // bounded receipt IDs, never original payloads or queue authority
+    this.actions = new Set(); // in-flight exact-item actions
     this.deliveries = new Map(); // message ID -> server receipt (or local Sending only)
+    // message ID -> { text, images } this window submitted, shown as sent until
+    // a message is tied to it. Only in memory; see holdSent.
+    this.sent = new Map();
+    this.lastSent = null; // the message ID this window submitted last
     this.seq = 0;
     this.eventSeqs = new Set();
     this.piQueue = { known: false };
@@ -125,22 +146,27 @@ function pruneCaches() {
 // Records that arrive while the history loads are queued, then replayed on
 // top of it, skipping messages the history already has, so a turn in
 // progress keeps streaming and none shows twice.
-const messageKey = (m) => `${m?.role}:${m?.timestamp}`;
+const messageKey = (m) => originOf(m)?.submission ? `submission:${originOf(m).submission}` : `${m?.role}:${m?.timestamp}`;
 
 const DELIVERY_LABELS = {
   sending: 'Sending…', accepted: 'Accepted · delivery unconfirmed',
   steering: 'Accepted for steering · delivery unconfirmed', queued: 'Accepted for follow-up · delivery unconfirmed',
   unconfirmed: 'Delivery unconfirmed', failed: 'Not sent', interrupted: 'Delivery interrupted',
-  handled: 'Handled by an extension',
+  handled: 'Handled by an extension', dispatched: 'Taken by pi', cancelled: 'Recalled',
 };
+const deliveryLabel = (d) => d.nativePending ? (d.state === 'queued' ? 'Waiting · follow-up' : 'Steering · waiting for input checkpoint') : DELIVERY_LABELS[d.state];
 
-// pi cannot say whether a receipt's message was taken. A message yesman's
-// extension tied to its receipt is in the conversation, so it was.
-const BOUND_DELIVERY = 'Delivered';
+// Only an explicit recorded submission identity can bind a receipt.
+const BOUND_DELIVERY = 'Taken by pi';
 
 function pruneDeliveryRows(c, ids) {
   let changed = false;
-  for (const id of ids ?? []) changed = c.deliveries.delete(id) || changed;
+  for (const id of ids ?? []) {
+    c.recalled.delete(id);
+    c.submitted.delete(id);
+    c.sent.delete(id);
+    changed = c.deliveries.delete(id) || changed;
+  }
   if (changed) schedulePatch(c, { frame: true });
 }
 
@@ -161,49 +187,226 @@ function updateDelivery(c, d) {
   if (d?.agentSince && `${c.id}@${d.agentSince}` !== c.key) return;
   if (!d?.id || (c.deliveries.get(d.id)?.revision ?? -1) >= d.revision) return;
   c.deliveries.set(d.id, d);
+  letGo(c);
   if (c.deliveries.size > 256) {
     const excess = [...c.deliveries.keys()].filter(id => id !== d.id).slice(0,c.deliveries.size-256);
     pruneDeliveryRows(c,excess);
   }
 }
 
+function copyActions(text, c = null, d = null) {
+  const eligible = (d?.canCancel || d?.canRestore) && !c?.recalled.has(d.id);
+  const actions = messageActions({ text,
+    loadText: text == null && d?.originalText ? () => call('SubmissionText', c.id, d.id, d.agentSince) : null,
+    copy: (value) => call('CopyValue', value), done: () => toast(t('Copied.')), fail,
+    recall: eligible ? () => recallMessage(c, d.id) : null, restoring: d?.canRestore,
+    promote: d?.canPromote && d.nativePending && d.state === 'queued' ? () => promoteMessage(c, d.id) : null,
+    busy: c?.actions.has(d?.id) });
+  actions._copyText = text;
+  actions._recall = `${!!d?.canCancel}:${!!d?.canRestore}:${!!d?.originalText}`;
+  return actions;
+}
+
+function refreshDelivery(c, d) { if (d) schedulePatch(c, { frame: true }); }
+
+async function promoteMessage(c, id) {
+  const a = selectedAgent();
+  const receipt = c.deliveries.get(id);
+  if (!a || keyOf(a) !== c.key || !receipt?.nativePending || !receipt.canPromote || receipt.state !== 'queued' || c.actions.has(id)) return;
+  c.actions.add(id);
+  schedulePatch(c);
+  const current = () => state.convos.get(c.key) === c && keyOf(agentById(a.id) ?? {}) === c.key;
+  try {
+    const result = await call('PromoteSubmission', a.id, id, a.since);
+    if (!current()) return;
+    updateDelivery(c, result.delivery);
+  } catch (error) {
+    if (current() && keyOf(selectedAgent() ?? {}) === c.key) fail(t(errorText(error)));
+  } finally {
+    c.actions.delete(id);
+    if (current()) schedulePatch(c);
+  }
+}
+
+async function recallMessage(c, id) {
+  const a = selectedAgent();
+  if (!a || keyOf(a) !== c.key) return;
+  const key = c.key;
+  const attachments = state.attachments.get(key);
+  if (!attachments || attachments.sending || attachments.reading || attachments.recalling) return;
+  if ((state.drafts.get(key) ?? '') !== '' || attachments.items.length) return fail(t('Send or clear the current draft before recalling a message.'));
+  const receipt = c.deliveries.get(id);
+  if ((!receipt?.canCancel && !receipt?.canRestore) || c.recalled.has(id) || c.actions.has(id)) return;
+  c.actions.add(id);
+  schedulePatch(c);
+  attachments.recalling = true;
+  let focusAllowed = true;
+  const movedFocus = (event) => { if (!event.target.matches('.composer textarea')) focusAllowed = false; };
+  document.addEventListener('focusin', movedFocus);
+  const current = () => state.attachments.get(key) === attachments && keyOf(agentById(a.id) ?? {}) === key;
+  const redraw = () => { if (current() && keyOf(selectedAgent() ?? {}) === key) renderDock(); };
+  redraw();
+  try {
+    const result = await call('CancelSubmission', a.id, id, a.since);
+    if (!current()) return;
+    updateDelivery(c, result.delivery);
+    refreshDelivery(c, c.deliveries.get(id));
+    if (result.delivery?.id !== id || result.delivery?.state !== 'cancelled' || typeof result.payload?.text !== 'string') throw new Error(t('Cancellation could not be confirmed.'));
+    const images = restoredImages(result.payload.images ?? []);
+    if ((state.drafts.get(key) ?? '') !== '' || attachments.items.length) throw new Error(t('The message was recalled. Clear the current draft to return it to the input.'));
+    state.drafts.set(key, result.payload.text);
+    c.recalled.add(id);
+    attachments.items = images;
+    attachments.submissionID = null;
+    attachments.submission = null;
+    const d = c.deliveries.get(id);
+    if (d) { d.canCancel = false; d.canRestore = false; d.originalText = false; refreshDelivery(c, d); }
+    call('AckRecall', a.id, id, a.since).catch(() => {});
+  } catch (error) {
+    if (current() && keyOf(selectedAgent() ?? {}) === key) fail(t(errorText(error)));
+  } finally {
+    document.removeEventListener('focusin', movedFocus);
+    attachments.recalling = false;
+    c.actions.delete(id);
+    if (current()) schedulePatch(c);
+    if (current() && keyOf(selectedAgent() ?? {}) === key) renderDock({ focusComposer: focusAllowed });
+  }
+}
+
 // deliveryStatus is a receipt's state, lightly, under the message it is for.
 function deliveryStatus(d, bound) {
-  const label = bound ? BOUND_DELIVERY : DELIVERY_LABELS[d.state];
-  return h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite', 'data-state': bound ? 'delivered' : d.state,
-    hidden: !label, title: bound ? t('pi took this message into the conversation.') : d.error || (d.state === 'sending' ? null : t('pi has not reported whether this particular message was taken for processing.')) },
+  const label = bound ? BOUND_DELIVERY : deliveryLabel(d);
+  const title = bound ? t('pi took this message into the conversation.')
+    : d.state === 'dispatched' ? t('pi took this input for processing.')
+      : d.nativePending ? (d.state === 'queued' ? t('This input is still in pi’s follow-up queue.') : t('Steering is read at the next eligible input checkpoint, after the current response and tool batch.'))
+      : d.state === 'cancelled' ? t('This input was removed from the queue.')
+        : d.error || (d.state === 'sending' ? null : t('pi has not reported whether this particular message was taken for processing.'));
+  return h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite', 'data-state': bound ? 'dispatched' : d.state,
+    hidden: !label, title },
   label ? t(label) : '');
 }
 
-// receiptEl shows a submission the conversation does not show: still on its
-// way, refused, or not tied to a message. It shows what the receipt keeps
-// (a preview and the number of images), never a guess at the original.
-const receiptVariant = (d) => (d.state === 'sending' ? 'sending' : d.state === 'unconfirmed' && !d.error ? 'compact' : 'bubble');
+// receiptEl shows a submission the conversation does not show yet as the
+// person's message, with its state under it: exactly as this window sent it
+// when it has that, or else what the receipt keeps (a preview and the number
+// of images), never a guess at the original. Folded with earlier submissions,
+// it is one light line.
+const receiptForm = (d, sent, line) => `${line ? 'line' : sent ? 'sent' : 'kept'}:${d.text ?? ''}:${d.imageCount ?? 0}`;
 
-function receiptEl(c, d) {
-  const el = receiptBody(d);
-  el._variant = `${receiptVariant(d)}:${d.text ?? ''}:${d.imageCount ?? 0}`;
+function receiptEl(c, d, { sent, line = false } = {}) {
+  const el = line ? receiptLine(d) : receiptBody(d, sent);
+  if (!line) {
+    const status = el.querySelector('.delivery-status');
+    status.remove();
+    el.append(h('div', { class: 'message-footer' }, status, copyActions(sent?.text ?? receiptText(d), c, d)));
+    if (!sent && d.originalPayload) hydrateReceipt(c, el, d);
+  }
+  el._variant = receiptForm(d, sent, line);
   return el;
 }
 
-function receiptBody(d) {
+// A visible row can retrieve originals from the Manager's bounded memory.
+// Keep them only in this row, never another persistent or conversation cache.
+async function hydrateReceipt(c, el, d) {
+  el._hydration = true;
+  try {
+    const payload = await call('SubmissionPayload', c.id, d.id, d.agentSince);
+    const current = c.deliveries.get(d.id);
+    if (!el.isConnected || state.convos.get(c.key) !== c || keyOf(selectedAgent() ?? {}) !== c.key || !current?.originalPayload || typeof payload?.text !== 'string' || !Array.isArray(payload.images)) return;
+    el._payload = payload;
+    el.querySelector('.msg-user').replaceWith(userBubble({ content: [{ type: 'text', text: payload.text }, ...payload.images] }));
+    el.querySelector('.delivery-image-count')?.remove();
+    el.querySelector('.message-actions')?.replaceWith(copyActions(payload.text, c, current));
+    el.dataset.original = 'true';
+  } catch { /* Missing after intake/retirement stays an honest bounded preview. */ }
+}
+
+const imageNote = (n) => h('div', { class: 'delivery-image-count' }, tn(n, '{n} image submitted', '{n} images submitted'));
+
+function receiptBody(d, sent) {
+  const imageCount = d.imageCount ?? d.images?.length ?? 0;
+  const text = sent ? sent.text : d.text ? (d.preview ? `${d.text}…` : d.text) : '';
+  const images = (sent ? sent.images : d.images ?? []).filter((image) => imageURL(image));
+  return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(d.state === 'sending') },
+    h('div', { class: 'msg-user' }, text || (imageCount && !images.length ? t('Attached images') : ''),
+      images.length ? h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null),
+    !images.length && imageCount ? imageNote(imageCount) : null, deliveryStatus(d, false));
+}
+
+function receiptLine(d) {
   const imageCount = d.imageCount ?? d.images?.length ?? 0;
   const preview = d.text ? (d.preview ? `${d.text}…` : d.text) : '';
-  const imageNote = imageCount ? h('div', { class: 'delivery-image-count' }, tn(imageCount, '{n} image submitted', '{n} images submitted')) : null;
-  // Accepted, then nothing more known: most likely in the conversation above
-  // already, untied (an earlier version, or input another extension rewrote).
-  if (d.state === 'unconfirmed' && !d.error) {
-    const short = d.text?.trim().replace(/\s+/g, ' ').slice(0, 60) || t('Attached images');
-    return h('div', { class: 'msg-delivery msg-delivery--compact', 'data-delivery': d.id, 'data-sending': 'false' },
-      h('div', { class: 'delivery-compact', title: preview || null }, t('Submission: {text}', { text: short }),
-        imageCount ? ` · ${tn(imageCount, '{n} image submitted', '{n} images submitted')}` : ''),
-      deliveryStatus(d, false));
+  const short = d.text?.trim().replace(/\s+/g, ' ').slice(0, 60) || t('Attached images');
+  return h('div', { class: 'msg-delivery msg-delivery--compact', 'data-delivery': d.id, 'data-sending': 'false' },
+    h('div', { class: 'delivery-compact', title: preview || null }, t('Submission: {text}', { text: short }),
+      imageCount ? ` · ${tn(imageCount, '{n} image submitted', '{n} images submitted')}` : ''),
+    deliveryStatus(d, false));
+}
+
+// receiptEl brought up to date: a receipt changing state keeps its element
+// (and what is selected in it) unless it changes form.
+function updateReceipt(c, el, d, options = {}) {
+  if (el._variant === receiptForm(d, options.sent, options.line) && !d.images?.length) {
+    el.dataset.sending = String(!options.line && d.state === 'sending');
+    el.querySelector('.delivery-status').replaceWith(deliveryStatus(d, false));
+    if (!options.line) {
+      el.querySelector('.message-actions')?.replaceWith(copyActions(el._payload?.text ?? options.sent?.text ?? receiptText(d), c, d));
+      if (!options.sent && d.originalPayload && !el._hydration) hydrateReceipt(c, el, d);
+    }
+    return el;
   }
-  const images = (d.images ?? []).filter((image) => imageURL(image));
-  return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(d.state === 'sending') },
-    h('div', { class: 'msg-user' }, preview || (imageCount ? t('Attached images') : ''),
-      images.length ? h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null),
-    images.length ? null : imageNote, deliveryStatus(d, false));
+  return receiptEl(c, d, options);
+}
+
+const receiptSig = (d, sent) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}:${!!d.originalPayload}:${!!d.canPromote}:${!!d.canCancel}:${!!d.canRestore}`;
+
+// The earlier submissions no message is tied to, folded into one line. Opened,
+// each is one light line with what yesman kept of it and its state.
+function receiptsEl(c, row) {
+  const el = h('details', { class: 'receipts' });
+  el.append(
+    h('summary', null, h('span', { class: 'receipts-label' }), h('span', { class: 'receipts-facts' }), icon('chevron', 'mds-icon receipts-caret')),
+    h('div', { class: 'receipts-body' }));
+  el.open = c.receiptsOpen;
+  el.addEventListener('toggle', () => {
+    c.receiptsOpen = el.open;
+    if (el.open) patchReceipts(c, el.lastElementChild, el._deliveries ?? []);
+  });
+  return updateReceipts(c, el, row);
+}
+
+const RECEIPT_FACTS = {
+  unconfirmed: ['{n} delivery unconfirmed', '{n} delivery unconfirmed'],
+  handled: ['{n} handled by an extension', '{n} handled by an extension'],
+  failed: ['{n} not sent', '{n} not sent'],
+  interrupted: ['{n} delivery interrupted', '{n} delivery interrupted'],
+};
+
+function updateReceipts(c, el, row) {
+  const counts = new Map();
+  for (const d of row.deliveries) counts.set(d.state, (counts.get(d.state) ?? 0) + 1);
+  const label = tn(row.deliveries.length, '{n} earlier submission', '{n} earlier submissions');
+  const facts = counts.size === 1 ? t(DELIVERY_LABELS[[...counts.keys()][0]] ?? '')
+    : [...counts].map(([state, n]) => (RECEIPT_FACTS[state] ? tn(n, ...RECEIPT_FACTS[state]) : '')).filter(Boolean).join(' · ');
+  const summary = `${label}|${facts}`;
+  if (el._summary !== summary) {
+    el._summary = summary;
+    const s = el.firstElementChild;
+    s.children[0].textContent = label;
+    s.children[1].textContent = facts;
+    s.title = t('Earlier submissions that yesman cannot tie to a message above, kept for a while as a record. pi reported nothing more about them, and any that was not sent was followed by a later submission. Open to see what was kept of each.');
+  }
+  el._deliveries = row.deliveries;
+  if (el.open) patchReceipts(c, el.lastElementChild, row.deliveries);
+  return el;
+}
+
+function patchReceipts(c, body, deliveries) {
+  patchChildren(body, 'data-item', deliveries.map((d) => ({ type: 'receipt', key: `d:${d.id}`, delivery: d })), {
+    make: (entry) => receiptEl(c, entry.delivery, { line: true }),
+    sig: (entry) => receiptSig(entry.delivery),
+    update: (el, entry) => updateReceipt(c, el, entry.delivery, { line: true }),
+  });
 }
 
 function renderQueue(c) {
@@ -213,8 +416,9 @@ function renderQueue(c) {
   const q = c.piQueue;
   if (q.known && q.steering + q.followUp > 0) {
     const el = h('div', { class: 'pi-queue-status note note--quiet', role: 'status', 'aria-live': 'polite',
-      title: t('These counts describe pi’s whole queue, not an individual submission.') },
-      t('pi queue: {steering} steering · {followUp} follow-up', { steering: q.steering, followUp: q.followUp }));
+      title: q.recallSupported ? t('These counts describe pi’s whole queue, not an individual submission.') : t('This pi runtime does not support recalling individual queued messages.') },
+      t('pi queue: {steering} steering · {followUp} follow-up', { steering: q.steering, followUp: q.followUp }),
+      !q.recallSupported ? h('div', null, t('Individual recall is unavailable in this pi runtime.')) : null);
     const working = thread.querySelector('.working-live');
     working ? working.before(el) : thread.append(el);
   }
@@ -233,6 +437,7 @@ async function loadConvo(c) {
       const sending = request?.sending && request.submissionID === d.id;
       c.deliveries.set(d.id, { ...d, state: sending ? 'sending' : 'unconfirmed' });
     }
+    letGo(c);
     c.seq = data?.seq ?? 0;
     c.eventSeqs.clear();
     c.piQueue = data?.queue ?? { known: false };
@@ -241,6 +446,7 @@ async function loadConvo(c) {
     c.retainedDeliveryIDs = new Set((data?.deliveries ?? []).map(d => d.id));
     c.tools.clear();
     for (const message of c.messages) indexMessage(c, message);
+    for (const id of c.sent.keys()) if (!c.deliveries.has(id)) c.sent.delete(id);
     c.live = null;
     c.loaded = true;
     c.error = null;
@@ -267,8 +473,7 @@ async function loadConvo(c) {
   if (a && keyOf(a) === c.key) renderThread();
 }
 
-const textOf = (content) =>
-  typeof content === 'string' ? content : (content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+const textOf = messageText;
 
 // Tool state is built from history and live events; rendering only reads it.
 function indexTool(c, block) {
@@ -278,6 +483,9 @@ function indexTool(c, block) {
 }
 
 function indexMessage(c, message) {
+  // A message tied to a submission shows it from here on.
+  const submission = originOf(message)?.submission;
+  if (submission) c.sent.delete(submission);
   if (message.role === 'assistant') {
     for (const block of message.content ?? []) {
       if (block.type === 'toolCall') indexTool(c, block);
@@ -376,15 +584,16 @@ function userBubble(m) {
       h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
 }
 
-function userRowEl(row) {
+function userRowEl(row, c) {
   // yesman wrote its notices as text alone: a message with images is a
   // person's whatever its text says, and is shown in full with them.
   const images = Array.isArray(row.message.content) && row.message.content.some((b) => b?.type === 'image');
   const legacy = !row.origin && !images && legacyNoteEl(textOf(row.message.content));
   if (legacy) return legacy;
   const bubble = userBubble(row.message);
-  if (!row.delivery) return bubble;
-  return h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble, deliveryStatus(row.delivery, true));
+  if (!row.delivery) { bubble.append(copyActions(textOf(row.message.content))); return bubble; }
+  return h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble,
+    h('div', { class: 'message-footer' }, deliveryStatus(row.delivery, true), copyActions(textOf(row.message.content))));
 }
 
 function leadRowEl(row) {
@@ -462,7 +671,7 @@ function patchChildren(parent, attr, entries, { make, sig, update }) {
     const s = sig(entry);
     if (el && el._kind === entry.type) {
       old.delete(entry.key);
-      if (el._sig !== s || entry.type === 'work') {
+      if (el._sig !== s || entry.type === 'work' || entry.type === 'receipts') {
         const fresh = update(el, entry);
         if (fresh && fresh !== el) {
           el.replaceWith(fresh);
@@ -538,21 +747,22 @@ function updateWork(c, el, row) {
 
 function rowEl(c, row) {
   switch (row.type) {
-    case 'user': return userRowEl(row);
+    case 'user': return userRowEl(row, c);
     case 'lead': return leadRowEl(row);
     case 'text': return h('div', { class: 'msg-assistant' }, md(row.text));
     case 'note': return noteRowEl(row);
     case 'work': return workEl(c, row);
-    case 'receipt': return receiptEl(c, row.delivery);
+    case 'receipt': return receiptEl(c, row.delivery, { sent: row.sent });
+    case 'receipts': return receiptsEl(c, row);
     default: return h('div');
   }
 }
 
 function rowSig(row) {
   switch (row.type) {
-    case 'user': return row.delivery ? `bound:${row.delivery.id}` : '';
+    case 'user': return row.delivery ? `bound:${row.delivery.id}:${row.delivery.revision}` : '';
     case 'text': return row.live ? `l:${row.text}` : 'f';
-    case 'receipt': return `${row.delivery.state}:${row.delivery.revision}:${row.delivery.error ?? ''}:${row.delivery.images?.length ?? 0}`;
+    case 'receipt': return receiptSig(row.delivery, row.sent);
     default: return 'f';
   }
 }
@@ -578,20 +788,15 @@ function patchThread(c) {
   if (rows.length) thread.querySelector('.thread-empty')?.remove();
   patchChildren(thread, 'data-row', rows, {
     make: (row) => rowEl(c, row),
-    sig: rowSig,
+    sig: (row) => `${rowSig(row)}:${c.actions.has(row.delivery?.id)}`,
     update: (el, row) => {
       if (row.type === 'work') return updateWork(c, el, row);
+      if (row.type === 'receipts') return updateReceipts(c, el, row);
       if (row.type === 'text') {
         el.firstElementChild.innerHTML = renderMarkdown(row.text);
         return el;
       }
-      // A receipt changing state keeps its row (and what is selected in it)
-      // unless it changes form.
-      const d = row.delivery;
-      if (row.type === 'receipt' && el._variant === `${receiptVariant(d)}:${d.text ?? ''}:${d.imageCount ?? 0}` && !d.images?.length) {
-        el.querySelector('.delivery-status').replaceWith(deliveryStatus(row.delivery, false));
-        return el;
-      }
+      if (row.type === 'receipt') return updateReceipt(c, el, row.delivery, { sent: row.sent });
       return rowEl(c, row);
     },
   });
@@ -650,7 +855,7 @@ function renderWorking(rows) {
   const thread = $('#thread');
   if (!thread) return;
   const a = selectedAgent();
-  const last = rows?.findLast((r) => r.type !== 'receipt');
+  const last = rows?.findLast((r) => r.type !== 'receipt' && r.type !== 'receipts');
   const show = a?.status === 'working' && last?.state !== 'running';
   let el = thread.querySelector('.working-live');
   if (!show) {
@@ -723,7 +928,7 @@ function onAgentEvent(ev) {
   if (e.type === 'queue_update' || e.type === 'delivery_queue') {
     if (ev.seq <= c.queueSeq) return;
     c.queueSeq = ev.seq;
-    c.piQueue = e.type === 'delivery_queue' ? e.queue : { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0 };
+    c.piQueue = e.type === 'delivery_queue' ? e.queue : { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: supportsRecall(e.pending?.capability) };
     if (keyOf(selectedAgent() ?? {}) === c.key) {
       const scroller = $('#scroll');
       if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
@@ -750,7 +955,7 @@ function applyEvent(c, e, replaying,seq = 0) {
       if (visible) renderQueue(c);
       return;
     case 'queue_update':
-      c.piQueue = { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0 };
+      c.piQueue = { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: supportsRecall(e.pending?.capability) };
       if (visible) renderQueue(c);
       return;
     case 'delivery_retained':
@@ -793,7 +998,10 @@ function applyEvent(c, e, replaying,seq = 0) {
           for (const key of [...c.workOpen]) if (key.startsWith(before)) { c.workOpen.delete(key); c.workOpen.add(after + key.slice(before.length)); }
         }
       }
-      c.messages.push(m);
+      const submission = originOf(m)?.submission;
+      const existing = submission ? c.messages.findIndex(old => originOf(old)?.submission === submission) : -1;
+      if (existing >= 0) c.messages[existing] = m;
+      else c.messages.push(m);
       if (m.role === 'assistant') c.live = null;
       break;
     }
@@ -959,7 +1167,8 @@ function renderSidebar() {
       t('{n} more', { n: formatNumber(items.length - SIDE_REQUESTS) })));
   }
   list.append(h('div', { class: 'side-group' }, h('span', null, t('Yesmen')),
-    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Hire a yesman'), 'aria-label': t('Hire a yesman'), onclick: openHire }, icon('plus'))));
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: shortcuts.hint(t('Hire a yesman'), 'yesman.hire'), 'aria-label': t('Hire a yesman'),
+      'aria-keyshortcuts': shortcuts.aria('yesman.hire'), onclick: openHire }, icon('plus'))));
   for (const y of state.snap.yesmen) {
     const agents = state.snap.agents.filter((a) => a.yesman === y.name);
     const lead = agents.find((a) => a.role === 'lead');
@@ -971,6 +1180,13 @@ function renderSidebar() {
       if (hide && w.finishedAt && !(state.view.kind === 'agent' && state.view.id === w.id)) continue;
       list.append(agentRow(w, 'agent-row--worker', w.name));
     }
+  }
+  for (const issue of state.snap.workspaceErrors ?? []) {
+    list.append(h('div', { class: 'workspace-error', role: 'note', 'data-workspace-error': issue.name },
+      h('p', null, h('strong', null, issue.name), ': ', t('Workspace unavailable')),
+      h('p', null, t('Metadata is {size} bytes; the limit is {limit} bytes.', { size: issue.size, limit: issue.limit })),
+      h('p', { class: 'path' }, issue.path),
+      h('p', null, t('Quit yesman before editing. Back up this file, reduce its size, and preserve its hiredAt field.'))));
   }
   restoreSidebarFocus(focusedRow);
   renderSideFoot();
@@ -1342,8 +1558,9 @@ function renderBar() {
 function renderBarActions() {
   const actions = $('#bar-actions');
   const a = state.view.kind === 'agent' ? selectedAgent() : null;
-  const button = (iconName, label, onclick, extra = {}) =>
-    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: label, 'aria-label': label, onclick, ...extra }, icon(iconName));
+  const button = (iconName, label, onclick, extra = {}, action = null) =>
+    h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: action ? shortcuts.hint(label, action) : label, 'aria-label': label,
+      'aria-keyshortcuts': action ? shortcuts.aria(action) : null, onclick, ...extra }, icon(iconName));
   actions.replaceChildren(...[
     a ? h('span', { class: 'mds-status', 'data-status': statusTone(a), role: 'status' }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }), h('span', null, statusLabel(a))) : null,
     updatePill(),
@@ -1351,9 +1568,9 @@ function renderBarActions() {
       ? button('power', t('Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.'), () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
-    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }) : null,
-    a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }) : null,
-    a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }) : null,
+    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }, 'pane.info') : null,
+    a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }, 'pane.board') : null,
+    a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }, 'pane.files') : null,
   ].filter(Boolean));
 }
 
@@ -1544,6 +1761,8 @@ function bindHireForm(form, error, { dialog, cancel } = {}) {
 }
 
 function renderBody() {
+  if (state.view.kind !== 'settings' || state.view.page !== 'shortcuts') shortcutsPage.leave();
+  if (state.view.kind !== 'settings' || state.view.page !== 'grant') grantsPage.leave();
   const body = $('#body');
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
@@ -1646,7 +1865,7 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   const key = keyOf(a);
   let attachments = state.attachments.get(key);
   if (!attachments) state.attachments.set(key, (attachments = { items: [], reading: false, sending: false }));
-  const busy = attachments.reading || attachments.sending;
+  const busy = attachments.reading || attachments.sending || attachments.recalling;
   const previews = h('div', { class: 'composer-images', hidden: !attachments.items.length }, attachments.items.map((image) =>
     h('div', { class: 'composer-image' },
       h('img', { src: imageURL(image), alt: image.name, title: image.name }),
@@ -1656,7 +1875,7 @@ function renderDock({ focusComposer = false, held = null } = {}) {
       } }, icon('trash')))));
   const refresh = () => { if (keyOf(selectedAgent() ?? {}) === key) renderDock(); };
   const addImages = async (files) => {
-    if (attachments.reading || attachments.sending || !files.length) return;
+    if (attachments.reading || attachments.sending || attachments.recalling || !files.length) return;
     const error = imageFileError(files, attachments.items);
     if (error) return fail(t(error));
     attachments.reading = true;
@@ -1680,13 +1899,14 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   const textarea = h('textarea', {
     // Read-only keeps the caret/focus while RPC acceptance is pending. A
     // disabled textarea would drop focus to BODY before the next render.
-    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending,
+    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending || attachments.recalling,
     title: working ? t('Enter to send after the current step; Shift+Enter for a new line') : '',
     placeholder: a.role === 'lead' ? t('Message {name}…', { name: yesmanLabel(a.yesman) }) : t('Message worker {name}…', { name: a.name }),
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
   const action = working
-    ? h('button', { class: 'round round--stop composer-action', type: 'button', 'aria-label': t('Stop'), title: t('Stop the current run'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop'))
+    ? h('button', { class: 'round round--stop composer-action', type: 'button', 'aria-label': t('Stop'), title: shortcuts.hint(t('Stop the current run'), 'agent.stop'),
+      'aria-keyshortcuts': shortcuts.aria('agent.stop'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop'))
     : h('button', { class: 'round composer-action', type: 'submit', 'aria-label': t('Send'), title: t('Send') }, icon('enter'));
   const sync = () => {
     // A run can be interrupted even with an empty draft or a pending image/send.
@@ -1695,8 +1915,11 @@ function renderDock({ focusComposer = false, held = null } = {}) {
     textarea.style.height = `${textarea.scrollHeight}px`;
   };
   textarea.addEventListener('input', () => { state.drafts.set(keyOf(a), textarea.value); sync(); });
+  let composing = false;
+  textarea.addEventListener('compositionstart', () => { composing = true; });
+  textarea.addEventListener('compositionend', () => { composing = false; });
   textarea.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && !composing) {
       e.preventDefault();
       form.requestSubmit();
     }
@@ -1757,14 +1980,36 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   locateRequest(dock, a);
 }
 
+// holdSent keeps what this window submitted, exactly as it was sent, to show
+// as the person's message until pi's own message is tied to it. A new
+// submission lets go of earlier ones nothing more will be known about: they
+// fold with the other earlier submissions, from what the receipt keeps. It is
+// never stored or sent anywhere, and at most a few are kept.
+const SENT_KEPT = 8;
+function holdSent(c, id, submission) {
+  if (!c.sent.has(id)) {
+    for (const [held] of c.sent) if (canReleaseSent(c.deliveries.get(held))) c.sent.delete(held);
+  }
+  c.sent.delete(id);
+  c.sent.set(id, { text: submission.text, images: submission.images });
+  for (const held of [...c.sent.keys()].slice(0, Math.max(0, c.sent.size - SENT_KEPT))) c.sent.delete(held);
+}
+
+// Release superseded terminal display payloads (PR67); membership and restore
+// authority override terminal-looking metadata and never come from this cache.
+const canReleaseSent = (d) => d && FINISHED.has(d.state) && !d.nativePending && !d.canRestore;
+function letGo(c) {
+  for (const id of [...c.sent.keys()]) if (id !== c.lastSent && canReleaseSent(c.deliveries.get(id))) c.sent.delete(id);
+}
+
 const sameSubmissionImages = (left, right) => left.length === right.length && left.every((image, i) =>
   image.type === right[i].type && image.mimeType === right[i].mimeType && image.data === right[i].data);
 
 async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
-  const text = textarea.value.trim();
-  if ((!text && !attachments?.items.length) || attachments?.reading || attachments?.sending || state.modelOptions.get(key)?.busy) return;
+  const text = textarea.value;
+  if ((!text.trim() && !attachments?.items.length) || attachments?.reading || attachments?.sending || attachments?.recalling || state.modelOptions.get(key)?.busy) return;
   const images = imagePayload(attachments?.items ?? []);
   const c = convo(a);
   // Editing after an uncertain submission is a new user intent. Retrying the
@@ -1786,6 +2031,9 @@ async function sendMessage(a, textarea, submitter = null) {
       const excess = [...c.deliveries.keys()].slice(0,Math.max(0,c.deliveries.size-256));
       pruneDeliveryRows(c,excess);
     }
+    c.submitted.add(messageID);
+    holdSent(c, messageID, attachments.submission);
+    c.lastSent = messageID;
     schedulePatch(c);
   }
   // SubmitEvent retains the activated Send button even after WebKit's mouse
@@ -1888,7 +2136,10 @@ function renderWelcome(body) {
 // The pages, labelled in English: each is said in the page's language.
 const SETTINGS = [
   { page: 'general', label: 'General', icon: 'sliders' },
+  { page: 'shortcuts', label: 'Shortcuts', icon: 'keyboard' },
+  { page: 'grant', label: 'Grant', icon: 'lock' },
   { page: 'yesman', label: 'yesman', icon: 'users' },
+  { page: 'usage', label: 'Model usage', icon: 'chart' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
   { page: 'secrets', label: 'Secrets', icon: 'lock' },
   { page: 'variables', label: 'Variables', icon: 'code' },
@@ -1916,6 +2167,10 @@ function renderSideFoot() {
   $('#settings-button').toggleAttribute('data-active', open);
   $('#settings-button').setAttribute('aria-expanded', String(open));
   $('#settings-nav').inert = !open;
+  $('#settings-button').title = shortcuts.hint(t('Settings'), 'settings.open');
+  const keys = shortcuts.aria('settings.open');
+  if (keys) $('#settings-button').setAttribute('aria-keyshortcuts', keys);
+  else $('#settings-button').removeAttribute('aria-keyshortcuts');
   for (const item of document.querySelectorAll('#settings-nav .mds-nav-item')) {
     if (open && item.dataset.page === state.view.page) item.setAttribute('aria-current', 'page');
     else item.removeAttribute('aria-current');
@@ -1936,8 +2191,11 @@ async function loadSettingsPage(page) {
     if (page === 'general' || page === 'storage') state.settings = await call('Settings');
     else if (page === 'about') state.about = await call('About');
     else if (page === 'repositories') [state.repos, state.settings, state.fetches] = await Promise.all([call('Repos'), call('Settings'), call('Fetches')]);
+    else if (page === 'shortcuts') { await shortcutsPage.load(); return; }
+    else if (page === 'grant') { await grantsPage.load(); return; }
     else if (page === 'pi') { await piPage.load(); return; }
     else if (page === 'yesman') { await crewPage.load(); return; }
+    else if (page === 'usage') { usagePage.load(); return; }
     else if (page === 'secrets') { await secretsPage.load(); return; }
     else if (page === 'variables') { await variablesPage.load(); return; }
   } catch (err) {
@@ -1952,8 +2210,11 @@ function renderSettings(body) {
   body.append(h('div', { class: 'page' }, inner));
   if (state.view.page === 'repositories') renderRepositories(inner);
   else if (state.view.page === 'storage') renderStorage(inner);
+  else if (state.view.page === 'shortcuts') shortcutsPage.render(inner);
+  else if (state.view.page === 'grant') grantsPage.render(inner);
   else if (state.view.page === 'pi') piPage.render(inner);
   else if (state.view.page === 'yesman') crewPage.renderPage(inner);
+  else if (state.view.page === 'usage') usagePage.render(inner);
   else if (state.view.page === 'secrets') secretsPage.render(inner);
   else if (state.view.page === 'variables') variablesPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
@@ -1997,6 +2258,9 @@ function choiceSelect(v, key, method, label, choices) {
   } }, choices.map(([value, text]) => h('option', { value, selected: value === v[key] }, text)));
 }
 
+// Settings › Grant keeps its requests and DOM lifecycle in grants.js.
+const grantsPage = createGrants({ call, shown: () => state.view.kind === 'settings' && state.view.page === 'grant' });
+
 // Settings › pi, in pi.js.
 const piPage = createPiPage({
   call,
@@ -2017,7 +2281,14 @@ const crewPage = createCrew({
   shown: () => state.view.kind === 'settings' && state.view.page === 'yesman',
   rerender: () => renderBody(),
   openPage: () => showSettings('yesman'),
+  openUsage: () => showSettings('usage'),
   preferenceRow,
+});
+// Settings › Model usage: what agents actually used, in usage.js.
+const usagePage = createUsagePage({
+  call,
+  shown: () => state.view.kind === 'settings' && state.view.page === 'usage',
+  openScores: () => showSettings('yesman'),
 });
 // Settings › Secrets and Settings › Variables, in env.js.
 const envPage = (kind) => createEnvPage(kind, {
@@ -2252,7 +2523,7 @@ function renderAbout(inner) {
     settingsSection('yesman', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
       row(t('Build'), build),
       row(t('Updates'), updateStatus()),
-      row('pi', v ? (v.pi || h('span', { class: 'danger' }, v.piError)) : checking()),
+      row(!v ? 'pi' : v.piManaged ? t('Managed pi') : t('External pi'), v ? (v.pi || (v.piState && v.piState !== 'failed' ? t({ preparing: 'Preparing…', unprepared: 'Not prepared', closed: 'Stopped.' }[v.piState] || 'Version unknown') : h('span', { class: 'danger' }, v.piError || t('Version unknown')))) : checking()),
       row('MyGo', v ? v.mygo || faint(t('unknown')) : checking()),
       row('Magpie', v ? v.magpie || faint(t('unknown')) : checking()),
       row('Go', v ? v.go : checking())),
@@ -2333,6 +2604,7 @@ async function importConfig() {
     c.imported = { lines: importLines(plan, result) };
     state.settings = null; // the next General or Repositories page reads them again
     refreshState();
+    shortcuts.load().catch(fail); // the file may carry shortcuts
   } catch (err) {
     fail(err);
   } finally {
@@ -2351,6 +2623,13 @@ function settingChanges(plan) {
     const now = plan.current[key];
     if (plan.merge[key] !== now) lines.push({ text: t('{setting}: {from} → {to}', { setting: label, from: show(now), to: show(plan.merge[key]) }) });
     else if (plan.replace[key] !== now) lines.push({ text: t('{setting}: {from} → {to}', { setting: label, from: show(now), to: show(plan.replace[key]) }), replaceOnly: true });
+  }
+  const keys = plan.shortcuts ?? { merge: [], replace: [] };
+  const shortcutLine = (n) => tn(n, 'Keyboard shortcuts: 1 action changes', 'Keyboard shortcuts: {n} actions change');
+  if (keys.merge.length) lines.push({ text: shortcutLine(keys.merge.length) });
+  // Replacing also gives the actions the file leaves out their defaults.
+  if (keys.replace.length !== keys.merge.length || keys.replace.some((id) => !keys.merge.includes(id))) {
+    lines.push({ text: shortcutLine(keys.replace.length), replaceOnly: true });
   }
   return lines;
 }
@@ -2906,6 +3185,7 @@ const files = createFiles({
   confirm: (title, body, ok) => confirmAction(title, body, ok),
   shown: () => info.render(),
   worktrees: (y) => info.worktrees(y),
+  keys: () => ({ 'files.find': shortcuts.primary('files.find'), 'files.tree': shortcuts.primary('files.tree') }),
 });
 
 // ---------- Info panel ----------
@@ -3106,6 +3386,103 @@ async function removeWorker(a) {
   }
 }
 
+// ---------- Shortcuts ----------
+
+// The conversations in the sidebar's order, as it shows them: each yesman's
+// lead, then the workers it lists.
+const sidebarAgents = () => [...document.querySelectorAll('#yesmen .agent-row:is([data-sidebar-entry="yesman"], [data-sidebar-entry="worker"])')]
+  .map((row) => agentById(row.dataset.agent)).filter(Boolean);
+
+function latestRecallCandidate() {
+  const a = selectedAgent();
+  const textarea = state.view.kind === 'agent' ? $('.composer textarea') : null;
+  if (!a || !mayRecallInComposer(textarea, state.attachments.get(keyOf(a)))) return null;
+  const c = convo(a);
+  const delivery = [...c.deliveries.values()].filter(d => d.canCancel && !c.recalled.has(d.id) && !c.actions.has(d.id)).sort((a,b) => b.order - a.order)[0];
+  return delivery ? { c, delivery } : null;
+}
+
+// What the actions do, by the window's own functions.
+const actionHost = {
+  t,
+  selectedAgent,
+  yesmanOf: (a) => (a ? yesmanOf(a.id) : null),
+  label: yesmanLabel,
+  entries: sidebarAgents,
+  leads: () => state.snap.yesmen.map((y) => agentById(`${y.name}/lead`)).filter(Boolean),
+  needsYou: () => state.snap.agents.find((a) => a.role === 'lead' && a.status === 'waiting') ?? null,
+  step(by) {
+    const list = sidebarAgents();
+    const at = list.findIndex((a) => a.id === state.view.id);
+    const next = at < 0 ? list[by > 0 ? 0 : list.length - 1] : list[(at + by + list.length) % list.length];
+    if (next) selectAgent(next.id);
+  },
+  selectAgent,
+  composer: () => (state.view.kind === 'agent' ? $('#dock textarea') : null),
+  canRecall: ({ event } = {}) => !(event?.isComposing || event?.keyCode === 229) && !!latestRecallCandidate(),
+  recallLatest() {
+    const candidate = latestRecallCandidate();
+    if (candidate) return recallMessage(candidate.c, candidate.delivery.id);
+  },
+  abort: (a) => call('Abort', a.id),
+  sleep: (a) => call('Stop', a.id),
+  // Another dialog than the palette, which closes before an action runs.
+  dialogOpen: () => !!document.querySelector('dialog[open]:not(.palette-dialog)'),
+  showSettings(page) {
+    showSettings(page ?? state.settingsPage);
+    // The page replaced what had focus: Settings › Shortcuts focuses its
+    // search, another page its own item in Settings.
+    const now = document.activeElement;
+    if (!now || now === document.body) {
+      (state.view.page === 'shortcuts' ? $('#shortcut-search') : $('#settings-nav [aria-current="page"]'))?.focus({ preventScroll: true });
+    }
+  },
+  settingsPages: () => SETTINGS,
+  openHire,
+  togglePane,
+  togglePanel,
+  files: () => files,
+  openCheckout,
+  renameYesman,
+  removeWorker,
+  dismiss,
+  addRepos() {
+    showSettings('repositories');
+    openAddRepos();
+  },
+  fetchAll: () => call('FetchAll'),
+  palette: () => palette,
+};
+registerActions(shortcuts, actionHost);
+
+// The message box is drawn again as its agent starts or stops: closing the
+// palette gives focus back to the same agent's box, never another's.
+const composerKey = () => (state.view.kind === 'agent' ? keyOf(selectedAgent() ?? {}) : null);
+const palette = createPalette({
+  shortcuts, items: () => paletteItems(actionHost), fail,
+  place: () => ({ agent: composerKey(), composer: !!document.activeElement?.matches?.('#dock textarea') }),
+  back: (where) => (where?.composer && where.agent && composerKey() === where.agent ? $('#dock textarea') : null),
+});
+
+// Settings › Shortcuts, in shortcuts-page.js.
+const shortcutsPage = createShortcutsPage({
+  shortcuts,
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  shown: () => state.view.kind === 'settings' && state.view.page === 'shortcuts',
+  rerender: () => renderBody(),
+  settingsSection,
+});
+
+// Controls that show their action's keys show the keys chosen now.
+let started = false;
+shortcuts.onChange(() => {
+  if (!started) return;
+  renderSidebar();
+  renderBarActions();
+  if (state.view.kind === 'settings' && state.view.page === 'shortcuts') shortcutsPage.renderList();
+  else if (state.view.kind === 'agent') renderDock();
+});
+
 // ---------- State ----------
 
 let refreshTimer = null;
@@ -3130,6 +3507,7 @@ async function refreshState() {
   }
   const sidebarFocus = $('#yesmen').contains(document.activeElement) ? document.activeElement : null;
   render();
+  palette.refresh();
   // The rebuilt composer can take initial focus during a full state refresh.
   // Preserve the sidebar's stable agent + semantic entry after that rebuild.
   restoreSidebarFocus(sidebarFocus);
@@ -3142,6 +3520,7 @@ function onAgents(agents) {
   state.snap.agents = agents;
   pruneCaches();
   renderSidebar();
+  palette.refresh();
   if (needsYouItems(state.snap).map((item) => item.key).join() !== requests) {
     if (state.view.kind === 'needs-you') renderBody();
     info.render(); // its Needs you row counts them
@@ -3179,6 +3558,7 @@ function onLocale(tag) {
   translatePage();
   buildSideFoot();
   if (!$('#repo-dialog').open) buildRepoDialog();
+  palette.relocalize();
   render();
 }
 
@@ -3191,6 +3571,7 @@ async function start() {
   }
   buildSideFoot();
   buildRepoDialog();
+  started = true;
   mygo.on('mygo:locale', (e) => onLocale(e.locale));
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href]');
@@ -3213,6 +3594,9 @@ async function start() {
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
   mygo.on('board', (yesman) => board.onChange(yesman));
   document.addEventListener('keydown', (e) => files.onKey(e));
+  // After the files pane's ⌘S, which keeps its key.
+  shortcuts.listen();
+  shortcuts.load().catch(fail);
   call('Update').then(onUpdate, () => {});
   mygo.on('focus-agent', (id) => {
     call('TakeFocus').catch(() => {});

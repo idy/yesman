@@ -24,15 +24,9 @@ import (
 	"github.com/idy/yesman/internal/yesmen"
 )
 
-// TestMain lets the test binary double as a fake pi for the Needs-you
-// browser fixture.
-func TestMain(m *testing.M) {
-	if os.Getenv("YESMAN_NEEDS_YOU_FAKE_PI") != "" {
-		needsYouFakePi()
-		os.Exit(0)
-	}
-	os.Exit(m.Run())
-}
+// The test binary doubles as a fake pi for the Needs-you browser fixture:
+// TestMain, in metadata_test.go, runs needsYouFakePi when
+// YESMAN_NEEDS_YOU_FAKE_PI is set.
 
 // needsYouFakePi answers pi's RPC as a scripted agent. A prompt "ASK {…}"
 // asks the dialog given, which holds the run until it is answered. A prompt

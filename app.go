@@ -13,6 +13,8 @@ import (
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/home"
+	"github.com/idy/yesman/internal/nativepermissions"
+	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
@@ -42,19 +44,24 @@ var (
 )
 
 type app struct {
-	home    home.Home
-	pool    *pool.Pool
-	clones  *clones
-	fetcher *fetcher
-	yesmen  *yesmen.Store
-	agents  *agent.Manager
-	pi      string
-	piErr   error
+	home      home.Home
+	pool      *pool.Pool
+	clones    *clones
+	fetcher   *fetcher
+	yesmen    *yesmen.Store
+	agents    *agent.Manager
+	pi        string
+	piErr     error
+	managedPi bool
+	piRuntime *piruntime.Runtime
 	// runPi runs a pi command for the user, outside any workspace.
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs
 	// catalog is pi's catalog of models, for the crew.
 	catalog *catalog
+	// usage is what Settings › Model usage read of agents' session logs.
+	usageOnce sync.Once
+	usage     *usageIndex
 	// vault and variables are what agents' commands get as environment
 	// variables, in Settings › Secrets and Settings › Variables.
 	vault     *secrets.Vault
@@ -101,6 +108,9 @@ type app struct {
 	updates *updates
 
 	files fileWatch // the workspace whose files the page shows
+
+	grantsOnce sync.Once
+	grants     *nativepermissions.Manager
 
 	infoOnce sync.Once
 	info     *infoCache // what the info panel measured

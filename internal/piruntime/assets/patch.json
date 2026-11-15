@@ -1,0 +1,622 @@
+{
+  "upstream": "1.5.2",
+  "revision": 4,
+  "patches": [
+    {
+      "path": "@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+      "before": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
+      "after": "1eb79219c3da2dc963216afd2373c30b7125abf8ff84927583c57fdb5c622744",
+      "edits": [
+        {
+          "before": "#!/usr/bin/env node\nimport { createRequire, enableCompileCache } from \"node:module\";\n\nenableCompileCache();\ncreateRequire(import.meta.url)(\"./cli-runtime.js\");\n",
+          "after": "#!/usr/bin/env node\nimport \"../cli.js\";\n"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-agent-core/dist/agent.js",
+      "before": "f45ae001e2b14fced8ae151f0a00303b5fbdb5fc4b25418d45de6a5546f48a8c",
+      "after": "7d9c8decdefec4c6ef4498374a441c90decc12af82c6626d025ce3d9b1b234d5",
+      "edits": [
+        {
+          "before": "class PendingMessageQueue {\n    messages = [];\n    mode;\n    constructor(mode) {\n        this.mode = mode;\n    }\n    enqueue(message) {\n        this.messages.push(message);\n    }\n    hasItems() {\n        return this.messages.length > 0;\n    }\n    peek() {\n        if (this.mode === \"all\")\n            return this.messages.slice();\n        const first = this.messages[0];\n        return first ? [first] : [];\n    }\n    drain() {\n        const drained = this.peek();\n        this.messages = this.messages.slice(drained.length);\n        return drained;\n    }\n    clear() {\n        this.messages = [];\n    }\n}\n",
+          "after": "import { PendingMessageQueue, PendingQueueRegistry } from \"./pending-queue.js\";\n"
+        },
+        {
+          "before": "    steeringQueue;\n",
+          "after": "    pendingQueue = new PendingQueueRegistry();\n    steeringQueue;\n"
+        },
+        {
+          "before": "new PendingMessageQueue(runtimeOptions.steeringMode ?? \"one-at-a-time\")",
+          "after": "new PendingMessageQueue(runtimeOptions.steeringMode ?? \"one-at-a-time\", \"steer\", this.pendingQueue)"
+        },
+        {
+          "before": "new PendingMessageQueue(runtimeOptions.followUpMode ?? \"one-at-a-time\")",
+          "after": "new PendingMessageQueue(runtimeOptions.followUpMode ?? \"one-at-a-time\", \"followUp\", this.pendingQueue)"
+        },
+        {
+          "before": "    steer(message) {\n        this.steeringQueue.enqueue(message);\n    }",
+          "after": "    steer(message, metadata) {\n        return this.steeringQueue.enqueue(message, metadata);\n    }"
+        },
+        {
+          "before": "    followUp(message) {\n        this.followUpQueue.enqueue(message);\n    }",
+          "after": "    followUp(message, metadata) {\n        return this.followUpQueue.enqueue(message, metadata);\n    }"
+        },
+        {
+          "before": "    /** Remove all queued steering messages. */",
+          "after": "    getPendingQueue() { return this.pendingQueue.snapshot(); }\n    subscribePendingQueue(listener) { return this.pendingQueue.subscribe(listener); }\n    cancelQueuedMessage(epoch, queueId, expectedRevision) { return this.pendingQueue.cancel(epoch, queueId, expectedRevision); }\n    promoteQueuedMessage(epoch, queueId, expectedRevision) { return this.pendingQueue.promote(epoch, queueId, expectedRevision); }\n    notifyPendingQueue() { this.pendingQueue.change([], \"pending\"); }\n    /** Remove all queued steering messages. */"
+        },
+        {
+          "before": "import { PendingMessageQueue, PendingQueueRegistry } from \"./pending-queue.js\";",
+          "after": "import { PendingMessageQueue, PendingQueueRegistry, copyInputRefs, appendInputMessage } from \"./pending-queue.js\";\nexport { bindInputTrigger, triggerIdentity, bindInputBatch, copyInputRefs, joinInputBatches, inputRefAt, recordedInputRef, hostInputRefs, bindProjectedInputs, recordedInputs, persistInputIdentity, publicInputEntry, INPUT_ENTRY } from \"./pending-queue.js\";"
+        },
+        {
+          "before": "let messages = initialState?.messages?.slice() ?? [];",
+          "after": "let messages = copyInputRefs(initialState?.messages ?? [], initialState?.messages?.slice() ?? []);"
+        },
+        {
+          "before": "    if (messages[0]?.role !== \"system\" && initialMessage)\n        messages.unshift(initialMessage);",
+          "after": "    if (messages[0]?.role !== \"system\" && initialMessage) {\n        messages.unshift(initialMessage);\n        copyInputRefs(messages, messages, 0);\n    }"
+        },
+        {
+          "before": "            messages = nextMessages.slice();",
+          "after": "            messages = copyInputRefs(nextMessages, nextMessages.slice());"
+        },
+        {
+          "before": "                this._state.messages.push(event.message);",
+          "after": "                event = { ...event, inputPosition: this._state.messages.length };\n                appendInputMessage(this._state.messages, event.message, event.inputIdentity);"
+        },
+        {
+          "before": "    /** Remove all queued steering messages. */",
+          "after": "    async runQueuedInput(epoch, queueId, expectedRevision, prepare, claimed, canCommit, committed) {\n        if (this.activeRun) throw new Error(\"Agent is already processing.\");\n        const before = this.pendingQueue.snapshot();\n        const target = before.items.find(i => i.queueId === queueId);\n        if (before.epoch !== epoch || !target || target.kind !== \"followUp\" || target.itemRevision !== expectedRevision)\n            return { ...before, outcome: before.epoch !== epoch ? \"stale\" : target ? \"stale_item\" : \"not_pending\" };\n        let result, preparationError;\n        await this.runWithLifecycle(async signal => {\n            // The lifecycle lock precedes observers of the committed queue change.\n            result = this.pendingQueue.promote(epoch,queueId,expectedRevision);\n            if (result.outcome !== \"promoted\") return;\n            let plan, prepared;\n            try {\n                const target = this.pendingQueue.pending.get(queueId);\n                const revision = target?.itemRevision;\n                plan = this.steeringQueue.prepareDrain();\n                const valid = () => !signal.aborted && canCommit() && this.pendingQueue.epoch === epoch &&\n                    this.pendingQueue.pending.get(queueId) === target && target?.itemRevision === revision && this.steeringQueue.canCommitDrain(plan);\n                if (!valid()) return;\n                claimed(result); // priority changed; intake has NOT committed\n                prepared = await prepare(plan.messages,signal);\n                if (!prepared || !valid() || !prepared.commit()) return;\n            } catch(error) {\n                // Preparation is not a model turn: keep originals and do not\n                // fabricate an assistant failure/usage record for untaken input.\n                preparationError = error;\n                return;\n            }\n            // All asynchronous preparation is over. No await between validation,\n            // consuming Session nextTurn context and exact native intake.\n            if (!this.steeringQueue.commitDrain(plan)) return;\n            committed();\n            // Intake has committed. Even if a queue observer just requested Stop,\n            // use the normal loop's prompt recording with its aborted signal.\n            // Never reinsert messages after this point or discard them on abort.\n            await runAgentLoop(prepared.messages, this.createContextSnapshot(), this.createLoopConfig({skipInitialSteeringPoll:true}),\n                event => this.processEvents(event), signal, this.streamFunction);\n        });\n        if (preparationError) throw preparationError;\n        return result;\n    }\n    /** Remove all queued steering messages. */"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-agent-core/dist/agent.d.ts",
+      "before": "05968f90cf20eec86cfd352c6a87dff94f7e177d8579c3864697e8a7bb773ace",
+      "after": "4ea33b4e0fa70d68c9c081bc1351b9432c26423a3b1cc28af6519fe80702ae38",
+      "edits": [
+        {
+          "before": "export declare class Agent {",
+          "after": "export interface PendingQueueItem { queueId: string; kind: \"steer\" | \"followUp\"; submissionId?: string; itemRevision: number; }\nexport interface PendingQueueSnapshot { capability: 2; epoch: string; revision: number; items: PendingQueueItem[]; steering: string[]; followUp: string[]; controlGeneration?: number; promoteAllowed?: boolean; promotionBlocked?: string; idleResume?: boolean; }\nexport interface PendingQueueEvent extends PendingQueueSnapshot { changes: (PendingQueueItem & { state: \"pending\" | \"taken\" | \"cancelled\" | \"cleared\" })[]; }\nexport interface PendingQueueResult extends PendingQueueSnapshot { outcome: \"cancelled\" | \"not_pending\" | \"stale\" | \"stale_item\"; }\nexport interface PendingPromotionResult extends PendingQueueSnapshot { outcome: \"promoted\" | \"already_steering\" | \"not_pending\" | \"stale\" | \"stale_item\" | \"stale_control\" | \"inactive\"; }\nexport declare class Agent {"
+        },
+        {
+          "before": "steer(message: AgentMessage): void;",
+          "after": "steer(message: AgentMessage, metadata?: { submissionId?: string }): string;"
+        },
+        {
+          "before": "followUp(message: AgentMessage): void;",
+          "after": "followUp(message: AgentMessage, metadata?: { submissionId?: string }): string;\n    getPendingQueue(): PendingQueueSnapshot;\n    subscribePendingQueue(listener: (event: PendingQueueEvent) => void): () => void;\n    cancelQueuedMessage(epoch: string, queueId: string, expectedRevision?: number): PendingQueueResult;\n    promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number): PendingPromotionResult;\n    /** @internal Session lifecycle metadata changed. */\n    notifyPendingQueue(): void;"
+        },
+        {
+          "before": "export interface PendingQueueItem {",
+          "after": "export interface HostInputIdentity { submissionId?: string; origin?: { source: \"user\"|\"lead\"|\"yesman\"; kind?: string; worker?: string }; epoch?: string; queueId?: string; }\nexport interface HostInputRef { native: true; identity: HostInputIdentity|null; entryId?: string; }\nexport declare function bindInputTrigger<T extends object>(trigger:T,metadata:unknown):T;\nexport declare function triggerIdentity(trigger:object):HostInputIdentity|undefined;\nexport declare function bindInputBatch<T>(messages:T[],identities:(HostInputIdentity|undefined|null)[]):T[];\nexport declare function copyInputRefs<T>(source:T[],target:T[],insert?:number):T[];\nexport declare function joinInputBatches<T>(...batches:T[][]):T[];\nexport declare function inputRefAt<T>(messages:T[],index:number):HostInputIdentity|null;\nexport declare function recordedInputRef<T>(messages:T[],index:number,entryId:string):void;\nexport declare function hostInputRefs<T>(messages:T[]):(HostInputRef|null)[];\nexport declare function bindProjectedInputs(projection:any,branch:any[]):any[];\nexport declare function recordedInputs(branch:any[]):Map<string,HostInputRef>;\nexport declare function persistInputIdentity(identity:HostInputIdentity|null):HostInputIdentity|null;\nexport declare function publicInputEntry(entry:any):any;\nexport declare const INPUT_ENTRY: string;\nexport interface PendingQueueItem {"
+        },
+        {
+          "before": "capability: 2;",
+          "after": "capability: 3;"
+        },
+        {
+          "before": "steer(message: AgentMessage, metadata?: { submissionId?: string }): string;",
+          "after": "steer(message: AgentMessage, metadata?: { submissionId?: string; hostOrigin?: HostInputIdentity[\"origin\"] }): string;"
+        },
+        {
+          "before": "followUp(message: AgentMessage, metadata?: { submissionId?: string }): string;",
+          "after": "followUp(message: AgentMessage, metadata?: { submissionId?: string; hostOrigin?: HostInputIdentity[\"origin\"] }): string;"
+        },
+        {
+          "before": "    notifyPendingQueue(): void;",
+          "after": "    notifyPendingQueue(): void;\n    runQueuedInput(epoch:string,queueId:string,expectedRevision:number,prepare:(messages:AgentMessage[],signal:AbortSignal)=>Promise<{messages:AgentMessage[];commit:()=>boolean}|undefined>,claimed:(result:PendingPromotionResult)=>void,canCommit:()=>boolean,committed:()=>void):Promise<PendingPromotionResult>;"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.js",
+      "before": "ee756f6f74afe9f8930ebf216c95334605d913a275a0eec2c9702f101baef3c3",
+      "after": "9d2e2c58a70ac50ae2f4c5a63690380cc992f3c321f6a6a40d97420394abb6a7",
+      "edits": [
+        {
+          "before": "            followUp: [...this._followUpMessages],",
+          "after": "            followUp: [...this._followUpMessages],\n            pending: { ...this.getPendingQueue(), changes: [] },"
+        },
+        {
+          "before": "        this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);",
+          "after": "        this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);\n        this._unsubscribePendingQueue = this.agent.subscribePendingQueue((pending) => {\n            this._steeringMessages = pending.steering;\n            this._followUpMessages = pending.followUp;\n            this._emit({ type: \"queue_update\", steering: pending.steering, followUp: pending.followUp, pending: this._decoratePendingQueue(pending) });\n        });"
+        },
+        {
+          "before": "            const messageText = contentText(event.message.content, \"\");\n            // Check steering queue first\n            const steeringIndex = this._steeringMessages.indexOf(messageText);\n            if (steeringIndex !== -1) {\n                this._steeringMessages.splice(steeringIndex, 1);\n                this._emitQueueUpdate();\n            }\n            else {\n                // Check follow-up queue\n                const followUpIndex = this._followUpMessages.indexOf(messageText);\n                if (followUpIndex !== -1) {\n                    this._followUpMessages.splice(followUpIndex, 1);\n                    this._emitQueueUpdate();\n                }\n            }\n",
+          "after": "            // Pending membership changes synchronously at native drain, never by matching text.\n"
+        },
+        {
+          "before": "    _disconnectFromAgent() {",
+          "after": "    _disconnectFromAgent() {\n        this._unsubscribePendingQueue?.();\n        this._unsubscribePendingQueue = undefined;"
+        },
+        {
+          "before": "await this._queueFollowUp(expandedText, currentImages);",
+          "after": "await this._queueFollowUp(expandedText, currentImages, options?.submissionId);"
+        },
+        {
+          "before": "await this._queueSteer(expandedText, currentImages);",
+          "after": "await this._queueSteer(expandedText, currentImages, options?.submissionId);"
+        },
+        {
+          "before": "async _queueUserInput(text, images, behavior, source) {",
+          "after": "async _queueUserInput(text, images, behavior, source, submissionId) {"
+        },
+        {
+          "before": "await this._queueSteer(expandedText, processedInput.images);",
+          "after": "await this._queueSteer(expandedText, processedInput.images, submissionId);"
+        },
+        {
+          "before": "await this._queueFollowUp(expandedText, processedInput.images);",
+          "after": "await this._queueFollowUp(expandedText, processedInput.images, submissionId);"
+        },
+        {
+          "before": "this._queueUserInput(text, images, \"steer\", options?.source ?? \"interactive\")",
+          "after": "this._queueUserInput(text, images, \"steer\", options?.source ?? \"interactive\", options?.submissionId)"
+        },
+        {
+          "before": "this._queueUserInput(text, images, \"followUp\", options?.source ?? \"interactive\")",
+          "after": "this._queueUserInput(text, images, \"followUp\", options?.source ?? \"interactive\", options?.submissionId)"
+        },
+        {
+          "before": "    async _queueSteer(text, images) {\n        this._steeringMessages.push(text);\n        this._emitQueueUpdate();",
+          "after": "    async _queueSteer(text, images, submissionId) {"
+        },
+        {
+          "before": "    async _queueFollowUp(text, images) {\n        this._followUpMessages.push(text);\n        this._emitQueueUpdate();",
+          "after": "    async _queueFollowUp(text, images, submissionId) {"
+        },
+        {
+          "before": "        this.agent.steer(message);",
+          "after": "        return this.agent.steer(message, { submissionId });"
+        },
+        {
+          "before": "        this.agent.followUp(message);",
+          "after": "        return this.agent.followUp(message, { submissionId });"
+        },
+        {
+          "before": "    _isEmittingAgentSettled = false;",
+          "after": "    _queueControlGeneration = 0;\n    _isEmittingAgentSettled = false;"
+        },
+        {
+          "before": "        this._agentRunAbortRequested = false;",
+          "after": "        this._agentRunAbortRequested = false;\n        this.agent.notifyPendingQueue();"
+        },
+        {
+          "before": "            this._isAgentRunActive = false;\n            this._flushPendingBashMessages();",
+          "after": "            this._isAgentRunActive = false;\n            this.agent.notifyPendingQueue();\n            this._flushPendingBashMessages();"
+        },
+        {
+          "before": "        this._isEmittingAgentSettled = true;",
+          "after": "        this._isEmittingAgentSettled = true;\n        this.agent.notifyPendingQueue();"
+        },
+        {
+          "before": "            this._isEmittingAgentSettled = false;",
+          "after": "            this._isEmittingAgentSettled = false;\n            this.agent.notifyPendingQueue();"
+        },
+        {
+          "before": "    async abort() {",
+          "after": "    async abort() {\n        this._queueControlGeneration++;"
+        },
+        {
+          "before": "        this.abortRetry();\n        this.abortCompaction();",
+          "after": "        this.agent.notifyPendingQueue();\n        this.abortRetry();\n        this.abortCompaction();"
+        },
+        {
+          "before": "    clearQueue() {",
+          "after": "    _decoratePendingQueue(snapshot) {\n        const promoteAllowed = this.isStreaming && !this._agentRunAbortRequested && !this._isEmittingAgentSettled;\n        return { ...snapshot, controlGeneration: this._queueControlGeneration, promoteAllowed, idleResume: false,\n            promotionBlocked: promoteAllowed ? \"\" : this._agentRunAbortRequested ? \"stopped\" : \"idle_resume_unavailable\" };\n    }\n    getPendingQueue() { return this._decoratePendingQueue(this.agent.getPendingQueue()); }\n    cancelQueuedMessage(epoch, queueId, expectedRevision) { return this._decoratePendingQueue(this.agent.cancelQueuedMessage(epoch, queueId, expectedRevision)); }\n    promoteQueuedMessage(epoch, queueId, expectedRevision, controlGeneration) {\n        const snapshot = this.getPendingQueue();\n        if (epoch !== snapshot.epoch) return { ...snapshot, outcome: \"stale\" };\n        if (controlGeneration !== this._queueControlGeneration) return { ...snapshot, outcome: \"stale_control\" };\n        const item = snapshot.items.find(item => item.queueId === queueId);\n        if (!item) return { ...snapshot, outcome: \"not_pending\" };\n        // Reconciliation of an already-promoted occurrence never starts a run.\n        if (item.kind !== \"steer\" && !snapshot.promoteAllowed) return { ...snapshot, outcome: \"inactive\" };\n        return this._decoratePendingQueue(this.agent.promoteQueuedMessage(epoch, queueId, expectedRevision));\n    }\n    clearQueue() {"
+        },
+        {
+          "before": "import { runToolCall, } from \"@earendil-works/pi-agent-core\";",
+          "after": "import { runToolCall, bindInputTrigger, triggerIdentity, bindInputBatch, copyInputRefs, joinInputBatches, inputRefAt, recordedInputRef, hostInputRefs, bindProjectedInputs, recordedInputs, persistInputIdentity, publicInputEntry, INPUT_ENTRY } from \"@earendil-works/pi-agent-core\";"
+        },
+        {
+          "before": "            contextEntries: projection.entries,",
+          "after": "            contextEntries: projection.entries.map(e => ({...e,sourceEntry:publicInputEntry(e.sourceEntry)})),"
+        },
+        {
+          "before": "                    branchEntries: pathEntries,\n                    customInstructions,",
+          "after": "                    branchEntries: pathEntries.map(publicInputEntry),\n                    customInstructions,"
+        },
+        {
+          "before": "                    branchEntries: pathEntries,\n                    customInstructions: undefined,",
+          "after": "                    branchEntries: pathEntries.map(publicInputEntry),\n                    customInstructions: undefined,"
+        },
+        {
+          "before": "            entriesToSummarize,\n            userWantsSummary:",
+          "after": "            entriesToSummarize: entriesToSummarize.map(publicInputEntry),\n            userWantsSummary:"
+        },
+        {
+          "before": "        this.agent.state.messages = projection.messages;",
+          "after": "        this.agent.state.messages = bindProjectedInputs(projection, this.sessionManager.getBranch());"
+        },
+        {
+          "before": "    _handleAgentEvent = async (event) => {",
+          "after": "    _handleAgentEvent = async (event) => {\n        const inputMessages = this.agent.state.messages;"
+        },
+        {
+          "before": "this._emit(event.type === \"agent_end\" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);",
+          "after": "this._emit(event.type === \"agent_end\" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : { ...event, hostSession: this.sessionId });"
+        },
+        {
+          "before": "            if (entryId)\n                this._entryIdsByMessage.set(event.message, entryId);",
+          "after": "            if (entryId) {\n                this._entryIdsByMessage.set(event.message, entryId);\n                if (event.message.role === \"user\" && Number.isInteger(event.inputPosition)) {\n                    const identity = persistInputIdentity(event.inputIdentity);\n                    this.sessionManager.appendCustomEntry(INPUT_ENTRY, { entryId, identity });\n                    recordedInputRef(inputMessages, event.inputPosition, entryId);\n                    this._emit({ type: \"input_recorded\", hostSession: this.sessionId, entryId, inputIdentity: identity });\n                }\n            }"
+        },
+        {
+          "before": "    /** Current steering mode */",
+          "after": "    getHostMessages() {\n        const branch = this.sessionManager.getBranch();\n        const messages = this.isStreaming ? this.messages : bindProjectedInputs(this.sessionManager.buildSessionProjection(), branch);\n        const recorded = recordedInputs(branch);\n        const inputRefs = hostInputRefs(messages).map((ref,index) => {\n            if (ref?.native || messages[index]?.role !== \"user\") return ref;\n            const mapped = this._entryIdsByMessage.get(messages[index]);\n            if (mapped) return recorded.get(mapped) ?? null;\n            const entries = branch.filter(e=>e.type===\"message\" && e.message === messages[index]);\n            return entries.length === 1 ? recorded.get(entries[0].id) ?? null : null;\n        });\n        return { messages, inputRefs, hostSession: this.sessionId,\n            recordedInputs: [...recorded.values()].filter(r => r.identity?.submissionId).slice(-256) };\n    }\n    /** Current steering mode */"
+        },
+        {
+          "before": "        return { messageType: \"user\", prompt: expandedText, images: currentImages };",
+          "after": "        return bindInputTrigger({ messageType: \"user\", prompt: expandedText, images: currentImages }, options);"
+        },
+        {
+          "before": "        return messages;\n    }\n    async _handlePostAgentRun()",
+          "after": "        return bindInputBatch(messages, messages.map((_, index) => index === (updateMessage ? 1 : 0) ? triggerIdentity(trigger) : undefined));\n    }\n    async _handlePostAgentRun()"
+        },
+        {
+          "before": "await this._queueFollowUp(expandedText, currentImages, options?.submissionId);",
+          "after": "await this._queueFollowUp(expandedText, currentImages, options?.submissionId, options?.hostOrigin);"
+        },
+        {
+          "before": "await this._queueSteer(expandedText, currentImages, options?.submissionId);",
+          "after": "await this._queueSteer(expandedText, currentImages, options?.submissionId, options?.hostOrigin);"
+        },
+        {
+          "before": "async _queueUserInput(text, images, behavior, source, submissionId)",
+          "after": "async _queueUserInput(text, images, behavior, source, submissionId, hostOrigin)"
+        },
+        {
+          "before": "await this._queueSteer(expandedText, processedInput.images, submissionId);",
+          "after": "await this._queueSteer(expandedText, processedInput.images, submissionId, hostOrigin);"
+        },
+        {
+          "before": "await this._queueFollowUp(expandedText, processedInput.images, submissionId);",
+          "after": "await this._queueFollowUp(expandedText, processedInput.images, submissionId, hostOrigin);"
+        },
+        {
+          "before": "\"steer\", options?.source ?? \"interactive\", options?.submissionId)",
+          "after": "\"steer\", options?.source ?? \"interactive\", options?.submissionId, options?.hostOrigin)"
+        },
+        {
+          "before": "\"followUp\", options?.source ?? \"interactive\", options?.submissionId)",
+          "after": "\"followUp\", options?.source ?? \"interactive\", options?.submissionId, options?.hostOrigin)"
+        },
+        {
+          "before": "async _queueSteer(text, images, submissionId)",
+          "after": "async _queueSteer(text, images, submissionId, hostOrigin)"
+        },
+        {
+          "before": "async _queueFollowUp(text, images, submissionId)",
+          "after": "async _queueFollowUp(text, images, submissionId, hostOrigin)"
+        },
+        {
+          "before": "return this.agent.steer(message, { submissionId });",
+          "after": "return this.agent.steer(message, { submissionId, hostOrigin });"
+        },
+        {
+          "before": "return this.agent.followUp(message, { submissionId });",
+          "after": "return this.agent.followUp(message, { submissionId, hostOrigin });"
+        },
+        {
+          "before": "        try {\n            await this.agent.prompt(messages);\n            while (!this._agentRunAbortRequested) {\n                if (await this._handlePostAgentRun()) {\n                    if (this._agentRunAbortRequested)\n                        break;\n                    await this.agent.continue();\n                    continue;\n                }\n                if (this._agentRunAbortRequested || !(await this._runBeforeSettleBoundary()))\n                    break;\n                if (this._agentRunAbortRequested)\n                    break;\n                await this.agent.continue();\n            }\n        }\n        finally {\n            if (this._agentRunAbortRequested)\n                this._finishCancelledRetry();\n            this._failedResponse = undefined;\n            this._runSystemPromptOptions = undefined;\n            this._flushPendingBashMessages();\n            this._flushPendingCustomMessages();\n            await this._emitAgentSettled();\n        }\n    }\n",
+          "after": "        await this._driveOwnedRun(() => this.agent.prompt(messages));\n    }\n    async _driveOwnedRun(run) {\n        try {\n            await run();\n            while (!this._agentRunAbortRequested) {\n                if (await this._handlePostAgentRun()) {\n                    if (this._agentRunAbortRequested)\n                        break;\n                    await this.agent.continue();\n                    continue;\n                }\n                if (this._agentRunAbortRequested || !(await this._runBeforeSettleBoundary()))\n                    break;\n                if (this._agentRunAbortRequested)\n                    break;\n                await this.agent.continue();\n            }\n        }\n        finally {\n            if (this._agentRunAbortRequested)\n                this._finishCancelledRetry();\n            this._failedResponse = undefined;\n            this._runSystemPromptOptions = undefined;\n            this._flushPendingBashMessages();\n            this._flushPendingCustomMessages();\n            await this._emitAgentSettled();\n        }\n    }\n"
+        },
+        {
+          "before": "    async abort() {\n        this._queueControlGeneration++;",
+          "after": "    async abort() {\n        this._queueControlGeneration++;\n        this._queuedResume?.abort.abort();"
+        },
+        {
+          "before": "    async _prepareRun(trigger) {",
+          "after": "    async _prepareRun(trigger, queuedMessages) {"
+        },
+        {
+          "before": "        if (trigger.messageType === \"custom\") {\n            messages.push(trigger.message);",
+          "after": "        if (queuedMessages) {\n            messages.push(...queuedMessages);\n        }\n        else if (trigger.messageType === \"custom\") {\n            messages.push(trigger.message);"
+        },
+        {
+          "before": "        messages.push(...this._pendingNextTurnMessages);\n        this._pendingNextTurnMessages = [];",
+          "after": "        const nextTurn = queuedMessages ? this._pendingNextTurnMessages.slice() : this._pendingNextTurnMessages;\n        messages.push(...nextTurn);\n        if (!queuedMessages) this._pendingNextTurnMessages = [];"
+        },
+        {
+          "before": "        return bindInputBatch(messages, messages.map((_, index) => index === (updateMessage ? 1 : 0) ? triggerIdentity(trigger) : undefined));",
+          "after": "        if (queuedMessages) {\n            const offset = updateMessage ? 1 : 0;\n            const batch = bindInputBatch(messages, messages.map((_,i) => i >= offset && i < offset + queuedMessages.length ? inputRefAt(queuedMessages,i-offset) : undefined));\n            return { messages: batch, commit: () => {\n                if (!nextTurn.every((m,i) => this._pendingNextTurnMessages[i] === m)) return false;\n                this._recordSelection();\n                this._pendingToolNames.clear();\n                this._pendingNextTurnMessages.splice(0,nextTurn.length);\n                return true;\n            }};\n        }\n        return bindInputBatch(messages, messages.map((_, index) => index === (updateMessage ? 1 : 0) ? triggerIdentity(trigger) : undefined));"
+        },
+        {
+          "before": "    _queueControlGeneration = 0;",
+          "after": "    _queueControlGeneration = 0;\n    _queuedResume = undefined;"
+        },
+        {
+          "before": "        const promoteAllowed = this.isStreaming && !this._agentRunAbortRequested && !this._isEmittingAgentSettled;\n        return { ...snapshot, controlGeneration: this._queueControlGeneration, promoteAllowed, idleResume: false,\n            promotionBlocked: promoteAllowed ? \"\" : this._agentRunAbortRequested ? \"stopped\" : \"idle_resume_unavailable\" };",
+          "after": "        const idleReady = !this.isStreaming && !this.isCompacting && !this._isEmittingAgentSettled && this._promptPreflightCount === 0 && !this._queuedResume;\n        const promoteAllowed = !this._queuedResume && (idleReady || this.isStreaming && !this._agentRunAbortRequested && !this._isEmittingAgentSettled);\n        return { ...snapshot, controlGeneration: this._queueControlGeneration, promoteAllowed, idleResume: true,\n            promotionBlocked: promoteAllowed ? \"\" : \"session_busy\" };"
+        },
+        {
+          "before": "    promoteQueuedMessage(epoch, queueId, expectedRevision, controlGeneration) {",
+          "after": "    async promoteQueuedMessage(epoch, queueId, expectedRevision, controlGeneration) {"
+        },
+        {
+          "before": "        return this._decoratePendingQueue(this.agent.promoteQueuedMessage(epoch, queueId, expectedRevision));\n    }",
+          "after": "        if (item.kind === \"steer\" || this.isStreaming)\n            return this._decoratePendingQueue(this.agent.promoteQueuedMessage(epoch, queueId, expectedRevision));\n        // Reserve the Session synchronously; prompt preflights after this point\n        // queue into this run. No input hook is repeated for the target.\n        this._isAgentRunActive = true;\n        this._agentRunAbortRequested = false;\n        let resolveAdmission, rejectAdmission;\n        const admission = new Promise((resolve,reject) => {resolveAdmission=resolve;rejectAdmission=reject});\n        const reservation = { abort: new AbortController() };\n        const admissionTimer = setTimeout(() => reservation.abort.abort(), 15000);\n        this._queuedResume = reservation;\n        this._emit({type:\"queue_resume_start\"});\n        this.agent.notifyPendingQueue();\n        let admitted = false, driven = false, started = false;\n        reservation.done = (async () => {\n            try {\n                if (!this.model) throw new Error(formatNoModelSelectedMessage());\n                const hasAuth = this._modelRuntime.hasConfiguredAuth(this.model.provider) ||\n                    (await Promise.race([\n                        this._modelRuntime.checkAuth(this.model.provider),\n                        new Promise((_,reject) => reservation.abort.signal.addEventListener(\"abort\", () => reject(new Error(\"Queue admission was stopped or timed out\")), {once:true}))\n                    ])) !== undefined;\n                if (!hasAuth) throw new Error(formatNoApiKeyFoundMessage(this.model.provider));\n                if (reservation.abort.signal.aborted || this._agentRunAbortRequested || controlGeneration !== this._queueControlGeneration)\n                    throw new Error(\"Queue admission was stopped\");\n                const result = await this.agent.runQueuedInput(epoch,queueId,expectedRevision,\n                    async (messages,signal) => {\n                        const first = messages[0];\n                        const images = Array.isArray(first?.content) ? first.content.filter(b=>b.type==='image') : undefined;\n                        const prepared = await this._prepareRun({messageType:\"user\",prompt:contentText(first?.content,\"\"),images},messages);\n                        if (signal.aborted || this._agentRunAbortRequested) return undefined;\n                        return prepared;\n                    }, result => {\n                        admitted = true;\n                        // Admission/auth is complete. Context hooks and normal\n                        // pre-run compaction have their own lifecycle, not this deadline.\n                        clearTimeout(admissionTimer);\n                        resolveAdmission(this._decoratePendingQueue(result));\n                    }, () => !reservation.abort.signal.aborted && !this._agentRunAbortRequested &&\n                        this._queuedResume === reservation && controlGeneration === this._queueControlGeneration,\n                    () => {\n                        started = true;\n                        this._queuedResume = undefined;\n                        this.agent.notifyPendingQueue();\n                    });\n                if (!admitted) {resolveAdmission(this._decoratePendingQueue(result));return;}\n                if (!started) return; // aborted/changed preparation never wakes a generic continuation\n                // Core's initial queue run finished. Existing Session recovery,\n                // before-settle, retries and final cleanup remain the sole owner.\n                driven = true;\n                await this._driveOwnedRun(async () => {});\n            } catch(error) {\n                if (!admitted) rejectAdmission(error);\n                else this._emit({type:\"queue_resume_error\",message:String(error)});\n            } finally {\n                clearTimeout(admissionTimer);\n                if (this._queuedResume === reservation) this._queuedResume = undefined;\n                if (!driven && this._isAgentRunActive) {\n                    if (!started) this._agentRunAbortRequested = true;\n                    this._failedResponse = undefined;\n                    this._runSystemPromptOptions = undefined;\n                    await this._emitAgentSettled();\n                }\n            }\n        })();\n        // The promise is retained/observed by the Session and RPC shutdown waits\n        // for waitForIdle. This is not a wake-on-settle background task.\n        void reservation.done.catch(error => this._emit({type:\"queue_resume_error\",message:String(error)}));\n        return admission;\n    }"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts",
+      "before": "56d24887a400d77a77b428deb1cce25576cac27e18089e722f536d600fa32c3a",
+      "after": "08beaa6820a552980b5c436c5fe80486c49242c8526ba811c3de81af5446da9c",
+      "edits": [
+        {
+          "before": "export interface PromptOptions {",
+          "after": "export interface PromptOptions {\n    /** Host-only identity. Never passed to input/context/model hooks. */\n    submissionId?: string;"
+        },
+        {
+          "before": "    steer(text: string, images?: ImageContent[], options?: {",
+          "after": "    steer(text: string, images?: ImageContent[], options?: {\n        submissionId?: string;"
+        },
+        {
+          "before": "    followUp(text: string, images?: ImageContent[], options?: {",
+          "after": "    followUp(text: string, images?: ImageContent[], options?: {\n        submissionId?: string;"
+        },
+        {
+          "before": "    clearQueue(): {",
+          "after": "    getPendingQueue(): import(\"@earendil-works/pi-agent-core\").PendingQueueSnapshot;\n    cancelQueuedMessage(epoch: string, queueId: string, expectedRevision?: number): import(\"@earendil-works/pi-agent-core\").PendingQueueResult;\n    promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number, controlGeneration: number): import(\"@earendil-works/pi-agent-core\").PendingPromotionResult;\n    clearQueue(): {"
+        },
+        {
+          "before": "    type: \"queue_update\";",
+          "after": "    type: \"queue_update\";\n    pending?: import(\"@earendil-works/pi-agent-core\").PendingQueueEvent;"
+        },
+        {
+          "before": "    type: \"agent_settled\";",
+          "after": "    type: \"input_recorded\";\n    hostSession: string; entryId: string; inputIdentity: import(\"@earendil-works/pi-agent-core\").HostInputIdentity|null;\n} | {\n    type: \"queue_resume_error\"; message: string;\n} | {\n    type: \"agent_settled\";"
+        },
+        {
+          "before": "export interface PromptOptions {",
+          "after": "export interface PromptOptions {\n    hostOrigin?: import(\"@earendil-works/pi-agent-core\").HostInputIdentity[\"origin\"];"
+        },
+        {
+          "before": "    steer(text: string, images?: ImageContent[], options?: {",
+          "after": "    steer(text: string, images?: ImageContent[], options?: {\n        hostOrigin?: import(\"@earendil-works/pi-agent-core\").HostInputIdentity[\"origin\"];"
+        },
+        {
+          "before": "    followUp(text: string, images?: ImageContent[], options?: {",
+          "after": "    followUp(text: string, images?: ImageContent[], options?: {\n        hostOrigin?: import(\"@earendil-works/pi-agent-core\").HostInputIdentity[\"origin\"];"
+        },
+        {
+          "before": "    getPendingQueue():",
+          "after": "    getHostMessages(): { messages: AgentMessage[]; inputRefs: (import(\"@earendil-works/pi-agent-core\").HostInputRef|null)[]; hostSession: string; recordedInputs: import(\"@earendil-works/pi-agent-core\").HostInputRef[] };\n    getPendingQueue():"
+        },
+        {
+          "before": "    type: \"queue_update\";",
+          "after": "    type: \"queue_resume_start\";\n} | {\n    type: \"queue_update\";"
+        },
+        {
+          "before": "promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number, controlGeneration: number): import(\"@earendil-works/pi-agent-core\").PendingPromotionResult;",
+          "after": "promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number, controlGeneration: number): Promise<import(\"@earendil-works/pi-agent-core\").PendingPromotionResult>;"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js",
+      "before": "505297dba2df1de3003c0399b3312fd581359a4e27a5e9262b274b6cb5cb4ef3",
+      "after": "1914c28015294d2931480f666b71ae681412edd0b294032213042cae77a153d3",
+      "edits": [
+        {
+          "before": "                    streamingBehavior: command.streamingBehavior,",
+          "after": "                    streamingBehavior: command.streamingBehavior,\n                    submissionId: command.submissionId,"
+        },
+        {
+          "before": "session.steer(command.message, command.images, { source: \"rpc\" })",
+          "after": "session.steer(command.message, command.images, { source: \"rpc\", submissionId: command.submissionId })"
+        },
+        {
+          "before": "session.followUp(command.message, command.images, { source: \"rpc\" })",
+          "after": "session.followUp(command.message, command.images, { source: \"rpc\", submissionId: command.submissionId })"
+        },
+        {
+          "before": "            case \"clear_queue\": {",
+          "after": "            case \"get_pending_queue\": {\n                return success(id, \"get_pending_queue\", session.getPendingQueue());\n            }\n            case \"cancel_queued_message\": {\n                if (typeof command.epoch !== \"string\" || typeof command.queueId !== \"string\")\n                    return error(id, \"cancel_queued_message\", \"epoch and queueId are required\");\n                return success(id, \"cancel_queued_message\", session.cancelQueuedMessage(command.epoch, command.queueId, command.expectedRevision));\n            }\n            case \"promote_queued_message\": {\n                if (typeof command.epoch !== \"string\" || typeof command.queueId !== \"string\" ||\n                    !Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0 ||\n                    !Number.isSafeInteger(command.controlGeneration) || command.controlGeneration < 0)\n                    return error(id, \"promote_queued_message\", \"epoch, queueId, expectedRevision and controlGeneration are required\");\n                return success(id, \"promote_queued_message\", session.promoteQueuedMessage(command.epoch, command.queueId, command.expectedRevision, command.controlGeneration));\n            }\n            case \"clear_queue\": {"
+        },
+        {
+          "before": "                    pendingMessageCount: session.pendingMessageCount,",
+          "after": "                    pendingMessageCount: session.pendingMessageCount,\n                    pendingQueue: session.getPendingQueue(),\n                    runtime: \"yesman-pi/1.5.2-2\","
+        },
+        {
+          "before": "submissionId: command.submissionId,",
+          "after": "submissionId: command.submissionId,\n                    hostOrigin: command.hostOrigin,"
+        },
+        {
+          "before": "session.steer(command.message, command.images, { source: \"rpc\", submissionId: command.submissionId })",
+          "after": "session.steer(command.message, command.images, { source: \"rpc\", submissionId: command.submissionId, hostOrigin: command.hostOrigin })"
+        },
+        {
+          "before": "session.followUp(command.message, command.images, { source: \"rpc\", submissionId: command.submissionId })",
+          "after": "session.followUp(command.message, command.images, { source: \"rpc\", submissionId: command.submissionId, hostOrigin: command.hostOrigin })"
+        },
+        {
+          "before": "return success(id, \"get_messages\", { messages: session.messages });",
+          "after": "return success(id, \"get_messages\", session.getHostMessages());"
+        },
+        {
+          "before": "runtime: \"yesman-pi/1.5.2-2\"",
+          "after": "runtime: \"yesman-pi/1.5.2-4\""
+        },
+        {
+          "before": "                return success(id, \"promote_queued_message\", session.promoteQueuedMessage(command.epoch, command.queueId, command.expectedRevision, command.controlGeneration));",
+          "after": "                activeCommands++;\n                try {\n                    return success(id, \"promote_queued_message\", await session.promoteQueuedMessage(command.epoch, command.queueId, command.expectedRevision, command.controlGeneration));\n                } finally {\n                    void session.waitForIdle().finally(() => { activeCommands--; checkShutdownRequested(); });\n                }"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-types.d.ts",
+      "before": "68b6dc2e47a3969c09c961a40d0462473407b6786f3bd02715fa035e816e2af1",
+      "after": "fa42b06540d5748dd3d519c3bf1d23af8acba4006569bf388dba0a9988f4e426",
+      "edits": [
+        {
+          "before": "    type: \"prompt\";\n    message: string;",
+          "after": "    type: \"prompt\";\n    submissionId?: string;\n    message: string;"
+        },
+        {
+          "before": "    type: \"steer\";\n    message: string;",
+          "after": "    type: \"steer\";\n    submissionId?: string;\n    message: string;"
+        },
+        {
+          "before": "    type: \"follow_up\";\n    message: string;",
+          "after": "    type: \"follow_up\";\n    submissionId?: string;\n    message: string;"
+        },
+        {
+          "before": "    type: \"clear_queue\";\n} | {",
+          "after": "    type: \"clear_queue\";\n} | {\n    id?: string; type: \"get_pending_queue\";\n} | {\n    id?: string; type: \"cancel_queued_message\"; epoch: string; queueId: string; expectedRevision?: number;\n} | {\n    id?: string; type: \"promote_queued_message\"; epoch: string; queueId: string; expectedRevision: number; controlGeneration: number;\n} | {"
+        },
+        {
+          "before": "    pendingMessageCount: number;",
+          "after": "    pendingMessageCount: number;\n    pendingQueue?: import(\"@earendil-works/pi-agent-core\").PendingQueueSnapshot;\n    runtime?: string;"
+        },
+        {
+          "before": "export type RpcResponse = {",
+          "after": "export type RpcResponse = {\n    id?: string; type: \"response\"; command: \"get_pending_queue\"; success: true;\n    data: import(\"@earendil-works/pi-agent-core\").PendingQueueSnapshot;\n} | {\n    id?: string; type: \"response\"; command: \"cancel_queued_message\"; success: true;\n    data: import(\"@earendil-works/pi-agent-core\").PendingQueueResult;\n} | {\n    id?: string; type: \"response\"; command: \"promote_queued_message\"; success: true;\n    data: import(\"@earendil-works/pi-agent-core\").PendingPromotionResult;\n} | {"
+        },
+        {
+          "before": "    command: \"get_messages\";\n    success: true;\n    data: {\n        messages: AgentMessage[];\n    };",
+          "after": "    command: \"get_messages\";\n    success: true;\n    data: {\n        messages: AgentMessage[];\n        inputRefs?: (import(\"@earendil-works/pi-agent-core\").HostInputRef|null)[];\n        recordedInputs?: import(\"@earendil-works/pi-agent-core\").HostInputRef[];\n        hostSession?: string;\n    };"
+        },
+        {
+          "before": "    type: \"prompt\";\n    submissionId?: string;",
+          "after": "    type: \"prompt\";\n    hostOrigin?: import(\"@earendil-works/pi-agent-core\").HostInputIdentity[\"origin\"];\n    submissionId?: string;"
+        },
+        {
+          "before": "    type: \"steer\";\n    submissionId?: string;",
+          "after": "    type: \"steer\";\n    hostOrigin?: import(\"@earendil-works/pi-agent-core\").HostInputIdentity[\"origin\"];\n    submissionId?: string;"
+        },
+        {
+          "before": "    type: \"follow_up\";\n    submissionId?: string;",
+          "after": "    type: \"follow_up\";\n    hostOrigin?: import(\"@earendil-works/pi-agent-core\").HostInputIdentity[\"origin\"];\n    submissionId?: string;"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-client.js",
+      "before": "6cbb7d183db13468af61af733013a97ee6f5547ccd44edb1f85647f8bd6f218c",
+      "after": "6d4eef08b47b86952e836352361c1e1606102a998d247b02e81a998f97b15adc",
+      "edits": [
+        {
+          "before": "async prompt(message, images, streamingBehavior)",
+          "after": "async prompt(message, images, streamingBehavior, submissionId)"
+        },
+        {
+          "before": "{ type: \"prompt\", message, images, streamingBehavior }",
+          "after": "{ type: \"prompt\", message, images, streamingBehavior, submissionId }"
+        },
+        {
+          "before": "async steer(message, images)",
+          "after": "async steer(message, images, submissionId)"
+        },
+        {
+          "before": "{ type: \"steer\", message, images }",
+          "after": "{ type: \"steer\", message, images, submissionId }"
+        },
+        {
+          "before": "async followUp(message, images)",
+          "after": "async followUp(message, images, submissionId)"
+        },
+        {
+          "before": "{ type: \"follow_up\", message, images }",
+          "after": "{ type: \"follow_up\", message, images, submissionId }"
+        },
+        {
+          "before": "    async clearQueue() {",
+          "after": "    async getPendingQueue() { return this.getData(await this.send({ type: \"get_pending_queue\" })); }\n    async cancelQueuedMessage(epoch, queueId, expectedRevision) { return this.getData(await this.send({ type: \"cancel_queued_message\", epoch, queueId, expectedRevision })); }\n    async promoteQueuedMessage(epoch, queueId, expectedRevision, controlGeneration) { return this.getData(await this.send({ type: \"promote_queued_message\", epoch, queueId, expectedRevision, controlGeneration })); }\n    async clearQueue() {"
+        },
+        {
+          "before": "    async getMessages() {",
+          "after": "    async getHostMessages() { return this.getData(await this.send({ type: \"get_messages\" })); }\n    async getMessages() {"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-client.d.ts",
+      "before": "85ec53b3f019e0176bdbb8f843a213d8ae8aa0bba937dce40291e1315b762b1b",
+      "after": "7a4aeab88cca745b258f92da1b1b9b9b7189e6dca082fdd5a9a3542e05575587",
+      "edits": [
+        {
+          "before": "streamingBehavior?: \"steer\" | \"followUp\"): Promise<PromptDisposition>;",
+          "after": "streamingBehavior?: \"steer\" | \"followUp\", submissionId?: string): Promise<PromptDisposition>;"
+        },
+        {
+          "before": "steer(message: string, images?: ImageContent[]): Promise<QueuedInputDisposition>;",
+          "after": "steer(message: string, images?: ImageContent[], submissionId?: string): Promise<QueuedInputDisposition>;"
+        },
+        {
+          "before": "followUp(message: string, images?: ImageContent[]): Promise<QueuedInputDisposition>;",
+          "after": "followUp(message: string, images?: ImageContent[], submissionId?: string): Promise<QueuedInputDisposition>;"
+        },
+        {
+          "before": "    clearQueue(): Promise<{",
+          "after": "    getPendingQueue(): Promise<import(\"@earendil-works/pi-agent-core\").PendingQueueSnapshot>;\n    cancelQueuedMessage(epoch: string, queueId: string, expectedRevision?: number): Promise<import(\"@earendil-works/pi-agent-core\").PendingQueueResult>;\n    promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number, controlGeneration: number): Promise<import(\"@earendil-works/pi-agent-core\").PendingPromotionResult>;\n    clearQueue(): Promise<{"
+        },
+        {
+          "before": "    getMessages(): Promise<AgentMessage[]>;",
+          "after": "    getMessages(): Promise<AgentMessage[]>;\n    getHostMessages(): Promise<ReturnType<import(\"../../core/agent-session.js\").AgentSession[\"getHostMessages\"]>>;"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-coding-agent/package.json",
+      "before": "18b422b7d80f2caa2551d253c0a8409e1caa54b954bfb7d18252e507bb8a0318",
+      "after": "4f50a0e12c909b7993d426a0fa3f54a141c03064668dcad71472be14f301bc52",
+      "edits": [
+        {
+          "before": "\"pi\": \"dist/bundle/cli.js\"",
+          "after": "\"pi\": \"dist/cli.js\""
+        },
+        {
+          "before": "\"import\": \"./dist/bundle/rpc-entry.js\"",
+          "after": "\"import\": \"./dist/rpc-entry.js\""
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-agent-core/dist/agent-loop.js",
+      "before": "22ee81f9977e211044c1ad41a763876c793ca7fc1c5b39b9fa7f76f3cb281129",
+      "after": "6530a4d6b7c7e4c4cae2a14827e5556fb45fca083626a086f4b6ffc0b67313c9",
+      "edits": [
+        {
+          "before": "import { getDefaultStreamFn } from \"./stream-fn.js\";",
+          "after": "import { getDefaultStreamFn } from \"./stream-fn.js\";\nimport { copyInputRefs, joinInputBatches, inputRefAt } from \"./pending-queue.js\";"
+        },
+        {
+          "before": "    for (const message of initialMessages) {\n        await emit({ type: \"message_start\", message });\n        await emit({ type: \"message_end\", message });",
+          "after": "    for (const [index, message] of initialMessages.entries()) {\n        const inputIdentity = inputRefAt(initialMessages, index);\n        await emit({ type: \"message_start\", message, inputIdentity });\n        await emit({ type: \"message_end\", message, inputIdentity });"
+        },
+        {
+          "before": "            for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {\n                await emit({ type: \"message_start\", message });\n                await emit({ type: \"message_end\", message });",
+          "after": "            const inputs = declareToolChanges(currentContext, joinInputBatches(preparedMessages, pendingMessages));\n            for (const [index, message] of inputs.entries()) {\n                const inputIdentity = inputRefAt(inputs, index);\n                await emit({ type: \"message_start\", message, inputIdentity });\n                await emit({ type: \"message_end\", message, inputIdentity });"
+        },
+        {
+          "before": "        return baseline.map((message, index) => (index === systemIndex ? withToolChanges(pending, changes) : message));",
+          "after": "        return copyInputRefs(pendingMessages, baseline.map((message, index) => (index === systemIndex ? withToolChanges(pending, changes) : message)));"
+        },
+        {
+          "before": "    return [...pendingMessages.slice(0, index), update, ...pendingMessages.slice(index)];",
+          "after": "    return copyInputRefs(pendingMessages, [...pendingMessages.slice(0, index), update, ...pendingMessages.slice(index)], index);"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-agent-core/dist/types.d.ts",
+      "before": "dbdda5a3f7d873b07c9aa0502ab165672d898c9114767a95c28e987daab0075d",
+      "after": "d4006fdb769d849be7cd11ba840a85e4e3f47635a5f0088c87a3a59cd7bb0fab",
+      "edits": [
+        {
+          "before": "    type: \"message_start\";\n    message: AgentMessage;",
+          "after": "    type: \"message_start\";\n    /** Host-only occurrence envelope, never an AgentMessage field. */\n    inputIdentity?: import(\"./agent.js\").HostInputIdentity|null;\n    inputPosition?: number;\n    hostSession?: string;\n    message: AgentMessage;"
+        },
+        {
+          "before": "    type: \"message_end\";\n    message: AgentMessage;",
+          "after": "    type: \"message_end\";\n    /** Host-only occurrence envelope, never an AgentMessage field. */\n    inputIdentity?: import(\"./agent.js\").HostInputIdentity|null;\n    inputPosition?: number;\n    hostSession?: string;\n    message: AgentMessage;"
+        }
+      ]
+    }
+  ]
+}

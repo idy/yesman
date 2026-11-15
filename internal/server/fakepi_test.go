@@ -6,21 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"testing"
 )
 
-// TestMain lets the test binary stand in for pi in RPC mode when
-// YESMAN_SERVER_FAKE_PI is set: it answers every command, and writes the
-// credential the app gave it to $FAKE_PI_TOKENS/<yesman>_<agent>, so tests can
-// call the API as that agent.
-func TestMain(m *testing.M) {
-	if os.Getenv("YESMAN_SERVER_FAKE_PI") != "" {
-		serverFakePi()
-		os.Exit(0)
-	}
-	os.Exit(m.Run())
-}
-
+// serverFakePi lets the test binary stand in for pi in RPC mode when
+// YESMAN_SERVER_FAKE_PI is set (TestMain is in board_lifetime_test.go): it
+// answers every command, and writes the credential the app gave it to
+// $FAKE_PI_TOKENS/<yesman>_<agent>, so tests can call the API as that agent.
 func serverFakePi() {
 	if dir := os.Getenv("FAKE_PI_TOKENS"); dir != "" {
 		name := strings.ReplaceAll(os.Getenv("YESMAN_AGENT"), "/", "_")
