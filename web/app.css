@@ -92,7 +92,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .dot-wrap { display: grid; place-items: center; width: 14px; height: 14px; }
 [data-status="working"] { --mds-tone: var(--mds-accent); --mds-tone-ink: var(--mds-accent-ink); }
 [data-status="waiting"] { --mds-tone: var(--mds-warn); --mds-tone-ink: var(--mds-warn); }
-[data-status="failed"] { --mds-tone: var(--mds-error); --mds-tone-ink: var(--mds-error); }
+[data-status="failed"], .agent-row[data-status="error"], .dot-wrap[data-status="error"], .mds-status[data-status="error"] { --mds-tone: var(--mds-error); --mds-tone-ink: var(--mds-error); }
 [data-status="idle"] { --mds-tone: var(--mds-good); }
 [data-status="starting"] { --mds-tone: var(--mds-muted); }
 [data-status="asking"] { --mds-tone: var(--mds-accent); --mds-tone-ink: var(--mds-accent-ink); }
@@ -209,7 +209,33 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .work-report > summary:hover { background: var(--mds-hover); }
 .work-report-mark { width: 14px; height: 14px; font-size: 14px; color: var(--mds-muted); }
 .work-report > .md { margin: 4px 0 6px 30px; }
-@media (prefers-reduced-motion: reduce) { .work[data-state="running"] .work-mark { animation: none; } .work-caret, .receipts-caret { transition: none; } }
+/* Failed runs in a row: one line in the error colour, opened to read them. */
+.failures { align-self: stretch; min-width: 0; }
+.failures > summary {
+  display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 8px; border: 1px solid var(--mds-error-line); border-radius: var(--mds-radius-sm);
+  background: var(--mds-error-bg); font-size: var(--mds-text-caption); color: var(--mds-error-detail); list-style: none; cursor: default;
+}
+.failures > summary::-webkit-details-marker { display: none; }
+.failures > summary:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: -2px; }
+.failures-mark { flex: none; width: 14px; height: 14px; font-size: 14px; color: var(--mds-error); }
+.failures-label { flex: none; white-space: nowrap; color: var(--mds-error); }
+.failures-facts { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.failures-caret { flex: none; display: inline-flex; width: 12px; height: 12px; font-size: 12px; margin-left: auto; color: var(--mds-muted); transition: transform .15s ease; }
+.failures[open] > summary .failures-caret { transform: rotate(90deg); }
+.failures-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; margin: 4px 0 6px 15px; padding-left: 12px; border-left: 2px solid var(--mds-error-line); }
+.failure { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
+.failure-head { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--mds-text-caption); color: var(--mds-muted); }
+.failure-count { flex: none; color: var(--mds-error); font-variant-numeric: tabular-nums; }
+.failure-source { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.failure-head > .message-copy { margin-left: auto; }
+.failure-text { margin: 0; padding: 8px 10px; border-radius: var(--mds-radius-sm); background: var(--mds-error-bg); color: var(--mds-error-detail); font-family: var(--mds-mono); font-size: var(--mds-text-caption); white-space: pre-wrap; overflow-wrap: anywhere; }
+.failure-text--blank { font-family: inherit; font-style: italic; }
+.failure-runs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
+.failure-run { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 8px; min-width: 0; }
+.failure-run > time { padding-top: 5px; color: var(--mds-muted); font-size: var(--mds-text-caption); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.failure-run-empty { padding: 5px 8px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.dot-wrap .status-error-mark { width: 14px; height: 14px; font-size: 14px; color: var(--mds-error); }
+@media (prefers-reduced-motion: reduce) { .work[data-state="running"] .work-mark { animation: none; } .work-caret, .receipts-caret, .failures-caret { transition: none; } }
 
 .tool { border-radius: var(--mds-radius-sm); }
 .tool > summary {
