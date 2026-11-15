@@ -94,7 +94,7 @@ func (m *Manager) observeNativeInput(a *agent, p *proc, kind string, raw json.Ra
 }
 func (m *Manager) reconcileRecordedInputs(a *agent, p *proc, session string, refs []hostInputRef) {
 	m.mu.Lock()
-	if m.agents[a.info.ID] != a || a.proc != p || a.retiring || a.removing || a.deliverySealed || a.nativeQueue.Capability != 3 || session == "" || session != p.piSession.Load().(string) {
+	if m.agents[a.info.ID] != a || a.proc != p || a.retiring || a.removing || a.deliverySealed || !a.nativeQueue.supportsInputIdentity() || session == "" || session != p.piSession.Load().(string) {
 		m.mu.Unlock()
 		return
 	}

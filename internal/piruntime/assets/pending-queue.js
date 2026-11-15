@@ -6,16 +6,42 @@ import { randomUUID } from 'node:crypto';
 // particular the same object may occur twice, or also occur in prepared context.
 const inputRefs = new WeakMap();
 const triggerRefs = new WeakMap();
+const SUBMISSION_ID = /^[a-f0-9]{48}$/;
+// One occurrence holds its primary human input plus at most 15 appended segments.
+export const MAX_SEGMENTS = 16;
+export const SEGMENT_SEPARATOR = '\n\n';
 export function inputIdentity(metadata) {
   if (!metadata) return undefined;
-  const submissionId = /^[a-f0-9]{48}$/.test(metadata.submissionId ?? '') ? metadata.submissionId : undefined;
+  const submissionId = SUBMISSION_ID.test(metadata.submissionId ?? '') ? metadata.submissionId : undefined;
+  // Host-only IDs of later inputs appended into this same occurrence. Bounded,
+  // never on an AgentMessage, and only meaningful with a primary submission.
+  const segments = submissionId && Array.isArray(metadata.segments) ?
+    metadata.segments.filter(s => typeof s === 'string' && SUBMISSION_ID.test(s) && s !== submissionId).slice(0, MAX_SEGMENTS - 1) : [];
   const source = metadata.hostOrigin?.source;
   const origin = ['user','lead','yesman'].includes(source) ? {source} : submissionId ? {source:'user'} : undefined;
   if (origin) {
     if (/^[a-z]{1,16}$/.test(metadata.hostOrigin?.kind ?? '')) origin.kind = metadata.hostOrigin.kind;
     if (/^[a-z0-9][a-z0-9-]{0,31}$/.test(metadata.hostOrigin?.worker ?? '')) origin.worker = metadata.hostOrigin.worker;
   }
-  return submissionId || origin ? Object.freeze({...(submissionId ? {submissionId}:{}), ...(origin ? {origin:Object.freeze(origin)}:{})}) : undefined;
+  return submissionId || origin ? Object.freeze({...(submissionId ? {submissionId}:{}), ...(origin ? {origin:Object.freeze(origin)}:{}),
+    ...(segments.length ? {segments:Object.freeze(segments)}:{})}) : undefined;
+}
+// The merged occurrence keeps pi's queued user-message shape exactly:
+// one text block, then images in original order. Anything else is not merged.
+function queuedParts(message) {
+  if (message?.role !== 'user' || !Array.isArray(message.content) || message.content[0]?.type !== 'text' ||
+      typeof message.content[0].text !== 'string' || !message.content.slice(1).every(b => b?.type === 'image')) return undefined;
+  return { text: message.content[0].text, images: message.content.slice(1) };
+}
+export function mergeQueuedMessage(base, extra) {
+  const a = queuedParts(base), b = queuedParts(extra);
+  if (!a || !b) return undefined;
+  const text = a.text === '' ? b.text : b.text === '' ? a.text : a.text + SEGMENT_SEPARATOR + b.text;
+  // A new object: the original may be shared, and identity is positional.
+  return { ...base, content: [{ type: 'text', text }, ...a.images, ...b.images] };
+}
+function sameOrigin(a, b) {
+  return a?.source === b?.source && a?.kind === b?.kind && a?.worker === b?.worker;
 }
 export function bindInputTrigger(trigger, metadata) { triggerRefs.set(trigger,inputIdentity(metadata)); return trigger; }
 export function triggerIdentity(trigger) { return triggerRefs.get(trigger); }
@@ -67,7 +93,7 @@ export function recordedInputs(branch) {
   }
   for(const e of branch)if(e.type==='custom'&&e.customType===INPUT_ENTRY&&e.parentId===e.data?.entryId&&messages.has(e.data?.entryId)) {
     const i=e.data.identity;
-    records.set(e.data.entryId,{native:true,entryId:e.data.entryId,identity:inputIdentity(i?{submissionId:i.submissionId,hostOrigin:i.origin}:null)??null});
+    records.set(e.data.entryId,{native:true,entryId:e.data.entryId,identity:inputIdentity(i?{submissionId:i.submissionId,hostOrigin:i.origin,segments:i.segments}:null)??null});
   }
   return records;
 }
@@ -77,7 +103,7 @@ export function bindProjectedInputs(projection,branch) {
   return projection.messages;
 }
 export function persistInputIdentity(identity) {
-  return inputIdentity(identity?{submissionId:identity.submissionId,hostOrigin:identity.origin}:null)??null;
+  return inputIdentity(identity?{submissionId:identity.submissionId,hostOrigin:identity.origin,segments:identity.segments}:null)??null;
 }
 
 export class PendingQueueRegistry {
@@ -87,21 +113,33 @@ export class PendingQueueRegistry {
   pending = new Map();
   queues = new Map();
   cancelled = new Set();
+  // Submission IDs (primary and appended) recently taken, cancelled or cleared.
+  // A repeated append request for one of them neither appends nor enqueues.
+  retired = new Set();
   listeners = new Set();
 
+  retire(entries) {
+    for (const entry of entries) for (const id of [entry.submissionId, ...entry.segments]) if (id) {
+      this.retired.add(id);
+      if (this.retired.size > 1024) this.retired.delete(this.retired.values().next().value);
+    }
+  }
   snapshot() {
     const entries = [...this.pending.values()];
     const text = (entry) => typeof entry.message.content === 'string' ? entry.message.content :
       (entry.message.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
     const lane = (kind) => (this.queues.get(kind)?.messages ?? []).map(text);
-    return { capability: 3, epoch: this.epoch, revision: this.revision,
-      items: entries.map(({ queueId, kind, submissionId, itemRevision }) => ({ queueId, kind, itemRevision, ...(submissionId ? { submissionId } : {}) })),
+    return { capability: 4, epoch: this.epoch, revision: this.revision,
+      items: entries.map(entry => this.item(entry)),
       steering: lane('steer'), followUp: lane('followUp') };
   }
-  change(entries, state) {
+  item({ queueId, kind, submissionId, itemRevision, segments, claim }) {
+    return { queueId, kind, itemRevision, ...(submissionId ? { submissionId } : {}),
+      ...(segments.length ? { segments: [...segments] } : {}), ...(claim ? { preparing: true } : {}) };
+  }
+  change(entries, state, detail = {}) {
     this.revision++;
-    const event = { ...this.snapshot(), changes: entries.map(({ queueId, kind, submissionId, itemRevision }) =>
-      ({ queueId, kind, state, itemRevision, ...(submissionId ? { submissionId } : {}) })) };
+    const event = { ...this.snapshot(), changes: entries.map(entry => ({ ...this.item(entry), state, ...detail })) };
     // Queue mutation has already committed. Observers cannot turn successful
     // admission/removal into a rejected operation by throwing.
     for (const listener of this.listeners) { try { listener(structuredClone(event)); } catch {} }
@@ -141,8 +179,56 @@ export class PendingQueueRegistry {
     entry.queue.remove(entry);
     this.cancelled.add(queueId);
     if (this.cancelled.size > 1024) this.cancelled.delete(this.cancelled.values().next().value);
+    this.retire([entry]);
     this.change([entry], 'cancelled');
     return { outcome: 'cancelled', ...this.snapshot() };
+  }
+  // Freeze occurrences captured by an idle preparation. They stay pending and
+  // cancellable with their complete payload, but can no longer be extended:
+  // extending would invalidate the preparation instead of the later input
+  // simply waiting for its own checkpoint.
+  claim(entries) {
+    const token = {};
+    const claimed = entries.filter((e, i, all) => e && all.indexOf(e) === i && this.pending.get(e.queueId) === e && !e.claim);
+    for (const entry of claimed) entry.claim = token;
+    if (claimed.length) this.change(claimed, 'preparing');
+    return token;
+  }
+  release(token) {
+    if (!token) return;
+    const released = [...this.pending.values()].filter(e => e.claim === token);
+    for (const entry of released) delete entry.claim;
+    if (released.length) this.change(released, 'pending');
+  }
+  // Synchronously extend one unclaimed pending human occurrence with a later
+  // human input. Never awaits, so it linearizes with drain/commit/cancel/promote.
+  // Only 'appended' mutates; every other outcome leaves the registry unchanged.
+  append(epoch, queueId, expectedRevision, kind, message, metadata, fence) {
+    const submissionId = metadata?.submissionId, identity = inputIdentity(metadata);
+    const target = this.pending.get(queueId);
+    if (typeof submissionId !== 'string' || !SUBMISSION_ID.test(submissionId)) return { outcome: 'ineligible' };
+    if (target?.segments.includes(submissionId)) return { outcome: 'already_appended', queueId, itemRevision: target.itemRevision };
+    if (this.retired.has(submissionId) || [...this.pending.values()].some(e => e.submissionId === submissionId || e.segments.includes(submissionId)))
+      return { outcome: 'duplicate' };
+    if (fence) return { outcome: fence }; // Session Stop/settlement fence
+    if (epoch !== this.epoch) return { outcome: 'stale' };
+    if (!target) return { outcome: 'not_pending' };
+    if (target.claim) return { outcome: 'preparing' };
+    if (target.itemRevision !== expectedRevision) return { outcome: 'stale_item' };
+    if (target.kind !== kind) return { outcome: 'kind_mismatch' };
+    // Nothing else may be queued between the occurrence and this input.
+    if ([...this.pending.values()].some(e => e.sequence > target.sequence)) return { outcome: 'not_latest' };
+    if (!target.submissionId || target.identity?.origin?.source !== 'user' || !sameOrigin(target.identity.origin, identity?.origin))
+      return { outcome: 'ineligible' };
+    if (target.segments.length + 1 >= MAX_SEGMENTS) return { outcome: 'limit' };
+    const merged = mergeQueuedMessage(target.message, message);
+    if (!merged) return { outcome: 'ineligible' };
+    target.message = merged;
+    target.segments = [...target.segments, submissionId];
+    target.identity = inputIdentity({ submissionId: target.submissionId, hostOrigin: target.identity.origin, segments: target.segments });
+    target.itemRevision++;
+    this.change([target], 'appended', { appendedSubmissionId: submissionId });
+    return { outcome: 'appended', queueId, itemRevision: target.itemRevision, message: merged };
   }
 }
 
@@ -157,8 +243,9 @@ export class PendingMessageQueue {
     const submissionId = metadata?.submissionId;
     if (submissionId !== undefined && (typeof submissionId !== 'string' || !/^[a-f0-9]{48}$/.test(submissionId)))
       throw new Error('Invalid submission ID');
-    const entry = { queueId: `${this.registry.epoch}:${++this.registry.sequence}`, kind: this.kind,
-      submissionId, message, queue: this, itemRevision: 0, identity: inputIdentity(metadata) };
+    const sequence = ++this.registry.sequence;
+    const entry = { queueId: `${this.registry.epoch}:${sequence}`, sequence, kind: this.kind,
+      submissionId, message, queue: this, itemRevision: 0, identity: inputIdentity(metadata ? { ...metadata, segments: undefined } : metadata), segments: [] };
     this.messages.push(entry);
     this.registry.pending.set(entry.queueId, entry);
     this.registry.change([entry], 'pending');
@@ -184,12 +271,14 @@ export class PendingMessageQueue {
     if (!this.canCommitDrain(plan)) return false;
     this.messages.splice(0,plan.entries.length);
     for (const entry of plan.entries) this.registry.pending.delete(entry.queueId);
+    this.registry.retire(plan.entries);
     this.registry.change(plan.entries,'taken');
     return true;
   }
   drain() {
     const entries = this.messages.splice(0, this.mode === 'all' ? this.messages.length : 1);
     for (const entry of entries) this.registry.pending.delete(entry.queueId);
+    this.registry.retire(entries);
     if (entries.length) this.registry.change(entries, 'taken');
     return bindInputBatch(entries.map((e) => e.message), entries.map(e => Object.freeze({ ...e.identity, epoch:this.registry.epoch, queueId:e.queueId })));
   }
@@ -202,6 +291,7 @@ export class PendingMessageQueue {
   clear() {
     const entries = this.messages.splice(0);
     for (const entry of entries) this.registry.pending.delete(entry.queueId);
+    this.registry.retire(entries);
     if (entries.length) this.registry.change(entries, 'cleared');
   }
 }

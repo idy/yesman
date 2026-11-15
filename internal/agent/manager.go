@@ -854,7 +854,7 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		}
 		m.mu.Lock()
 		retiring := a.retiring || a.proc != p
-		if a.nativeQueue.Capability == 3 {
+		if a.nativeQueue.supportsInputIdentity() {
 			cmd["hostOrigin"] = origin
 		}
 		if messageID != "" && a.nativeQueue.supported() {

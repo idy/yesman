@@ -127,8 +127,8 @@ func newPromotionFixtureWithContext(t *testing.T, onEvent func(Event), beforeCon
 	f.m.mu.Lock()
 	capability := f.m.agents[f.info.ID].nativeQueue.Capability
 	f.m.mu.Unlock()
-	if capability != 3 {
-		t.Fatal("promotion requires real v3 runtime")
+	if capability != 4 {
+		t.Fatal("promotion requires the real managed v4 runtime")
 	}
 	return f
 }

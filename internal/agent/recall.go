@@ -39,8 +39,15 @@ type pendingQueue struct {
 	IdleResume        bool          `json:"idleResume"`
 }
 
-func (q pendingQueue) supportsPromotion() bool { return q.Capability == 2 || q.Capability == 3 }
-func (q pendingQueue) supported() bool         { return q.Capability >= 1 && q.Capability <= 3 }
+func (q pendingQueue) supportsPromotion() bool { return q.Capability >= 2 && q.Capability <= 4 }
+func (q pendingQueue) supported() bool         { return q.Capability >= 1 && q.Capability <= 4 }
+
+// supportsInputIdentity reports host-only input provenance (capability 3+).
+func (q pendingQueue) supportsInputIdentity() bool { return q.Capability == 3 || q.Capability == 4 }
+
+// supportsAppend reports the native same-occurrence append of capability 4.
+// Never inferred from counts or from an older capability.
+func (q pendingQueue) supportsAppend() bool { return q.Capability == 4 }
 
 type RecallResult struct {
 	Delivery Delivery      `json:"delivery"`
