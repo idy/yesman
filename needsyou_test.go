@@ -107,6 +107,9 @@ func TestStartupCountsKeptHandoffs(t *testing.T) {
 	var notes []string
 	restarted := &app{yesmen: original.yesmen, notifier: func(_, _, body string) { notes = append(notes, body) }}
 	restarted.keepAwake = func(string) func() { return func() {} }
+	// This app has no agent manager: a lead going idle here must not leave
+	// a finished notice to fire after the test, while later tests run.
+	t.Cleanup(func() { restarted.completions.update(nil, func(agent.Info) {}) })
 	restarted.countHandoffs()
 	if restarted.waiting != 1 || len(notes) != 0 {
 		t.Fatalf("on startup: waiting %d, notifications %q", restarted.waiting, notes)
