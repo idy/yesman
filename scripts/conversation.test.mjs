@@ -147,6 +147,135 @@ test('stops, errors and failed tools are stated, and errors stay in the conversa
   assert.equal(rows[5].text, 'provider unavailable');
 });
 
+// The shape of a lead out of provider quota: every worker report starts a run
+// that thinks, calls a tool or two and ends on the same error.
+const LIMIT = 'server_error: Codex Magpie: Codex: The usage limit has been reached (429: you can retry your request)';
+const failedRun = (n, message = LIMIT, extra = {}) => {
+  const c = call('yesman_board');
+  return [
+    report(`w${n}`, `report ${n}`),
+    assistant([thinking('a'), thinking('b'), c], 'toolUse'),
+    result(c),
+    assistant([thinking('c')], 'error', { errorMessage: message, provider: 'codex', model: 'gpt-5', ...extra }),
+  ];
+};
+const shapes = (rows) => rows.map((r) => (r.type === 'failures' ? `failures(${r.errors.map((e) => e.runs.length).join('+')})` : r.type === 'work' ? `work:${r.state}` : r.type));
+
+test('runs in a row that end on nothing but an error fold into one row that keeps each of them', () => {
+  const messages = Array.from({ length: 7 }, (_, i) => failedRun(i)).flat();
+  const convo = { messages, tools: new Map() };
+  const rows = project(convo, { status: 'idle' });
+  assert.deepEqual(shapes(rows), ['failures(7)']);
+  const [row] = rows;
+  assert.equal(row.runs.length, 7);
+  assert.equal(row.errors.length, 1);
+  assert.equal(row.errors[0].text, LIMIT);
+  assert.equal(row.errors[0].provider, 'codex');
+  assert.deepEqual([...row.errors[0].models], ['gpt-5']);
+  // Every run keeps its work and note as they were: the report, thinking and tools.
+  for (const run of row.runs) {
+    assert.equal(run.work.state, 'error');
+    assert.deepEqual(run.work.counts, { thinking: 3, tools: 1, failed: 0, reports: 1, notices: 0, workers: 0 });
+    assert.equal(run.note.text, LIMIT);
+    assert.equal(typeof run.note.failure.at, 'number');
+  }
+  // Projecting again, or with the history read again, folds the same: the
+  // count does not grow and the key stays.
+  const again = project({ messages: structuredClone(messages), tools: new Map() }, { status: 'idle' });
+  assert.equal(again[0].key, row.key);
+  assert.equal(again[0].runs.length, 7);
+  // An eighth run joins the same row, under the same key.
+  const more = project({ messages: [...messages, ...failedRun(8)], tools: new Map() }, { status: 'idle' });
+  assert.deepEqual(shapes(more), ['failures(8)']);
+  assert.equal(more[0].key, row.key);
+  // The messages are not changed.
+  assert.equal(messages.length, 28);
+});
+
+test('a single failed run stays as it was; different errors stay apart in one row', () => {
+  assert.deepEqual(shapes(project({ messages: failedRun(1), tools: new Map() }, { status: 'idle' })), ['work:error', 'note']);
+  const rate = 'rate_limit_exceeded: Too many requests, please retry in 20s (429)';
+  const rows = project({ messages: [...failedRun(1), ...failedRun(2, rate), ...failedRun(3), ...failedRun(4, `  ${LIMIT}\n`)], tools: new Map() }, { status: 'idle' });
+  assert.deepEqual(shapes(rows), ['failures(3+1)']);
+  // Same message from another provider is another error, and a message that
+  // only shares a beginning is another error too.
+  const other = project({ messages: [...failedRun(1), ...failedRun(2, LIMIT, { provider: 'anthropic' }), ...failedRun(3, `${LIMIT} for org-2`)], tools: new Map() }, { status: 'idle' });
+  assert.deepEqual(shapes(other), ['failures(1+1+1)']);
+  // Error runs with no work before them fold too, as notes alone.
+  const bare = project({ messages: [assistant([], 'error', { errorMessage: LIMIT, provider: 'codex' }), assistant([], 'error', { errorMessage: LIMIT, provider: 'codex' })] }, { status: 'idle' });
+  assert.deepEqual(shapes(bare), ['failures(2)']);
+  assert.equal(bare[0].runs[0].work, null);
+});
+
+test('a person, a reply, part of a reply or a stop ends a fold, and none of them is folded', () => {
+  const partial = [report('w9', 'r'), assistant([thinking('x'), text('Here is what I found so far: …')], 'error', { errorMessage: LIMIT, provider: 'codex' })];
+  const rows = project({ messages: [
+    ...failedRun(1), ...failedRun(2),
+    user('Is the quota back? It said error 429 before.', { source: 'user' }, 1),
+    ...failedRun(3), ...failedRun(4),
+    assistant([text('Recovered: the board is up to date.')]),
+    ...failedRun(5), ...failedRun(6),
+    ...partial,
+    ...failedRun(7), ...failedRun(8),
+    assistant([thinking('y')], 'aborted'),
+    ...failedRun(10), ...failedRun(11),
+    user('[from your lead] carry on', { source: 'lead', kind: 'message' }),
+    ...failedRun(12), ...failedRun(13),
+  ], tools: new Map() }, { status: 'idle' });
+  assert.deepEqual(shapes(rows), [
+    'failures(2)', 'user', 'failures(2)', 'text', 'failures(2)',
+    'work:done', 'text', 'note',
+    'failures(2)', 'work:stopped', 'note', 'failures(2)', 'lead', 'failures(2)',
+  ]);
+  assert.equal(rows[1].message.content.filter((b) => b.type === 'image').length, 1);
+  assert.equal(rows[6].text, 'Here is what I found so far: …');
+  assert.equal(rows[7].failure, null, 'an error after part of a reply never folds');
+  // A reply being written that fails is not folded either until pi records it.
+  const live = project({ messages: [...failedRun(1), ...failedRun(2)], live: { message: assistant([thinking('z')], 'error', { errorMessage: LIMIT, provider: 'codex' }) }, tools: new Map() }, { status: 'working' });
+  assert.deepEqual(shapes(live), ['failures(2)', 'work:error', 'note']);
+});
+
+test('an error pi recorded without a message is stated and folds like any other', () => {
+  // pi's stopReason says the run failed, whatever errorMessage holds.
+  const one = project({ messages: failedRun(1, '') }, { status: 'idle' });
+  assert.deepEqual(shapes(one), ['work:error', 'note']);
+  assert.equal(one[1].tone, 'error');
+  assert.equal(one[1].blank, true);
+  const missing = failedRun(1);
+  delete missing.at(-1).errorMessage;
+  assert.equal(project({ messages: missing }, { status: 'idle' })[1].blank, true);
+  // Seven of them fold into one row under one blank error; one with a
+  // message stays its own error.
+  const rows = project({ messages: [...Array.from({ length: 7 }, (_, i) => failedRun(i, i % 2 ? '' : '  ')).flat(), ...failedRun(8)] }, { status: 'idle' });
+  assert.deepEqual(shapes(rows), ['failures(7+1)']);
+  assert.equal(rows[0].errors[0].blank, true);
+  assert.equal(rows[0].errors[1].blank, false);
+  assert.equal(rows[0].errors[1].text, LIMIT);
+  // Part of a reply before it, or a person's message after it, stays apart.
+  const partial = project({ messages: [...failedRun(1, ''), assistant([text('So far: …')], 'error', { provider: 'codex' }), user('error?', { source: 'user' }), ...failedRun(2, ''), ...failedRun(3, '')] }, { status: 'idle' });
+  assert.deepEqual(shapes(partial), ['work:error', 'note', 'text', 'note', 'user', 'failures(2)']);
+  assert.equal(partial[3].failure, null);
+});
+
+test('a text that reads like an error is never a failure', () => {
+  const rows = project({ messages: [
+    user('error: 429 usage limit reached', { source: 'user' }),
+    report('w1', 'server_error: usage limit reached (429)'),
+    assistant([thinking('x')]),
+    report('w2', 'server_error: usage limit reached (429)'),
+    assistant([thinking('y')]),
+  ], tools: new Map() }, { status: 'idle' });
+  assert.deepEqual(shapes(rows), ['user', 'work:ended']);
+  assert(!rows.some((r) => r.failure || r.type === 'failures' || r.type === 'note'));
+});
+
+test('pending and failed receipts stay apart from folded runs', () => {
+  const pending = { id: sub(41), revision: 1, state: 'queued', order: 1, nativePending: true, text: 'queued while failing' };
+  const failed = { id: sub(42), revision: 2, state: 'failed', order: 2, error: 'rejected', text: 'failed', agentSince: 's1' };
+  const rows = project({ messages: [...failedRun(1), ...failedRun(2)], tools: new Map(), deliveries: new Map([[pending.id, pending], [failed.id, failed]]) }, { status: 'idle', since: 's1' });
+  assert.deepEqual(shapes(rows), ['failures(2)', 'receipt', 'receipt']);
+});
+
 test('empty and redacted thinking add nothing; text is kept even when it reads like process', () => {
   const rows = project({ messages: [
     assistant([thinking(''), thinking('  '), { type: 'thinking', thinking: '', redacted: true, thinkingSignature: 'x' }]),

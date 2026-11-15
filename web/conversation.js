@@ -28,8 +28,10 @@ const textOf = (content) =>
 //   user     a person's message, with its receipt when the message is bound to one
 //   lead     a worker's task or a message from its lead
 //   text     one text block of the agent's, shown as it is written
-//   note     an error, a stop, a summary of earlier conversation, an extension's message
+//   note     an error (blank when pi recorded no message for it), a stop, a
+//            summary of earlier conversation, an extension's message
 //   work     the work between those: thinking, tool calls and yesman's notices to a lead
+//   failures runs in a row that ended on nothing but an error, folded (see foldFailures)
 //   receipt  a submission the conversation does not show yet, as the person's message
 //   receipts earlier submissions not tied to a message that need nothing more, folded
 //
@@ -81,16 +83,30 @@ export function project(convo, agent = {}) {
         return;
       }
       case 'assistant': {
+        let said = false;
         (m.content ?? []).forEach((block, i) => {
           if (!block) return;
           const k = `${key}:${i}`;
-          if (block.type === 'text' && block.text?.trim()) main({ type: 'text', key: k, text: block.text, live });
-          else if (block.type === 'thinking' && block.thinking?.trim()) step({ type: 'thinking', key: k, text: block.thinking, live });
+          if (block.type === 'text' && block.text?.trim()) {
+            said = true;
+            main({ type: 'text', key: k, text: block.text, live });
+          } else if (block.type === 'thinking' && block.thinking?.trim()) step({ type: 'thinking', key: k, text: block.thinking, live });
           else if (block.type === 'toolCall' && block.id) step({ type: 'tool', key: k, block });
         });
-        if (m.stopReason === 'error' && m.errorMessage) {
+        if (m.stopReason === 'error') {
+          // pi may record an error with no message: the page says it gave
+          // none (blank), rather than show nothing or fold it away.
+          const text = typeof m.errorMessage === 'string' ? m.errorMessage : '';
+          const before = work;
           if (work) work.error = true;
-          main({ type: 'note', key: `${key}:end`, tone: 'error', text: m.errorMessage });
+          // pi's record of the failed message: what may fold with others like
+          // it. One that said something to the person, even in part, or is
+          // still being written, never folds.
+          const failure = said || live ? null : {
+            work: before, at: typeof m.timestamp === 'number' ? m.timestamp : null,
+            provider: typeof m.provider === 'string' ? m.provider : '', model: typeof m.model === 'string' ? m.model : '',
+          };
+          main({ type: 'note', key: `${key}:end`, tone: 'error', text, blank: !text.trim(), failure });
         } else if (m.stopReason === 'aborted') {
           if (work) work.stopped = true;
           main({ type: 'note', key: `${key}:end`, tone: 'quiet', stopped: true });
@@ -143,6 +159,8 @@ export function project(convo, agent = {}) {
                 : current ? 'ended' : 'done';
   }
 
+  rows.splice(0, rows.length, ...foldFailures(rows));
+
   // Submissions not tied to a message come last, in the order they were made.
   // One still to be known about reads as the person's message, from what this
   // window sent when it has that, with its state under it. A receipt also
@@ -168,6 +186,51 @@ export function project(convo, agent = {}) {
   if (earlier.length) rows.push({ type: 'receipts', key: 'd:earlier', deliveries: earlier });
   for (const d of receipts) if (own(d)) rows.push({ type: 'receipt', key: `d:${d.id}`, delivery: d, sent: convo.sent?.get(d.id) });
   return rows;
+}
+
+// foldFailures folds runs in a row that ended on nothing but an error into
+// one failures row, such as a lead failing on a provider's usage limit at
+// every worker report. A run is the error note pi recorded, with the work
+// row before it if any; only pi's stopReason says it failed, never text.
+// Any other row ends the fold: a person's message, a lead's, a reply or part
+// of one, a stop, a summary. A single failed run stays as it was.
+//
+// The failures row keeps every run, with its work row and note as they
+// were, under the error each one ended on: errors are the same when their
+// provider and message are, whitespace aside. Its key is its first run's,
+// so it stays the same as runs join it.
+function foldFailures(rows) {
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i], next = rows[i + 1];
+    let run = null;
+    if (row.type === 'work' && next?.failure && next.failure.work === row) {
+      run = { key: row.key, work: row, note: next };
+      i++;
+    } else if (row.failure && !row.failure.work) run = { key: row.key, work: null, note: row };
+    if (!run) {
+      out.push(row);
+      continue;
+    }
+    const prev = out.at(-1);
+    if (prev?.type === 'failures') prev.runs.push(run);
+    else out.push({ type: 'failures', key: `f:${run.key}`, runs: [run] });
+  }
+  return out.flatMap((row) => {
+    if (row.type !== 'failures') return [row];
+    if (row.runs.length < 2) return row.runs.flatMap((run) => (run.work ? [run.work, run.note] : [run.note]));
+    const errors = new Map();
+    for (const run of row.runs) {
+      const { provider } = run.note.failure;
+      const id = `${provider}\n${run.note.text.trim().replace(/\s+/g, ' ')}`;
+      let e = errors.get(id);
+      if (!e) errors.set(id, (e = { key: `${row.key}:${errors.size}`, text: run.note.text, blank: run.note.blank, provider, models: new Set(), runs: [] }));
+      if (run.note.failure.model) e.models.add(run.note.failure.model);
+      e.runs.push(run);
+    }
+    row.errors = [...errors.values()];
+    return [row];
+  });
 }
 
 // The states after which nothing more is known about a submission. Any
