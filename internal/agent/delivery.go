@@ -32,6 +32,15 @@ type Delivery struct {
 	OriginalPayload     bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
 	NativePending       bool      `json:"nativePending,omitempty"`
 	CanPromote          bool      `json:"canPromote,omitempty"` // live native membership/admission only
+	// MergedInto names the still-pending submission this input was appended to;
+	// pi takes both as one message. Merged lists, in order, the inputs appended to
+	// this submission. Both are bounded private receipt links, never pi input.
+	MergedInto          string   `json:"mergedInto,omitempty"`
+	Merged              []string `json:"merged,omitempty"`
+	Preparing           bool     `json:"preparing,omitempty"` // view only: claimed by pi's idle preparation, not taken
+	queuePreparing      bool
+	coalesce            bool   // a composer submission that may join a pending occurrence
+	appendRoot          string // the occurrence an in-flight append targeted
 	queueRevision       uint64
 	queueID, queueEpoch string
 	boundSeq            uint64
@@ -74,9 +83,9 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 	if !pendingDelivery(d.State) && (pendingDelivery(previous.State) || d.expires == 0) {
 		d.expires = time.Now().Add(deliveryRetention).UnixMilli()
 	}
-	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload = false, false, false, false, false, false
+	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload, d.Preparing = false, false, false, false, false, false, false
 	if d.State == "dispatched" || d.State == "failed" || d.State == "handled" || d.State == "interrupted" || d.State == "accepted" {
-		d.queueID = ""
+		d.queueID, d.queuePreparing = "", false
 		m.forgetRecallLocked(a, d.ID)
 	}
 	d.Revision++
@@ -103,6 +112,20 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 // bridge call returns its existing receipt and never sends the prompt twice.
 func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
 	d, err := m.submit(ctx, id, messageID, text, images, "steer", expectedSince...)
+	return m.submitView(id, d), err
+}
+
+// SubmitCoalescing is Submit for the composer: while pi still holds this
+// agent's newest human input pending and unclaimed, in the same lane, session
+// and generation, pi appends this input to that same occurrence instead of
+// queueing another one. pi decides atomically at its own enqueue point; when
+// the occurrence was taken, claimed or changed first, or the runtime predates
+// capability 4, the input is queued exactly once as its own message.
+func (m *Manager) SubmitCoalescing(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
+	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", true, expectedSince...)
+	return m.submitView(id, d), err
+}
+func (m *Manager) submitView(id string, d Delivery) Delivery {
 	m.mu.Lock()
 	if a := m.agents[id]; a != nil && a.info.Since.Equal(d.AgentSince) {
 		if current, ok := a.deliveries[d.ID]; ok {
@@ -111,9 +134,12 @@ func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images
 		d = a.deliveryView(d)
 	}
 	m.mu.Unlock()
-	return d, err
+	return d
 }
 func (m *Manager) submit(ctx context.Context, id, messageID, text string, images []Image, behavior string, expectedSince ...time.Time) (Delivery, error) {
+	return m.submitDelivery(ctx, id, messageID, text, images, behavior, false, expectedSince...)
+}
+func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string, images []Image, behavior string, coalesce bool, expectedSince ...time.Time) (Delivery, error) {
 	if err := ctx.Err(); err != nil {
 		return Delivery{}, err
 	}
@@ -222,7 +248,7 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	}
 	preview, truncated := deliveryClip(text, maxDeliveryPreview)
 	a.deliveryOrder++
-	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, fingerprint: fingerprint, created: deliveryTimestamp(messageID)}
+	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, fingerprint: fingerprint, created: deliveryTimestamp(messageID), coalesce: coalesce}
 	a.deliveries[messageID] = d
 	m.retainRecallLocked(a, messageID, text, images)
 	ev := m.deliveryLocked(a, d)
@@ -318,11 +344,37 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 	}
 	var data struct {
 		Disposition string `json:"disposition"`
+		Append      *struct {
+			Outcome string `json:"outcome"`
+			QueueID string `json:"queueId"`
+		} `json:"append"`
 	}
 	_ = json.Unmarshal(r.Data, &data)
+	appended := r.Success && data.Disposition == "queued" && data.Append != nil &&
+		(data.Append.Outcome == "appended" || data.Append.Outcome == "already_appended")
+	if appended {
+		// The ordered appended/taken events normally reached this receipt first;
+		// this covers only their absence. Never a second dispatch.
+		if root, ok := m.appendedRootLocked(a, p, d, data.Append.QueueID); ok {
+			events := m.mergeChildLocked(a, root, d)
+			m.mu.Unlock()
+			for _, ev := range events {
+				m.cfg.OnEvent(ev)
+			}
+			return
+		}
+		d.State = "unconfirmed"
+		ev := m.deliveryLocked(a, d)
+		m.mu.Unlock()
+		m.cfg.OnEvent(ev)
+		return
+	}
 	switch {
 	case !r.Success:
 		d.State, d.Error = "failed", r.Error
+	case data.Disposition == "queued" && data.Append != nil && data.Append.Outcome == "duplicate":
+		// pi already holds or took this submission ID; nothing was queued again.
+		d.State = "unconfirmed"
 	case data.Disposition == "handled":
 		d.State = "handled"
 	case a.deliverySettled > d.boundSeq:
@@ -383,7 +435,8 @@ func (m *Manager) observeDelivery(a *agent, p *proc, kind string, raw json.RawMe
 	for _, d := range a.deliveries {
 		uncertain := kind == "agent_settled" && (d.State == "accepted" || d.State == "steering" || d.State == "queued") ||
 			kind == "queue_update" && a.queue.Steering+a.queue.FollowUp == 0 && (d.State == "steering" || d.State == "queued")
-		if d.Session == p.deliverySession() && uncertain && d.queueID == "" {
+		// An appended input follows its occurrence, not run boundaries.
+		if d.Session == p.deliverySession() && uncertain && d.queueID == "" && d.MergedInto == "" {
 			d.State = "unconfirmed"
 			events = append(events, m.deliveryLocked(a, d))
 		}
@@ -402,7 +455,7 @@ func (m *Manager) interruptDeliveriesLocked(a *agent) []Event {
 		if d.State != "cancelled" {
 			m.forgetRecallLocked(a, id)
 		}
-		d.queueID = ""
+		d.queueID, d.queuePreparing = "", false
 		a.deliveries[id] = d
 	}
 	a.nativeQueue = pendingQueue{}

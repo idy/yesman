@@ -300,6 +300,9 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 		if _, err := hex.DecodeString(stored.Fingerprint); err != nil {
 			return nil, 0, errors.New("invalid delivery fingerprint")
 		}
+		if !validMergeLinks(d) {
+			return nil, 0, errors.New("invalid delivery merge links")
+		}
 		d.fingerprint, d.created, d.expires = stored.Fingerprint, stored.Created, stored.Expires
 		if d.expires == 0 {
 			d.expires = d.created + deliveryRetention.Milliseconds()
@@ -309,7 +312,7 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 		d.Error, _ = deliveryClip(d.Error, maxDeliveryError)
 		d.Session, _ = deliveryClip(d.Session, 160)
 		d.Images = nil
-		d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload = false, false, false, false, false, false
+		d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload, d.Preparing = false, false, false, false, false, false, false
 		if pendingDelivery(d.State) {
 			d.State, d.Error = "interrupted", ""
 			d.expires = now.Add(deliveryRetention).UnixMilli()
@@ -320,6 +323,20 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 	floor := disk.Floor
 	pruneDeliveryRecords(records, &floor, now)
 	return records, floor, nil
+}
+// validMergeLinks bounds the private links between inputs pi took as one message.
+func validMergeLinks(d Delivery) bool {
+	if d.MergedInto != "" && (len(d.Merged) > 0 || !deliveryID.MatchString(d.MergedInto) || d.MergedInto == d.ID) || len(d.Merged) > maxMergedInputs {
+		return false
+	}
+	seen := map[string]bool{d.ID: true}
+	for _, id := range d.Merged {
+		if !deliveryID.MatchString(id) || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
 }
 func pruneDeliveryRecords(records map[string]Delivery, floor *int64, now time.Time) []string {
 	var terminal []Delivery

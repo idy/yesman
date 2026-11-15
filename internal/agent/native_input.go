@@ -2,11 +2,13 @@ package agent
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 )
 
 type hostIdentity struct {
-	SubmissionID string `json:"submissionId"`
+	SubmissionID string   `json:"submissionId"`
+	Segments     []string `json:"segments"` // inputs pi appended into this one occurrence
 	Origin       Origin `json:"origin"`
 	Epoch        string `json:"epoch"`
 	QueueID      string `json:"queueId"`
@@ -111,8 +113,21 @@ func (m *Manager) reconcileRecordedInputs(a *agent, p *proc, session string, ref
 		// compaction omitted its message from the current model context. It is not
 		// a replay permission and must never override a cancellation tombstone.
 		d.State = "dispatched"
-		d.queueID = ""
+		d.queueID, d.queuePreparing = "", false
+		for _, segment := range ref.Identity.Segments {
+			if deliveryID.MatchString(segment) && segment != d.ID && !slices.Contains(d.Merged, segment) && len(d.Merged) < maxMergedInputs {
+				if child, ok := a.deliveries[segment]; ok && child.Session == d.Session && child.AgentSince.Equal(d.AgentSince) {
+					d.Merged = append(slices.Clone(d.Merged), segment)
+				}
+			}
+		}
 		events = append(events, m.deliveryLocked(a, d))
+		root := a.deliveries[d.ID]
+		for _, segment := range root.Merged {
+			if child, ok := a.deliveries[segment]; ok && child.State != "cancelled" && child.State != "dispatched" && child.Session == root.Session {
+				events = append(events, m.mergeChildLocked(a, root, child)...)
+			}
+		}
 	}
 	m.mu.Unlock()
 	for _, event := range events {

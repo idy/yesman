@@ -194,6 +194,7 @@ type agent struct {
 	nativeQueue                    pendingQueue
 	recallPayloads                 map[string]recallPayload
 	recallBytes, recalls           int
+	appendGate                     chan struct{} // serializes composer submissions that may join an occurrence
 	deliverySettled                uint64 // sequence of last observed settled boundary
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
@@ -853,12 +854,30 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 			cmd["images"] = images
 		}
 		m.mu.Lock()
+		joining := messageID != "" && origin.Source == OriginUser && a.deliveries[messageID].coalesce && a.nativeQueue.supportsAppend()
+		m.mu.Unlock()
+		if joining {
+			// Held across this RPC: its ordered reply/events update the occurrence
+			// before the next composer input proposes a target revision.
+			release := m.acquireAppendGate(a, p)
+			defer release()
+		}
+		m.mu.Lock()
 		retiring := a.retiring || a.proc != p
 		if a.nativeQueue.supportsInputIdentity() {
 			cmd["hostOrigin"] = origin
 		}
 		if messageID != "" && a.nativeQueue.supported() {
 			cmd["submissionId"] = messageID
+		}
+		if joining && !retiring {
+			if d, ok := a.deliveries[messageID]; ok && d.State == "sending" {
+				if target, root := m.appendTargetLocked(a, p, d, behavior); target != nil {
+					cmd["appendTo"] = target
+					d.appendRoot = root
+					a.deliveries[messageID] = d
+				}
+			}
 		}
 		if !a.nativeQueue.supported() {
 			m.forgetRecallLocked(a, messageID)
