@@ -52,24 +52,25 @@ type View struct {
 // Mutations are serialized; the small state mutex never covers network I/O.
 // Every configuration/key/lock change cancels in-flight App operations.
 type Manager struct {
-	mu          sync.Mutex
-	operations  sync.Mutex
-	dir         string
-	vault       *secrets.Vault
-	keychain    Keychain
-	gh          string
-	cfg         Config
-	loadErr     error
-	closed      bool
-	client      *Client
-	app         *Registration
-	verified    bool
-	connections []Connection
-	epoch       context.Context
-	cancel      context.CancelFunc
-	revision    uint64
-	testAttempt uint64 // latest connection test, independently of settings revision
-	newClient   func(Registration, []byte, []string) (*Client, error)
+	mu            sync.Mutex
+	operations    sync.Mutex
+	dir           string
+	vault         *secrets.Vault
+	keychain      Keychain
+	gh            string
+	cfg           Config
+	loadErr       error
+	closed        bool
+	client        *Client
+	app           *Registration
+	verified      bool
+	connections   []Connection
+	epoch         context.Context
+	cancel        context.CancelFunc
+	revision      uint64
+	testAttempt   uint64 // latest connection test, independently of settings revision
+	importAttempt uint64 // latest native import; older inspections cannot commit
+	newClient     func(Registration, []byte, []string) (*Client, error)
 }
 
 func NewManager(dir string, keychain Keychain, gh string) *Manager {
@@ -317,6 +318,12 @@ func (m *Manager) SaveRegistration(app Registration, key []byte) error {
 	defer m.operations.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.saveRegistrationLocked(app, key)
+}
+
+// Caller holds operations and mu; validation/admission precedes any settings or
+// vault write. Registration and imported keys share this one commit path.
+func (m *Manager) saveRegistrationLocked(app Registration, key []byte) error {
 	if m.closed {
 		return errManagerClosed
 	}
@@ -337,9 +344,16 @@ func (m *Manager) SaveRegistration(app Registration, key []byte) error {
 }
 
 func (m *Manager) ImportKey(ctx context.Context, id int64, key []byte) (Registration, error) {
-	if err := m.closedError(); err != nil {
-		return Registration{}, err
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return Registration{}, errManagerClosed
 	}
+	m.importAttempt++
+	attempt, revision, epoch := m.importAttempt, m.revision, m.epoch
+	m.mu.Unlock()
+	ctx, cancel := joinedContext(ctx, epoch)
+	defer cancel()
 	c, err := m.newClient(Registration{ID: id}, key, nil)
 	if err != nil {
 		return Registration{}, err
@@ -349,7 +363,14 @@ func (m *Manager) ImportKey(ctx context.Context, id int64, key []byte) (Registra
 	if err != nil {
 		return Registration{}, err
 	}
-	if err := m.SaveRegistration(app, key); err != nil {
+	m.operations.Lock()
+	defer m.operations.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || ctx.Err() != nil || revision != m.revision || attempt != m.importAttempt {
+		return Registration{}, errors.New("GitHub App import was canceled or superseded; the inspected key was not saved")
+	}
+	if err := m.saveRegistrationLocked(app, key); err != nil {
 		return Registration{}, err
 	}
 	return app, nil
