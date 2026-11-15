@@ -49,9 +49,10 @@ export async function appendPatch(patch, core, app) {
  });
  await patch(core+'agent.d.ts',(change)=>{
   change('export interface HostInputIdentity { submissionId?: string;', 'export interface HostInputIdentity { submissionId?: string; segments?: string[];');
+  change('origin?: { source: "user"|"lead"|"yesman"; kind?: string; worker?: string };', 'origin?: { source: "user"|"lead"|"yesman"; kind?: string; worker?: string; context?: string };');
   change('export interface PendingQueueItem { queueId: string; kind: "steer" | "followUp"; submissionId?: string; itemRevision: number; }', `export interface PendingQueueItem { queueId: string; kind: "steer" | "followUp"; submissionId?: string; itemRevision: number; segments?: string[]; preparing?: boolean; }
 export interface PendingAppendTarget { epoch: string; queueId: string; expectedRevision: number; controlGeneration: number; }
-export interface PendingAppendResult { outcome: "appended" | "already_appended" | "duplicate" | "stale" | "not_pending" | "preparing" | "stale_item" | "stale_control" | "kind_mismatch" | "not_latest" | "ineligible" | "limit"; queueId?: string; itemRevision?: number; enqueued?: boolean; }`);
+export interface PendingAppendResult { outcome: "appended" | "already_appended" | "duplicate" | "stale" | "not_pending" | "preparing" | "stale_item" | "stale_control" | "kind_mismatch" | "not_latest" | "ineligible" | "limit" | "budget"; queueId?: string; itemRevision?: number; enqueued?: boolean; }`);
   change('capability: 3;', 'capability: 4;');
   change('idleResume?: boolean; }', 'idleResume?: boolean; appendAllowed?: boolean; }');
   change('state: "pending" | "taken" | "cancelled" | "cleared" })[]; }', 'state: "pending" | "taken" | "cancelled" | "cleared" | "appended" | "preparing"; appendedSubmissionId?: string })[]; }');
@@ -74,6 +75,18 @@ export interface PendingAppendResult { outcome: "appended" | "already_appended" 
   change('async _queueFollowUp(text, images, submissionId, hostOrigin) {', 'async _queueFollowUp(text, images, submissionId, hostOrigin, appendTo) {');
   change('        return this.agent.steer(message, { submissionId, hostOrigin });', '        if (appendTo) return this._appendQueued("steer", message, { submissionId, hostOrigin }, appendTo);\n        return this.agent.steer(message, { submissionId, hostOrigin });');
   change('        return this.agent.followUp(message, { submissionId, hostOrigin });', '        if (appendTo) return this._appendQueued("followUp", message, { submissionId, hostOrigin }, appendTo);\n        return this.agent.followUp(message, { submissionId, hostOrigin });');
+  // Idle preparation works on copies of the captured queued inputs, which the
+  // delivery-time normalization (keyed by the original objects) never sees.
+  // Normalize the copies after before_agent_start chose the model, as for an
+  // idle prompt; the pending originals stay unchanged until intake commits.
+  change(`        if (queuedMessages) {
+            messages.push(...queuedMessages);
+        }`, `        if (queuedMessages) {
+            for (const message of queuedMessages)
+                if (message.role === "user")
+                    await this._normalizeQueuedMessageImages(message);
+            messages.push(...queuedMessages);
+        }`);
   change('    getPendingQueue() { return this._decoratePendingQueue(this.agent.getPendingQueue()); }', `    getPendingQueue() { return this._decoratePendingQueue(this.agent.getPendingQueue()); }
     _appendQueued(kind, message, metadata, appendTo) {
         // Stop and settlement are fences: a request prepared before them never

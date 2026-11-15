@@ -91,7 +91,7 @@
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.d.ts",
       "before": "05968f90cf20eec86cfd352c6a87dff94f7e177d8579c3864697e8a7bb773ace",
-      "after": "45328aec0aeb946b66ba0c3e93aeb44826f4192fa2c57552a8201c214f9b7f71",
+      "after": "6445a5158a25cb45856a945582d25a34ef32648276fec10e6029feeba5d2e003",
       "edits": [
         {
           "before": "export declare class Agent {",
@@ -130,8 +130,12 @@
           "after": "export interface HostInputIdentity { submissionId?: string; segments?: string[];"
         },
         {
+          "before": "origin?: { source: \"user\"|\"lead\"|\"yesman\"; kind?: string; worker?: string };",
+          "after": "origin?: { source: \"user\"|\"lead\"|\"yesman\"; kind?: string; worker?: string; context?: string };"
+        },
+        {
           "before": "export interface PendingQueueItem { queueId: string; kind: \"steer\" | \"followUp\"; submissionId?: string; itemRevision: number; }",
-          "after": "export interface PendingQueueItem { queueId: string; kind: \"steer\" | \"followUp\"; submissionId?: string; itemRevision: number; segments?: string[]; preparing?: boolean; }\nexport interface PendingAppendTarget { epoch: string; queueId: string; expectedRevision: number; controlGeneration: number; }\nexport interface PendingAppendResult { outcome: \"appended\" | \"already_appended\" | \"duplicate\" | \"stale\" | \"not_pending\" | \"preparing\" | \"stale_item\" | \"stale_control\" | \"kind_mismatch\" | \"not_latest\" | \"ineligible\" | \"limit\"; queueId?: string; itemRevision?: number; enqueued?: boolean; }"
+          "after": "export interface PendingQueueItem { queueId: string; kind: \"steer\" | \"followUp\"; submissionId?: string; itemRevision: number; segments?: string[]; preparing?: boolean; }\nexport interface PendingAppendTarget { epoch: string; queueId: string; expectedRevision: number; controlGeneration: number; }\nexport interface PendingAppendResult { outcome: \"appended\" | \"already_appended\" | \"duplicate\" | \"stale\" | \"not_pending\" | \"preparing\" | \"stale_item\" | \"stale_control\" | \"kind_mismatch\" | \"not_latest\" | \"ineligible\" | \"limit\" | \"budget\"; queueId?: string; itemRevision?: number; enqueued?: boolean; }"
         },
         {
           "before": "capability: 3;",
@@ -154,7 +158,7 @@
     {
       "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.js",
       "before": "ee756f6f74afe9f8930ebf216c95334605d913a275a0eec2c9702f101baef3c3",
-      "after": "71987cd7a94c52f27b85c9acc1b4f3110e2436a95a9133659322b43aa1ca021e",
+      "after": "c87fe036b81668c8a2e7e44d801e9cd14ba15e1e4d4fcd22b38a27b878968d9e",
       "edits": [
         {
           "before": "            followUp: [...this._followUpMessages],",
@@ -399,6 +403,10 @@
         {
           "before": "        return this.agent.followUp(message, { submissionId, hostOrigin });",
           "after": "        if (appendTo) return this._appendQueued(\"followUp\", message, { submissionId, hostOrigin }, appendTo);\n        return this.agent.followUp(message, { submissionId, hostOrigin });"
+        },
+        {
+          "before": "        if (queuedMessages) {\n            messages.push(...queuedMessages);\n        }",
+          "after": "        if (queuedMessages) {\n            for (const message of queuedMessages)\n                if (message.role === \"user\")\n                    await this._normalizeQueuedMessageImages(message);\n            messages.push(...queuedMessages);\n        }"
         },
         {
           "before": "    getPendingQueue() { return this._decoratePendingQueue(this.agent.getPendingQueue()); }",

@@ -46,6 +46,8 @@ const outcome: import('@earendil-works/pi-agent-core').PendingAppendResult['outc
 const appendWire: RpcCommand = {type:'prompt',message:'more',streamingBehavior:'steer',submissionId:'b'.repeat(48),appendTo:target};
 const appendReply: RpcResponse = {type:'response',command:'prompt',success:true,data:{disposition:'queued',append:{outcome:'preparing',queueId:handle,itemRevision:0,enqueued:true}}};
 const identitySegments: string[]|undefined = ({} as import('@earendil-works/pi-agent-core').HostInputIdentity).segments;
+const budgetOutcome: import('@earendil-works/pi-agent-core').PendingAppendResult['outcome'] = 'budget';
+const contextOrigin: import('@earendil-works/pi-agent-core').HostInputIdentity['origin'] = {source:'user',context:'topic:1'};
 // @ts-expect-error Queue identity is not part of a model message.
 message.queueId = handle;
 `);

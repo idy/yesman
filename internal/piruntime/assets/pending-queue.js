@@ -10,6 +10,26 @@ const SUBMISSION_ID = /^[a-f0-9]{48}$/;
 // One occurrence holds its primary human input plus at most 15 appended segments.
 export const MAX_SEGMENTS = 16;
 export const SEGMENT_SEPARATOR = '\n\n';
+// yesman's single-message image contract. The host checks original inputs
+// before proposing an append; this checks the final, post-hook combination.
+export const MAX_IMAGES = 4;
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+export const MAX_TOTAL_IMAGE_BYTES = 10 * 1024 * 1024;
+const CONTEXT_KEY = /^[a-z0-9][a-z0-9._:-]{0,63}$/;
+// Decoded size of base64 image data, as transmitted to pi.
+function imageBytes(image) {
+  const data = typeof image?.data === 'string' ? image.data : '';
+  return Math.floor(data.length * 3 / 4) - (data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0);
+}
+function withinImageBudget(images) {
+  let total = 0;
+  for (const image of images) {
+    const bytes = imageBytes(image);
+    if (bytes > MAX_IMAGE_BYTES) return false;
+    total += bytes;
+  }
+  return images.length <= MAX_IMAGES && total <= MAX_TOTAL_IMAGE_BYTES;
+}
 export function inputIdentity(metadata) {
   if (!metadata) return undefined;
   const submissionId = SUBMISSION_ID.test(metadata.submissionId ?? '') ? metadata.submissionId : undefined;
@@ -22,6 +42,9 @@ export function inputIdentity(metadata) {
   if (origin) {
     if (/^[a-z]{1,16}$/.test(metadata.hostOrigin?.kind ?? '')) origin.kind = metadata.hostOrigin.kind;
     if (/^[a-z0-9][a-z0-9-]{0,31}$/.test(metadata.hostOrigin?.worker ?? '')) origin.worker = metadata.hostOrigin.worker;
+    // A trusted conversation context (for example a topic) the host assigned.
+    // Inputs from different contexts never share an occurrence.
+    if (CONTEXT_KEY.test(metadata.hostOrigin?.context ?? '')) origin.context = metadata.hostOrigin.context;
   }
   return submissionId || origin ? Object.freeze({...(submissionId ? {submissionId}:{}), ...(origin ? {origin:Object.freeze(origin)}:{}),
     ...(segments.length ? {segments:Object.freeze(segments)}:{})}) : undefined;
@@ -41,7 +64,7 @@ export function mergeQueuedMessage(base, extra) {
   return { ...base, content: [{ type: 'text', text }, ...a.images, ...b.images] };
 }
 function sameOrigin(a, b) {
-  return a?.source === b?.source && a?.kind === b?.kind && a?.worker === b?.worker;
+  return a?.source === b?.source && a?.kind === b?.kind && a?.worker === b?.worker && a?.context === b?.context;
 }
 export function bindInputTrigger(trigger, metadata) { triggerRefs.set(trigger,inputIdentity(metadata)); return trigger; }
 export function triggerIdentity(trigger) { return triggerRefs.get(trigger); }
@@ -223,6 +246,9 @@ export class PendingQueueRegistry {
     if (target.segments.length + 1 >= MAX_SEGMENTS) return { outcome: 'limit' };
     const merged = mergeQueuedMessage(target.message, message);
     if (!merged) return { outcome: 'ineligible' };
+    // Input hooks may have changed either input's images since the host checked
+    // the originals: the combination pi would take must fit one message.
+    if (!withinImageBudget(merged.content.slice(1))) return { outcome: 'budget' };
     target.message = merged;
     target.segments = [...target.segments, submissionId];
     target.identity = inputIdentity({ submissionId: target.submissionId, hostOrigin: target.identity.origin, segments: target.segments });

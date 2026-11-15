@@ -18,7 +18,7 @@ await writeFile(`${temp}/config/settings.json`, JSON.stringify({ packages: [], e
 await writeFile(`${temp}/hook.ts`, `import { appendFileSync } from 'node:fs';
 export default (pi) => {
  const audit = (kind, e) => appendFileSync(process.env.APPEND_HOOK_AUDIT, JSON.stringify({ kind, e }) + '\\n');
- pi.on('input', e => audit('input', e));
+ pi.on('input', e => { audit('input', e); if (e.text === 'budget B') return { action: 'transform', text: e.text, images: [...e.images, e.images[0]] }; });
  pi.on('context', e => audit('context', e.messages));
  pi.on('before_agent_start', e => audit('before_agent_start', e));
  pi.on('message_start', e => audit('message_start', e));
@@ -64,6 +64,15 @@ function png(r, g, b) {
   return { type: 'image', mimeType: 'image/png', data: Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(Buffer.concat([row, row]))), chunk('IEND', Buffer.alloc(0))]).toString('base64') };
 }
 const [img1, img2, img3, img4] = [png(255, 0, 0), png(0, 255, 0), png(0, 0, 255), png(9, 9, 9)];
+// A small but wide PNG that pi's model-limit normalization actually resizes.
+function widePNG() {
+  const width = 4096, height = 16;
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td)); return Buffer.concat([len, td, crc]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const row = Buffer.alloc(1 + 3 * width); for (let x = 0; x < width; x++) row[1 + x * 3] = 255;
+  return { type: 'image', mimeType: 'image/png', data: Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(Buffer.concat(Array.from({ length: height }, () => row)))), chunk('IEND', Buffer.alloc(0))]).toString('base64') };
+}
+const wide = widePNG();
 let idCounter = 0; const ids = [];
 const newId = () => { const id = Date.now().toString(16).padStart(12, '0') + (++idCounter).toString(16).padStart(36, '0'); ids.push(id); return id; };
 const user = { source: 'user' };
@@ -253,6 +262,114 @@ try {
     assert.equal((await call({ type: 'cancel_queued_message', epoch: s.epoch, queueId: s.items[1].queueId, expectedRevision: 0 })).outcome, 'cancelled');
     assert.equal((await call({ type: 'get_pending_queue' })).items.length, 0);
     results.stopDuringPreparation = { a: 'pending, claim released, cancelled', b: 'new occurrence, cancelled', provider: 0 };
+  }
+
+  // 5. A permitted input hook adds an image to B after the host checked the
+  // originals (1 + 3). pi checks the final combination (1 + 4) in the same
+  // step, so B is queued once on its own instead of making a 5-image message.
+  {
+    const from = records.length;
+    await holdTurn('hold budget');
+    const idA = newId(), idB = newId();
+    await call({ type: 'prompt', message: 'budget A', images: [img1], streamingBehavior: 'steer', submissionId: idA, hostOrigin: user });
+    const q = await call({ type: 'get_pending_queue' });
+    const a = q.items.find(i => i.submissionId === idA);
+    const rB = await call({ type: 'prompt', message: 'budget B', images: [img2, img3, img4], streamingBehavior: 'steer', submissionId: idB, hostOrigin: user,
+      appendTo: { epoch: q.epoch, queueId: a.queueId, expectedRevision: 0, controlGeneration: q.controlGeneration } });
+    assert.equal(rB.append.outcome, 'budget'); assert.equal(rB.append.enqueued, true); assert.notEqual(rB.append.queueId, a.queueId);
+    const after = await call({ type: 'get_pending_queue' });
+    assert.equal(after.items.find(i => i.submissionId === idA).itemRevision, 0, 'budget refusal changed the occurrence');
+    await openAll();
+    await until(() => records.slice(from).some(r => r.type === 'agent_settled'), 'phase 5 settle');
+    await closeAll();
+    const users = usersSince(from);
+    assert.deepEqual(users.map(r => text(r.message)), ['hold budget', 'budget A', 'budget B']);
+    assert.equal(images(users[1].message).length, 1); assert.equal(images(users[2].message).length, 4);
+    assert.deepEqual(changes(from, 'taken').map(c => c.submissionId), [idA, idB]);
+    providerCount = (await providerCalls()).length;
+    results.postHookBudget = { originalImages: '1+3', finalImages: '1+4', outcome: 'budget', delivered: 'A (1 image) and B (4 images) once each' };
+  }
+
+  // 6. Idle preparation normalizes its prepared copies exactly like an idle
+  // prompt (same resized image and coordinate hint), for several captured
+  // entries; the pending originals stay unnormalized when it is stopped.
+  {
+    const normalFrom = records.length;
+    await openAll();
+    await call({ type: 'prompt', message: 'wide A\n\nwide B', images: [wide, img2] });
+    await until(() => records.slice(normalFrom).some(r => r.type === 'agent_settled'), 'normal settle');
+    await closeAll();
+    const normal = (await providerCalls()).at(-1).users.at(-1);
+    providerCount = (await providerCalls()).length;
+    assert.notEqual(images(normal)[0].data, wide.data, 'the control prompt must actually resize');
+    const hint = text(normal).slice('wide A\n\nwide B'.length);
+    assert.match(hint, /^\n\n\[Image: original 4096x16/);
+
+    // 6a. Steering mode all: the preparation captures S and the promoted A+B.
+    await call({ type: 'set_steering_mode', mode: 'all' });
+    await holdTurn('hold normalize');
+    const idS = newId(), idA = newId(), idB = newId();
+    await call({ type: 'prompt', message: 'wide S', images: [wide], streamingBehavior: 'steer', submissionId: idS, hostOrigin: user });
+    await call({ type: 'prompt', message: 'wide A', images: [wide], streamingBehavior: 'followUp', submissionId: idA, hostOrigin: user });
+    let q = await call({ type: 'get_pending_queue' });
+    const a = q.items.find(i => i.submissionId === idA);
+    assert.equal((await call({ type: 'prompt', message: 'wide B', images: [img2], streamingBehavior: 'followUp', submissionId: idB, hostOrigin: user,
+      appendTo: { epoch: q.epoch, queueId: a.queueId, expectedRevision: 0, controlGeneration: q.controlGeneration } })).append.outcome, 'appended');
+    let stopFrom = records.length;
+    await call({ type: 'abort' });
+    await until(() => records.slice(stopFrom).some(r => r.type === 'agent_settled'), 'normalize stop settle');
+    providerCount = (await providerCalls()).length;
+    q = await call({ type: 'get_pending_queue' });
+    const from = records.length;
+    await openAll();
+    assert.equal((await call({ type: 'promote_queued_message', epoch: q.epoch, queueId: a.queueId, expectedRevision: 1, controlGeneration: q.controlGeneration })).outcome, 'promoted');
+    await until(() => records.slice(from).some(r => r.type === 'agent_settled'), 'prepared settle');
+    await closeAll();
+    // The context also holds the earlier control prompt: use this run's inputs.
+    const [single, merged] = (await providerCalls())[providerCount].users.slice(-2);
+    assert.ok(text(single).startsWith('wide S') && text(merged).startsWith('wide A'), JSON.stringify([single, merged].map(text)));
+    assert.deepEqual(images(merged), images(normal), 'merged images differ from a one-piece idle prompt');
+    assert.equal(text(merged), 'wide A\n\nwide B' + hint);
+    assert.deepEqual(images(single), [images(normal)[0]]);
+    assert.equal(text(single), 'wide S' + hint);
+    assert.deepEqual(changes(from, 'taken').map(c => c.submissionId), [idS, idA]);
+    providerCount = (await providerCalls()).length;
+
+    // 6b. Stop while the preparation waits in before_agent_start.
+    await call({ type: 'set_steering_mode', mode: 'one-at-a-time' });
+    await holdTurn('hold normalize stop');
+    const idC = newId();
+    await call({ type: 'prompt', message: 'wide C', images: [wide], streamingBehavior: 'followUp', submissionId: idC, hostOrigin: user });
+    stopFrom = records.length;
+    await call({ type: 'abort' });
+    await until(() => records.slice(stopFrom).some(r => r.type === 'agent_settled'), 'stop settle');
+    providerCount = (await providerCalls()).length;
+    q = await call({ type: 'get_pending_queue' });
+    const c = q.items.find(i => i.submissionId === idC);
+    contextHold = deferred();
+    const contextBefore = contextRequests;
+    const prepFrom = records.length;
+    assert.equal((await call({ type: 'promote_queued_message', epoch: q.epoch, queueId: c.queueId, expectedRevision: 0, controlGeneration: q.controlGeneration })).outcome, 'promoted');
+    await until(() => contextRequests > contextBefore, 'stopped preparation');
+    const stopping = call({ type: 'abort' });
+    await until(() => records.slice(prepFrom).some(r => r.type === 'queue_update' && r.pending?.controlGeneration > q.controlGeneration), 'normalize Stop fence');
+    contextHold.resolve(); contextHold = null;
+    await stopping;
+    await until(() => records.slice(prepFrom).some(r => r.type === 'agent_settled'), 'stopped preparation settle');
+    assert.equal((await providerCalls()).length, providerCount, 'stopped preparation reached the provider');
+    const left = await call({ type: 'get_pending_queue' });
+    // pi's lane text is the pending original's text block: no hint was added to it.
+    assert.deepEqual(left.items.map(i => i.submissionId), [idC]); assert.deepEqual(left.steering, ['wide C']);
+    // A later checkpoint takes the untouched original and normalizes it once.
+    const goFrom = records.length;
+    await openAll();
+    await call({ type: 'prompt', message: 'wide go' });
+    await until(() => records.slice(goFrom).some(r => r.type === 'agent_settled'), 'later delivery settle');
+    await closeAll();
+    const later = usersSince(goFrom).map(r => r.message).find(m => text(m).startsWith('wide C'));
+    assert.equal(text(later), 'wide C' + hint); assert.deepEqual(images(later), [images(normal)[0]]);
+    providerCount = (await providerCalls()).length;
+    results.preparedNormalization = { capturedEntries: 2, merged: 'same images and hint as one idle prompt', stopDuringPreparation: 'original pending unnormalized, provider 0, later normalized once' };
   }
 
   // Private identities never reach hooks, extension events or the provider.
