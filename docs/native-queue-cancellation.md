@@ -1,8 +1,8 @@
 # Managed pi and native message recall
 
 yesman's default supported runtime is **pi 1.5.2 with queue protocol patch 1**
-(`1.5.2-yesman.4`). It provides actual per-occurrence pending identity and atomic
-cancellation. Original upstream pi 1.5.2 lacks that API; external runtimes retain
+(`1.5.2-yesman.5`, queue capability 4). It provides actual per-occurrence pending
+identity, atomic cancellation and same-occurrence append. Original upstream pi 1.5.2 lacks that API; external runtimes retain
 normal sending/Copy and only expose recall if they report the supported protocol.
 
 ## Runtime selection and distribution
@@ -163,6 +163,56 @@ receipt. Ordered events reconcile lost ACKs; old initial submission ACKs cannot
 downgrade the changed kind. Restart invalidates live queue authority and never
 replays the original intent. No new payloads or queue authority are persisted.
 
+## Same-occurrence append (capability 4)
+
+A later human input can join a human message that is still pending in pi, so pi
+takes and the model receives one message instead of several. RPC `prompt` accepts
+an optional `appendTo: {epoch, queueId, expectedRevision, controlGeneration}`.
+It applies only while the Session is streaming, where the prompt would otherwise
+be queued. An idle Session ignores it and starts a run as usual.
+
+The input first passes through its own input hooks, skill/template expansion and
+image list. Then one synchronous registry step decides at the exact point pi would
+enqueue it. The input is appended to that occurrence when every condition holds:
+- it is pending and not claimed by an idle preparation;
+- its epoch and item revision match;
+- the Session's control generation matches, and the Session is neither stopping nor settling;
+- it is in the same lane (steer/follow-up);
+- it is the newest pending occurrence in either lane;
+- both inputs carry a 48-hex submission ID and the same host origin, and the origin is the user;
+- fewer than 16 segments exist.
+
+Otherwise the input is enqueued as a new occurrence in that same step, so it is
+never lost or processed twice. The reply is `{disposition:"queued", append:{outcome,
+queueId, itemRevision, enqueued?}}`. Possible outcomes are `appended`, `already_appended`,
+`duplicate`, `stale`, `not_pending`, `preparing`, `stale_item`, `stale_control`,
+`kind_mismatch`, `not_latest`, `ineligible` and `limit`.
+
+A repeated append of a submission ID that is already a segment, a pending primary or
+recently retired (1024 bound) changes nothing and enqueues nothing.
+
+The merged message keeps pi's queued shape: one text block, then images in their
+original order. The text is the earlier text, a blank line (`"\n\n"`), then the
+later text verbatim. Image-only inputs add no separator. The occurrence keeps its
+handle, its primary submission ID, its origin and its timestamp. Its item revision
+increases with each append. Snapshot items list the appended IDs as `segments`.
+`queue_update` reports state `appended` with `appendedSubmissionId`, and the
+eventual `taken` change carries `segments`. The host-only `yesman-input-v1` record
+stores the segments next to the primary ID. None of these IDs appear on an
+AgentMessage, in hooks or in provider context.
+
+An idle preparation (`runQueuedInput`) **claims** its captured occurrences and the
+promoted target. Snapshot items carry `preparing: true` and the transitions are reported as
+`preparing`/`pending`. Claimed items remain pending, cancellable and complete;
+they are **not** taken. Claimed items cannot be extended, so a later input waits for
+its own checkpoint instead of invalidating the preparation. The claim is released
+when the preparation commits or ends without intake.
+
+`get_pending_queue` adds `appendAllowed` as a hint. The SDK exposes
+`Agent.appendQueuedMessage`, `PromptOptions.appendTo` and `RpcClient.promptAppend`.
+Hosts never send `appendTo` to capability ≤3 runtimes. With those runtimes a later
+input simply remains its own message.
+
 ## Protocol and atomicity
 
 Core enqueue returns a unique handle for each occurrence, even if two writers
@@ -298,6 +348,11 @@ are not copied to the clipboard. No history rewrite, fork or response rerun exis
   yesman extension plus third-party transform/context audit and local provider;
   both kinds/modes, concurrent writers, middle cancellation, duplicate retries,
   epoch mismatch, survivor order, post-drain failure and metadata isolation.
+- `check-queue-append.mjs`: actual managed CLI/Session/native queue/RPC with the
+  production yesman extension, third-party hook audit and a per-call gated local
+  provider. It checks one merged occurrence and one provider introduction, text and four images
+  in order, duplicate append, every independent outcome, the checkpoint taking the
+  occurrence first, the idle-preparation claim with no stall, and Stop during preparation.
 - `check-queue-sdk.mjs`: actual managed public core SDK; same-object repeated
   enqueue, 100 interleaved occurrences, ordering/race and bounded terminal handles.
 - `TestRecallWithManagedPi`: actual Go Manager and runtime, complete text/images,
