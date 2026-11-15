@@ -92,9 +92,11 @@ func TestQueueActionsBrowserBridge(t *testing.T) {
 			json.Unmarshal(req.Args[3], &images)
 			if req.Method == "FixtureFollowUp" {
 				value, err = f.m.submit(r.Context(), text(0), text(1), text(2), images, "followUp", since(4))
-			} else if strings.HasSuffix(req.Method, "SubmitCoalescing") {
-				value, err = f.m.SubmitCoalescing(r.Context(), text(0), text(1), text(2), images, since(4))
 			} else {
+				// The page sends composer input as SubmitCoalescing. This scenario
+				// needs every input as its own occurrence (order, promotion, cache),
+				// which is also what pi does when it does not join them; joining has
+				// its own real check (scripts/check-coalesce-browser.mjs).
 				value, err = f.m.Submit(r.Context(), text(0), text(1), text(2), images, since(4))
 			}
 		case "PromoteSubmission":

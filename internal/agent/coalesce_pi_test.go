@@ -171,7 +171,7 @@ func TestCoalesceWithManagedPi(t *testing.T) {
 	if items := f.pendingItems(); len(items) != 1 {
 		t.Fatalf("a retry created an occurrence: %+v", items)
 	}
-	wantText, wantImages := aText+"\n\nbeta 补充", []Image{p1, p2, p3, p4}
+	wantText, wantImages := aText+"\nbeta 补充", []Image{p1, p2, p3, p4}
 	payload, err := f.m.SubmissionPayload(f.info.ID, idC, f.info.Since)
 	if err != nil || payload.Text != wantText || !reflect.DeepEqual(payload.Images, wantImages) {
 		t.Fatalf("aggregate payload %q %v", payload.Text, err)
@@ -328,12 +328,12 @@ func TestCoalesceCancelAndPromoteFamilyWithManagedPi(t *testing.T) {
 		f.delivery(t, idX, "steering")
 		waitFor(t, "merge recorded", func() bool { return slices.Equal(f.receipt(idA).Merged, []string{idB}) })
 		result, err := f.m.CancelSubmission(ctx, f.info.ID, idB, f.info.Since)
-		if err != nil || result.Payload.Text != "alpha\n\nbeta" || !reflect.DeepEqual(result.Payload.Images, []Image{pA, pB}) || result.Delivery.ID != idA {
+		if err != nil || result.Payload.Text != "alpha\nbeta" || !reflect.DeepEqual(result.Payload.Images, []Image{pA, pB}) || result.Delivery.ID != idA {
 			t.Fatalf("cancel %+v %v", result, err)
 		}
 		f.delivery(t, idA, "cancelled")
 		f.delivery(t, idB, "cancelled")
-		if again, err := f.m.CancelSubmission(ctx, f.info.ID, idA, f.info.Since); err != nil || again.Payload.Text != "alpha\n\nbeta" {
+		if again, err := f.m.CancelSubmission(ctx, f.info.ID, idA, f.info.Since); err != nil || again.Payload.Text != "alpha\nbeta" {
 			t.Fatalf("lost-reply retry %+v %v", again, err)
 		}
 		if items := f.pendingItems(); len(items) != 1 || items[0].SubmissionID != idX {
@@ -348,7 +348,7 @@ func TestCoalesceCancelAndPromoteFamilyWithManagedPi(t *testing.T) {
 		f.release(t)
 		f.delivery(t, idX, "dispatched")
 		calls, _ := f.awaitProvider(t, "survivor")
-		if len(introduced(calls, "survivor")) != 1 || len(introduced(calls, "alpha\n\nbeta")) != 0 || len(introduced(calls, "alpha")) != 0 {
+		if len(introduced(calls, "survivor")) != 1 || len(introduced(calls, "alpha\nbeta")) != 0 || len(introduced(calls, "alpha")) != 0 {
 			t.Fatal("cancelled family reached the provider")
 		}
 	})
@@ -373,8 +373,8 @@ func TestCoalesceCancelAndPromoteFamilyWithManagedPi(t *testing.T) {
 		f.release(t)
 		f.delivery(t, idA, "dispatched")
 		f.delivery(t, idB, "dispatched")
-		calls, _ := f.awaitProvider(t, "follow A\n\nfollow B")
-		if len(introduced(calls, "follow A\n\nfollow B")) != 1 || len(introduced(calls, "follow B")) != 0 {
+		calls, _ := f.awaitProvider(t, "follow A\nfollow B")
+		if len(introduced(calls, "follow A\nfollow B")) != 1 || len(introduced(calls, "follow B")) != 0 {
 			t.Fatal("promoted family not delivered once")
 		}
 	})
@@ -435,7 +435,7 @@ func TestCoalescePreparingWinsWithManagedPi(t *testing.T) {
 	f.delivery(t, idA, "dispatched")
 	f.delivery(t, idB, "dispatched")
 	calls, _ := f.awaitProvider(t, "prepared A", "later B")
-	if len(introduced(calls, "prepared A")) != 1 || len(introduced(calls, "later B")) != 1 || len(introduced(calls, "prepared A\n\nlater B")) != 0 {
+	if len(introduced(calls, "prepared A")) != 1 || len(introduced(calls, "later B")) != 1 || len(introduced(calls, "prepared A\nlater B")) != 0 {
 		t.Fatal("claim-first inputs not delivered once each")
 	}
 }

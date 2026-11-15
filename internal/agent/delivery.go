@@ -58,9 +58,6 @@ type QueueStatus struct {
 	FollowUp         int  `json:"followUp"`
 	RecallSupported  bool `json:"recallSupported,omitempty"`
 	PromoteSupported bool `json:"promoteSupported,omitempty"`
-	// AppendSupported is a display hint only: pi can currently extend its
-	// newest pending human occurrence. pi still decides each append itself.
-	AppendSupported bool `json:"appendSupported,omitempty"`
 }
 
 var deliveryID = regexp.MustCompile(`^[a-f0-9]{48}$`)

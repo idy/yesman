@@ -170,21 +170,13 @@ export function project(convo, agent = {}) {
     !FINISHED.has(d.state) || convo.sent?.has(d.id) || (d === latest && !settled(d));
   const earlier = receipts.filter((d) => !own(d));
   if (earlier.length) rows.push({ type: 'receipts', key: 'd:earlier', deliveries: earlier });
-  // Only the newest pending occurrence can still be extended, and only while
-  // pi says it accepts appends: a display hint, never an action's authority.
-  const newest = all.filter((d) => d.nativePending).reduce((a, d) => (!a || (d.order ?? 0) > (a.order ?? 0) ? d : a), null);
   for (const d of receipts) {
     if (!own(d)) continue;
     const members = familyOf(convo, d);
-    rows.push({ type: 'receipt', key: `d:${d.id}`, delivery: d, members, sent: sentOf(convo, members),
-      appendable: !!convo.piQueue?.appendSupported && d === newest && appendable(d) });
+    rows.push({ type: 'receipt', key: `d:${d.id}`, delivery: d, members, sent: sentOf(convo, members) });
   }
   return rows;
 }
-
-// pi bounds one occurrence to its primary input and this many appended ones.
-export const MAX_APPENDED = 15;
-const appendable = (d) => d.nativePending && !d.preparing && d.state === 'steering' && !d.mergedInto && (d.merged?.length ?? 0) < MAX_APPENDED;
 
 // familyOf lists the inputs one occurrence's message is made of, its primary
 // input first: those pi reported in order, then any whose own receipt names
@@ -197,9 +189,9 @@ export function familyOf(convo, root) {
   return [...ids, ...late.map((d) => d.id)];
 }
 
-// joinText is pi's merge of two inputs' text: a blank line between them,
-// none when either has no text.
-export const joinText = (a, b) => (a === '' ? b : b === '' ? a : `${a}\n\n${b}`);
+// joinText is pi's merge of two inputs' text: one newline between them, each
+// kept verbatim, none when either has no text (an image-only input).
+export const joinText = (a, b) => (a === '' ? b : b === '' ? a : `${a}\n${b}`);
 
 // joinInputs is the whole message several inputs make: their text joined in
 // order, then all their images in order.

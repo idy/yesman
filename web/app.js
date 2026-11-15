@@ -295,7 +295,7 @@ function deliveryStatus(d, bound) {
 // one message: the occurrence's row shows them all, in the same element.
 const receiptForm = (d, sent, line) => (line ? `line:${d.text ?? ''}:${d.imageCount ?? 0}` : 'bubble');
 
-function receiptEl(c, d, { sent, line = false, members, appendable = false } = {}) {
+function receiptEl(c, d, { sent, line = false, members } = {}) {
   if (line) {
     const el = receiptLine(d);
     el._variant = receiptForm(d, sent, line);
@@ -305,7 +305,7 @@ function receiptEl(c, d, { sent, line = false, members, appendable = false } = {
     h('div', { class: 'msg-user' }),
     h('div', { class: 'message-footer' }, deliveryStatus(d, false), h('div', { class: 'message-actions' })));
   el._variant = receiptForm(d, sent, line);
-  return updateBubble(c, el, d, { sent, members, appendable });
+  return updateBubble(c, el, d, { sent, members });
 }
 
 const sameIDs = (a, b) => a.length === b.length && a.every((id, i) => id === b[i]);
@@ -326,72 +326,36 @@ function receiptContent(c, el, d, sent, members) {
   return { full: false, members, text: d.text ? (d.preview ? `${d.text}…` : d.text) : '', images, imageCount: d.imageCount ?? d.images?.length ?? 0 };
 }
 
-const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
-
-// One polite announcement each time an input joins a pending message; the
-// message itself is never read out again.
-function announce(text) {
-  let el = document.getElementById('live-announcer');
-  if (!el) document.body.append(el = h('div', { id: 'live-announcer', class: 'mds-visually-hidden', role: 'status', 'aria-live': 'polite' }));
-  el.textContent = '';
-  requestAnimationFrame(() => { el.textContent = text; });
-}
-
-// The text and images of a receipt's message. A part just appended fades in
-// and the message grows to hold it; a caret breathes while the message can
-// still take more. Both are decoration only, and still under reduced motion.
-function fillBubble(el, content, { appendable, grew, from }) {
+// The text and images of a receipt's message, as one bubble: replacing its
+// content keeps the element, and so its place, focus and what surrounds it.
+function fillBubble(el, content) {
   const bubble = el.querySelector('.msg-user');
-  const before = grew && !reducedMotion() ? bubble.getBoundingClientRect().height : null;
   const images = content.images.filter((image) => imageURL(image));
-  const nodes = [];
-  if (from && content.text.startsWith(from.text) && content.text.length > from.text.length) {
-    nodes.push(from.text, h('span', { class: 'msg-append' }, content.text.slice(from.text.length)));
-  } else {
-    nodes.push(content.text || (content.imageCount && !images.length ? t('Attached images') : ''));
-  }
-  if (appendable) nodes.push(h('span', { class: 'msg-caret', 'aria-hidden': 'true' }));
-  if (images.length) nodes.push(h('div', { class: 'message-images' }, images.map((image, i) =>
-    h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy', class: from && i >= from.images.length ? 'msg-append' : null }))));
-  bubble.replaceChildren(...nodes);
-  bubble.dataset.appendable = String(!!appendable);
+  bubble.replaceChildren(content.text || (content.imageCount && !images.length ? t('Attached images') : ''),
+    ...(images.length ? [h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' })))] : []));
   el.querySelector(':scope > .delivery-image-count')?.remove();
   if (!images.length && content.imageCount) bubble.after(imageNote(content.imageCount));
-  if (before != null && bubble.animate) {
-    const after = bubble.getBoundingClientRect().height;
-    if (after > before) {
-      const scroller = $('#scroll');
-      const stick = scroller?.dataset.stick !== 'false';
-      bubble.animate([{ height: `${before}px`, overflow: 'hidden' }, { height: `${after}px`, overflow: 'hidden' }], { duration: 200, easing: 'ease-out' })
-        .finished.then(() => { if (stick) scrollDown(); }, () => {});
-    }
-  }
 }
 
 // updateBubble brings a receipt's message up to date in its own element:
 // state, actions and, when its inputs changed, what it shows.
-function updateBubble(c, el, d, { sent, members = [d.id], appendable = false }) {
-  el._options = { sent, members, appendable };
+function updateBubble(c, el, d, { sent, members = [d.id] }) {
+  el._options = { sent, members };
   el.dataset.sending = String(d.state === 'sending');
   let content = receiptContent(c, el, d, sent, members);
   if (content.full && !sent) el.dataset.original = 'true';
   if (content.full) el._full = { members: content.members, text: content.text, images: content.images };
   const shown = el._shown;
-  const grew = !!shown && content.members.length > shown.members.length;
   // While the complete message is fetched, keep the last complete one rather
   // than drop back to a preview of it.
   const fetching = !content.full && d.originalPayload && el._failed !== content.members.join(',');
   if (fetching && shown?.full && startsWithIDs(content.members, shown.members)) content = null;
   if (content) {
-    const sig = `${content.full}:${content.members.join(',')}:${content.text}:${content.images.length}:${content.imageCount ?? 0}:${appendable}`;
+    const sig = `${content.full}:${content.members.join(',')}:${content.text}:${content.images.length}:${content.imageCount ?? 0}`;
     if (shown?.sig !== sig) {
-      fillBubble(el, content, { appendable, grew, from: grew && shown.full && content.full ? shown : null });
-      if (grew) announce(t('Added to pending message'));
-      el._shown = { sig, full: content.full, members: content.members, text: content.text, images: content.images, appendable };
+      fillBubble(el, content);
+      el._shown = { sig, full: content.full, members: content.members, text: content.text, images: content.images };
     }
-  } else if (!appendable) {
-    el.querySelector('.msg-caret')?.remove();
-    el.querySelector('.msg-user').dataset.appendable = 'false';
   }
   el.querySelector('.message-footer > .delivery-status').replaceWith(deliveryStatus(d, false));
   const full = el._shown?.full && startsWithIDs(el._shown.members, members) ? el._shown.text : null;
@@ -473,7 +437,7 @@ function updateReceipt(c, el, d, options = {}) {
   return receiptEl(c, d, options);
 }
 
-const receiptSig = (d, sent, members = [], appendable = false) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}:${!!d.originalPayload}:${!!d.canPromote}:${!!d.canCancel}:${!!d.canRestore}:${!!d.preparing}:${members.join(',')}:${appendable}`;
+const receiptSig = (d, sent, members = []) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}:${!!d.originalPayload}:${!!d.canPromote}:${!!d.canCancel}:${!!d.canRestore}:${!!d.preparing}:${members.join(',')}`;
 
 // The earlier submissions no message is tied to, folded into one neutral
 // record count. Recorded outcomes belong in the historical details.
@@ -858,7 +822,7 @@ function rowEl(c, row) {
     case 'text': return h('div', { class: 'msg-assistant' }, md(row.text));
     case 'note': return noteRowEl(row);
     case 'work': return workEl(c, row);
-    case 'receipt': return receiptEl(c, row.delivery, { sent: row.sent, members: row.members, appendable: row.appendable });
+    case 'receipt': return receiptEl(c, row.delivery, { sent: row.sent, members: row.members });
     case 'receipts': return receiptsEl(c, row);
     default: return h('div');
   }
@@ -868,7 +832,7 @@ function rowSig(row) {
   switch (row.type) {
     case 'user': return row.delivery ? `bound:${row.delivery.id}:${row.delivery.revision}` : '';
     case 'text': return row.live ? `l:${row.text}` : 'f';
-    case 'receipt': return receiptSig(row.delivery, row.sent, row.members, row.appendable);
+    case 'receipt': return receiptSig(row.delivery, row.sent, row.members);
     default: return 'f';
   }
 }
@@ -902,7 +866,7 @@ function patchThread(c) {
         el.firstElementChild.innerHTML = renderMarkdown(row.text);
         return el;
       }
-      if (row.type === 'receipt') return updateReceipt(c, el, row.delivery, { sent: row.sent, members: row.members, appendable: row.appendable });
+      if (row.type === 'receipt') return updateReceipt(c, el, row.delivery, { sent: row.sent, members: row.members });
       return rowEl(c, row);
     },
   });
@@ -1007,10 +971,9 @@ function workingLabel(a) {
   return `${label}${parallel}…`;
 }
 
-// pi's own queue snapshot: whole-queue counts, by message, and whether it
-// can still extend its newest pending occurrence (a display hint only).
-const nativeQueueStatus = (e) => ({ known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0,
-  recallSupported: supportsRecall(e.pending?.capability), appendSupported: e.pending?.capability === 4 && e.pending?.appendAllowed === true });
+// pi's own queue snapshot: whole-queue counts, by message (an occurrence
+// holding appended inputs counts once).
+const nativeQueueStatus = (e) => ({ known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: supportsRecall(e.pending?.capability) });
 
 // Live records from an agent's pi process.
 function onAgentEvent(ev) {
@@ -1039,15 +1002,12 @@ function onAgentEvent(ev) {
   if (e.type === 'queue_update' || e.type === 'delivery_queue') {
     if (ev.seq <= c.queueSeq) return;
     c.queueSeq = ev.seq;
-    const previousAppend = !!c.piQueue.appendSupported;
     c.piQueue = e.type === 'delivery_queue' ? e.queue : nativeQueueStatus(e);
     if (keyOf(selectedAgent() ?? {}) === c.key) {
       const scroller = $('#scroll');
       if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
       renderQueue(c);
       scrollDown();
-      // The caret follows whether pi can still extend its newest message.
-      if (!!c.piQueue.appendSupported !== previousAppend) patchThread(c);
     }
     return;
   }

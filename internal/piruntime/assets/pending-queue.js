@@ -9,7 +9,9 @@ const triggerRefs = new WeakMap();
 const SUBMISSION_ID = /^[a-f0-9]{48}$/;
 // One occurrence holds its primary human input plus at most 15 appended segments.
 export const MAX_SEGMENTS = 16;
-export const SEGMENT_SEPARATOR = '\n\n';
+// Two inputs with text are joined by one newline; each keeps its own characters
+// verbatim (a trailing newline of the earlier one is kept before the separator).
+export const SEGMENT_SEPARATOR = '\n';
 // yesman's single-message image contract. The host checks original inputs
 // before proposing an append; this checks the final, post-hook combination.
 export const MAX_IMAGES = 4;

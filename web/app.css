@@ -138,23 +138,6 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .delivery-status { color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; padding-inline: 4px; overflow-wrap: anywhere; }
 .delivery-status[data-state="failed"], .delivery-status[data-state="interrupted"] { color: var(--mds-error); }
 .delivery-status.delivery-status--historical { color: var(--mds-muted); }
-/* An input pi appended to a pending message fades in where it joined, and a
-   caret breathes while pi can still extend the message. Decoration only:
-   both stop once pi claims or takes it, and stay still under reduced motion. */
-.msg-append { animation: msg-append-in 200ms ease-out both; }
-.message-images img.msg-append { animation-name: msg-append-image; }
-@keyframes msg-append-in { from { opacity: 0; background: color-mix(in srgb, var(--mds-accent) 14%, transparent); } }
-@keyframes msg-append-image { from { opacity: 0; transform: scale(.96); } }
-.msg-caret {
-  display: inline-block; width: 2px; height: 1.1em; margin-inline-start: 2px; vertical-align: text-bottom;
-  border-radius: 1px; background: var(--mds-muted); animation: msg-caret 1.4s ease-in-out infinite;
-}
-@keyframes msg-caret { 50% { opacity: .2; } }
-@media (prefers-reduced-motion: reduce) {
-  .msg-append, .message-images img.msg-append { animation: none; }
-  .msg-caret { animation: none; opacity: .5; }
-}
-@media (forced-colors: active) { .msg-caret { background: CanvasText; } }
 .msg-delivery--compact { gap: 2px; }
 .delivery-compact { max-width: 100%; color: var(--mds-muted); font-size: var(--mds-text-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-inline: 4px; }
 /* Earlier submissions no message is tied to: one light line, opened to read them. */

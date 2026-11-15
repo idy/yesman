@@ -11,13 +11,14 @@ const convo = (deliveries, extra = {}) => ({ messages: [], tools: new Map(), del
 const receiptRows = (rows) => rows.filter((r) => r.type === 'receipt' || r.type === 'receipts');
 const png = (n) => ({ type: 'image', mimeType: 'image/png', data: `iVBOR${n}` });
 
-test('pi\'s merge joins text with one blank line, none around an empty input, then all images in order', () => {
-  assert.equal(joinText('a', 'b'), 'a\n\nb');
+test('pi\'s merge joins text with one newline, none around an empty input, then all images in order', () => {
+  assert.equal(joinText('a', 'b'), 'a\nb');
   assert.equal(joinText('', 'b'), 'b');
   assert.equal(joinText('a', ''), 'a');
-  assert.equal(joinText(' a\n', '  b '), ' a\n\n\n  b ', 'each input keeps its own whitespace');
+  assert.equal(joinText(' a\n', '  b '), ' a\n\n  b ', 'each input keeps its own characters, a trailing newline too');
+  assert.equal(joinText('   ', 'b'), '   \nb', 'whitespace-only text is still text: nothing is trimmed away');
   assert.deepEqual(joinInputs([{ text: 'A', images: [png(1)] }, { text: '', images: [png(2), png(3)] }, { text: 'C', images: [] }]),
-    { text: 'A\n\nC', images: [png(1), png(2), png(3)] });
+    { text: 'A\nC', images: [png(1), png(2), png(3)] });
 });
 
 test('an appended input is part of its occurrence\'s message, never a row of its own', () => {
@@ -38,7 +39,7 @@ test('an occurrence whose receipt has not caught up still shows the input whose 
   const rows = receiptRows(project(c, { status: 'working' }));
   assert.deepEqual(rows.map((r) => r.key), [`d:${A}`]);
   assert.deepEqual(rows[0].members, [A, B]);
-  assert.deepEqual(rows[0].sent, { text: 'first\n\nsecond', images: [png(1), png(2)] });
+  assert.deepEqual(rows[0].sent, { text: 'first\nsecond', images: [png(1), png(2)] });
   assert.deepEqual(familyOf(c, c.deliveries.get(A)), [A, B]);
 });
 
@@ -55,7 +56,7 @@ test('a later input pi kept as its own message has its own row', () => {
 });
 
 test('once pi takes the occurrence, its one canonical message binds every input it joined', () => {
-  const merged = { role: 'user', timestamp: 9, yesman: { source: 'user', submission: A }, content: [{ type: 'text', text: 'first\n\nsecond' }] };
+  const merged = { role: 'user', timestamp: 9, yesman: { source: 'user', submission: A }, content: [{ type: 'text', text: 'first\nsecond' }] };
   const c = convo([receipt(A, { state: 'dispatched', merged: [B, C] }), receipt(B, { state: 'dispatched', mergedInto: A }), receipt(C, { state: 'dispatched', mergedInto: A })], { messages: [merged] });
   const rows = project(c, { status: 'idle' });
   assert.deepEqual(rows.map((r) => r.type), ['user'], 'no child in the earlier-records fold and no second bubble');
@@ -72,15 +73,4 @@ test('an unbound finished family folds as one earlier record', () => {
 test('an appended input whose occurrence receipt is gone shows honestly as itself', () => {
   const c = convo([receipt(B, { state: 'interrupted', mergedInto: A })], { submitted: new Set([B]) });
   assert.deepEqual(receiptRows(project(c, { status: 'idle' })).map((r) => r.key), [`d:${B}`]);
-});
-
-test('only the newest pending steering occurrence pi can extend shows the caret', () => {
-  const pending = (n, extra) => receipt(n, { nativePending: true, ...extra });
-  const at = (deliveries, piQueue = { appendSupported: true }) => receiptRows(project(convo(deliveries, { piQueue }), { status: 'working' })).map((r) => [r.key, r.appendable]);
-  assert.deepEqual(at([pending(A), pending(B)]), [[`d:${A}`, false], [`d:${B}`, true]]);
-  assert.deepEqual(at([pending(A)], { appendSupported: false }), [[`d:${A}`, false]]);
-  assert.deepEqual(at([pending(A, { preparing: true })]), [[`d:${A}`, false]], 'claimed by a preparation');
-  assert.deepEqual(at([pending(A, { state: 'queued' })]), [[`d:${A}`, false]], 'a follow-up never takes a composer input');
-  assert.deepEqual(at([pending(A, { merged: Array.from({ length: 15 }, (_, i) => id(100 + i)) })]), [[`d:${A}`, false]], 'full');
-  assert.deepEqual(at([receipt(A, { state: 'steering', nativePending: false })]), [[`d:${A}`, false]], 'no longer in pi\'s queue');
 });

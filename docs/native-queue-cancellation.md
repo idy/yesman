@@ -192,8 +192,9 @@ A repeated append of a submission ID that is already a segment, a pending primar
 recently retired (1024 bound) changes nothing and enqueues nothing.
 
 The merged message keeps pi's queued shape: one text block, then images in their
-original order. The text is the earlier text, a blank line (`"\n\n"`), then the
-later text verbatim. Image-only inputs add no separator. The occurrence keeps its
+original order. The text is the earlier text verbatim, one newline (`"\n"`), then the
+later text verbatim; a trailing newline of the earlier text is kept before the
+separator. Image-only inputs add no separator. The occurrence keeps its
 handle, its primary submission ID, its origin and its timestamp. Its item revision
 increases with each append. Snapshot items list the appended IDs as `segments`.
 `queue_update` reports state `appended` with `appendedSubmissionId`, and the

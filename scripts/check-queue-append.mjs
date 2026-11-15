@@ -118,7 +118,7 @@ try {
     assert.equal(rC.append.outcome, 'appended'); assert.equal(rC.append.itemRevision, 2);
     const q1 = await call({ type: 'get_pending_queue' });
     assert.equal(q1.items.length, 1); assert.deepEqual(q1.items[0].segments, [idB, idC]); assert.equal(q1.items[0].itemRevision, 2);
-    assert.deepEqual(q1.steering, [`${aText}\n\nbeta 补充`]);
+    assert.deepEqual(q1.steering, [`${aText}\nbeta 补充`]);
     assert.equal(changes(from, 'appended').length, 2);
     assert.deepEqual(changes(from, 'appended').map(c => c.appendedSubmissionId), [idB, idC]);
     // Every non-eligible request is enqueued once as its own occurrence.
@@ -143,7 +143,7 @@ try {
     await until(() => records.slice(from).some(r => r.type === 'agent_settled'), 'phase 1 settle');
     await closeAll();
     const users = usersSince(from);
-    assert.deepEqual(users.map(r => text(r.message)), ['hold append', `${aText}\n\nbeta 补充`, 'delta stale', 'echo not latest', 'foxtrot from lead', 'golf stale control', 'hotel follow-up']);
+    assert.deepEqual(users.map(r => text(r.message)), ['hold append', `${aText}\nbeta 补充`, 'delta stale', 'echo not latest', 'foxtrot from lead', 'golf stale control', 'hotel follow-up']);
     const merged = users[1].message;
     assert.deepEqual(merged.content.map(b => b.type), ['text', 'image', 'image', 'image', 'image']);
     assert.deepEqual(images(merged).map(i => i.data), [img1, img2, img3, img4].map(i => i.data));
@@ -157,7 +157,7 @@ try {
     assert.equal(last.filter(m => text(m).includes('beta 补充')).length, 1, 'merged input must reach the provider once');
     assert.equal(last.filter(m => text(m) === 'beta 补充' || text(m) === '').length, 0, 'no separate B/C user message');
     const firstMerged = calls.findIndex(c => c.users.some(m => text(m).includes('beta 补充')));
-    assert.equal(text(calls[firstMerged].users.at(-1)), `${aText}\n\nbeta 补充`);
+    assert.equal(text(calls[firstMerged].users.at(-1)), `${aText}\nbeta 补充`);
     assert.deepEqual(images(calls[firstMerged].users.at(-1)).map(i => i.data), [img1, img2, img3, img4].map(i => i.data));
     results.appendWins = { occurrence: 'A+B+C one queueId', duplicateRetry: 'already_appended', providerIntroductions: 1, images: 4,
       independent: { stale_item: 'D', not_latest: 'E', ineligibleOrigin: 'F', stale_control: 'G', kind_mismatch: 'H' } };
@@ -296,13 +296,13 @@ try {
   {
     const normalFrom = records.length;
     await openAll();
-    await call({ type: 'prompt', message: 'wide A\n\nwide B', images: [wide, img2] });
+    await call({ type: 'prompt', message: 'wide A\nwide B', images: [wide, img2] });
     await until(() => records.slice(normalFrom).some(r => r.type === 'agent_settled'), 'normal settle');
     await closeAll();
     const normal = (await providerCalls()).at(-1).users.at(-1);
     providerCount = (await providerCalls()).length;
     assert.notEqual(images(normal)[0].data, wide.data, 'the control prompt must actually resize');
-    const hint = text(normal).slice('wide A\n\nwide B'.length);
+    const hint = text(normal).slice('wide A\nwide B'.length);
     assert.match(hint, /^\n\n\[Image: original 4096x16/);
 
     // 6a. Steering mode all: the preparation captures S and the promoted A+B.
@@ -329,7 +329,7 @@ try {
     const [single, merged] = (await providerCalls())[providerCount].users.slice(-2);
     assert.ok(text(single).startsWith('wide S') && text(merged).startsWith('wide A'), JSON.stringify([single, merged].map(text)));
     assert.deepEqual(images(merged), images(normal), 'merged images differ from a one-piece idle prompt');
-    assert.equal(text(merged), 'wide A\n\nwide B' + hint);
+    assert.equal(text(merged), 'wide A\nwide B' + hint);
     assert.deepEqual(images(single), [images(normal)[0]]);
     assert.equal(text(single), 'wide S' + hint);
     assert.deepEqual(changes(from, 'taken').map(c => c.submissionId), [idS, idA]);

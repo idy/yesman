@@ -258,7 +258,7 @@ func (m *Manager) applyPendingLocked(a *agent, p *proc, q pendingQueue) []Event 
 	return events
 }
 func pendingStatus(q pendingQueue) QueueStatus {
-	status := QueueStatus{Known: q.supported(), RecallSupported: q.supported(), PromoteSupported: q.supportsPromotion(), AppendSupported: q.supportsAppend() && q.AppendAllowed}
+	status := QueueStatus{Known: q.supported(), RecallSupported: q.supported(), PromoteSupported: q.supportsPromotion()}
 	for _, item := range q.Items {
 		if item.Kind == "steer" {
 			status.Steering++

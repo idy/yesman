@@ -3,7 +3,8 @@
 // deterministic provider whose every call waits for its own gate.
 //
 // Later composer inputs join the newest still-pending message: one bubble,
-// updated in its own element, and pi takes the whole message once. Run with
+// updated in its own element (inputs joined by newlines, in order), and pi
+// takes the whole message once. Run with
 // YESMAN_TEST_RUNTIME (prepared managed runtime) and Playwright.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -46,7 +47,7 @@ const L = (language, en, zh) => (language === 'en' ? en : zh);
 
 try {
   for (const [name, engine] of engines) for (const language of languages) {
-    // English: wide, light, full motion. Chinese: narrow, dark, reduced motion.
+    // English: wide and light. Chinese: narrow, dark, with reduced motion asked.
     const reduced = language !== 'en';
     const viewport = reduced ? { width: 480, height: 740 } : { width: 1000, height: 760 };
     const temp = await mkdtemp(`${tmpdir()}/coalesce-browser-`), ready = `${temp}/ready`;
@@ -110,7 +111,7 @@ try {
       await input.waitFor();
       const stopPolling = async () => assert.deepEqual(await page.evaluate(() => window.stopFixturePolling()), [], 'Unexpected bridge poll failure');
       const reload = async () => { await stopPolling(); await page.reload(); await input.waitFor(); if (reduced) await page.evaluate(() => (document.documentElement.dataset.theme = 'dark')); };
-      const submits = () => page.evaluate(() => window.sent.filter((s) => s.method === 'Yesman.SubmitCoalescing'));
+      const submits = () => page.evaluate(() => window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)));
       const attach = async (list) => {
         await page.locator('.composer input[type=file]').setInputFiles(list.map((i, n) => ({ name: `input-${n}.png`, mimeType: 'image/png', buffer: images[i] })));
         await page.locator('.composer-image').nth(list.length - 1).waitFor();
@@ -122,7 +123,7 @@ try {
         if (list.length) await attach(list);
         const before = (await submits()).length;
         await input.press('Enter');
-        await page.waitForFunction((n) => window.sent.filter((s) => s.method === 'Yesman.SubmitCoalescing').length > n, before);
+        await page.waitForFunction((n) => window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).length > n, before);
         if (settle) await page.waitForFunction(() => !document.querySelector('.composer textarea').readOnly && document.querySelector('.composer textarea').value === '' && !document.querySelector('.composer-image'));
         return (await submits()).at(-1).args[1];
       };
@@ -132,7 +133,6 @@ try {
         const b = el?.querySelector('.msg-user');
         return b && { text: [...b.childNodes].filter((n) => !n.classList?.contains('message-images')).map((n) => n.textContent).join(''),
           images: [...b.querySelectorAll('.message-images img')].map((img) => img.getAttribute('src')),
-          caret: !!b.querySelector('.msg-caret'), appended: [...b.querySelectorAll('span.msg-append')].map((s) => s.textContent),
           status: el.querySelector('.delivery-status')?.textContent, state: el.querySelector('.delivery-status')?.dataset.state,
           preparing: el.querySelector('.delivery-status')?.dataset.preparing === 'true', original: el.dataset.original === 'true',
           recall: !!el.querySelector('.message-recall') };
@@ -145,14 +145,10 @@ try {
       const since = async () => (await submits()).at(-1).args[4];
 
       // 1. A, then B and image-only C join it: one bubble, the same element.
-      const aText = '  alpha 原文\n  keep  spacing  ', bText = 'beta 补充\n第二行', abText = `${aText}\n\n${bText}`;
+      const aText = '  alpha 原文\n  keep  spacing  ', bText = 'beta 补充\n第二行', abText = `${aText}\n${bText}`;
       const idA = await submit(aText, [0]);
       await page.waitForFunction((id) => document.querySelector(`#thread [data-delivery="${id}"] .delivery-status`)?.dataset.state === 'steering', idA);
-      await page.waitForFunction((id) => document.querySelector(`#thread [data-delivery="${id}"] .msg-caret`), idA);
       await page.evaluate((id) => (window.rowA = document.querySelector(`#thread [data-delivery="${id}"]`)), idA);
-      const caretAnimation = await page.locator(`#thread [data-delivery="${idA}"] .msg-caret`).evaluate((el) => getComputedStyle(el).animationName);
-      assert.equal(caretAnimation, reduced ? 'none' : 'msg-caret');
-      assert.equal(await page.locator(`#thread [data-delivery="${idA}"] .msg-caret`).getAttribute('aria-hidden'), 'true');
       const idB = await submit(bText, [1, 2]);
       await page.waitForFunction(({ idA, idB, abText }) => {
         const b = document.querySelector(`#thread [data-delivery="${idA}"] .msg-user`);
@@ -161,11 +157,6 @@ try {
       let a = await bubble(idA);
       assert.deepEqual(a.images, [dataURL(0), dataURL(1), dataURL(2)]);
       assert.equal(await page.evaluate((id) => window.rowA === document.querySelector(`#thread [data-delivery="${id}"]`) && window.rowA.isConnected, idA), true, 'the bubble was rebuilt');
-      assert.deepEqual(a.appended, [`\n\n${bText}`], 'the appended part is marked where it joined');
-      const appendAnimation = await page.locator(`#thread [data-delivery="${idA}"] span.msg-append`).evaluate((el) => [getComputedStyle(el).animationName, getComputedStyle(el).animationDuration]);
-      assert.deepEqual(appendAnimation, reduced ? ['none', appendAnimation[1]] : ['msg-append-in', '0.2s']);
-      await page.waitForFunction((text) => document.getElementById('live-announcer')?.textContent === text, L(language, 'Added to pending message', '已追加到待处理消息'));
-      assert.equal(await page.locator('#live-announcer').getAttribute('aria-live'), 'polite');
       const idC = await submit('', [3]);
       await page.waitForFunction(({ idA, idC }) => !document.querySelector(`#thread [data-delivery="${idC}"]`) && document.querySelectorAll(`#thread [data-delivery="${idA}"] .message-images img`).length === 4, { idA, idC });
       a = await bubble(idA);
@@ -173,10 +164,7 @@ try {
       assert.deepEqual(a.images, [0, 1, 2, 3].map(dataURL));
       assert.deepEqual(await pendingRows(), [idA], 'one bubble for the whole pending message');
       assert.equal(await page.evaluate(() => document.activeElement?.matches('.composer textarea')), true, 'composer focus kept');
-      const grows = await page.evaluate(() => window.grows);
-      if (reduced) assert.deepEqual(grows, [], 'reduced motion: no growth animation');
-      else assert(grows.length >= 1 && grows.every((g) => g.duration <= 240), `growth animation ${JSON.stringify(grows)}`);
-      report.grows = grows.length;
+      assert.deepEqual(await page.evaluate(() => window.grows), [], 'the bubble updates in place, without animation');
       if (out) await page.screenshot({ path: `${out}/${name}-${language}-merged.png` });
 
       // 2. Copy, a stale snapshot of A and a duplicate B leave the whole message.
@@ -203,10 +191,10 @@ try {
       await input.fill(dText);
       const beforeLost = (await submits()).length;
       await input.press('Enter');
-      await page.waitForFunction((n) => window.sent.filter((s) => s.method === 'Yesman.SubmitCoalescing').length > n && !document.querySelector('.composer textarea').readOnly, beforeLost);
+      await page.waitForFunction((n) => window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).length > n && !document.querySelector('.composer textarea').readOnly, beforeLost);
       assert.equal(await input.inputValue(), dText, 'the draft stays after a lost answer');
       const idD = (await submits()).at(-1).args[1];
-      const abdText = `${abText}\n\n${dText}`;
+      const abdText = `${abText}\n${dText}`;
       await page.waitForFunction(({ idA, idD, text }) => !document.querySelector(`#thread [data-delivery="${idD}"]`) &&
         [...(document.querySelector(`#thread [data-delivery="${idA}"] .msg-user`)?.childNodes ?? [])].filter((n) => !n.classList?.contains('message-images')).map((n) => n.textContent).join('') === text, { idA, idD, text: abdText });
       await input.press('Enter');
@@ -263,7 +251,7 @@ try {
         }
       }
       report.scrollAnchor = scrollChecked ? 'kept at top while two inputs joined' : 'thread not scrollable at this size';
-      const eWhole = [eText, ...fTexts].join('\n\n');
+      const eWhole = [eText, ...fTexts].join('\n');
       await page.waitForFunction(({ id, text }) => [...(document.querySelector(`#thread [data-delivery="${id}"] .msg-user`)?.childNodes ?? [])].filter((n) => !n.classList?.contains('message-images')).map((n) => n.textContent).join('') === text, { id: idE, text: eWhole });
       assert.deepEqual(await pendingRows(), [idE]);
       assert.deepEqual((await bubble(idE)).images, [0, 1, 2, 3].map(dataURL));
@@ -295,26 +283,26 @@ try {
       await page.waitForFunction(({ idG, idH }) => !document.querySelector(`#thread [data-delivery="${idH}"]`) && document.querySelector(`#thread [data-delivery="${idG}"] .msg-user`)?.textContent.includes('eta joins gamma'), { idG, idH });
       assert.deepEqual(await pendingRows(), [idG]);
 
-      // 9. Stop keeps the pending message (no caret: pi cannot extend it while
-      //    idle). The next input starts a turn whose preparation claims it:
-      //    Preparing, still recallable, never Taken.
+      // 9. Stop keeps the pending message, whole and recallable. The next input
+      //    starts a new turn: while that turn is being prepared the message is
+      //    still pending, never shown as taken, and pi takes it once.
       await page.locator('.composer .round--stop').click();
-      await page.waitForFunction((id) => !document.querySelector(`#thread [data-delivery="${id}"] .msg-caret`), idG);
+      await page.waitForFunction(() => !document.querySelector('.composer .round--stop'));
       assert.equal((await bubble(idG)).state, 'steering');
       await control('HoldContext');
       const kText = 'kappa starts the next turn';
       const idK = await submit(kText, [], { settle: false });
-      await page.waitForFunction((id) => document.querySelector(`#thread [data-delivery="${id}"] .delivery-status`)?.dataset.preparing === 'true', idG);
+      { const end = Date.now() + 10000; while (!(await control('Counts')).contextHeld) { assert(Date.now() < end, 'production context gate not entered'); await new Promise((r) => setTimeout(r, 10)); } }
       const g = await bubble(idG);
-      assert.equal(g.status, L(language, 'Preparing · being sent to pi', '准备中 · 正在送入 pi'));
-      assert.equal(g.caret, false);
-      assert.equal(g.recall, true, 'a claimed message can still be recalled');
-      assert.notEqual(g.state, 'dispatched');
-      if (out) await page.screenshot({ path: `${out}/${name}-${language}-preparing.png` });
+      assert.equal(g.text, `${gText}\n${hText}`);
+      assert.equal(g.state, 'steering', 'still pending while the next turn is prepared');
+      assert.equal(g.recall, true);
+      assert.deepEqual(await pendingRows(), [idG, idK]);
+      if (out) await page.screenshot({ path: `${out}/${name}-${language}-stopped.png` });
       await control('ReleaseContext');
       await control('ReleaseCall', '2');
       await control('ReleaseCall', '3');
-      const ghText = `${gText}\n\n${hText}`;
+      const ghText = `${gText}\n${hText}`;
       await waitAudit('received the claimed message and the new turn', (cs) => introductions(cs, ghText).length > 0 && introductions(cs, kText).length > 0);
       await page.waitForFunction(() => !document.querySelector('.composer textarea').readOnly);
       await page.waitForTimeout(300);
@@ -327,10 +315,11 @@ try {
       await page.waitForFunction((text) => [...document.querySelectorAll('#thread > .msg-delivery[data-bound="true"] .msg-user')].some((b) => b.textContent === text), ghText);
       assert.equal(await row(idH).count(), 0);
       if (out) await page.screenshot({ path: `${out}/${name}-${language}-final.png`, fullPage: true });
+      assert.deepEqual([...new Set((await submits()).map((s) => s.method))], ['Yesman.SubmitCoalescing'], 'the composer sends through SubmitCoalescing');
       const counts = await control('Counts');
       await stopPolling();
       assert.deepEqual(errors, []);
-      Object.assign(report, { counts, providerCalls: calls.length, mergedImages: 'exact, in order', copy: 'whole message', recall: 'whole message, one cancel', preparing: 'shown, recallable, not taken', afterTake: 'own bubble' });
+      Object.assign(report, { counts, providerCalls: calls.length, mergedImages: 'exact, in order', copy: 'whole message', recall: 'whole message, one cancel', afterStop: 'pending, whole, recallable while the next turn is prepared', afterTake: 'own bubble' });
       reports.push(report);
     } finally {
       if (activePage && !activePage.isClosed()) await activePage.evaluate(() => window.stopFixturePolling?.()).catch(() => {});

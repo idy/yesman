@@ -78,7 +78,7 @@ func TestCoalesceEventThenReplyThenTaken(t *testing.T) {
 	merged := pendingItem{QueueID: "E:1", SubmissionID: idA, Kind: "steer", ItemRevision: 1, Segments: []string{idB}}
 	u.snapshot(2, []pendingItem{merged}, pendingItem{QueueID: "E:1", SubmissionID: idA, Kind: "steer", ItemRevision: 1, State: "appended", Segments: []string{idB}})
 	a, b := u.get(idA), u.get(idB)
-	if !slices.Equal(a.Merged, []string{idB}) || a.queueRevision != 1 || a.ImageCount != 3 || a.Text != "alpha\n\nbeta" || b.MergedInto != idA || b.State != "steering" || b.queueID != "" {
+	if !slices.Equal(a.Merged, []string{idB}) || a.queueRevision != 1 || a.ImageCount != 3 || a.Text != "alpha\nbeta" || b.MergedInto != idA || b.State != "steering" || b.queueID != "" {
 		t.Fatalf("appended event: A=%+v B=%+v", a, b)
 	}
 	if a.fingerprint != deliveryFingerprint("alpha", []Image{testPNG(1, 0, 0)}) {
@@ -99,7 +99,7 @@ func TestCoalesceEventThenReplyThenTaken(t *testing.T) {
 	}
 	payload, err := u.m.SubmissionPayload(u.a.info.ID, idB, u.a.info.Since)
 	want := []Image{testPNG(1, 0, 0), testPNG(2, 0, 0), testPNG(3, 0, 0)}
-	if err != nil || payload.Text != "alpha\n\nbeta" || !reflect.DeepEqual(payload.Images, want) {
+	if err != nil || payload.Text != "alpha\nbeta" || !reflect.DeepEqual(payload.Images, want) {
 		t.Fatalf("aggregate payload %+v %v", payload, err)
 	}
 	payload.Images[0].Data = "mutated"
@@ -337,18 +337,11 @@ func TestCoalesceFamilyPreviewWithoutOriginals(t *testing.T) {
 	// learns which inputs a payload joins.
 	v, idA2, idB2 := newCoalesceUnit(t)
 	v.m.mergeChildLocked(v.a, v.get(idA2), v.get(idB2))
-	if a := v.get(idA2); a.Preview || a.Text != "alpha\n\nbeta" || a.ImageCount != 3 {
+	if a := v.get(idA2); a.Preview || a.Text != "alpha\nbeta" || a.ImageCount != 3 {
 		t.Fatalf("family receipt %+v", a)
 	}
 	payload, err := v.m.SubmissionPayload(v.a.info.ID, idB2, v.a.info.Since)
-	if err != nil || !slices.Equal(payload.Members, []string{idA2, idB2}) || payload.Text != "alpha\n\nbeta" || len(payload.Images) != 3 {
+	if err != nil || !slices.Equal(payload.Members, []string{idA2, idB2}) || payload.Text != "alpha\nbeta" || len(payload.Images) != 3 {
 		t.Fatalf("family payload %+v %v", payload, err)
-	}
-	if status := pendingStatus(v.a.nativeQueue); !status.AppendSupported {
-		t.Fatalf("queue status %+v", status)
-	}
-	v.a.nativeQueue.AppendAllowed = false
-	if status := pendingStatus(v.a.nativeQueue); status.AppendSupported {
-		t.Fatalf("queue status while pi cannot append %+v", status)
 	}
 }

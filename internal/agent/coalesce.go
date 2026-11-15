@@ -20,10 +20,12 @@ const (
 	// A composer submission waits this long for an earlier one's RPC so it can
 	// see that occurrence; afterwards it is sent as its own message.
 	appendSerialWait = 3 * time.Second
-	segmentSeparator = "\n\n"
+	segmentSeparator = "\n"
 )
 
-// joinSegmentText is pi's canonical merge of two inputs' text blocks.
+// joinSegmentText is pi's canonical merge of two inputs' text blocks: one
+// newline between two non-empty texts, each kept verbatim, none around an
+// empty one (an image-only input).
 func joinSegmentText(a, b string) string {
 	switch {
 	case a == "":

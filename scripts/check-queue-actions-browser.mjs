@@ -124,6 +124,9 @@ try { for(const [engineName,engine]of Object.entries({chromium,webkit})) for(con
   const prepareDeadline=Date.now()+10000;while(!(await control('ContextReady'))){assert(Date.now()<prepareDeadline,'production context gate not entered');await new Promise(r=>setTimeout(r,10))}
   await row(prepareID).locator('.message-recall').waitFor();
   await page.waitForFunction(id=>document.querySelector(`[data-delivery="${id}"] .delivery-status`)?.dataset.state==='steering',prepareID);
+  // Claimed by the idle preparation: Preparing, still recallable, never Taken.
+  await page.waitForFunction(id=>document.querySelector(`[data-delivery="${id}"] .delivery-status`)?.dataset.preparing==='true',prepareID);
+  assert.equal(await row(prepareID).locator('.delivery-status').innerText(),language==='en'?'Preparing · being sent to pi':'准备中 · 正在送入 pi');
   assert.equal(await row(prepareID).getAttribute('data-bound'),null);
   assert.equal(await row(prepareID).locator('.delivery-status').getAttribute('data-state'),'steering');
   assert.equal((await control('State')).agents.find(x=>x.id===a.id).detail ?? '', '', 'preparation created a false attention/error box');
