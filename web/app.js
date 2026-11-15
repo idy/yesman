@@ -5,7 +5,7 @@
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
 import { orderWorkers } from './sidebar.js';
-import { needsYouItems, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
+import { needsYouItems, requestsOf, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
 import { messageActions, messageText, receiptText } from './message-actions.js';
 import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
 import { renderMarkdown } from './markdown.js';
@@ -63,7 +63,7 @@ const state = {
   drafts: new Map(),
   attachments: new Map(),
   modelOptions: new Map(),
-  pane: null, // the pane beside the conversation: 'files', 'board' or null
+  pane: null, // the pane beside the conversation: 'files', 'board', 'needs-you' or null
   hideDone: new Set(JSON.parse(localStorage.getItem('yesman.hideDone') ?? '[]')), // yesmen whose done workers are hidden
   // The info panel between the conversation and the files, open unless
   // closed, as it was last.
@@ -79,8 +79,8 @@ const state = {
   fetches: { fetching: [], errors: {} }, // Yesman.Fetches: repositories being fetched, and their last errors
   clones: [], // Yesman.Clones: repositories on their way into the pool
   update: null, // Yesman.Update: where updating yesman stands
-  // The Needs-you request being opened in its conversation: { key, agent,
-  // back (opened from the Needs you page), pending (still to be located) }.
+  // The Needs-you request being opened in its conversation, from the Needs
+  // you pane: { key, agent, pending (still to be located) }.
   request: null,
   resolving: new Set(), // keys of handoffs being closed
   resetting: new Set(), // yesmen whose request memory is being reset
@@ -1139,17 +1139,11 @@ async function openAgentMenu(e, a) {
 // hidden/removed worker. Keep focus unchanged when the workspace is gone.
 function restoreSidebarFocus(row) {
   const list = $('#yesmen');
-  if (row?.dataset.sidebarEntry === 'needs-you-page') {
-    list.querySelector('[data-sidebar-entry="needs-you-page"]')?.focus({ preventScroll: true });
-    return;
-  }
   if (!row?.dataset.agent) return;
   const agent = `[data-agent="${CSS.escape(row.dataset.agent)}"]`;
   const entry = `[data-sidebar-entry="${CSS.escape(row.dataset.sidebarEntry)}"]`;
   const lead = `${row.dataset.agent.split('/')[0]}/lead`;
-  // A Needs-you request keeps its row while it is open, by its own key.
-  const request = row.dataset.request ? list.querySelector(`[data-request="${CSS.escape(row.dataset.request)}"]`) : null;
-  const target = request ?? list.querySelector(agent + entry) ?? list.querySelector(agent)
+  const target = list.querySelector(agent + entry) ?? list.querySelector(agent)
     ?? list.querySelector(`[data-agent="${CSS.escape(lead)}"][data-sidebar-entry="yesman"]`);
   target?.focus({ preventScroll: true });
 }
@@ -1158,14 +1152,8 @@ function renderSidebar() {
   const list = $('#yesmen');
   const focusedRow = list.contains(document.activeElement) ? document.activeElement : null;
   list.replaceChildren();
-  // What waits on you, from every yesman: always there, with its count.
-  const items = needsYouItems(state.snap);
-  list.append(needsYouEntry(items));
-  for (const item of items.slice(0, SIDE_REQUESTS)) list.append(needsYouRow(item));
-  if (items.length > SIDE_REQUESTS) {
-    list.append(h('button', { class: 'needs-you-more', type: 'button', onclick: () => showNeedsYou() },
-      t('{n} more', { n: formatNumber(items.length - SIDE_REQUESTS) })));
-  }
+  // What waits on you shows by yesman, in the Needs you pane beside its
+  // conversation, never gathered here.
   list.append(h('div', { class: 'side-group' }, h('span', null, t('Yesmen')),
     h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: shortcuts.hint(t('Hire a yesman'), 'yesman.hire'), 'aria-label': t('Hire a yesman'),
       'aria-keyshortcuts': shortcuts.aria('yesman.hire'), onclick: openHire }, icon('plus'))));
@@ -1194,12 +1182,16 @@ function renderSidebar() {
 
 // ---------- Needs you ----------
 
-const SIDE_REQUESTS = 5;
+// Needs you is a pane beside the conversation, in the place of the board and
+// the files: what the yesman shown waits on the user for, for its current
+// hire only. A request opens where it was asked; opening it closes nothing:
+// answering it there, or marking it done or not needed, does.
+
 const REQUEST_ICONS = {
   confirm: 'check', select: 'listChecks', input: 'pencil', editor: 'pencil',
   decision: 'listChecks', login: 'lock', install: 'package', manual: 'info',
 };
-const requestIcon = (item) => icon(REQUEST_ICONS[item.type] ?? 'bell', 'mds-icon');
+const requestIcon = (item, cls = 'mds-icon') => icon(REQUEST_ICONS[item.type] ?? 'bell', cls);
 const RESOLUTIONS = { done: 'Marked done', 'not-needed': 'Marked not needed', resolved: 'Resolved by the lead' };
 
 // Where a request comes from: the yesman, and for a worker its number and
@@ -1213,111 +1205,163 @@ function requestFrom(item) {
 
 const requestWhat = (item) => item.title || t(typeLabel(item));
 
-function needsYouEntry(items) {
-  const n = items.length;
-  const label = n ? t('Needs You: {n} waiting', { n: formatNumber(n) }) : t('Needs You: nothing waiting');
-  return h('button', {
-    class: 'mds-nav-item needs-you-entry', type: 'button', 'data-sidebar-entry': 'needs-you-page', 'data-count': String(n),
-    'aria-current': state.view.kind === 'needs-you' ? 'page' : null, 'aria-label': label, title: label,
-    onclick: () => showNeedsYou(),
-  }, icon('bell'), h('span', { class: 'needs-you-label' }, t('Needs You')),
-  n ? h('span', { class: 'needs-you-count', 'aria-hidden': 'true' }, formatNumber(n)) : null);
-}
-
-// A request in the sidebar: where it is from, and what it asks.
-function needsYouRow(item) {
+// requestSource is the badge of who in the yesman asks: its lead, or a
+// worker by its number.
+function requestSource(item) {
+  if (item.role === 'lead') return t('Lead');
   const a = agentById(item.agent);
-  const current = state.view.kind === 'agent' && state.view.id === item.agent;
-  return h('button', {
-    class: 'agent-row needs-you-row', type: 'button', 'data-agent': item.agent, 'data-sidebar-entry': 'needs-you',
-    'data-request': item.key, 'data-status': 'waiting', 'aria-current': current ? 'page' : null, 'aria-haspopup': 'menu',
-    title: `${requestFrom(item)}: ${requestWhat(item)} (${t(typeLabel(item))})`,
-    onclick: () => openRequest(item),
-    oncontextmenu: (e) => { if (a) openAgentMenu(e, a); },
-    onkeydown: (e) => {
-      if (a && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) openAgentMenu(e, a);
-    },
-  }, statusDot('waiting'), h('span', { class: 'name' }, requestFrom(item)),
-  h('span', { class: 'meta' }, t(typeLabel(item))), h('span', { class: 'needs-you-what' }, requestWhat(item)));
+  return a ? workerNumber(a) : item.agent.split('/')[1];
 }
 
-// showNeedsYou shows what waits on the user: from every yesman, or, with a
-// scope, from one ({ yesman, hiredAt }), opened from where (from, an agent's
-// conversation to go back to).
-function showNeedsYou(focusKey = null, scope = null) {
-  state.view = scope?.yesman ? { kind: 'needs-you', yesman: scope.yesman, hiredAt: scope.hiredAt ?? '', from: scope.from ?? null } : { kind: 'needs-you' };
-  state.request = null;
-  render();
-  // The sidebar's entry keeps focus; going back to a request, or opening
-  // one yesman's, moves it to the page.
-  if (focusKey || scope?.yesman) ((focusKey && $(`#body [data-request="${CSS.escape(focusKey)}"]`)) || $('#body .needs-you-page h1'))?.focus();
+// What waits on the user from y, for its current hire (needsyou.js).
+const needsYouOf = (y) => requestsOf(state.snap, y);
+
+// The yesman the pane shows: the one whose conversation is shown. y is null
+// when its workspace cannot be read; the pane says so, never that nothing
+// waits.
+function needsYouShown() {
+  const a = state.pane === 'needs-you' ? selectedAgent() : null;
+  return a ? { name: a.yesman, y: yesmanOf(a.id) ?? null } : null;
 }
 
-// The yesman Needs you shows, while it is still the one it was opened for.
+// needsYouScope names the yesman and the hire the pane shows, or null.
 function needsYouScope() {
-  const v = state.view;
-  if (v.kind !== 'needs-you' || !v.yesman) return null;
-  const y = state.snap.yesmen.find((y) => y.name === v.yesman);
-  return y && (y.hiredAt ?? '') === v.hiredAt ? y : null;
+  const s = needsYouShown();
+  return s ? JSON.stringify([s.name, s.y ? s.y.hiredAt ?? '' : null]) : null;
+}
+
+let needsYouHistoryOpen = false;
+
+// showNeedsYou opens the pane for the yesman shown, and puts focus on the
+// request named or on the pane's heading. Outside a conversation there is no
+// yesman to show it for.
+function showNeedsYou(focusKey = null) {
+  if (!selectedAgent()) return false;
+  if (state.pane !== 'needs-you') setPane('needs-you');
+  const aside = $('#needs-you');
+  ((focusKey && aside.querySelector(`[data-request="${CSS.escape(focusKey)}"]`)) || aside.querySelector('.needs-you-heading'))?.focus({ preventScroll: true });
+  return true;
+}
+
+// closeNeedsYou closes the pane and gives focus back to what opens it: the
+// info panel's row, or the message box.
+function closeNeedsYou() {
+  setPane(null);
+  const row = $('#yesman-info [data-info-entry="needs-you"]');
+  (row?.getClientRects().length ? row : $('#dock textarea'))?.focus({ preventScroll: true });
 }
 
 // Open a request where it was asked: its agent's conversation, with the
 // request found and focused there.
-function openRequest(item, back = state.view.kind === 'needs-you' ? { yesman: state.view.yesman, hiredAt: state.view.hiredAt, from: state.view.from } : null) {
+function openRequest(item) {
   if (!agentById(item.agent)) {
     toast(t('This request is no longer open.'));
     refreshSoon();
     return;
   }
-  state.request = { key: item.key, agent: item.agent, back, pending: true };
+  state.request = { key: item.key, agent: item.agent, pending: true };
   selectAgent(item.agent);
 }
 
-function renderNeedsYou(body) {
-  const v = state.view;
+function renderNeedsYouPane() {
+  const aside = $('#needs-you');
+  const shown = needsYouShown();
+  aside.hidden = !shown;
+  aside.setAttribute('aria-label', t('Needs You'));
+  document.documentElement.dataset.needsYou = shown ? 'open' : 'closed';
+  if (!shown) {
+    aside.replaceChildren();
+    delete aside.dataset.scope;
+    return;
+  }
+  const { name, y } = shown;
   const scope = needsYouScope();
-  const inScope = (name) => !scope || name === scope.name;
-  const items = needsYouItems(state.snap).filter((item) => inScope(item.yesman));
-  // The page names what it shows (view, opener, and the hire it is for), so
-  // that a redraw puts focus back on a control only where it was.
-  const inner = h('div', { class: 'page-inner needs-you-page', 'data-page': JSON.stringify([v.yesman ?? '', v.hiredAt ?? '', scope?.hiredAt ?? null, v.from ?? '']) },
-    h('h1', { class: 'mds-title', tabindex: '-1' }, t('Needs You')),
-    h('p', { class: 'needs-you-intro' }, t('What your yesmen handed to you: their questions only you can answer, decisions, and steps only you can take. Open one to handle it in its conversation.')));
-  if (v.yesman) {
-    // Opened for one yesman: say which, or that it is gone, and offer all.
-    const from = v.from && agentById(v.from);
-    inner.append(h('div', { class: 'needs-you-scope', role: 'status' },
-      h('span', null, scope ? t('From {name} only', { name: yesmanLabel(scope.name) }) : t('{name} is no longer here; showing every yesman.', { name: v.yesman })),
-      scope ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-needs-you-nav': 'all', onclick: () => showNeedsYou() }, t('Show every yesman')) : null,
-      from ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-needs-you-nav': 'back', onclick: () => backToConversation(from.id) },
-        icon('arrowLeft'), t('Back to the conversation')) : null));
-  }
-  for (const y of state.snap.yesmen) {
-    if (!inScope(y.name)) continue;
-    if (y.handoffsError) {
-      inner.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
-        h('strong', null, t('What {name} handed to you cannot be read', { name: y.displayName || y.name })), h('p', null, y.handoffsError))));
-    }
-    const memory = callMemoryNotice(y);
-    if (memory) inner.append(memory);
-  }
-  if (!items.length) {
-    inner.append(h('div', { class: 'needs-you-empty', role: 'status' }, icon('check', 'mds-icon'),
-      h('p', null, scope ? t('Nothing from {name} needs you right now.', { name: yesmanLabel(scope.name) }) : t('Nothing needs you right now.')),
-      h('p', { class: 'needs-you-hint' }, t('When a yesman needs your answer, a decision or a step only you can take, it shows here.'))));
+  const same = aside.dataset.scope === scope;
+  // What had focus, to give back after the redraw: the request (or the one
+  // now in its place), the request memory, the history, the close button or
+  // the heading. A control gone with another yesman or hire leaves focus on
+  // the heading; focus outside the pane stays where it is.
+  const active = aside.contains(document.activeElement) ? document.activeElement : null;
+  const rows = [...aside.querySelectorAll('[data-request]')];
+  const at = rows.indexOf(active?.closest('[data-request]'));
+  const key = active?.closest('[data-request]')?.dataset.request;
+  const memory = active?.closest('[data-memory]') ? 'memory' : null;
+  const control = memory ?? active?.closest('[data-pane-control]')?.dataset.paneControl;
+  const scroll = same ? $('.board-body', aside)?.scrollTop ?? 0 : 0;
+
+  const label = yesmanLabel(name);
+  const items = y ? needsYouOf(y) : [];
+  const body = h('div', { class: 'board-body needs-you-body' });
+  if (!y) {
+    body.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+      h('strong', null, t('What {name} needs from you cannot be read', { name: label })),
+      h('p', null, t('Its workspace is unavailable; the sidebar says why.')))));
   } else {
-    inner.append(h('ul', { class: 'needs-you-list', 'aria-label': t('Waiting for you') }, items.map((item) => h('li', null, requestCard(item)))));
+    if (y.handoffsError) {
+      body.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+        h('strong', null, t('What {name} handed to you cannot be read', { name: label })), h('p', null, y.handoffsError))));
+    }
+    const notice = callMemoryNotice(y);
+    if (notice) body.append(notice);
+    if (items.length) {
+      body.append(h('ol', { class: 'board-list needs-you-list', 'aria-label': t('Waiting for you') }, items.map(needsYouPaneRow)));
+    } else if (!y.handoffsError) {
+      body.append(h('div', { class: 'board-empty needs-you-empty', role: 'status' },
+        h('strong', null, t('Nothing from {name} needs you right now.', { name: label })),
+        h('p', null, t('When a yesman needs your answer, a decision or a step only you can take, it shows here.'))));
+    }
+    const closed = closedHandoffs(state.snap, 20, y.name);
+    if (closed.length) {
+      const history = h('details', { class: 'board-done needs-you-history', open: needsYouHistoryOpen, 'data-pane-control': 'history' },
+        h('summary', null, icon('chevron', 'mds-icon board-fold'), t('Recently handled ({n})', { n: formatNumber(closed.length) })),
+        h('ul', null, closed.map(({ handoff }) => h('li', null,
+          h('span', { class: 'needs-you-history-title' }, handoff.title),
+          h('span', { class: 'needs-you-history-meta' },
+            `${t(RESOLUTIONS[handoff.resolution] ?? 'Closed')} · ${t('{time} ago', { time: elapsed(handoff.closedAt) })}`)))));
+      history.addEventListener('toggle', () => { needsYouHistoryOpen = history.open; });
+      body.append(history);
+    }
   }
-  const closed = closedHandoffs(state.snap, 20, scope?.name);
-  if (closed.length) {
-    inner.append(h('details', { class: 'needs-you-history' },
-      h('summary', null, t('Recently handled ({n})', { n: formatNumber(closed.length) })),
-      h('ul', null, closed.map(({ yesman, handoff }) => h('li', null,
-        h('span', { class: 'needs-you-history-title' }, handoff.title),
-        h('span', { class: 'needs-you-history-meta' },
-          `${yesmanLabel(yesman)} · ${t(RESOLUTIONS[handoff.resolution] ?? 'Closed')} · ${t('{time} ago', { time: elapsed(handoff.closedAt) })}`))))));
-  }
-  body.append(h('div', { class: 'page' }, inner));
+  const count = items.length ? tn(items.length, '{n} waiting', '{n} waiting') : '';
+  aside.replaceChildren(
+    h('div', { class: 'files-head drag' },
+      h('h2', { class: 'files-title needs-you-heading', tabindex: '-1' }, t('Needs You')),
+      count ? h('span', { class: 'board-count', 'data-tone': 'waiting' }, count) : null,
+      h('div', { class: 'files-head-actions' },
+        h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-pane-control': 'close', title: t('Close Needs You'), 'aria-label': t('Close Needs You'), onclick: closeNeedsYou }, icon('x')))),
+    body);
+  aside.dataset.scope = scope;
+  body.scrollTop = scroll;
+  if (!active) return;
+  let target = null;
+  if (same && key) {
+    const now = [...aside.querySelectorAll('[data-request]')];
+    target = now.find((el) => el.dataset.request === key) ?? (now.length ? now[Math.min(at, now.length - 1)] : null);
+  } else if (same && control === 'memory') target = aside.querySelector('[data-memory] button');
+  else if (same && control === 'history') target = aside.querySelector('[data-pane-control="history"] > summary');
+  else if (control === 'close') target = aside.querySelector('[data-pane-control="close"]');
+  (target ?? aside.querySelector('.needs-you-heading'))?.focus({ preventScroll: true });
+}
+
+// A request in the pane, as a task on the board: what it asks, a line of its
+// text, its kind and how long it has waited, and who asks.
+function needsYouPaneRow(item) {
+  const text = requestSummary(item.summary);
+  const opened = state.request?.key === item.key && state.view.kind === 'agent' && state.view.id === item.agent;
+  return h('li', { class: 'board-task needs-you-item', 'data-type': item.type, 'data-kind': item.kind },
+    h('button', {
+      class: 'board-toggle needs-you-open', type: 'button', 'data-request': item.key, 'aria-current': opened ? 'true' : null,
+      title: `${requestFrom(item)}: ${requestWhat(item)} (${t(typeLabel(item))})`,
+      onclick: () => openRequest(item),
+    }, requestIcon(item, 'mds-icon board-mark'),
+    h('span', { class: 'needs-you-item-text' },
+      h('span', { class: 'board-title' }, requestWhat(item)),
+      text ? h('span', { class: 'needs-you-item-summary' }, text) : null,
+      h('span', { class: 'needs-you-item-meta' },
+        h('span', null, t(typeLabel(item))),
+        item.since ? h('span', null, t('Waiting'), ' ', h('span', { 'data-elapsed': item.since }, elapsed(item.since))) : null,
+        item.timeout ? h('span', null, t('Goes on without you after {time}', { time: span(Math.round(item.timeout / 1000)) })) : null))),
+    h('span', { class: 'board-owner needs-you-source', title: requestFrom(item) }, requestSource(item)));
 }
 
 // What a yesman's memory of its lead's tool calls means for the user, when
@@ -1341,7 +1385,8 @@ function callMemoryNotice(y) {
     h('div', null,
       h('strong', null, t(text.title, { name })),
       h('p', null, t(text.body, { used: formatNumber(m.used), capacity: formatNumber(m.capacity) }))),
-    h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: busy, onclick: () => resetCallMemory(y, m) }, t('Start a new memory…')));
+    // Busy, it keeps focus, so that focus stays in the pane while it resets.
+    h('button', { class: 'mds-button mds-button--small', type: 'button', 'aria-disabled': busy ? 'true' : null, onclick: () => resetCallMemory(y, m) }, t('Start a new memory…')));
 }
 
 async function resetCallMemory(y, m) {
@@ -1354,9 +1399,12 @@ async function resetCallMemory(y, m) {
     t('Requests waiting for you, recently handled ones and the latest tool calls stay.'),
     t('A request handled long ago may show up once more if its lead repeats an old tool call; it is remembered again then. A later reset can let it back once more.')].join(' ');
   if (!(await confirmAction(t('Start a new request memory for {name}?', { name }), body, t('Start a new memory')))) return;
-  // Where the reset was asked: focus goes back there only if the user is
-  // still on that page and has not put it on something else meanwhile.
-  const asked = needsYouPageKey();
+  // Where the reset was asked: focus goes back there only if the pane still
+  // shows that yesman and hire, and the user has not put it on something
+  // else meanwhile. A closed confirmation can keep focus (WebKit): it goes
+  // back on the button now, before the conversation is drawn again.
+  const asked = JSON.stringify([y.name, y.hiredAt ?? '']);
+  if (needsYouScope() === asked && focusIsFree(y.name)) $(`#needs-you [data-memory="${CSS.escape(y.name)}"] button`)?.focus({ preventScroll: true });
   state.resetting.add(y.name);
   render();
   try {
@@ -1367,39 +1415,19 @@ async function resetCallMemory(y, m) {
   } finally {
     state.resetting.delete(y.name);
     await refreshState();
-    if (asked && needsYouPageKey() === asked && focusIsFree(y.name)) {
-      const same = state.snap.yesmen.some((v) => v.name === y.name && (v.hiredAt ?? '') === (y.hiredAt ?? ''));
-      ((same && $(`#body [data-memory="${CSS.escape(y.name)}"] button`)) || $('#body .needs-you-page h1'))?.focus();
+    if (needsYouScope() === asked && focusIsFree(y.name)) {
+      ($(`#needs-you [data-memory="${CSS.escape(y.name)}"] button`) || $('#needs-you .needs-you-heading'))?.focus();
     }
   }
 }
 
-// needsYouPageKey names the Needs you page shown: every yesman's, or one's
-// (by name and hire); null when another view is shown.
-function needsYouPageKey() {
-  const v = state.view;
-  return v.kind === 'needs-you' ? JSON.stringify([v.yesman ?? '', v.hiredAt ?? '']) : null;
-}
-
 // focusIsFree reports whether focus is on nothing the user chose: nowhere,
 // left in a closed dialog (WebKit keeps it on the confirmation a click
-// closed), the page's heading, or this yesman's request memory.
+// closed), the pane's heading, or this yesman's request memory.
 function focusIsFree(name) {
   const a = document.activeElement;
   const dialog = a?.closest('dialog');
-  return !a || a === document.body || (dialog && !dialog.open) || a.matches('.needs-you-page h1') || !!a.closest(`#body [data-memory="${CSS.escape(name)}"]`);
-}
-
-function requestCard(item) {
-  const text = requestSummary(item.summary);
-  return h('button', { class: 'needs-you-card', type: 'button', 'data-request': item.key, 'data-type': item.type, onclick: () => openRequest(item) },
-    h('span', { class: 'needs-you-type' }, requestIcon(item), t(typeLabel(item))),
-    h('span', { class: 'needs-you-title' }, requestWhat(item)),
-    text ? h('span', { class: 'needs-you-summary' }, text) : null,
-    h('span', { class: 'needs-you-meta' },
-      h('span', null, t('From {from}', { from: requestFrom(item) })),
-      item.since ? h('span', null, t('Waiting'), ' ', h('span', { 'data-elapsed': item.since }, elapsed(item.since))) : null,
-      item.timeout ? h('span', null, t('Goes on without you after {time}', { time: span(Math.round(item.timeout / 1000)) })) : null));
+  return !a || a === document.body || (dialog && !dialog.open) || a.matches('#needs-you .needs-you-heading') || !!a.closest(`#needs-you [data-memory="${CSS.escape(name)}"]`);
 }
 
 // The handoffs of a lead's yesman, in its conversation, the one being opened
@@ -1414,7 +1442,7 @@ function handoffEls(a) {
   if (focus && !shown.includes(focus)) shown = [focus, ...shown.slice(0, 2)];
   const els = shown.map((item) => handoffEl(a, y, item));
   if (items.length > shown.length) {
-    els.push(h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-more', type: 'button', onclick: () => showNeedsYou() },
+    els.push(h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-more', type: 'button', onclick: () => showNeedsYou(items.find((item) => !shown.includes(item))?.key) },
       t('{n} more under Needs You', { n: formatNumber(items.length - shown.length) })));
   }
   return els;
@@ -1469,27 +1497,21 @@ function locateRequest(dock, a) {
       r.pending = false;
       dock.prepend(h('div', { class: 'mds-notice needs-you-gone', role: 'status' }, h('div', null,
         h('p', null, t('This request is no longer open: it was answered, cancelled or timed out.')),
-        r.back ? backToNeedsYou(r.key, r.back) : null)));
+        backToNeedsYou(r.key))));
     }
     return;
   }
   target.classList.add('needs-you-target');
-  if (r.back) target.append(backToNeedsYou(r.key, r.back));
+  target.append(backToNeedsYou(r.key));
   if (!r.pending) return;
   r.pending = false;
   target.scrollIntoView({ block: 'nearest' });
   target.querySelector('input, textarea, button')?.focus({ preventScroll: true });
 }
 
-const backToNeedsYou = (key, scope) => h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-back', type: 'button', onclick: () => showNeedsYou(key, scope) },
+// Back to the request in the Needs you pane, opening it if it was closed.
+const backToNeedsYou = (key) => h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-back', type: 'button', onclick: () => showNeedsYou(key) },
   icon('arrowLeft'), t('Back to Needs You'));
-
-// backToConversation goes back to the conversation Needs you was opened
-// from, to the entry that opened it when the info panel shows.
-function backToConversation(id) {
-  selectAgent(id);
-  $('#yesman-info [data-info-entry="needs-you"]')?.focus();
-}
 
 // showToolCall finds the lead's tool call that registered a handoff in the
 // folded work log of its conversation, when the loaded history has it.
@@ -1543,8 +1565,6 @@ function renderBar() {
   if (state.view.kind === 'settings') {
     const page = SETTINGS.find((s) => s.page === state.view.page);
     crumbs.replaceChildren(h('span', null, t('Settings')), sep(), h('span', { 'aria-current': 'page' }, t(page.label)));
-  } else if (state.view.kind === 'needs-you') {
-    crumbs.replaceChildren(h('span', { 'aria-current': 'page' }, t('Needs You')));
   } else if (a) {
     const y = yesmanOf(a.id);
     const here = h('span', { 'aria-current': 'page', title: y?.path ?? '' }, a.role === 'lead' ? yesmanLabel(a.yesman) : a.name);
@@ -1767,10 +1787,6 @@ function renderBody() {
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
   const held = requestFocus($('#dock'));
-  const cards = [...body.querySelectorAll('.needs-you-card')];
-  const cardAt = cards.indexOf(active?.closest?.('.needs-you-card'));
-  const nav = active?.closest?.('[data-needs-you-nav]')?.dataset.needsYouNav;
-  const page = active?.closest?.('.needs-you-page')?.dataset.page;
   contextViewer.close();
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
@@ -1782,29 +1798,6 @@ function renderBody() {
       again.focus();
       if (['INPUT', 'TEXTAREA'].includes(again.tagName) && again.type !== 'password') again.setSelectionRange(active.selectionStart, active.selectionEnd);
     }
-    return;
-  }
-  if (state.view.kind === 'needs-you') {
-    renderNeedsYou(body);
-    // A refresh keeps focus on the request it was on, or, when that one is
-    // gone, on the one now in its place, or the page's heading; and on a
-    // yesman's request memory, or the heading once it is gone; and on the
-    // page's own Show every yesman or Back to the conversation while the page
-    // is still the one it was (the same view, opener and hire), or else, the
-    // control gone with it, the heading.
-    const key = active?.closest?.('[data-request]')?.dataset.request;
-    const again = key && body.querySelector(`[data-request="${CSS.escape(key)}"]`);
-    const memory = active?.closest?.('[data-memory]')?.dataset.memory;
-    if (again) again.focus();
-    else if (cardAt >= 0) {
-      const now = body.querySelectorAll('.needs-you-card');
-      (now[Math.min(cardAt, now.length - 1)] ?? body.querySelector('.needs-you-page h1'))?.focus();
-    } else if (memory !== undefined) {
-      (body.querySelector(`[data-memory="${CSS.escape(memory)}"] button`) ?? body.querySelector('.needs-you-page h1'))?.focus();
-    } else if (nav !== undefined) {
-      const same = page === body.querySelector('.needs-you-page')?.dataset.page;
-      ((same && body.querySelector(`[data-needs-you-nav="${CSS.escape(nav)}"]`)) || body.querySelector('.needs-you-page h1'))?.focus();
-    } else if (active?.matches?.('.needs-you-page h1')) body.querySelector('.needs-you-page h1')?.focus();
     return;
   }
   const a = selectedAgent();
@@ -1837,6 +1830,9 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   const a = selectedAgent();
   const keep = dock?.querySelector('textarea');
   const focused = keep && document.activeElement === keep;
+  // Focus on the Needs you pane beside stays there when the conversation is
+  // drawn again; opening a request from it moves focus to the request.
+  const beside = !!document.activeElement?.closest?.('#needs-you');
   const actionFocused = dock?.querySelector('.composer-action') === document.activeElement;
   const caret = focused ? [keep.selectionStart, keep.selectionEnd, keep.selectionDirection] : null;
   const control = dock?.contains(document.activeElement) && document.activeElement.getAttribute('role') === 'combobox'
@@ -1951,7 +1947,7 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   const nextControl = composerSelects.find((select) => select.trigger.getAttribute('aria-label') === control);
   if (nextControl && !nextControl.trigger.disabled) nextControl.trigger.focus({ preventScroll: true });
   else if (actionFocused && !focusComposer && !action.disabled) action.focus({ preventScroll: true });
-  else if (focusComposer || focused || actionFocused || !keep) {
+  else if (focusComposer || focused || actionFocused || (!keep && !beside)) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
   }
@@ -3203,14 +3199,18 @@ const info = createInfo({
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
-  // The same requests as Needs you shows, of this yesman only.
-  needsYou: (y) => ({
-    count: needsYouItems(state.snap).filter((item) => item.yesman === y.name).length,
-    error: state.snap.yesmen.find((v) => v.name === y.name)?.handoffsError ?? '',
-    // New requests are refused until the user starts a new memory.
-    refused: ['full', 'blocked', 'legacy-full'].includes(state.snap.yesmen.find((v) => v.name === y.name)?.callMemory?.state),
-  }),
-  openNeedsYou: (y) => showNeedsYou(null, { yesman: y.name, hiredAt: y.hiredAt ?? '', from: state.view.kind === 'agent' ? state.view.id : null }),
+  // The same requests as the Needs you pane shows for this yesman.
+  needsYou: (y) => {
+    const v = state.snap.yesmen.find((v) => v.name === y.name);
+    return {
+      count: v ? needsYouOf(v).length : 0,
+      error: v?.handoffsError ?? '',
+      // New requests are refused until the user starts a new memory.
+      refused: ['full', 'blocked', 'legacy-full'].includes(v?.callMemory?.state),
+      open: state.pane === 'needs-you',
+    };
+  },
+  openNeedsYou: () => showNeedsYou(),
   openWorktree: (dir, show) => files.openWorktree(dir, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
@@ -3251,6 +3251,7 @@ function togglePane(pane) {
 function renderInfo() {
   files.render();
   board.render();
+  renderNeedsYouPane();
 }
 
 async function openCheckout(y) {
@@ -3411,13 +3412,8 @@ const actionHost = {
   entries: sidebarAgents,
   leads: () => state.snap.yesmen.map((y) => agentById(`${y.name}/lead`)).filter(Boolean),
   needsYou: () => state.snap.agents.find((a) => a.role === 'lead' && a.status === 'waiting') ?? null,
-  // Needs You, every yesman's requests; focus goes to its heading when the
-  // control that had it was drawn away.
-  showNeedsYou() {
-    showNeedsYou();
-    const now = document.activeElement;
-    if (!now || now === document.body) $('#body .needs-you-page h1')?.focus({ preventScroll: true });
-  },
+  // The Needs you pane of the yesman shown, with focus on its heading.
+  showNeedsYou: () => showNeedsYou(),
   step(by) {
     const list = sidebarAgents();
     const at = list.findIndex((a) => a.id === state.view.id);
@@ -3528,12 +3524,12 @@ function onAgents(agents) {
   pruneCaches();
   renderSidebar();
   palette.refresh();
-  if (needsYouItems(state.snap).map((item) => item.key).join() !== requests) {
-    if (state.view.kind === 'needs-you') renderBody();
-    info.render(); // its Needs you row counts them
-  }
-  // The board links a task's owner while it is one of the agents.
+  const changed = needsYouItems(state.snap).map((item) => item.key).join() !== requests;
+  if (changed) info.render(); // its Needs you row counts them
+  // The board links a task's owner while it is one of the agents, and so
+  // does Needs you who asks.
   if (state.pane === 'board' && agents.map((a) => a.id).join() !== ids) board.render();
+  if (state.pane === 'needs-you' && (changed || agents.map((a) => a.id).join() !== ids)) renderNeedsYouPane();
   piPage.onAgents();
   const after = selectedAgent();
   // The work row or the line at the foot says what the agent does now.

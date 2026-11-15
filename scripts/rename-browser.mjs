@@ -136,10 +136,12 @@ try {
      agents.push({id:'alice/active',name:'active',yesman:'alice',role:'worker',number:3,status:'working'});
      emitChanged();
    });
-   await page.waitForFunction(()=>document.querySelectorAll('[data-agent="alice/lead"]').length===2);
+   // A waiting lead has one sidebar entry: its requests show in its Needs you pane.
+   await page.waitForFunction(()=>document.querySelector('[data-agent="alice/lead"][data-sidebar-entry="yesman"]')?.dataset.status==='waiting');
+   assert.equal(await page.locator('[data-agent="alice/lead"]').count(),1);
    const workerIDs=()=>page.locator('#yesmen [data-sidebar-entry="worker"]').evaluateAll(rows=>rows.map(r=>r.dataset.agent));
    assert.deepEqual(await workerIDs(),['alice/worker-one','alice/active','alice/ended']);
-   for(const entry of ['yesman','needs-you']) {
+   for(const entry of ['yesman']) {
      const row=page.locator(`[data-agent="alice/lead"][data-sidebar-entry="${entry}"]`);
      await row.focus();
      await page.evaluate(entry=>{localStorage.setItem('synthetic.label','刷新名称 '+entry);emitChanged();},entry);
@@ -154,10 +156,10 @@ try {
      assert.equal(anchor.y,anchor.bottom);
    }
    await page.evaluate(()=>{agents[0].status='idle';emitChanged();});
-   await page.waitForFunction(()=>document.querySelectorAll('[data-agent="alice/lead"]').length===1);
+   await page.waitForFunction(()=>document.querySelector('[data-agent="alice/lead"]')?.dataset.status==='idle');
    assert.equal(await page.evaluate(()=>document.activeElement.dataset.sidebarEntry),'yesman');
    await page.evaluate(()=>{agents[0].status='waiting';const ended=agents.find(a=>a.name==='ended');ended.status='starting';delete ended.finishedAt;emitChanged();});
-   await page.waitForFunction(()=>document.querySelectorAll('[data-agent="alice/lead"]').length===2);
+   await page.waitForFunction(()=>document.querySelector('[data-agent="alice/lead"]')?.dataset.status==='waiting');
    assert.deepEqual(await workerIDs(),['alice/ended','alice/worker-one','alice/active']);
    assert.equal(await page.evaluate(()=>document.activeElement.dataset.sidebarEntry),'yesman');
    assert.equal(await page.locator('.composer textarea').inputValue(),'synthetic worker draft');
