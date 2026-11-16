@@ -42,8 +42,12 @@ a competing process's completed preparation is accepted only after verification.
 
 The runtime uses pi's original CLI, configuration/resource loader, user agent
 directory, providers, auth, models, packages and MCP behavior. It preserves the
-original environment, workspace cwd, `--session-dir`, `--continue`, model selection
-and production yesman extension. The installer does not read or rewrite pi user
+original environment, workspace cwd, `--session-dir`, model selection and
+production yesman extension. yesman chooses the session to resume itself: the
+agent's newest session with `--session`, or, when that session was recorded
+under a workspace path that has since changed, a complete copy yesman makes
+first (`internal/agent/session_copy.go`); `--continue` only when no session
+file can be read. The installer does not read or rewrite pi user
 settings. Package-management actions still run pi's explicit package commands.
 Explicit external runtimes remain responsible for their own dependencies.
 
