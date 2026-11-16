@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -133,9 +134,34 @@ type Store struct {
 	metaMu        sync.Mutex // serialize metadata reads with atomic replacement on Windows
 
 	lmu    sync.Mutex
-	locks  map[string]*sync.RWMutex // per yesman: Use reads, Archive writes
-	hlocks map[string]*sync.Mutex   // per yesman: its handoffs, in turn
+	locks  map[string]*sync.RWMutex  // per yesman: Use reads, Archive writes
+	hlocks map[string]*sync.Mutex    // per yesman: its handoffs, in turn
+	clocks map[string]*sync.Mutex    // per yesman: its continuation record, in turn
+	revs   map[string]*atomic.Uint64 // per yesman: changes to its board, workers and handoffs
 }
+
+// Revision counts the changes to a yesman's board, workers and handoffs
+// made through this Store. Each change counts before it is written, so one
+// who read the same revision before and after reading them read no change
+// that a later write overtook.
+func (s *Store) Revision(name string) uint64 { return s.rev(name).Load() }
+
+func (s *Store) rev(name string) *atomic.Uint64 {
+	s.lmu.Lock()
+	defer s.lmu.Unlock()
+	if s.revs == nil {
+		s.revs = map[string]*atomic.Uint64{}
+	}
+	r := s.revs[name]
+	if r == nil {
+		r = &atomic.Uint64{}
+		s.revs[name] = r
+	}
+	return r
+}
+
+// changing counts a change to a yesman's tasks, workers or handoffs.
+func (s *Store) changing(name string) { s.rev(name).Add(1) }
 
 // New returns the store of workspaces under root, archiving into archive.
 func New(root, archive string) *Store {
@@ -480,6 +506,7 @@ func (s *Store) AddWorker(name string, w Worker) error {
 	}
 	y, _ := s.Get(name)
 	ws = append(ws, w)
+	s.changing(name)
 	if err := writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws); err != nil {
 		return err
 	}
@@ -551,6 +578,7 @@ func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, 
 		return false, nil
 	}
 	y, _ := s.Get(name)
+	s.changing(name)
 	return true, writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws)
 }
 
@@ -565,7 +593,29 @@ func (s *Store) RemoveWorker(name, worker string) error {
 	}
 	y, _ := s.Get(name)
 	s.noteStarts(y, ws)
+	// Its tasks stay its own: a worker of the same name hired later does
+	// not own them, whatever it works on. Bound first, under the same lock,
+	// so that no reader sees the name free with its tasks unbound.
+	if i := slices.IndexFunc(ws, func(x Worker) bool { return x.Name == worker }); i >= 0 {
+		b, err := s.board(name)
+		if err != nil {
+			return err
+		}
+		bound := false
+		for j := range b.Tasks {
+			if t := &b.Tasks[j]; t.Owner == worker && t.OwnerSince.IsZero() {
+				t.OwnerSince, bound = ws[i].StartedAt, true
+			}
+		}
+		if bound {
+			s.changing(name)
+			if err := writeJSON(y.BoardFile(), b); err != nil {
+				return err
+			}
+		}
+	}
 	ws = slices.DeleteFunc(ws, func(x Worker) bool { return x.Name == worker })
+	s.changing(name)
 	return writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws)
 }
 

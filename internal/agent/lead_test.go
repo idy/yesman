@@ -186,7 +186,7 @@ func TestContinuationTellsOncePerState(t *testing.T) {
 	if !strings.HasPrefix(got, reminder) || !strings.Contains(got, "- t1 [todo] Windows build: no worker carries it\n") || strings.Contains(got, "Lint") {
 		t.Errorf("notice:\n%s", got)
 	}
-	legacy := strings.Index(got, "Blocked without a recorded wait")
+	legacy := strings.Index(got, "Check these; yesman leaves them blocked")
 	if legacy < 0 || !strings.Contains(got[legacy:], "- t3 [blocked] Migrate the database") {
 		t.Errorf("the legacy blocked task is not listed to check:\n%s", got)
 	}

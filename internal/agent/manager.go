@@ -162,16 +162,17 @@ type Config struct {
 type Manager struct {
 	cfg Config
 
-	mu              sync.Mutex
-	agents          map[string]*agent
-	tokens          map[string]string        // credential -> agent ID, while its process runs
-	closed          bool                     // StopAll permanently prevents further starts; guarded by mu
-	worktreeCleanup map[string]bool          // reservations preventing owner startup/input during final removal
-	shutdown        chan struct{}            // closed by StopAll to wake pending report retries
-	recallBytes     int                      // full payload memory across all agent generations; guarded by mu
-	continuations   map[string]*continuation // by yesman; guarded by mu, see continuation.go
-	beforeNotice    func()                   // tests only: runs before a notice reserves the lead
-	pauses          map[string]*sync.Mutex   // by yesman: user pauses vs notice dispatch; guarded by mu
+	mu               sync.Mutex
+	agents           map[string]*agent
+	tokens           map[string]string        // credential -> agent ID, while its process runs
+	closed           bool                     // StopAll permanently prevents further starts; guarded by mu
+	worktreeCleanup  map[string]bool          // reservations preventing owner startup/input during final removal
+	shutdown         chan struct{}            // closed by StopAll to wake pending report retries
+	recallBytes      int                      // full payload memory across all agent generations; guarded by mu
+	continuations    map[string]*continuation // by yesman; guarded by mu, see continuation.go
+	beforeNotice     func()                   // tests only: runs before a notice reserves the lead
+	leadPauses       map[string]*leadPause    // by yesman: the user's pauses of leads; guarded by mu, see pause.go
+	beforePromptDone func(*agent)             // tests only: runs once a prompt's RPC returned, before it ends
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
 	// callsDone is signalled, under mu, when an agent's last caller
@@ -219,6 +220,12 @@ type agent struct {
 	// message's error, or nil; runSaid tells whether it had one at all.
 	runEnd  *RunError
 	runSaid bool
+	// closeAt is when a finished worker's report reached its lead, while the
+	// prompt that began that run had not ended yet; closeInbox its inbox
+	// then. That prompt's end closes the worker if nothing came meanwhile.
+	// Guarded by the manager's mu.
+	closeAt    time.Time
+	closeInbox uint64
 	// inbox changes when a message is queued or registered. settledInbox is
 	// the inbox at the last settle, so accepted prompts awaiting agent_start
 	// still defer telling the lead about its tasks. Both are guarded by the manager's mu.
@@ -367,10 +374,12 @@ func (m *Manager) setStatus(a *agent, p *proc, s Status, detail string) {
 
 // ensure starts the agent unless it runs.
 func (m *Manager) ensure(id string) (*agent, *proc, error) {
-	return m.ensureScoped(id, nil, "", nil)
+	return m.ensureScoped(id, nil, "", nil, false)
 }
 
-func (m *Manager) ensureScoped(id string, owner *agent, messageID string, scope *time.Time) (*agent, *proc, error) {
+// ensureScoped starts the agent if needed. auto: for yesman's own message to
+// a lead, which starts nothing while the user's pause holds it.
+func (m *Manager) ensureScoped(id string, owner *agent, messageID string, scope *time.Time, auto bool) (*agent, *proc, error) {
 	ys, name, err := SplitID(id)
 	if err != nil {
 		return nil, nil, err
@@ -395,13 +404,13 @@ func (m *Manager) ensureScoped(id string, owner *agent, messageID string, scope 
 			}
 		}
 		var err error
-		a, p, err = m.ensureIn(y, id, name)
+		a, p, err = m.ensureIn(y, id, name, auto)
 		return err
 	})
 	return a, p, err
 }
 
-func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, error) {
+func (m *Manager) ensureIn(y yesmen.Yesman, id, name string, auto bool) (*agent, *proc, error) {
 	ys := y.Name
 	role := RoleLead
 	since := y.HiredAt
@@ -429,6 +438,10 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		if m.worktreeCleanup[id] {
 			m.mu.Unlock()
 			return nil, nil, errWorktreeCleanup
+		}
+		if auto && m.leadPausedLocked(y) {
+			m.mu.Unlock()
+			return nil, nil, errLeadPaused
 		}
 		a, err := m.workspaceAgentLocked(y, Info{ID: id, Yesman: ys, Name: name, Role: role, Status: Stopped, Since: since})
 		if err != nil {
@@ -800,7 +813,8 @@ func (m *Manager) promptImages(ctx context.Context, id, text string, images []Im
 	}
 	m.unnudge(id)
 	if origin.Source == OriginUser {
-		m.resumeByUser(id)
+		// What was kept for a lead the user paused follows their message.
+		defer m.resumeByUser(id)()
 	}
 	return m.prompt(ctx, id, text, "steer", origin, images...)
 }
@@ -816,10 +830,22 @@ func (m *Manager) promptDelivery(ctx context.Context, id, text, behavior, messag
 	var (
 		a *agent
 		p *proc
+		y yesmen.Yesman
 	)
+	auto := automatic(id, origin)
+	if auto {
+		ys, _, _ := SplitID(id)
+		var err error
+		if y, err = m.cfg.Yesmen.Get(ys); err != nil {
+			return err
+		}
+		if m.loadPause(y) {
+			return errLeadPaused
+		}
+	}
 	for {
 		var err error
-		if a, p, err = m.ensureScoped(id, owner, messageID, scope); err != nil {
+		if a, p, err = m.ensureScoped(id, owner, messageID, scope, auto); err != nil {
 			return err
 		}
 		// Register before dispatch, under the same lock as configuration's
@@ -857,8 +883,17 @@ func (m *Manager) promptDelivery(ctx context.Context, id, text, behavior, messag
 		a.modelMu.Unlock()
 		return errWorktreeCleanup
 	}
+	if auto && m.leadPausedLocked(y) {
+		m.mu.Unlock()
+		a.modelMu.Unlock()
+		return errLeadPaused
+	}
 	a.prompts++
-	a.inbox++
+	// A task notice is deduped by its own record: refused, it must not
+	// leave the lead looking busy, which would hold off its retry.
+	if origin.Source != OriginYesman || origin.Kind != "tasks" {
+		a.inbox++
+	}
 	m.mu.Unlock()
 	if a.info.Role == RoleWorker {
 		// A message gives a finished worker work again.
@@ -920,9 +955,19 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 				p.origins.answered(origin, behavior, nil)
 			}
 		}
+		if m.beforePromptDone != nil {
+			m.beforePromptDone(a) // tests: the answered prompt is slow to end
+		}
 		a.modelMu.Lock()
 		m.mu.Lock()
 		a.prompts--
+		closeAt := time.Time{}
+		if a.prompts == 0 && !a.closeAt.IsZero() {
+			if a.inbox == a.closeInbox {
+				closeAt = a.closeAt
+			}
+			a.closeAt = time.Time{}
+		}
 		// A lead that settled while this prompt was still unanswered was
 		// not yet free to hear about its tasks: it is now.
 		settled := a.prompts == 0 && a.info.Role == RoleLead && a.info.Status == Idle && a.inbox == a.settledInbox && !a.retiring
@@ -930,6 +975,9 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		a.modelMu.Unlock()
 		if settled {
 			go m.continueTasks(a.info.Yesman)
+		}
+		if !closeAt.IsZero() {
+			go m.closeWhenIdle(a, p, closeAt)
 		}
 		done <- err
 	}()
@@ -1391,6 +1439,12 @@ func (m *Manager) closeIfFinished(a *agent, p *proc, finishedAt time.Time) {
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
 	idle := !a.retiring && a.proc == p && a.starting == nil && a.info.Status == Idle && a.prompts == 0 && a.recalls == 0
+	if !idle && !finishedAt.IsZero() && !a.retiring && a.proc == p && a.starting == nil && a.info.Status == Idle &&
+		a.recalls == 0 && a.prompts > 0 && a.inbox == a.settledInbox {
+		// Only prompts given before its run settled are still ending: the
+		// last to end closes it, unless something new comes meanwhile.
+		a.closeAt, a.closeInbox = finishedAt, a.inbox
+	}
 	yesman, name := a.info.Yesman, a.info.Name
 	m.mu.Unlock()
 	if !idle {
@@ -1416,6 +1470,19 @@ func (m *Manager) closeIfFinished(a *agent, p *proc, finishedAt time.Time) {
 		m.Stop(a.info.ID)
 		return nil
 	})
+}
+
+// closeWhenIdle closes a finished worker whose report reached its lead
+// before the prompt that began its run ended. pi is asked first, as it may
+// be running that prompt before yesman hears of it.
+func (m *Manager) closeWhenIdle(a *agent, p *proc, finishedAt time.Time) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	state, err := p.modelState(ctx)
+	cancel()
+	if err != nil || state.IsStreaming || state.IsCompacting {
+		return // it has work: its next report closes it
+	}
+	m.closeIfFinished(a, p, finishedAt)
 }
 
 const titleLimit = 80
@@ -1457,6 +1524,17 @@ func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, kind, msg string
 		if err = m.promptDelivery(ctx, lead, msg, "followUp", "", nil, &scope, origin); err == nil {
 			return nil
 		}
+		if errors.Is(err, errLeadPaused) {
+			// The user stopped the lead: keep this for when they write to it.
+			if m.deferForLead(a.info.Yesman, scope, func() { m.redeliver(a, kind, msg) }) {
+				m.mu.Lock()
+				a.info.Detail, a.info.UpdatedAt = "Its last message waits until you write to the lead you stopped.", time.Now()
+				m.mu.Unlock()
+				m.changed()
+				return err
+			}
+			continue // lifted meanwhile
+		}
 		select {
 		case <-m.shutdown:
 			return errStopped
@@ -1478,6 +1556,26 @@ func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, kind, msg string
 	m.mu.Unlock()
 	m.changed()
 	return err
+}
+
+// redeliver sends a message kept while the user had the lead paused. A
+// report delivered then closes its finished worker, as it would have.
+func (m *Manager) redeliver(a *agent, kind, msg string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if m.tellLeadWithin(ctx, a, kind, msg) != nil {
+		return
+	}
+	m.mu.Lock()
+	p := a.proc
+	if a.info.Detail == "Its last message waits until you write to the lead you stopped." {
+		a.info.Detail = ""
+	}
+	m.mu.Unlock()
+	m.changed()
+	if kind == "report" && p != nil {
+		m.closeIfFinished(a, p, time.Now().UTC())
+	}
 }
 
 // How often, and how patiently, a worker's report is offered to its lead.

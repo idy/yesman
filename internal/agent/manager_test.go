@@ -255,8 +255,10 @@ func newTestManager(t *testing.T, delay time.Duration, env ...string) (*Manager,
 	m := New(Config{
 		Pi:        exe,
 		Extension: filepath.Join(tmp, "none.ts"),
-		Env:       append([]string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=" + delay.String()}, env...),
-		Yesmen:    store,
+		// A race-built fake pi otherwise sleeps a second as it exits, which
+		// every Stop would wait for (as in the server's Board fixture).
+		Env:    append([]string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=" + delay.String(), "GORACE=atexit_sleep_ms=0"}, env...),
+		Yesmen: store,
 	})
 	t.Cleanup(m.StopAll)
 	return m, store

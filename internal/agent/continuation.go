@@ -4,11 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/idy/yesman/internal/yesmen"
@@ -201,6 +201,10 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 	if err != nil {
 		return
 	}
+	// The revision is read before what it covers: if it is the same when the
+	// notice is recorded, nothing read here was overtaken (see recordAttempt).
+	rev := m.cfg.Yesmen.Revision(yesman)
+	paused := m.loadPause(y)
 	record, err := m.cfg.Yesmen.Continuation(yesman)
 	if err != nil {
 		log.Printf("yesman: continuation of %s: %v", yesman, err)
@@ -215,8 +219,11 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 		return
 	}
 	handoffs, err := m.cfg.Yesmen.Handoffs(yesman)
-	if err != nil {
-		handoffs = yesmen.Handoffs{} // a damaged file shows as no open request
+	unreadable := err != nil
+	if unreadable {
+		// Unknown is not cleared: its waits stay blocked, to be checked.
+		log.Printf("yesman: Needs you of %s: %v", yesman, err)
+		handoffs = yesmen.Handoffs{}
 	}
 	runs := map[string]ownerRun{}
 	m.mu.Lock()
@@ -224,21 +231,16 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 		if a.info.Yesman != yesman || a.info.Role != RoleWorker || a.retiring {
 			continue
 		}
-		busy := a.starting != nil || a.prompts > 0 || a.reports > 0 || a.recalls > 0
-		switch a.info.Status {
-		case Starting, Working, Waiting:
-			busy = true
-		}
-		runs[a.info.Name] = ownerRun{since: a.info.Since, active: busy, status: a.info.Status}
+		runs[a.info.Name] = ownerRun{since: a.info.Since, active: busyLocked(a), status: a.info.Status}
 	}
 	m.mu.Unlock()
 
-	items := classify(board, workers, runs, handoffs)
+	items := classifyAs(board, workers, runs, handoffs, unreadable)
 	// Whatever the lead's state, a task that needs no notice now forgets the
 	// one it had, so that it is told again once it needs one; it keeps its
 	// count, so that a task going back and forth without progress stays
 	// bounded.
-	if record = m.forgetSettled(y, record, items); !record.LeadPausedAt.IsZero() {
+	if record = m.forgetSettled(y, record, items); paused {
 		return // the user stopped the lead: nothing starts it but the user
 	}
 	m.mu.Lock()
@@ -281,21 +283,19 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 	if m.beforeNotice != nil {
 		m.beforeNotice() // tests: something changes after the board was read
 	}
-	// The user's Stop records its pause under this lock: from here to the
-	// notice's dispatch, a pause either is seen now or comes after, and its
-	// Stop then ends what the notice started.
-	pause := m.pauseLock(yesman)
-	pause.Lock()
-	defer pause.Unlock()
-	if r, err := m.cfg.Yesmen.Continuation(yesman); err != nil || !r.LeadPausedAt.IsZero() {
-		return
-	}
-
 	// Reserve the lead, recheck it and record the attempt before sending,
-	// so that a restart never forgets a notice that may have gone.
+	// so that a restart never forgets a notice that may have gone. The
+	// user's Stop sets its pause under mu, so a notice either is reserved
+	// before it (and the Stop ends what it started) or sees it here; no
+	// lock is held while the notice is sent.
 	m.mu.Lock()
 	lead, p, inbox, again := m.leadStateLocked(yesman)
+	stale := m.leadPausedLocked(y) || m.carriedLocked(yesman, listed)
 	m.mu.Unlock()
+	if stale {
+		m.reevaluate(c)
+		return
+	}
 	if again != state {
 		return // it changed meanwhile; its own event evaluates again
 	}
@@ -303,9 +303,10 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 		lead.modelMu.Lock()
 		m.mu.Lock()
 		l, p2, inbox2, s := m.leadStateLocked(yesman)
-		if s != leadIdle || l != lead || p2 != p || inbox2 != inbox {
+		if s != leadIdle || l != lead || p2 != p || inbox2 != inbox || m.leadPausedLocked(y) || m.carriedLocked(yesman, listed) {
 			m.mu.Unlock()
 			lead.modelMu.Unlock()
+			m.reevaluate(c)
 			return
 		}
 		// Not inbox: a notice pi refuses must not leave the lead looking
@@ -324,9 +325,13 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 		m.mu.Unlock()
 		lead.modelMu.Unlock()
 	}
-	if err := m.recordAttempt(y, listed, now, false, board); err != nil {
+	if err := m.recordAttempt(y, listed, now, false, board, rev); err != nil {
 		release()
-		log.Printf("yesman: record continuation of %s: %v", yesman, err)
+		if errors.Is(err, errOvertaken) {
+			m.reevaluate(c) // what was read changed meanwhile: read it again
+		} else {
+			log.Printf("yesman: record continuation of %s: %v", yesman, err)
+		}
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -337,6 +342,9 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 	} else {
 		since := y.HiredAt
 		err = m.promptDelivery(ctx, ID(yesman, yesmen.LeadName), text, "followUp", "", nil, &since, origin)
+	}
+	if errors.Is(err, errLeadPaused) {
+		return // the user stopped it meanwhile: it hears when they write to it
 	}
 	if err != nil {
 		log.Printf("yesman: tell the lead of %s about its tasks: %v", yesman, err)
@@ -355,19 +363,31 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 	m.mu.Lock()
 	c.retries = 0
 	m.mu.Unlock()
-	if err := m.recordAttempt(y, listed, now, true, board); err != nil {
+	if err := m.recordAttempt(y, listed, now, true, board, 0); err != nil {
 		log.Printf("yesman: record continuation of %s: %v", yesman, err)
 	}
 }
 
+// errOvertaken refuses to record a notice read from what changed since.
+var errOvertaken = errors.New("the tasks changed while yesman read them")
+
 // recordAttempt records a notice as sent, before it is, or as delivered.
 // It forgets tasks no longer on the board, so the record stays bounded.
-func (m *Manager) recordAttempt(y yesmen.Yesman, listed []notice, at time.Time, delivered bool, board yesmen.Board) error {
+// Before a notice is sent, the board, workers and handoffs must still be at
+// revision rev: a change counts before it is written, so one that was not
+// counted yet commits after this record, and the notice told the state
+// before it.
+func (m *Manager) recordAttempt(y yesmen.Yesman, listed []notice, at time.Time, delivered bool, board yesmen.Board, rev uint64) error {
 	return m.cfg.Yesmen.Use(y.Name, func(cur yesmen.Yesman) error {
 		if !cur.HiredAt.Equal(y.HiredAt) {
 			return yesmen.ErrRehired
 		}
+		overtaken := false
 		_, err := m.cfg.Yesmen.UpdateContinuation(y.Name, y.HiredAt, func(c *yesmen.Continuation) bool {
+			if !delivered && m.cfg.Yesmen.Revision(y.Name) != rev {
+				overtaken = true
+				return false
+			}
 			if delivered {
 				changed := false
 				for _, n := range listed {
@@ -390,6 +410,9 @@ func (m *Manager) recordAttempt(y yesmen.Yesman, listed []notice, at time.Time, 
 			}
 			return true
 		})
+		if err == nil && overtaken {
+			err = errOvertaken
+		}
 		return err
 	})
 }
@@ -436,19 +459,37 @@ func (m *Manager) forgetSettled(y yesmen.Yesman, record yesmen.Continuation, ite
 	return out
 }
 
-// pauseLock orders a yesman's user pauses with its notices' dispatch.
-func (m *Manager) pauseLock(yesman string) *sync.Mutex {
+// busyLocked reports whether a worker carries its work now: it starts,
+// works, waits for an answer, or has a message or its report on its way.
+func busyLocked(a *agent) bool {
+	switch a.info.Status {
+	case Starting, Working, Waiting:
+		return true
+	}
+	return a.starting != nil || a.prompts > 0 || a.reports > 0 || a.recalls > 0
+}
+
+// carriedLocked reports whether a worker took up a task the notice lists
+// as nobody's since it was read.
+func (m *Manager) carriedLocked(yesman string, listed []notice) bool {
+	for _, n := range listed {
+		if n.verify || n.task.Owner == "" || n.task.Owner == yesmen.LeadName || n.task.Status == yesmen.TaskBlocked {
+			continue
+		}
+		a := m.agents[ID(yesman, n.task.Owner)]
+		if a != nil && !a.retiring && busyLocked(a) && (n.task.OwnerSince.IsZero() || n.task.OwnerSince.Equal(a.info.Since)) {
+			return true
+		}
+	}
+	return false
+}
+
+// reevaluate has the running evaluation of c read everything again, once it
+// ends: what it read was overtaken.
+func (m *Manager) reevaluate(c *continuation) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.pauses == nil {
-		m.pauses = map[string]*sync.Mutex{}
-	}
-	l := m.pauses[yesman]
-	if l == nil {
-		l = &sync.Mutex{}
-		m.pauses[yesman] = l
-	}
-	return l
+	c.again = true
+	m.mu.Unlock()
 }
 
 func recentAttempts(all []time.Time, now time.Time) []time.Time {
@@ -465,6 +506,13 @@ func recentAttempts(all []time.Time, now time.Time) []time.Time {
 // nobody carries and blocked ones whose wait is over, then legacy blocked
 // tasks without a wait, to check.
 func classify(board yesmen.Board, workers []yesmen.Worker, runs map[string]ownerRun, handoffs yesmen.Handoffs) []notice {
+	return classifyAs(board, workers, runs, handoffs, false)
+}
+
+// classifyAs is classify, where unreadable says the Needs you requests
+// could not be read: a task waiting for the user is then only listed to
+// check, never taken as free to go on.
+func classifyAs(board yesmen.Board, workers []yesmen.Worker, runs map[string]ownerRun, handoffs yesmen.Handoffs, unreadable bool) []notice {
 	byID := map[string]yesmen.Task{}
 	for _, t := range board.Tasks {
 		byID[t.ID] = t
@@ -485,7 +533,11 @@ func classify(board yesmen.Board, workers []yesmen.Worker, runs map[string]owner
 			out = append(out, notice{task: t, why: why, progress: progress, sig: hashOf(progress, state)})
 		case yesmen.TaskBlocked:
 			if t.Wait == nil {
-				legacy = append(legacy, notice{task: t, verify: true, progress: progress, sig: hashOf(progress, "legacy")})
+				legacy = append(legacy, notice{task: t, verify: true, why: "no wait recorded: record what it waits for", progress: progress, sig: hashOf(progress, "legacy")})
+				continue
+			}
+			if unreadable && t.Wait.Kind == yesmen.WaitUser {
+				legacy = append(legacy, notice{task: t, verify: true, why: "its Needs you requests could not be read: check them", progress: progress, sig: hashOf(progress, "unreadable")})
 				continue
 			}
 			why, state, ok := waitOver(t, byID, handoffs)
@@ -507,6 +559,11 @@ func unattended(t yesmen.Task, workers map[string]yesmen.Worker, runs map[string
 	w, ok := workers[t.Owner]
 	if !ok {
 		return fmt.Sprintf("no worker named %s now", t.Owner), "missing", true
+	}
+	if !t.OwnerSince.IsZero() && !t.OwnerSince.Equal(w.StartedAt) {
+		// A worker of the same name hired later: not the one it was given.
+		return fmt.Sprintf("its owner %s was replaced by a new worker of that name, which was not given it", t.Owner),
+			hashOf("replaced", t.OwnerSince.UTC().Format(time.RFC3339Nano), w.StartedAt.UTC().Format(time.RFC3339Nano)), true
 	}
 	if !w.PausedAt.IsZero() {
 		return "", "", false // the user stopped it: theirs to resume
@@ -631,7 +688,7 @@ func noticeText(listed []notice) string {
 	}
 	b.WriteString("\nFor each: start or message a worker for it, or mark it done or dropped, or blocked with the wait it is under (yesman_board wait). Leave what the user paused alone. yesman tells you again only of a task that changed.\n")
 	if verify {
-		b.WriteString("\nBlocked without a recorded wait; yesman leaves them blocked. Check each and record what it waits for:\n")
+		b.WriteString("\nCheck these; yesman leaves them blocked:\n")
 		for _, n := range listed {
 			if n.verify {
 				line(n)
@@ -647,73 +704,4 @@ func oneLine(s string) string {
 		return string(r[:119]) + "…"
 	}
 	return s
-}
-
-// pauseByUser records that the user stopped an agent or its run, so that
-// yesman does not start it again by itself, across restarts too.
-func (m *Manager) pauseByUser(id string) {
-	yesman, name, err := SplitID(id)
-	if err != nil {
-		return
-	}
-	now := time.Now().UTC()
-	pause := m.pauseLock(yesman)
-	pause.Lock()
-	defer pause.Unlock()
-	err = m.cfg.Yesmen.Use(yesman, func(y yesmen.Yesman) error {
-		if name == yesmen.LeadName {
-			_, err := m.cfg.Yesmen.UpdateContinuation(yesman, y.HiredAt, func(c *yesmen.Continuation) bool {
-				c.LeadPausedAt = now
-				return true
-			})
-			return err
-		}
-		ws, err := m.cfg.Yesmen.Workers(yesman)
-		if err != nil {
-			return err
-		}
-		i := slices.IndexFunc(ws, func(w yesmen.Worker) bool { return w.Name == name })
-		if i < 0 {
-			return nil
-		}
-		return m.cfg.Yesmen.PauseWorker(yesman, name, ws[i].StartedAt, now)
-	})
-	if err != nil {
-		log.Printf("yesman: record that the user stopped %s: %v", id, err)
-	}
-}
-
-// resumeByUser lifts the user's pause of a lead when they write to it.
-func (m *Manager) resumeByUser(id string) {
-	yesman, name, err := SplitID(id)
-	if err != nil || name != yesmen.LeadName {
-		return
-	}
-	err = m.cfg.Yesmen.Use(yesman, func(y yesmen.Yesman) error {
-		_, err := m.cfg.Yesmen.UpdateContinuation(yesman, y.HiredAt, func(c *yesmen.Continuation) bool {
-			if c.LeadPausedAt.IsZero() {
-				return false
-			}
-			c.LeadPausedAt = time.Time{}
-			return true
-		})
-		return err
-	})
-	if err != nil {
-		log.Printf("yesman: record that the user wrote to %s: %v", id, err)
-	}
-}
-
-// StopByUser is Stop for the user: the agent stays stopped, across
-// restarts, until it is given work again.
-func (m *Manager) StopByUser(id string) {
-	m.pauseByUser(id)
-	m.Stop(id)
-}
-
-// AbortByUser is Abort for the user, who stopped the run: yesman does not
-// start the agent again by itself.
-func (m *Manager) AbortByUser(ctx context.Context, id string) error {
-	m.pauseByUser(id)
-	return m.Abort(ctx, id)
 }

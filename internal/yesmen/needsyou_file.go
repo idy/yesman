@@ -67,62 +67,70 @@ func openHandoffs(root string, y Yesman, metaMu *sync.Mutex) (*handoffsFile, Han
 	return f, hs, nil
 }
 
-func (f *handoffsFile) open(root string, y Yesman, metaMu *sync.Mutex) (Handoffs, error) {
+// openMeta opens a yesman's .yesman folder in the Store's folder root: the
+// workspace and its .yesman must be real directories of the Store, never
+// links, and the workspace the yesman asked for, hired at y.HiredAt. The
+// caller closes the roots returned, even with an error.
+func openMeta(root string, y Yesman, metaMu *sync.Mutex) (ws, meta *os.Root, err error) {
 	// The Store's folder may be reached through a link, as configured; the
 	// workspace in it may not.
 	name := filepath.Base(y.Path)
 	if filepath.Join(root, name) != y.Path {
-		return Handoffs{}, errors.New("not a workspace of this store")
+		return nil, nil, errors.New("not a workspace of this store")
 	}
 	store, err := os.OpenRoot(root)
 	if err != nil {
-		return Handoffs{}, err
+		return nil, nil, err
 	}
 	defer store.Close()
 	dir, err := store.Lstat(name)
 	if err != nil {
-		return Handoffs{}, err
+		return nil, nil, err
 	}
 	if dir.Mode().Type() != fs.ModeDir {
-		return Handoffs{}, errors.New("the workspace is not a directory of the store (a link or another kind of file)")
+		return nil, nil, errors.New("the workspace is not a directory of the store (a link or another kind of file)")
 	}
-	ws, err := store.OpenRoot(name)
-	if err != nil {
-		return Handoffs{}, err
+	if ws, err = store.OpenRoot(name); err != nil {
+		return nil, nil, err
 	}
-	f.ws = ws
 	if opened, err := ws.Stat("."); err != nil {
-		return Handoffs{}, err
+		return ws, nil, err
 	} else if !os.SameFile(dir, opened) {
-		return Handoffs{}, errors.New("the workspace changed while it was opened")
+		return ws, nil, errors.New("the workspace changed while it was opened")
 	}
-	dir, err = ws.Lstat(".yesman")
-	if err != nil {
-		return Handoffs{}, err
+	if dir, err = ws.Lstat(".yesman"); err != nil {
+		return ws, nil, err
 	}
 	if dir.Mode().Type() != fs.ModeDir {
-		return Handoffs{}, errors.New(".yesman is not a directory of the workspace (a link or another kind of file)")
+		return ws, nil, errors.New(".yesman is not a directory of the workspace (a link or another kind of file)")
 	}
-	meta, err := ws.OpenRoot(".yesman")
-	if err != nil {
-		return Handoffs{}, err
+	if meta, err = ws.OpenRoot(".yesman"); err != nil {
+		return ws, nil, err
 	}
-	f.meta = meta
 	opened, err := meta.Stat(".")
 	if err != nil {
-		return Handoffs{}, err
+		return ws, meta, err
 	}
 	if !os.SameFile(dir, opened) {
-		return Handoffs{}, errors.New(".yesman changed while it was opened")
+		return ws, meta, errors.New(".yesman changed while it was opened")
 	}
 	// The workspace opened must be the yesman asked for, not a newer one
 	// of the same name that took its place since.
-	hired, err := f.hiredAt(metaMu)
+	hired, err := metaHiredAt(meta, metaMu)
 	if err != nil {
-		return Handoffs{}, err
+		return ws, meta, err
 	}
 	if !hired.Equal(y.HiredAt) {
-		return Handoffs{}, errors.New("the workspace was replaced while it was opened")
+		return ws, meta, errors.New("the workspace was replaced while it was opened")
+	}
+	return ws, meta, nil
+}
+
+func (f *handoffsFile) open(root string, y Yesman, metaMu *sync.Mutex) (Handoffs, error) {
+	ws, meta, err := openMeta(root, y, metaMu)
+	f.ws, f.meta = ws, meta
+	if err != nil {
+		return Handoffs{}, err
 	}
 	return f.read()
 }
@@ -138,20 +146,25 @@ const maxMetaBytes = maxYesmanMetadataBytes // the same bound as Get and List
 // replacement needs on Windows, is held only to open and read the file once
 // it is known to be a regular one.
 func (f *handoffsFile) hiredAt(metaMu *sync.Mutex) (time.Time, error) {
-	data, err := readRegular(f.meta, "yesman.json", maxMetaBytes, metaMu)
+	return metaHiredAt(f.meta, metaMu)
+}
+
+// metaHiredAt is hiredAt for an opened .yesman folder.
+func metaHiredAt(meta *os.Root, metaMu *sync.Mutex) (time.Time, error) {
+	data, err := readRegular(meta, "yesman.json", maxMetaBytes, metaMu)
 	if errors.Is(err, fs.ErrNotExist) {
 		return time.Time{}, nil
 	}
 	if err != nil {
 		return time.Time{}, fmt.Errorf("yesman.json: %w", err)
 	}
-	var meta struct {
+	var record struct {
 		HiredAt time.Time `json:"hiredAt"`
 	}
-	if err := json.Unmarshal(data, &meta); err != nil {
+	if err := json.Unmarshal(data, &record); err != nil {
 		return time.Time{}, fmt.Errorf("yesman.json: %w", err)
 	}
-	return meta.HiredAt, nil
+	return record.HiredAt, nil
 }
 
 // readRegular reads the regular file name in root, of at most limit bytes,

@@ -46,6 +46,11 @@ type Task struct {
 	// done before yesman recorded this have neither.
 	DoneAt    time.Time `json:"doneAt,omitzero"`
 	DoneOwner string    `json:"doneOwner,omitempty"`
+	// OwnerSince is when the worker it was handed to started: a worker of
+	// the same name hired later is not its owner. Zero means whichever
+	// worker has that name now, as for a task handed to a worker before it
+	// started, or before yesman recorded this; removing that worker sets it.
+	OwnerSince time.Time `json:"ownerSince,omitzero"`
 	// Wait says what a blocked task waits for, so that yesman can tell its
 	// lead when it can go on. Only blocked tasks have one; a blocked task
 	// without one, such as one blocked before yesman recorded waits, is
@@ -96,6 +101,9 @@ type Board struct {
 	Tasks []Task `json:"tasks"`
 	// Next numbers the next task added, so that IDs are never reused.
 	Next int `json:"next"`
+	// ownerSet lists the tasks a change handed to an owner, for the Store
+	// to bind to the owner's incarnation.
+	ownerSet []string
 }
 
 // TaskEdit adds a task, or changes the fields it sets of the task ID names.
@@ -172,30 +180,60 @@ func (s *Store) ChangeBoard(name string, c BoardChange) (Board, error) {
 // ChangeBoardBy is ChangeBoard for the lead, or for a worker, which cannot
 // pause a task, lift a pause or change a paused task.
 func (s *Store) ChangeBoardBy(name string, c BoardChange, lead bool) (Board, error) {
+	b, before, err := s.changeBoard(name, c, lead)
+	if err != nil {
+		return Board{}, err
+	}
+	// After the Store's lock: the record's own I/O holds up only this
+	// yesman. A notice recorded meanwhile was refused by the revision this
+	// change counted before it wrote the board.
+	y, _ := s.Get(name)
+	_ = s.forgetNotices(y, before, b.Tasks) // best effort: never holds up the board
+	return b, nil
+}
+
+func (s *Store) changeBoard(name string, c BoardChange, lead bool) (Board, []Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, err := s.board(name)
 	if err != nil {
-		return Board{}, err
+		return Board{}, nil, err
 	}
 	before := slices.Clone(b.Tasks)
 	if err := b.apply(c, time.Now().UTC()); err != nil {
-		return Board{}, err
+		return Board{}, nil, err
 	}
 	if !lead && pauseChanged(before, b.Tasks) {
-		return Board{}, ErrPauseByLead
+		return Board{}, nil, ErrPauseByLead
 	}
 	if err := b.checkWaits(before); err != nil {
-		return Board{}, err
+		return Board{}, nil, err
+	}
+	if len(b.ownerSet) > 0 {
+		// Bind each task handed over to the worker of that name now.
+		ws, err := s.workers(name)
+		if err != nil {
+			return Board{}, nil, err
+		}
+		for _, id := range b.ownerSet {
+			i := b.index(id)
+			if i < 0 {
+				continue
+			}
+			t := &b.Tasks[i]
+			t.OwnerSince = time.Time{}
+			if j := slices.IndexFunc(ws, func(w Worker) bool { return w.Name == t.Owner }); j >= 0 && t.Owner != "" {
+				t.OwnerSince = ws[j].StartedAt
+			}
+		}
+		b.ownerSet = nil
 	}
 	y, _ := s.Get(name)
+	s.changing(name)
 	if err := writeJSON(y.BoardFile(), b); err != nil {
-		return Board{}, err
+		return Board{}, nil, err
 	}
-	// Best effort: a record that cannot be read or written is left as it
-	// is, and never holds up the board.
-	_ = s.forgetNotices(y, before, b.Tasks)
-	return b, nil
+	return b, before, nil
 }
 
 // forgetNotices forgets what the lead was told about tasks that moved: whose
@@ -324,6 +362,11 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 	tasks := slices.Clone(b.Tasks)
 	next := b.Next
 	work := Board{Tasks: tasks, Next: next}
+	owned := func(e TaskEdit, id string) {
+		if e.Owner != nil {
+			work.ownerSet = append(work.ownerSet, id)
+		}
+	}
 
 	for _, e := range c.Update {
 		i := work.index(e.ID)
@@ -337,6 +380,7 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 		}
 		t.UpdatedAt = now
 		markDone(&t, wasDone, now)
+		owned(e, t.ID)
 		work.Tasks[i] = t
 	}
 	for _, id := range c.Remove {
@@ -359,6 +403,7 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 			return fmt.Errorf("new task %q: %w", *e.Title, err)
 		}
 		markDone(&t, false, now)
+		owned(e, t.ID)
 		work.Tasks = append(work.Tasks, t)
 	}
 	if len(work.Tasks) > maxTasks {

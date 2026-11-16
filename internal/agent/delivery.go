@@ -241,12 +241,13 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 		a.inbox++
 	}
 	m.mu.Unlock()
-	// The user writing to a lead they stopped lets yesman tell it about its
-	// tasks again.
-	m.resumeByUser(id)
+	// The user writing to a lead they stopped lifts its pause; what was kept
+	// for it follows their message.
+	flush := m.resumeByUser(id)
 	// Only the private receipt ID crosses this Go call. The pi command and
 	// user text remain byte-for-byte the same as the original submission path.
 	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, Origin{Source: OriginUser, Submission: messageID}, images...)
+	flush()
 	m.mu.Lock()
 	current := a.deliveries[messageID]
 	if !a.deliverySealed && err != nil && (current.State == "sending" || current.State == "interrupted" && current.Session == "") {
