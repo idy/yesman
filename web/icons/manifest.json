@@ -258,6 +258,10 @@
     "chart": {
       "name": "chart-bar",
       "codepoint": "e150"
+    },
+    "speaker": {
+      "name": "speaker-high",
+      "codepoint": "e44a"
     }
   },
   "fonts": {

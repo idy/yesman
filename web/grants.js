@@ -10,6 +10,7 @@ const PERMISSIONS = {
   camera: ['Camera', 'Allow camera tasks you choose to run. Granting access does not capture images.', 'image'],
   accessibility: ['Accessibility', 'Allow desktop automation to inspect and operate application controls.', 'users'],
   screen: ['Screen Recording', 'Allow screen capture for desktop tasks you choose to run.', 'device'],
+  'system-audio': ['System Audio Recording Only', 'Allow audio tasks you choose to run to record the sound this Mac plays, without screen capture. This is separate from Microphone.', 'speaker'],
   input: ['Input Monitoring', 'Allow desktop tasks to monitor keyboard and mouse input when needed.', 'sliders'],
   automation: ['Automation', 'Review application control permissions for automation tasks.', 'gear'],
 };
@@ -29,6 +30,9 @@ const DETAILS = {
   'notification-sound-off': 'Alerts are allowed, but notification sounds are off. Focus and other system settings may still silence delivery.',
   'restart-may-be-needed': 'macOS reports access for this process, without a decision history. After changing access, restart yesman if macOS asks.',
   'boolean-status': 'macOS reports whether this process is trusted, without distinguishing a first request from a denial.',
+  'adhoc-build': 'macOS does not report access for this process. This copy is ad-hoc signed: replacing it with a different build can invalidate an earlier grant even while System Settings still shows yesman as on. This check cannot determine why access is missing. If the switch is already on for this copy, remove that entry with − and add this copy again with +, then quit and reopen yesman.',
+  'system-audio-manual': 'macOS has no public status check or request for system audio recording; it asks when a task first records. Check yesman in Privacy & Security › Screen & System Audio Recording, under System Audio Recording Only, and add this copy with + if it is missing. Screen recording access above is a separate permission.',
+  'system-audio-os': 'System audio recording without screen capture needs macOS 14.2 or later.',
   'windows-system': 'Windows manages this through device and desktop app settings. yesman cannot reliably query a per-app grant for this installed desktop application.',
   'windows-no-tcc': 'Windows has no equivalent macOS permission switch for this item. File access, desktop sessions and security policy still apply.',
   'linux-system': 'Access depends on your desktop environment, devices, session and portal or sandbox policy. There is no portable application-wide grant to query or request here.',
@@ -41,6 +45,10 @@ const OUTCOMES = {
   'query-failed': 'The request finished, but its status could not be read. Refresh to try again.',
 };
 const errorText = (err) => String(err?.message || err?.error || err);
+
+// macOS 15 renamed the pane; the Screen row is its upper list there.
+const settingsName = (id, os) => (id === 'screen' && Number.parseInt(os, 10) >= 15 ? 'Screen & System Audio Recording' : PERMISSIONS[id][0]);
+const SIGNING = { adhoc: 'ad-hoc signed', signed: 'signed', unsigned: 'unsigned' };
 
 export function createGrants({ call, shown }) {
   let root = null;
@@ -70,6 +78,9 @@ export function createGrants({ call, shown }) {
     root.replaceChildren(...[
       h('div', { class: 'grant-toolbar' }, h('h2', { class: 'mds-heading' }, t('Grant')), refresh),
       h('p', { class: 'toolbar-lead' }, t('Choose the access your work needs. Permissions apply to this copy of yesman; independent terminals, runtimes and helper apps may need their own grants.')),
+      view?.app?.path ? h('p', { class: 'toolbar-lead grant-identity' }, SIGNING[view.app.signing]
+        ? t('macOS checks this copy: {path} ({signing}).', { path: view.app.path, signing: t(SIGNING[view.app.signing]) })
+        : t('macOS checks this copy: {path}.', { path: view.app.path })) : null,
       error ? h('p', { class: 'danger', role: 'alert' }, t('Could not read permissions. Refresh to try again.'), ' ', error) : null,
       !view && (reading || pending) ? h('p', { role: 'status', class: 'toolbar-lead' }, t(pending ? 'Waiting for the system…' : 'Reading permissions…')) : null,
       view ? h('div', { class: 'mds-group grant-list', 'aria-label': t('Application permissions') }, view.items.map(row)) : null].filter(Boolean));
@@ -82,7 +93,8 @@ export function createGrants({ call, shown }) {
   function row(item) {
     const spec = PERMISSIONS[item.id];
     if (!spec) return null;
-    const [name, description, glyph] = spec;
+    const [, description, glyph] = spec;
+    const name = settingsName(item.id, view?.os);
     const busy = pending?.id === item.id || item.busy;
     const note = feedback?.id === item.id ? feedback : null;
     const nativePending = view?.items.some(value => value.busy);

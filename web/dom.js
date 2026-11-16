@@ -87,6 +87,7 @@ export const ICONS = Object.freeze({
   pencil: '\ue3b4', // pencil-simple
   keyboard: '\ue2d8', // keyboard
   chart: '\ue150', // chart-bar
+  speaker: '\ue44a', // speaker-high
 });
 
 // The opening of each dialog still waiting for its close.

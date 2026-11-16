@@ -4,20 +4,22 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { permissionIds } from './grant-ids.mjs';
 const { chromium, webkit } = await import(process.env.YESMAN_PLAYWRIGHT || 'playwright');
-const root = fileURLToPath(new URL('../web/', import.meta.url));
+const root = process.env.YESMAN_TEST_WEB_DIR || fileURLToPath(new URL('../web/', import.meta.url));
 const out = process.env.YESMAN_GRANT_EVIDENCE || '/tmp/yesman-grants-evidence/browser';
 await mkdir(out, { recursive: true });
 const bridge = `<script>
 const handlers={};window.calls=[];window.unmocked=[];window.failRead=false;window.failAction=false;window.holdRead=false;window.holdAction=false;
-window.fixture={platform:'darwin',items:[
+window.fixture={platform:'darwin',os:'27.0.1',app:{path:'/Applications/yesman.app',signing:'adhoc'},items:[
  {id:'bluetooth',state:'not-determined',request:true,settings:true},
  {id:'notifications',state:'limited',detail:'notification-alerts-off',settings:true},
  {id:'full-disk',state:'manual',detail:'full-disk-manual',settings:true},
  {id:'microphone',state:'not-determined',request:true,settings:true},
  {id:'camera',state:'not-determined',request:true,settings:true},
- {id:'accessibility',state:'not-granted',detail:'boolean-status',request:true,settings:true},
+ {id:'accessibility',state:'not-granted',detail:'adhoc-build',request:true,settings:true},
  {id:'screen',state:'not-granted',detail:'restart-may-be-needed',request:true,settings:true},
+ {id:'system-audio',state:'manual',detail:'system-audio-manual',settings:true},
  {id:'input',state:'restricted',settings:true},
  {id:'automation',state:'manual',detail:'automation-manual',settings:true}
 ]};
@@ -63,6 +65,9 @@ const server = createServer(async(req,res)=>{
 });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const results=[];
+const ids=permissionIds();
+// The fixture covers every source permission, in the native order.
+assert.deepEqual([...bridge.matchAll(/\{id:'([a-z-]+)'/g)].map(m=>m[1]),ids);
 try {
  for(const [name,engine] of [['chromium',chromium],['webkit',webkit]]){
   const browser=await engine.launch({headless:true});
@@ -79,20 +84,49 @@ try {
    const refresh=()=>page.locator('[data-grant-focus="refresh"]');
    const ready=()=>page.waitForFunction(()=>document.querySelector('[data-grant-focus="refresh"]')?.getAttribute('aria-disabled')==='false');
    await row('bluetooth').waitFor();await ready();
-   assert.equal(await page.locator('[data-permission]').count(),9);
+   assert.deepEqual(await page.locator('[data-permission]').evaluateAll(rows=>rows.map(r=>r.dataset.permission)),ids);
    assert.equal(await nav.getAttribute('aria-current'),'page');
    assert.equal(await page.evaluate(()=>calls.filter(c=>c[0]==='GrantAction').length),0);
    assert.equal(await row('full-disk').locator('[data-grant-action="request"]').count(),0);
    assert.equal(await row('automation').locator('[data-grant-action="request"]').count(),0);
    assert.match(await row('notifications').innerText(),/Limited/);
    assert.match(await row('input').innerText(),/Restricted/);
+   // System Audio Recording Only: its own row and Phosphor glyph, manual
+   // status, Settings only. It is neither Microphone nor Screen Recording.
+   const audio=row('system-audio');
+   assert.equal(await audio.locator('h3').innerText(),'System Audio Recording Only');
+   assert.equal(await audio.locator('h3 .mds-icon').getAttribute('data-icon'),'speaker');
+   assert.equal(await audio.locator('h3 .mds-icon').getAttribute('data-glyph'),'\ue44a');
+   assert.equal(await audio.locator('.grant-state').innerText(),'Manual · cannot detect');
+   assert.match(await audio.innerText(),/no public status check[\s\S]*System Audio Recording Only/);
+   assert.equal(await audio.locator('[data-grant-action="request"]').count(),0);
+   assert.equal(await audio.locator('[data-grant-action="settings"]').count(),1);
+   // macOS 15+ names the Screen row after its list; the identity of the
+   // checked copy and the ad-hoc build explanation are visible.
+   assert.equal(await row('screen').locator('h3').innerText(),'Screen & System Audio Recording');
+   assert.match(await page.locator('.grant-identity').innerText(),/macOS checks this copy: \/Applications\/yesman\.app \(ad-hoc signed\)/);
+   assert.match(await row('accessibility').innerText(),/different build[\s\S]*cannot determine why[\s\S]*remove that entry with − and add this copy again with \+/);
+   assert.equal(await row('accessibility').locator('.grant-state').innerText(),'Not granted');
+   assert.equal(await row('accessibility').locator('[data-grant-action="request"]').count(),1);
    // Every settings action is a fixed ID and never changes permission state.
-   for(const id of ['bluetooth','notifications','full-disk','microphone','camera','accessibility','screen','input','automation']){
+   for(const id of ids){
     const before=await row(id).locator('.grant-state').innerText();
     await action(id,'settings').click();
     await row(id).getByRole('status').getByText(/System Settings opened/).waitFor();
     assert.equal(await row(id).locator('.grant-state').innerText(),before);
    }
+   assert.equal(await page.evaluate(()=>calls.filter(c=>c[0]==='GrantAction'&&c[2]==='request').length),0);
+   // Older macOS: Screen Recording name, no system audio permission/Settings,
+   // and no identity line for an unidentified copy.
+   await page.evaluate(()=>{window.modern=structuredClone(fixture);fixture.os='14.1';delete fixture.app;Object.assign(fixture.items.find(i=>i.id==='system-audio'),{state:'not-applicable',detail:'system-audio-os',settings:false});});
+   await refresh().click();await ready();
+   assert.equal(await row('screen').locator('h3').innerText(),'Screen Recording');
+   assert.equal(await row('system-audio').locator('.grant-state').innerText(),'Not applicable');
+   assert.match(await row('system-audio').innerText(),/needs macOS 14\.2 or later/);
+   assert.equal(await row('system-audio').locator('button').count(),0);
+   assert.equal(await page.locator('.grant-identity').count(),0);
+   await page.evaluate(()=>{fixture=modern;});
+   await refresh().click();await ready();
    await page.evaluate(()=>{for(const id of ['notifications','input']){const item=fixture.items.find(i=>i.id===id);item.state='not-determined';item.request=true;}});
    await refresh().click();await ready();
    // Denial, restriction and unresolved/cancelled system response stay honest.
@@ -163,11 +197,13 @@ try {
    // Cross-platform data never invents a per-app grant or Linux settings URI.
    await page.evaluate(()=>window.macFixture=structuredClone(fixture));
    for(const platform of ['windows','linux']){
-    await page.evaluate(platform=>{fixture.platform=platform;fixture.items=macFixture.items.map(item=>({id:item.id,state:platform==='windows'&&['full-disk','accessibility','screen','input','automation'].includes(item.id)?'not-applicable':'system',detail:platform==='windows'?'windows-system':'linux-system',settings:platform==='windows'&&['bluetooth','notifications','camera','microphone'].includes(item.id)}));},platform);
+    await page.evaluate(platform=>{fixture.platform=platform;delete fixture.os;delete fixture.app;fixture.items=macFixture.items.map(item=>({id:item.id,state:platform==='windows'&&['full-disk','accessibility','screen','system-audio','input','automation'].includes(item.id)?'not-applicable':'system',detail:platform==='windows'?'windows-system':'linux-system',settings:platform==='windows'&&['bluetooth','notifications','camera','microphone'].includes(item.id)}));},platform);
     await refresh().click();await ready();
     assert.equal(await page.locator('[data-grant-action="request"]').count(),0);
     assert.equal(await page.locator('[data-grant-action="settings"]').count(),platform==='windows'?4:0);
     assert.equal(await page.locator('.grant-state[data-state="granted"]').count(),0);
+    assert.equal(await page.locator('.grant-identity').count(),0);
+    assert.equal(await row('screen').locator('h3').innerText(),'Screen Recording');
     await page.screenshot({path:out+'/'+name+'-'+platform+'.png'});
    }
    await page.evaluate(()=>fixture=macFixture);await refresh().click();await ready();
