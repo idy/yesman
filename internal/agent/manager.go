@@ -532,9 +532,10 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 		return nil, modelState{}, err
 	}
 	args := []string{"--mode", "rpc", "--session-dir", sessions, "-e", m.cfg.Extension}
-	resumed := hasSession(sessions)
+	resume := resumeArgs(sessions, y.Path)
+	resumed := resume != nil
 	if resumed {
-		args = append(args, "--continue")
+		args = append(args, resume...)
 	} else {
 		args = append(args, "--name", ID(y.Name, name))
 	}
@@ -1461,11 +1462,6 @@ var (
 	reportAttempts = 3
 	reportBackoff  = 2 * time.Second
 )
-
-func hasSession(dir string) bool {
-	matches, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	return len(matches) > 0
-}
 
 func lastLines(s string, n int) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
