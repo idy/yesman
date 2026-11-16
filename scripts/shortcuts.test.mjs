@@ -429,6 +429,13 @@ test('side effect actions run only on the agent shown, and only when it can', ()
   assert.equal(idle.state(idle.action('yesman.goto.2')).reason, 'There is no yesman {n}.');
 });
 
+test('Show Needs You opens the pane of the yesman shown, so it needs a conversation', () => {
+  const none = actionTable('mac');
+  assert.equal(none.state(none.action('needs-you.show')).reason, 'Open a conversation first.');
+  const shown = actionTable('linux', { id: 'bob/lead', yesman: 'bob', role: 'lead', status: 'idle' });
+  assert.equal(shown.state(shown.action('needs-you.show')).enabled, true);
+});
+
 test('loading the keys waits for changes being saved', async () => {
   let saved = { 'a.one': ['Mod+J'] };
   let release;

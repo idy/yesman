@@ -1,5 +1,6 @@
-// Needs you: what waits on the user, across every yesman. It is built only
-// from structured requests, never from what anyone wrote:
+// Needs you: what waits on the user, which the window shows by yesman, in a
+// pane beside its conversation. It is built only from structured requests,
+// never from what anyone wrote:
 //
 //   dialog   a lead's own pi dialog (yes or no, choice, text), or a worker's
 //            dialog its lead handed over to the user (agent.handedOver)
@@ -52,6 +53,23 @@ export function needsYouItems(snap) {
   }
   // The longest waiting first; ties keep a stable order.
   return items.sort((a, b) => time(a.since) - time(b.since) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+// instant reads a time the app sends, to the millisecond, the same in every
+// engine, whatever its digits after that.
+const instant = (s) => Date.parse(String(s ?? '').replace(/(\.\d{3})\d+/, '$1'));
+
+// requestsOf is what waits on the user from one yesman, y, for its current
+// hire. A dialog of an agent that started before y was hired is a request of
+// the yesman of the same name archived since, read in an older list of the
+// agents; an agent whose start is unknown is taken as it is.
+export function requestsOf(snap, y) {
+  const hired = instant(y?.hiredAt);
+  return needsYouItems({ agents: snap?.agents ?? [], yesmen: y ? [y] : [] }).filter((item) => {
+    if (item.kind !== 'dialog' || !Number.isFinite(hired)) return true;
+    const since = instant(item.agentSince);
+    return !Number.isFinite(since) || since >= hired;
+  });
 }
 
 // closedHandoffs is the handoffs recently closed, newest first: history,

@@ -21,8 +21,9 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   isOpen()               whether the panel shows
 //   files()                what the files pane shows (files.shown())
 //   openKnowledge(), openTaskLog(), openWorktree(dir, show), checkout(y)
-//   needsYou(y)            what waits on the user from y: { count, error }
-//   openNeedsYou(y)        show what waits on the user from y
+//   needsYou(y)            what waits on the user from y: { count, error,
+//                          refused, open (the Needs you pane shows) }
+//   openNeedsYou(y)        open the Needs you pane, of y, beside its conversation
 //   openURL(url)
 export function createInfo(host) {
   const data = new Map(); // yesman name -> what was read of it
@@ -176,12 +177,13 @@ export function createInfo(host) {
     };
   }
 
-  // What waits on the user from this yesman, counted from what Needs you
-  // shows; it opens there.
+  // What waits on the user from this yesman, counted from what the Needs
+  // you pane shows; it opens the pane.
   function needsYouEntry(y) {
-    const { count, error, refused } = host.needsYou(y);
+    const { count, error, refused, open } = host.needsYou(y);
     return {
       key: 'needs-you', label: t('Needs You'), title: t('See what {name} needs from you', { name: y.displayName || y.name }),
+      current: open,
       // A file that cannot be read is said, not counted as nothing; and so
       // is a lead that cannot hand over new requests.
       aside: error ? [count && tn(count, '{n} waiting', '{n} waiting'), t('Cannot be read')].filter(Boolean).join(' · ')
