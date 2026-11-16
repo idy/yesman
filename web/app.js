@@ -9,7 +9,7 @@ import { needsYouItems, requestsOf, closedHandoffs, summary as requestSummary, t
 import { messageActions, messageText, receiptText } from './message-actions.js';
 import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
 import { renderMarkdown } from './markdown.js';
-import { project, originOf, FINISHED } from './conversation.js';
+import { project, originOf, FINISHED, dismissible } from './conversation.js';
 import { $, h, icon, openModal } from './dom.js';
 import { createFiles } from './files.js';
 import { createInfo } from './info.js';
@@ -121,6 +121,7 @@ class Convo {
     // a message is tied to it. Only in memory; see holdSent.
     this.sent = new Map();
     this.lastSent = null; // the message ID this window submitted last
+    this.handled = handledOf(this.key); // IDs the person dismissed or resent unchanged; see saveHandled
     this.seq = 0;
     this.eventSeqs = new Set();
     this.piQueue = { known: false };
@@ -128,6 +129,31 @@ class Convo {
     this.receiptSetSeq = 0;
     this.retainedDeliveryIDs = null;
   }
+}
+
+// A submission the person dismissed, or resent unchanged from the draft it
+// left, is only a matter of what this page shows: its ID is kept in this
+// browser by conversation, never sent anywhere, and its receipt does not
+// change. One that becomes pending again shows again (see dismissible).
+// Only IDs the server still keeps are kept, for the conversations last used.
+const HANDLED_STORE = 'yesman.handledSubmissions';
+const readHandled = () => {
+  try {
+    const all = JSON.parse(localStorage.getItem(HANDLED_STORE) ?? '{}');
+    return all && typeof all === 'object' && !Array.isArray(all) ? all : {};
+  } catch { return {}; }
+};
+const handledOf = (key) => {
+  const ids = readHandled()[key];
+  return new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string' && /^[a-f0-9]{48}$/.test(id)));
+};
+function saveHandled(c) {
+  const all = readHandled();
+  delete all[c.key];
+  if (c.handled.size) all[c.key] = [...c.handled].slice(-256);
+  const keys = Object.keys(all);
+  for (const key of keys.slice(0, Math.max(0, keys.length - 64))) delete all[key];
+  try { localStorage.setItem(HANDLED_STORE, JSON.stringify(all)); } catch { /* Unavailable: this page still hides it until it reloads. */ }
 }
 
 // An agent's name can be reused: a dismissed yesman's name can be hired
@@ -165,12 +191,14 @@ const DELIVERY_LABELS = {
 const deliveryLabel = (d) => d.nativePending ? (d.state === 'queued' ? 'Waiting · follow-up' : 'Steering · waiting for input checkpoint') : DELIVERY_LABELS[d.state];
 
 function pruneDeliveryRows(c, ids) {
-  let changed = false;
+  let changed = false, handled = false;
   for (const id of ids ?? []) {
     c.recalled.delete(id);
     c.sent.delete(id);
+    handled = c.handled.delete(id) || handled;
     changed = c.deliveries.delete(id) || changed;
   }
+  if (handled) saveHandled(c);
   if (changed) schedulePatch(c, { frame: true });
 }
 
@@ -205,13 +233,31 @@ function copyActions(text, c = null, d = null) {
     copy: (value) => call('CopyValue', value), done: () => toast(t('Copied.')), fail,
     recall: eligible ? () => recallMessage(c, d.id) : null, restoring: d?.canRestore,
     promote: d?.canPromote && d.nativePending && d.state === 'queued' ? () => promoteMessage(c, d.id) : null,
-    busy: c?.actions.has(d?.id) });
+    busy: c?.actions.has(d?.id), dismiss: c && d && dismissible(d) ? () => dismissReceipt(c, d.id) : null });
   actions._copyText = text;
   actions._recall = `${!!d?.canCancel}:${!!d?.canRestore}:${!!d?.originalText}`;
   return actions;
 }
 
 function refreshDelivery(c, d) { if (d) schedulePatch(c, { frame: true }); }
+
+// The person is done with a submission nothing waits on: its row leaves this
+// page (and focus moves on to the next such row, or the input).
+function dismissReceipt(c, id) {
+  const d = c.deliveries.get(id);
+  if (!d || !dismissible(d)) return;
+  const el = document.querySelector(`#thread > [data-delivery="${CSS.escape(id)}"]`);
+  const focused = !!el?.contains(document.activeElement);
+  const after = focused ? [...document.querySelectorAll('#thread > .msg-delivery .message-dismiss')]
+    .map((b) => b.closest('.msg-delivery')?.dataset.delivery).filter((other) => other && other !== id &&
+      (el.compareDocumentPosition(document.querySelector(`#thread > [data-delivery="${CSS.escape(other)}"]`)) & Node.DOCUMENT_POSITION_FOLLOWING)) : [];
+  c.handled.add(id);
+  saveHandled(c);
+  schedulePatch(c);
+  if (!focused) return;
+  const next = after.length ? document.querySelector(`#thread > [data-delivery="${CSS.escape(after[0])}"] .message-dismiss`) : null;
+  (next ?? document.querySelector('.composer textarea'))?.focus({ preventScroll: true });
+}
 
 async function promoteMessage(c, id) {
   const a = selectedAgent();
@@ -263,6 +309,7 @@ async function recallMessage(c, id) {
     attachments.items = images;
     attachments.submissionID = null;
     attachments.submission = null;
+    attachments.retryOf = null;
     const d = c.deliveries.get(id);
     if (d) { d.canCancel = false; d.canRestore = false; d.originalText = false; refreshDelivery(c, d); }
     call('AckRecall', a.id, id, a.since).catch(() => {});
@@ -385,6 +432,9 @@ async function loadConvo(c) {
     c.tools.clear();
     for (const message of c.messages) indexMessage(c, message);
     for (const id of c.sent.keys()) if (!c.deliveries.has(id)) c.sent.delete(id);
+    const kept = c.handled.size;
+    for (const id of c.handled) if (!c.deliveries.has(id)) c.handled.delete(id);
+    if (c.handled.size !== kept) saveHandled(c);
     c.live = null;
     c.loaded = true;
     c.error = null;
@@ -2065,6 +2115,12 @@ async function sendMessage(a, textarea, submitter = null) {
       attachments.submission = null;
     }
   }
+  // The draft a refusal left, sent again unchanged, is that submission's
+  // retry: once the server has the new one, the refused one has been dealt
+  // with. An edited draft is a new intent and leaves it in view.
+  const retry = attachments.retryOf;
+  if (retry && (retry.text !== text || !sameSubmissionImages(retry.images, images))) attachments.retryOf = null;
+  const retried = attachments.retryOf?.id ?? null;
   const messageID = attachments.submissionID ?? Date.now().toString(16).padStart(12, '0') + [...crypto.getRandomValues(new Uint8Array(18))].map((b) => b.toString(16).padStart(2, '0')).join('');
   {
     attachments.submissionID = messageID;
@@ -2090,6 +2146,11 @@ async function sendMessage(a, textarea, submitter = null) {
   try {
     const receipt = await call('Submit', a.id, messageID, text, images, a.since);
     updateDelivery(c, receipt);
+    if (retried && receipt?.id === messageID && receipt.revision > 0) {
+      if (attachments.retryOf?.id === retried) attachments.retryOf = null;
+      c.handled.add(retried);
+      saveHandled(c);
+    }
     schedulePatch(c);
     // A duplicate may find registration durable while pi's response is still
     // pending. Keep the only full draft/attachments until acceptance is known.
@@ -2097,7 +2158,11 @@ async function sendMessage(a, textarea, submitter = null) {
     if (receipt.state === 'failed' || receipt.state === 'interrupted' || receipt.state === 'unconfirmed' && receipt.error) {
       // Only a definite rejection permits a fresh ID on unchanged retry. An
       // interrupted process may already have admitted this input before exit.
-      if (receipt.state === 'failed') { attachments.submissionID = null; attachments.submission = null; }
+      if (receipt.state === 'failed') {
+        attachments.retryOf = { id: messageID, text, images };
+        attachments.submissionID = null;
+        attachments.submission = null;
+      }
       throw new Error(receipt.error || t(DELIVERY_LABELS[receipt.state]));
     }
     attachments.submissionID = null;

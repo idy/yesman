@@ -333,14 +333,16 @@ test('submissions pi took take no row, even when their messages are summarized a
   assert.deepEqual(rows.filter((r) => r.type === 'text').map((r) => r.text).slice(-3), ['answer 24', 'bound answer', 'second bound answer']);
   assert.equal(rows.filter((r) => r.type === 'text').length, 26);
   assert.deepEqual(people.filter((r) => r.delivery).map((r) => r.delivery.id), [sub(26), sub(27)]);
-  // Only what is still on its way or queued has a row; taken, handled,
-  // recalled, and problems a later submission moved past have none.
-  assert.deepEqual(rows.slice(rows.length - 3).map((r) => r.type), ['receipt', 'receipt', 'receipt']);
-  assert.deepEqual(receiptRows(rows), [sub(31), sub(32), 'local']);
+  // Only what is still on its way or queued, and problems the person has not
+  // dealt with, have a row; taken, handled and recalled ones have none.
+  assert.deepEqual(rows.slice(rows.length - 5).map((r) => r.type), ['receipt', 'receipt', 'receipt', 'receipt', 'receipt']);
+  assert.deepEqual(receiptRows(rows), [sub(28), sub(29), sub(31), sub(32), 'local']);
+  // Once the person dismisses the two problems, only what is waiting is left.
+  assert.deepEqual(receiptRows(project({ messages, deliveries, lastSent: 'local', handled: new Set([sub(28), sub(29)]) }, { status: 'working' })), [sub(31), sub(32), 'local']);
   assert(!rows.some((r) => r.type === 'receipts'));
 });
 
-test('the latest refusal or uncertain answer stays in view until anything is sent after it', () => {
+test('a refusal or an answer with an error stays until the person deals with it, whatever is sent after it', () => {
   const old = Array.from({ length: 22 }, (_, i) => receipt(i + 1, i % 3 === 1 ? 'unconfirmed' : 'dispatched'));
   const messages = Array.from({ length: 22 }, (_, i) => user(`old ${i + 1}`));
   // Nothing sent since, and nothing left to know: nothing at the foot.
@@ -352,18 +354,36 @@ test('the latest refusal or uncertain answer stays in view until anything is sen
     rows = project({ messages, deliveries: new Map([...old, last]), lastSent: 'local' });
     assert.deepEqual(receiptRows(rows), [last[0]], last[1].state);
   }
-  // A new submission on its way moves past the refusal at once...
-  const failed = receipt(23, 'failed', { error: 'rejected' });
-  rows = project({ messages, deliveries: new Map([...old, failed, ['local', { id: 'local', revision: 0, state: 'sending', text: 'new' }]]), lastSent: 'local' });
-  assert.deepEqual(receiptRows(rows), ['local']);
-  // ...and the refusal does not come back when the new one is answered, taken, or itself fails.
-  for (const next of [receipt(24, 'accepted'), receipt(24, 'dispatched'), receipt(24, 'failed', { error: 'again' })]) {
-    rows = project({ messages, deliveries: new Map([...old, failed, next]) });
-    assert.deepEqual(receiptRows(rows), next[1].state === 'dispatched' ? [] : [sub(24)], next[1].state);
+  // A new submission sent after a refusal does not retire it: the person may
+  // not have seen it (it can come after the new one, to a page reloaded since).
+  for (const problem of [receipt(23, 'failed', { error: 'rejected', session: '' }), receipt(23, 'unconfirmed', { error: 'the bridge lost its answer' })]) {
+    rows = project({ messages, deliveries: new Map([...old, problem, ['local', { id: 'local', revision: 0, state: 'sending', text: 'new' }]]), lastSent: 'local' });
+    assert.deepEqual(receiptRows(rows), [sub(23), 'local'], problem[1].state);
+    // Nor does the new one being answered, taken, or failing itself.
+    for (const next of [receipt(24, 'accepted'), receipt(24, 'dispatched'), receipt(24, 'failed', { error: 'again', session: '' })]) {
+      rows = project({ messages, deliveries: new Map([...old, problem, next]) });
+      assert.deepEqual(receiptRows(rows), next[1].state === 'dispatched' ? [sub(23)] : [sub(23), sub(24)], `${problem[1].state} then ${next[1].state}`);
+    }
+  }
+  // An uncertain answer without an error is not a refusal: it shows only while it is the latest.
+  rows = project({ messages, deliveries: new Map([...old, receipt(23, 'unconfirmed'), receipt(24, 'accepted')]) });
+  assert.deepEqual(receiptRows(rows), [sub(24)]);
+  // The person dismissed it, or sent its draft again unchanged: it leaves,
+  // and stays gone through any later state of others.
+  const failed = receipt(23, 'failed', { error: 'rejected', session: '' });
+  for (const next of [[], [receipt(24, 'failed', { error: 'again', session: '' })], [receipt(24, 'dispatched')]]) {
+    rows = project({ messages, deliveries: new Map([...old, failed, ...next]), handled: new Set([sub(23)]) });
+    assert.deepEqual(receiptRows(rows), next.length && next[0][1].state === 'failed' ? [sub(24)] : []);
+  }
+  // Dismissing never hides one that is waiting again (a late answer for a
+  // local row, or a recall that can still return to the input).
+  for (const waiting of [receipt(23, 'steering', { nativePending: true }), receipt(23, 'sending'), receipt(23, 'cancelled', { canRestore: true })]) {
+    rows = project({ messages, deliveries: new Map([...old, waiting]), handled: new Set([sub(23)]) });
+    assert.deepEqual(receiptRows(rows), [sub(23)], waiting[1].state);
   }
   // When its message arrives tied to it, no receipt row is left.
   const sent = user('new', { source: 'user', submission: sub(24) });
-  const snapshot = () => ({ messages: [...messages, sent], deliveries: new Map([...old, failed, receipt(24, 'accepted')]) });
+  const snapshot = () => ({ messages: [...messages, sent], deliveries: new Map([...old, failed, receipt(24, 'accepted')]), handled: new Set([sub(23)]) });
   rows = project(snapshot());
   assert.deepEqual(rows.slice(-2).map((r) => r.type), ['user', 'user']);
   assert.equal(rows.at(-1).delivery.id, sub(24));
@@ -371,7 +391,22 @@ test('the latest refusal or uncertain answer stays in view until anything is sen
   assert.deepEqual(project(snapshot()).map((r) => r.key), rows.map((r) => r.key));
 });
 
-test('interrupted submissions stay until something is sent to a later session, never guessed taken', () => {
+test('a refusal that comes after a newer submission, to a page reloaded since, keeps both rows', () => {
+  // The shape a real Manager returns when durable registration fails late for
+  // A, after the page that sent it reloaded and B was sent: both refused,
+  // neither reached pi. A's whole short text stays copyable from its row.
+  const hold = receipt(1, 'dispatched', { text: 'hold' });
+  const a = receipt(2, 'failed', { session: '', text: 'late A original', error: 'disk I/O failure' });
+  const b = receipt(3, 'failed', { session: '', text: 'new B also fails', error: 'disk I/O failure' });
+  for (const deliveries of [new Map([hold, a, b]), new Map([hold, a, ['local', { id: 'local', revision: 0, state: 'sending', text: 'C' }]])]) {
+    const rows = project({ messages: [], deliveries, lastSent: 'local' });
+    assert.equal(receiptRows(rows)[0], sub(2));
+    assert.equal(rows[0].delivery.text, 'late A original');
+    assert.equal(rows.length, 2);
+  }
+});
+
+test('interrupted submissions stay until the person deals with them, never guessed taken', () => {
   // The app quit with a follow-up and a steering message queued; the steering
   // one was taken first. The follow-up's interruption comes after that.
   const follow = receipt(1, 'interrupted', { text: 'continue' });
@@ -385,9 +420,14 @@ test('interrupted submissions stay until something is sent to a later session, n
   // A submission this window has not heard back about yet does not decide it.
   rows = project({ messages: [], deliveries: new Map([follow, steer, also, ['local', { id: 'local', revision: 0, state: 'sending', text: 'next' }]]), lastSent: 'local' });
   assert.deepEqual(receiptRows(rows), [sub(1), sub(3), 'local']);
-  // Once one is registered in the restarted session, the person has moved past them.
-  rows = project({ messages: [], deliveries: new Map([follow, steer, also, receipt(4, 'steering', { session: 'p2:s1' })]) });
-  assert.deepEqual(receiptRows(rows), [sub(4)]);
+  // Nor does one in the restarted session: pending, taken, or itself refused there.
+  for (const next of [receipt(4, 'steering', { session: 'p2:s1' }), receipt(4, 'dispatched', { session: 'p2:s1' }), receipt(4, 'failed', { session: 'p2:s1', error: 'refused' })]) {
+    rows = project({ messages: [], deliveries: new Map([follow, steer, also, next]) });
+    assert.deepEqual(receiptRows(rows), next[1].state === 'dispatched' ? [sub(1), sub(3)] : [sub(1), sub(3), sub(4)], next[1].state);
+  }
+  // The person dismisses them.
+  rows = project({ messages: [], deliveries: new Map([follow, steer, also, receipt(4, 'dispatched', { session: 'p2:s1' })]), handled: new Set([sub(1), sub(3)]) });
+  assert.deepEqual(receiptRows(rows), []);
   // Pi's own message tied to an interrupted one: recorded, so it is the message.
   rows = project({ messages: [user('continue', { source: 'user', submission: sub(1) })], deliveries: new Map([follow, steer]) });
   assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['user', sub(1)]]);

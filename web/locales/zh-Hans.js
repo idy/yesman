@@ -206,6 +206,8 @@ export default {
   "Installed packages have not been read yet.": "尚未读取已安装的扩展包。",
   "Copy message text": "复制消息文字",
   "Send now": "提前处理",
+  "Hide": "隐藏",
+  "Stop showing this. Nothing is sent again.": "不再显示这条提示，不会重新发送。",
   "Move to steering for the next input checkpoint": "转为引导消息，在下一个输入检查点处理",
   "Waiting · follow-up": "等待后续处理",
   "Steering · waiting for input checkpoint": "引导消息 · 等待输入检查点",

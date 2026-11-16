@@ -254,9 +254,15 @@ Reliable pending human receipt rows show **Cancel and edit**. Their footer uses
 **Waiting · follow-up** or **Steering · waiting for input checkpoint**, never
 Sending after native acceptance. The conversation is pi's messages; a receipt
 draws a row only while it is open: sending/accepted/queued/steering or native
-pending, cancelled with a restorable original, the latest `failed`/`unconfirmed`
-submission, or `interrupted` until a later submission is bound to another pi
-session. Taken (`dispatched`), `handled` and other finished receipts draw
+pending, cancelled with a restorable original, `failed`, `interrupted` or
+`unconfirmed` with an error until the person hides it (**Hide**) or this window
+resends its kept draft unchanged and the server registers that resend, or an
+`unconfirmed` answer without an error while it is the latest submission. Other
+later sends, replies and empty queues never retire a problem: its status can
+arrive after them, to a reloaded page. Hiding is page-only: IDs in localStorage
+per conversation, pruned to the receipts Go still keeps; receipts are unchanged
+and nothing is resent, and a hidden ID that becomes pending again shows again.
+Taken (`dispatched`), `handled` and other finished receipts draw
 nothing, including after compaction removes their messages from context; their
 receipts stay in Go for idempotence and audit. Visibility does not depend on the
 eight-entry `Convo.sent` display cache, which only supplies a visible row's exact

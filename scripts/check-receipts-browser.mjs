@@ -10,10 +10,12 @@
 // submission, and messages tied to their receipts. The conversation is pi's
 // messages: finished receipts draw no list, count, row or label, and every
 // message, image and reply stays as it was. A submission shows at the foot,
-// with its state and actions, only while it is open: sending, accepted,
-// refused or uncertain until something is sent after it, interrupted until a
-// submission reaches a later session, waiting in pi's queue (Send now, Cancel
-// and edit) or recalled with its original to return to the input. It also
+// with its state and actions, only while it is open: sending or accepted,
+// waiting in pi's queue (Send now, Cancel and edit), recalled with its
+// original to return to the input, uncertain while it is the latest, or
+// refused, interrupted or answered with an error until the person hides it or
+// sends its draft again unchanged; whatever else is sent after it, a refusal
+// that comes late, to a page reloaded since, stays. It also
 // covers two with the same text, images, a native message tied late, taken
 // ones leaving one by one while the reader's place, focus and draft stay, late
 // lower revisions, another agent, the command palette, keys and Settings
@@ -192,6 +194,7 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
           case "NeedsYou": return { items: [] };
           case "Update": return {};
           case "TakeFocus": return "";
+          case "CopyValue": window.copied = args[0]; return {};
           case "Shortcuts": return {};
           case "Grants": return { platform: "darwin", items: [] };
           case "ModelUsage": return { rows: [], coverage: {}, totals: {} };
@@ -421,8 +424,8 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await row(lost).locator(".delivery-status").innerText(), "Delivery unconfirmed");
     assert.equal(await row(lost).locator(".delivery-status").getAttribute("title"), "the bridge lost its answer");
     assert.equal(await input.inputValue(), "did this arrive?");
-    // Editing and sending is a new intent: the person moved past the uncertain
-    // one, which leaves; nothing resends it.
+    // Editing and sending is a new intent; it does not say the uncertain one
+    // was dealt with, which stays; nothing resends it.
     await input.fill("did this arrive? (edited)");
     count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
@@ -433,7 +436,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await settled();
     await frame(page);
     assert.match(await row(edited).innerText(), /^did this arrive\? \(edited\)\s*Accepted for steering/);
-    assert.equal(await row(lost).count(), 0, "an uncertain submission stayed after the person sent another");
+    assert.match(await row(lost).innerText(), /^did this arrive\?\s*Delivery unconfirmed/, "an uncertain answer with an error left when the person sent another");
     // One the server never heard of, superseded by an edited draft the server
     // answers for, leaves too: it is no longer the latest.
     await page.evaluate(() => (window.fixture.bridgeDown = true));
@@ -442,7 +445,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await settled();
     await frame(page);
     const unheard = await sentID();
-    assert.match(await row(unheard).innerText(), /^never heard of\s*Delivery unconfirmed$/);
+    assert.match(await row(unheard).innerText(), /^never heard of\s*Delivery unconfirmed\s*Hide$/);
     count = await page.evaluate(() => window.sent.length);
     await input.fill("never heard of (edited)");
     await input.press("Enter");
@@ -455,8 +458,8 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await row(unheard).count(), 0, "a submission the server never heard of stays the latest");
     assert.match(await row(reworded).innerText(), /^never heard of \(edited\)\s*Accepted for steering/);
 
-    // A refusal stays in view, with its error and the draft, until something
-    // is sent after it.
+    // A refusal stays in view, with its error and the draft, whatever is sent
+    // after it.
     await input.fill("this will be refused");
     count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
@@ -465,7 +468,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "failed", { error: "pi refused the prompt" }), refused);
     await settled();
     await frame(page);
-    assert.match(await row(refused).innerText(), /^this will be refused\s*Not sent$/);
+    assert.match(await row(refused).innerText(), /^this will be refused\s*Not sent\s*Hide$/);
     assert.equal(await row(refused).locator(".delivery-status").getAttribute("title"), "pi refused the prompt");
     assert.equal(await input.inputValue(), "this will be refused");
     // Images alone, sent now.
@@ -482,7 +485,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await settled();
     await frame(page);
     assert.equal(await row(alone).locator(".delivery-status").innerText(), "Accepted for follow-up · delivery unconfirmed");
-    assert.equal(await row(refused).count(), 0, "a refusal stayed after the person sent another");
+    assert.match(await row(refused).innerText(), /^this will be refused\s*Not sent/, "a refusal left when the person sent another");
     // The uncertain answer from the server, the latest now, is in view.
     await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed", { error: "pi stopped before answering" }), alone);
     await frame(page);
@@ -490,7 +493,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await row(alone).locator(".msg-user img").count(), 1, "the latest let go of what it was sent as");
     const live = await seen(page);
     const liveRows = await ownIDs(page);
-    assert.deepEqual(liveRows, [edited, reworded, alone]);
+    assert.deepEqual(liveRows, [lost, edited, reworded, refused, alone]);
     assert.equal(live.folded, 0);
     assert.doesNotMatch(await page.locator("#thread").innerText(), RECORDS);
     results[`${engine}-live`] = { ...live, people: live.people.length, rows: liveRows.length };
@@ -557,10 +560,91 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.match(await row(edited).innerText(), /^did this arrive\? \(edited\)\s*Accepted for steering/);
     assert.match(await row(reworded).innerText(), /^never heard of \(edited\)\s*Accepted for steering/);
 
+    // The person hides a refusal: it leaves, focus moves on to the next one
+    // to hide, and nothing is sent. Hidden ones stay hidden through a reload.
+    const hide = (id) => row(id).getByRole("button", { name: "Hide", exact: true });
+    count = await page.evaluate(() => window.sent.length);
+    assert.equal(await row(edited).locator(".message-dismiss").count(), 0, "a submission still on its way can be hidden");
+    await hide(refused).focus();
+    await page.keyboard.press("Enter");
+    await frame(page);
+    assert.equal(await row(refused).count(), 0);
+    assert.equal(await hide(alone).evaluate((el) => document.activeElement === el), true, "focus did not move on to the next one");
+    await hide(lost).click();
+    await frame(page);
+    assert.deepEqual(await ownIDs(page), [edited, reworded, alone]);
+    assert.equal(await page.evaluate(() => window.sent.length), count, "hiding sent something");
+    await page.reload();
+    await page.locator('[data-agent="alice/lead"]').first().click();
+    await row(alone).waitFor();
+    await page.waitForTimeout(100);
+    assert.deepEqual(await ownIDs(page), [edited, reworded, alone]);
+    // A refusal sent again unchanged, from the draft it left: once the server
+    // has the new one, the refused one has been dealt with, live and reloaded.
+    await input.fill("refused, then sent again as it was");
+    count = await page.evaluate(() => window.sent.length);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    const refusedOnce = await sentID();
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "failed", { error: "pi refused the prompt" }), refusedOnce);
+    await settled();
+    await frame(page);
+    assert.equal(await input.inputValue(), "refused, then sent again as it was");
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 2, count);
+    const again = await sentID();
+    assert.notEqual(again, refusedOnce);
+    assert.match(await row(refusedOnce).innerText(), /Not sent/, "the refusal left before the server had its retry");
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), again);
+    await settled();
+    await frame(page);
+    assert.equal(await row(refusedOnce).count(), 0, "a refusal sent again unchanged stayed");
+    assert.match(await row(again).innerText(), /^refused, then sent again as it was\s*Accepted for steering/);
+    // A refusal that comes late, to a page reloaded since, after a newer one
+    // was sent (the shape a real Manager gives when durable registration
+    // fails): both stay, the earlier one's text copyable, live and reloaded.
+    const late = sub(0x10a);
+    await page.evaluate((id) => window.fixture.emit("alice/lead", { type: "delivery_update", delivery: { id, agentSince: "1", session: "", revision: 1, state: "sending", text: "late A original", imageCount: 0, order: ++window.fixture.saved.order } }), late);
+    await frame(page);
+    await input.fill("new B also fails");
+    count = await page.evaluate(() => window.sent.length);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    const newer = await sentID();
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "failed", { error: "disk I/O failure" }), late);
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "failed", { error: "disk I/O failure" }), newer);
+    await settled();
+    await frame(page);
+    for (let pass = 0; pass < 2; pass++) {
+      assert.match(await row(late).innerText(), /^late A original\s*Not sent/);
+      assert.match(await row(newer).innerText(), /^new B also fails\s*Not sent/);
+      await row(late).locator(".message-copy").click();
+      await page.waitForFunction(() => window.copied === "late A original");
+      await page.evaluate(() => (window.copied = null));
+      if (!pass) {
+        await page.reload();
+        await page.locator('[data-agent="alice/lead"]').first().click();
+        await row(late).waitFor();
+      }
+    }
+    // Hidden, it shows again if it is waiting again: hiding never hides what pi may still take.
+    await hide(late).click();
+    await frame(page);
+    assert.equal(await row(late).count(), 0);
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "queued", { nativePending: true }), late);
+    await frame(page);
+    assert.match(await row(late).innerText(), /^late A original\s*Waiting · follow-up/);
+    assert.equal(await row(late).locator(".message-dismiss").count(), 0);
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "dispatched", { nativePending: false }), late);
+    await hide(newer).click();
+    await frame(page);
+    assert.deepEqual(await ownIDs(page), [edited, reworded, alone, again]);
+
     // Chinese.
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
     await page.waitForTimeout(50);
     assert.equal(await row(alone).locator(".delivery-status").innerText(), "交付状态尚未确认");
+    assert.equal(await row(alone).locator(".message-dismiss").innerText(), "隐藏");
     assert.doesNotMatch(await page.locator("#thread").innerText(), RECORDS);
     assert.deepEqual(errors, []);
     assert.deepEqual(outside, []);
@@ -604,7 +688,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await frame(mp);
     assert.deepEqual(await ownIDs(mp), [interrupted]);
     assert.equal(await mr(interrupted).locator(".delivery-status").innerText(), "Delivery interrupted");
-    assert.equal(await mr(interrupted).locator("button:not(:disabled)").count(), 1, "an interrupted submission offers more than Copy");
+    assert.deepEqual(await mr(interrupted).locator("button:not(:disabled)").evaluateAll((els) => els.map((el) => el.getAttribute("aria-label"))), ["Copy message text", "Hide"], "an interrupted submission offers more than Copy and Hide");
     const ids = [], texts = [];
     const fullText = "  original current input\n" + "全文 ".repeat(200);
     for (let i = 0; i < 12; i++) {
@@ -631,8 +715,8 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
       window.fixture.emit("alice/lead", { type: "delivery_update", delivery: { id: unknown, revision: 1, order: 199, state: "future-state", text: "unknown older receipt", preview: true, imageCount: 1 } });
     }, [ids, unknown]);
     await frame(mp);
-    // A submission to the restarted session moved past the interruption.
-    assert.deepEqual(await ownIDs(mp), [unknown, ...ids]);
+    // A submission to the restarted session does not say the interruption was dealt with.
+    assert.deepEqual(await ownIDs(mp), [interrupted, unknown, ...ids]);
     assert.equal(await mr(ids[3]).getByRole("button", { name: "Return recalled message to input", exact: true }).count(), 1);
     assert.equal(await mr(unknown).locator("img, button:not(:disabled)").count(), 0);
     for (const id of ids.filter((_, i) => i !== 3)) {
@@ -646,7 +730,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await mr(ids[0]).locator('[data-original], .msg-user img').first().waitFor();
     await mp.waitForFunction(() => document.querySelectorAll('#thread > [data-original="true"]').length === 12);
     const afterReload = await seen(mp);
-    assert.deepEqual(await ownIDs(mp), [unknown, ...ids]);
+    assert.deepEqual(await ownIDs(mp), [interrupted, unknown, ...ids]);
     assert.equal(afterReload.folded, 0);
     assert.deepEqual(afterReload.people, canonical.people);
     assert.equal(afterReload.replies, 42);
@@ -657,7 +741,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await frame(mp);
     assert.deepEqual(await mp.evaluate(() => window.promoted), [ids[0]]);
     assert.equal(await mr(ids[0]).locator(".delivery-status").innerText(), "Steering · waiting for input checkpoint");
-    results[`${engine}-mixed-current`] = { ...afterReload, people: afterReload.people.length, rows: 13, payloadsRestored: 12, exactPromotion: ids[0] };
+    results[`${engine}-mixed-current`] = { ...afterReload, people: afterReload.people.length, rows: 14, payloadsRestored: 12, exactPromotion: ids[0] };
     await mp.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
     await shot(mp, "mixed-current", engine);
     // Narrow, in Chinese.
@@ -689,7 +773,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
         if (tie) window.fixture.native("alice/lead", id, text);
       }, [id, n % 2 === 0, texts[ids.indexOf(id)]]);
       await frame(mp);
-      assert.deepEqual(await ownIDs(mp), [unknown, ids[3], ...queued.slice(n + 1)].sort((a, b) => [unknown, ...ids].indexOf(a) - [unknown, ...ids].indexOf(b)), `after ${n + 1} taken`);
+      assert.deepEqual(await ownIDs(mp), [interrupted, unknown, ids[3], ...queued.slice(n + 1)].sort((a, b) => [interrupted, unknown, ...ids].indexOf(a) - [interrupted, unknown, ...ids].indexOf(b)), `after ${n + 1} taken`);
       assert.deepEqual(await anchorOf(mp), mplace, "a taken submission moved the reader");
     }
     assert.deepEqual(await composerState(mp), { focused: true, value: "a draft while they are taken", selection: [2, 7] });
@@ -702,12 +786,16 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
       window.events["agent-event"]({ agent: "alice/lead", seq: ++window.fixture.saved.seq, data: { type: "delivery_update", delivery: { ...d, revision: 2, state: "queued", nativePending: true, canCancel: true, canPromote: true } } });
     }, queued[1]);
     await frame(mp);
-    assert.deepEqual(await ownIDs(mp), [unknown, ids[3]]);
+    assert.deepEqual(await ownIDs(mp), [interrupted, unknown, ids[3]]);
     // The recalled one goes back to the input with its text and images, then leaves.
     await mi.fill("");
     await mr(ids[3]).getByRole("button", { name: "Return recalled message to input", exact: true }).click();
     await mp.waitForFunction((text) => document.querySelector(".composer textarea").value === text, texts[3]);
     await mp.waitForFunction(() => document.querySelectorAll(".composer-image").length === 2);
+    await frame(mp);
+    assert.deepEqual(await ownIDs(mp), [interrupted, unknown]);
+    // The person hides the interruption; a state this page does not know cannot be hidden.
+    await mr(interrupted).getByRole("button", { name: "Hide", exact: true }).click();
     await frame(mp);
     assert.deepEqual(await ownIDs(mp), [unknown]);
     // Reloaded once more: the same rows; every message pi has is there.
@@ -727,7 +815,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.deepEqual(mixed.unsupported, []);
     assert.deepEqual(mixed.outside, []);
     await mixed.context.close();
-    console.log(engine, "finished receipts draw nothing/messages and replies whole/no labels/repeats keep place, focus and draft/sent as sent/states/same text/late native/retry/edit/refusal/images/agents/palette/keys/Settings/reload equals live/i18n/dark/narrow/local icons/cache8/queue actions/taken one by one/late revision/restore PASS");
+    console.log(engine, "finished receipts draw nothing/messages and replies whole/no labels/repeats keep place, focus and draft/sent as sent/states/same text/late native/retry/edit/refusal stays/hide and focus/unchanged resend/late refusal after reload/hidden but waiting again/images/agents/palette/keys/Settings/reload equals live/i18n/dark/narrow/local icons/cache8/queue actions/taken one by one/late revision/interruption until hidden/restore PASS");
   } finally {
     await browser.close();
   }

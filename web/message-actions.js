@@ -11,7 +11,7 @@ export function receiptText(receipt) {
   return !receipt.preview && typeof receipt.text === 'string' ? receipt.text : null;
 }
 
-export function messageActions({ text, loadText, copy, done, fail, recall, promote, busy = false, restoring = false }) {
+export function messageActions({ text, loadText, copy, done, fail, recall, promote, dismiss, busy = false, restoring = false }) {
   const available = typeof text === 'string' || typeof loadText === 'function';
   const hasText = !!loadText || !!text?.length;
   const label = !available ? t('Full message text is unavailable') : hasText ? t('Copy message text') : t('This message has no text to copy');
@@ -46,5 +46,11 @@ export function messageActions({ text, loadText, copy, done, fail, recall, promo
     class: 'message-copy message-promote', type: 'button', title: t('Move to steering for the next input checkpoint'), 'aria-label': promoteLabel,
     onclick: promote, disabled: busy, 'aria-busy': busy ? 'true' : null,
   }, icon('send'), h('span', null, promoteLabel)) : null;
-  return h('div', { class: 'message-actions' }, button, promoteButton, recallButton);
+  // Only stops showing a submission nothing waits on; it is never sent again.
+  const dismissLabel = t('Hide');
+  const dismissButton = dismiss ? h('button', {
+    class: 'message-dismiss', type: 'button', title: t('Stop showing this. Nothing is sent again.'), 'aria-label': dismissLabel,
+    onclick: dismiss,
+  }, icon('check'), h('span', null, dismissLabel)) : null;
+  return h('div', { class: 'message-actions' }, button, promoteButton, recallButton, dismissButton);
 }

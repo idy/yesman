@@ -41,7 +41,8 @@ const textOf = (content) =>
 // convo: { messages, live: message being written or null, tools: Map(id -> {status}),
 //          deliveries: Map(id -> receipt), sent: Map(id -> { text, images }) of what
 //          this window submitted and has not seen tied to a message yet,
-//          lastSent: the ID this window submitted last }
+//          lastSent: the ID this window submitted last,
+//          handled: Set of IDs the person dismissed or resent unchanged }
 // agent: { status } — working, waiting, failed... of the agent shown.
 export function project(convo, agent = {}) {
   const rows = [];
@@ -177,15 +178,15 @@ export function project(convo, agent = {}) {
   const made = (d) => (d.revision > 0 ? (d.order ?? 0) : Infinity);
   const receipts = all.filter((d) => !bound.has(d.id)).sort((a, b) => made(a) - made(b) || 0);
   // open: on its way or in pi's queue, recalled and ready to go back to the
-  // input, or a problem the person has not moved past. A refusal or an
-  // uncertain answer comes back to the send itself, so anything sent later
-  // moves past it. An interruption comes when pi's process or session ends,
-  // perhaps after later messages were taken, so only a submission the server
-  // has bound to a later session moves past it. Nothing here says a message
-  // was taken, and nothing replays it.
-  const open = (d) => d.nativePending || d.canRestore || !FINISHED.has(d.state) ||
-    (d.state === 'interrupted' ? !all.some((e) => e.revision > 0 && e.session && e.session !== d.session && made(e) > made(d))
-      : (d.state === 'failed' || d.state === 'unconfirmed') && d === latest);
+  // input, or a problem the person has not dealt with: refused, cut off with
+  // pi's process or session, or answered with an error. Only the person says
+  // they have dealt with one, by dismissing it or by sending its draft again
+  // unchanged (handled). Sending something else does not: the answer may come
+  // after it, to a page reloaded since, and the new message may fail too. An
+  // uncertain answer without an error shows while it is the latest. Nothing
+  // here says a message was taken, and nothing replays it.
+  const open = (d) => !dismissible(d) || !convo.handled?.has(d.id) &&
+    (problem(d) || d.state === 'unconfirmed' && d === latest);
   for (const d of receipts) if (open(d)) rows.push({ type: 'receipt', key: `d:${d.id}`, delivery: d, sent: convo.sent?.get(d.id) });
   return rows;
 }
@@ -238,3 +239,11 @@ function foldFailures(rows) {
 // The states after which nothing more is known about a submission. Any
 // other, or one this page does not know, keeps its row.
 export const FINISHED = new Set(['unconfirmed', 'failed', 'interrupted', 'handled', 'dispatched', 'cancelled']);
+
+// dismissible: nothing is waiting on a submission, so the person may stop
+// seeing it. One still on its way, in pi's queue or ready to go back to the
+// input never is.
+export const dismissible = (d) => FINISHED.has(d.state) && !d.nativePending && !d.canRestore;
+
+// problem: a submission that was refused, cut off, or answered with an error.
+const problem = (d) => d.state === 'failed' || d.state === 'interrupted' || d.state === 'unconfirmed' && !!d.error;
