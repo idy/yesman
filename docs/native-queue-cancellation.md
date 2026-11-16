@@ -261,7 +261,11 @@ resends its kept draft unchanged and the server registers that resend, or an
 later sends, replies and empty queues never retire a problem: its status can
 arrive after them, to a reloaded page. Hiding is page-only: IDs in localStorage
 per conversation, pruned to the receipts Go still keeps; receipts are unchanged
-and nothing is resent, and a hidden ID that becomes pending again shows again.
+and nothing is resent. The person sending that ID again, or an accepted update
+(this generation, newer revision, still retained) that is not finished, drops
+the ID from the hidden set and persists that, so the new attempt's outcome shows
+live and after reload; lower revisions and earlier generations cannot. If the
+set cannot be written, it is removed so a reload never hides more than the page.
 Taken (`dispatched`), `handled` and other finished receipts draw
 nothing, including after compaction removes their messages from context; their
 receipts stay in Go for idempotence and audit. Visibility does not depend on the

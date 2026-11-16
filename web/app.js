@@ -134,8 +134,11 @@ class Convo {
 // A submission the person dismissed, or resent unchanged from the draft it
 // left, is only a matter of what this page shows: its ID is kept in this
 // browser by conversation, never sent anywhere, and its receipt does not
-// change. One that becomes pending again shows again (see dismissible).
-// Only IDs the server still keeps are kept, for the conversations last used.
+// change. Hiding covers what the person saw: when they send that ID again,
+// or the server takes it up again (sending, queued, ready to return), the
+// Hide is dropped, so the outcome of that new attempt shows (see
+// reopenHandled). Only IDs the server still keeps are kept, for the
+// conversations last used.
 const HANDLED_STORE = 'yesman.handledSubmissions';
 const readHandled = () => {
   try {
@@ -153,7 +156,17 @@ function saveHandled(c) {
   if (c.handled.size) all[c.key] = [...c.handled].slice(-256);
   const keys = Object.keys(all);
   for (const key of keys.slice(0, Math.max(0, keys.length - 64))) delete all[key];
-  try { localStorage.setItem(HANDLED_STORE, JSON.stringify(all)); } catch { /* Unavailable: this page still hides it until it reloads. */ }
+  try { localStorage.setItem(HANDLED_STORE, JSON.stringify(all)); } catch {
+    // Unwritable: this page still hides what it hid until it reloads. Drop
+    // what was stored so a reload never hides what this page shows again.
+    try { localStorage.removeItem(HANDLED_STORE); } catch { /* Nothing stored can be read either. */ }
+  }
+}
+// reopenHandled drops the Hide of a submission tried again; true if it had one.
+function reopenHandled(c, id) {
+  if (!c.handled.delete(id)) return false;
+  saveHandled(c);
+  return true;
 }
 
 // An agent's name can be reused: a dismissed yesman's name can be hired
@@ -219,6 +232,9 @@ function updateDelivery(c, d) {
   if (d?.agentSince && `${c.id}@${d.agentSince}` !== c.key) return;
   if (!d?.id || (c.deliveries.get(d.id)?.revision ?? -1) >= d.revision) return;
   c.deliveries.set(d.id, d);
+  // Only an update that passed the checks above (this generation, a newer
+  // revision) can say the server took a hidden submission up again.
+  if (!dismissible(d)) reopenHandled(c, d.id);
   letGo(c);
   if (c.deliveries.size > 256) {
     const excess = [...c.deliveries.keys()].filter(id => id !== d.id).slice(0,c.deliveries.size-256);
@@ -2123,6 +2139,9 @@ async function sendMessage(a, textarea, submitter = null) {
   const retried = attachments.retryOf?.id ?? null;
   const messageID = attachments.submissionID ?? Date.now().toString(16).padStart(12, '0') + [...crypto.getRandomValues(new Uint8Array(18))].map((b) => b.toString(16).padStart(2, '0')).join('');
   {
+    // Sending a hidden submission's draft again is a new attempt the person
+    // asked for: what comes of it shows, even if it fails again.
+    reopenHandled(c, messageID);
     attachments.submissionID = messageID;
     attachments.submission ??= { text, images };
     if (!c.deliveries.has(messageID)) {

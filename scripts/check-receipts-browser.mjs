@@ -15,7 +15,8 @@
 // original to return to the input, uncertain while it is the latest, or
 // refused, interrupted or answered with an error until the person hides it or
 // sends its draft again unchanged; whatever else is sent after it, a refusal
-// that comes late, to a page reloaded since, stays. It also
+// that comes late, to a page reloaded since, stays. A hidden one tried again,
+// by the person or taken up again by the server, shows what comes of it. It also
 // covers two with the same text, images, a native message tied late, taken
 // ones leaving one by one while the reader's place, focus and draft stay, late
 // lower revisions, another agent, the command palette, keys and Settings
@@ -640,6 +641,119 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await frame(page);
     assert.deepEqual(await ownIDs(page), [edited, reworded, alone, again]);
 
+    // A hidden submission tried again: whatever comes of the new attempt
+    // shows, live and reloaded, with its whole text to copy. The Hide covered
+    // only what the person saw then.
+    const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem("yesman.handledSubmissions") ?? "{}")["alice/lead@1"] ?? []);
+    const copyOf = async (id) => {
+      await page.evaluate(() => (window.copied = null));
+      await row(id).locator(".message-copy").click();
+      await page.waitForFunction(() => window.copied !== null);
+      return page.evaluate(() => window.copied);
+    };
+    const reloadLead = async () => {
+      await page.reload();
+      await page.locator('[data-agent="alice/lead"]').first().click();
+      await row(alone).waitFor();
+      await page.waitForTimeout(100);
+    };
+    // (a) The bridge loses the first send before the server hears of it; the
+    // person hides that row, then sends the same draft again (the same ID).
+    // The server registers it and refuses it: the refusal shows.
+    await page.evaluate(() => (window.fixture.bridgeDown = true));
+    await input.fill("retry hidden unknown");
+    count = await page.evaluate(() => window.sent.length);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    await settled();
+    const retried = await sentID();
+    await hide(retried).click();
+    await frame(page);
+    assert.equal(await row(retried).count(), 0);
+    assert.equal((await stored()).includes(retried), true);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 2, count);
+    assert.equal(await sentID(), retried, "an unchanged retry got a new ID");
+    await row(retried).locator(".delivery-status", { hasText: "Sending" }).waitFor();
+    assert.equal((await stored()).includes(retried), false, "a retried submission stayed hidden in storage");
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "failed", { error: "initial persistence failed" }), retried);
+    await settled();
+    await frame(page);
+    for (let pass = 0; pass < 2; pass++) {
+      assert.match(await row(retried).innerText(), /^retry hidden unknown\s*Not sent/, "the new attempt's refusal is hidden");
+      assert.equal(await copyOf(retried), "retry hidden unknown");
+      if (!pass) await reloadLead();
+    }
+    // (b) Hidden again, it stays hidden through a late lower revision and an
+    // earlier generation's callback: neither is a new attempt.
+    await hide(retried).click();
+    await frame(page);
+    await page.evaluate((id) => {
+      const d = window.fixture.saved.receipts["alice/lead"].find((x) => x.id === id);
+      const deliver = (delivery) => window.events["agent-event"]({ agent: "alice/lead", seq: ++window.fixture.saved.seq, data: { type: "delivery_update", delivery } });
+      deliver({ ...d, revision: 1, state: "sending", error: "" });
+      deliver({ ...d, agentSince: "0", revision: 99, state: "queued", nativePending: true, error: "" });
+    }, retried);
+    await frame(page);
+    assert.equal(await row(retried).count(), 0, "a stale callback brought a hidden row back");
+    assert.equal((await stored()).includes(retried), true);
+    await reloadLead();
+    assert.equal(await row(retried).count(), 0);
+    // (c) The bridge loses its answer though the server got the message: the
+    // person hides the uncertain row, then the server's own answer arrives,
+    // waits in pi's queue, and is cut off. The interruption shows.
+    await page.evaluate(() => (window.fixture.bridgeDown = true));
+    await input.fill("reached the server after all");
+    count = await page.evaluate(() => window.sent.length);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    await settled();
+    const ambiguous = await sentID();
+    await hide(ambiguous).click();
+    await frame(page);
+    assert.equal(await row(ambiguous).count(), 0);
+    await page.evaluate((id) => window.fixture.emit("alice/lead", { type: "delivery_update", delivery: { id, agentSince: "1", session: "s", revision: 1, state: "sending", text: "reached the server after all", imageCount: 0, order: ++window.fixture.saved.order } }), ambiguous);
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "queued", { nativePending: true }), ambiguous);
+    await frame(page);
+    assert.match(await row(ambiguous).innerText(), /^reached the server after all\s*Waiting · follow-up/);
+    assert.equal(await row(ambiguous).locator(".message-dismiss").count(), 0);
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "interrupted", { nativePending: false }), ambiguous);
+    await frame(page);
+    for (let pass = 0; pass < 2; pass++) {
+      assert.match(await row(ambiguous).innerText(), /^reached the server after all\s*Delivery interrupted/, "an interruption after the server took it up again is hidden");
+      assert.equal(await copyOf(ambiguous), "reached the server after all");
+      if (!pass) await reloadLead();
+    }
+    // (d) An interruption hidden, then its kept draft sent again: the server
+    // answers with the same receipt, unchanged, and nothing is sent to pi.
+    // The person asked again, so the answer shows again.
+    await input.fill("interrupted, hidden, asked again");
+    count = await page.evaluate(() => window.sent.length);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    const asked = await sentID();
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "interrupted"), asked);
+    await settled();
+    await hide(asked).click();
+    await frame(page);
+    assert.equal(await row(asked).count(), 0);
+    const revision = await page.evaluate((id) => window.fixture.saved.receipts["alice/lead"].find((x) => x.id === id).revision, asked);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 2, count);
+    assert.equal(await sentID(), asked);
+    await settled();
+    await frame(page);
+    assert.equal(await page.evaluate((id) => window.fixture.saved.receipts["alice/lead"].find((x) => x.id === id).revision, asked), revision);
+    for (let pass = 0; pass < 2; pass++) {
+      assert.match(await row(asked).innerText(), /^interrupted, hidden, asked again\s*Delivery interrupted/);
+      if (!pass) await reloadLead();
+    }
+    // Hidden once more, all three stay hidden; the rest are as they were.
+    for (const id of [retried, ambiguous, asked]) if (await row(id).count()) await hide(id).click();
+    await frame(page);
+    await input.fill("");
+    assert.deepEqual(await ownIDs(page), [edited, reworded, alone, again]);
+
     // Chinese.
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
     await page.waitForTimeout(50);
@@ -815,7 +929,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.deepEqual(mixed.unsupported, []);
     assert.deepEqual(mixed.outside, []);
     await mixed.context.close();
-    console.log(engine, "finished receipts draw nothing/messages and replies whole/no labels/repeats keep place, focus and draft/sent as sent/states/same text/late native/retry/edit/refusal stays/hide and focus/unchanged resend/late refusal after reload/hidden but waiting again/images/agents/palette/keys/Settings/reload equals live/i18n/dark/narrow/local icons/cache8/queue actions/taken one by one/late revision/interruption until hidden/restore PASS");
+    console.log(engine, "finished receipts draw nothing/messages and replies whole/no labels/repeats keep place, focus and draft/sent as sent/states/same text/late native/retry/edit/refusal stays/hide and focus/unchanged resend/late refusal after reload/hidden but waiting again/hidden then tried again shows its outcome/stale callbacks keep hidden/images/agents/palette/keys/Settings/reload equals live/i18n/dark/narrow/local icons/cache8/queue actions/taken one by one/late revision/interruption until hidden/restore PASS");
   } finally {
     await browser.close();
   }
