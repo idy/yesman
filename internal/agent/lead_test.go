@@ -137,7 +137,7 @@ func TestDialogReply(t *testing.T) {
 	}
 }
 
-const reminder = "[yesman] No worker is running"
+const reminder = noticeHeader
 
 func countPrefix(list []string, prefix string) int {
 	n := 0
@@ -162,10 +162,10 @@ func waitCount(t *testing.T, prompts func(string) []string, id string, n int) {
 	}
 }
 
-// A lead that ends a run with tasks open and nothing running is reminded
-// once, again after someone writes to it, and not at all once the board
-// has nothing left to do.
-func TestFollowThroughRemindsOnce(t *testing.T) {
+// A lead that ends a run with a task nobody carries is told once; the user
+// writing again does not repeat it, and a done task is not told about. A
+// legacy blocked task without a wait is listed to check, not unblocked.
+func TestContinuationTellsOncePerState(t *testing.T) {
 	m, store := newTestManager(t, 0, "FAKE_PI_SLOW_RUNS=1")
 	prompts := promptsTo(m)
 	s := func(v string) *string { return &v }
@@ -183,17 +183,18 @@ func TestFollowThroughRemindsOnce(t *testing.T) {
 	}
 	waitCount(t, prompts, lead, 2)
 	got := prompts(lead)[1]
-	if !strings.HasPrefix(got, reminder) || !strings.Contains(got, "- t1 [todo] Windows build\n") || strings.Contains(got, "Lint") || strings.Contains(got, "Migrate") {
-		t.Errorf("reminder:\n%s", got)
+	if !strings.HasPrefix(got, reminder) || !strings.Contains(got, "- t1 [todo] Windows build: no worker carries it\n") || strings.Contains(got, "Lint") {
+		t.Errorf("notice:\n%s", got)
+	}
+	legacy := strings.Index(got, "Blocked without a recorded wait")
+	if legacy < 0 || !strings.Contains(got[legacy:], "- t3 [blocked] Migrate the database") {
+		t.Errorf("the legacy blocked task is not listed to check:\n%s", got)
 	}
 
 	if err := m.Prompt(ctx, lead, "again"); err != nil {
 		t.Fatal(err)
 	}
-	waitCount(t, prompts, lead, 4)
-	if n := countPrefix(prompts(lead), reminder); n != 2 {
-		t.Errorf("%d reminders: %q", n, prompts(lead))
-	}
+	waitCount(t, prompts, lead, 3)
 
 	if _, err := store.ChangeBoard("alice", yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: "t1", Status: s("done")}}}); err != nil {
 		t.Fatal(err)
@@ -201,11 +202,13 @@ func TestFollowThroughRemindsOnce(t *testing.T) {
 	if err := m.Prompt(ctx, lead, "done?"); err != nil {
 		t.Fatal(err)
 	}
-	waitCount(t, prompts, lead, 5)
+	waitCount(t, prompts, lead, 4)
+	if b, _ := store.Board("alice"); b.Tasks[2].Status != yesmen.TaskBlocked {
+		t.Errorf("a legacy blocked task changed: %+v", b.Tasks[2])
+	}
 }
 
-// While a worker works, the lead is not reminded: the worker's report
-// starts its next run.
+// A task whose worker waits for an answer is carried: the lead is not told.
 func TestNoReminderWhileAWorkerWorks(t *testing.T) {
 	m, store := newTestManager(t, 0, "FAKE_PI_SLOW_RUNS=1", "FAKE_PI_ASK_WORKERS=1")
 	prompts := promptsTo(m)
@@ -226,7 +229,7 @@ func TestNoReminderWhileAWorkerWorks(t *testing.T) {
 }
 
 // A worker has settled, but its report is deliberately held by fake pi.
-// Running followThrough synchronously must not race the report goroutine.
+// Evaluating synchronously must not race the report goroutine.
 func TestNoReminderWhileAReportIsPending(t *testing.T) {
 	for _, afterReport := range []string{yesmen.TaskTodo, yesmen.TaskDone} {
 		t.Run(afterReport, func(t *testing.T) {
@@ -248,7 +251,7 @@ func TestNoReminderWhileAReportIsPending(t *testing.T) {
 				t.Fatal(err)
 			}
 			id := ID("alice", yesmen.LeadName)
-			lead, p, err := m.ensure(id)
+			_, p, err := m.ensure(id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -276,7 +279,7 @@ func TestNoReminderWhileAReportIsPending(t *testing.T) {
 			if status != Idle || pending != 1 {
 				t.Fatalf("settled worker: status %s, pending reports %d", status, pending)
 			}
-			m.followThrough(lead, p)
+			m.continueTasks("alice")
 			if got := prompts(id); len(got) != 0 {
 				t.Fatalf("reminded before the report was read: %q", got)
 			}
@@ -294,7 +297,7 @@ func TestNoReminderWhileAReportIsPending(t *testing.T) {
 			if pending != 1 {
 				t.Fatalf("released the report reservation before delivery: %d", pending)
 			}
-			m.followThrough(lead, p)
+			m.continueTasks("alice")
 			if n := countPrefix(prompts(id), reminder); n != 0 {
 				t.Fatalf("reminded before report delivery finished: %q", prompts(id))
 			}
@@ -307,27 +310,34 @@ func TestNoReminderWhileAReportIsPending(t *testing.T) {
 			waitFinished(t, m, worker, time.Time{})
 			if afterReport == yesmen.TaskTodo {
 				waitPrompt(t, prompts, id, reminder)
-			} else if n := countPrefix(prompts(id), reminder); n != 0 {
-				t.Fatalf("reminded about finished work: %q", prompts(id))
+			} else {
+				time.Sleep(300 * time.Millisecond)
+				if n := countPrefix(prompts(id), reminder); n != 0 {
+					t.Fatalf("reminded about finished work: %q", prompts(id))
+				}
 			}
 		})
 	}
 }
 
-func TestFollowThroughLeavesStoppedWorkersAsleep(t *testing.T) {
+// What the user stopped stays stopped; what yesman stopped (a finished
+// worker closed, a worker put to sleep for new packages) is not a pause.
+func TestContinuationLeavesUserStopsAlone(t *testing.T) {
 	for _, c := range []struct {
 		name     string
 		finished bool
 		other    bool
+		system   bool
 	}{
 		{name: "only paused work"},
 		{name: "other work continues", other: true},
-		{name: "normally completed owner", finished: true},
+		{name: "normally completed owner", finished: true, system: true},
+		{name: "system sleep is no pause", system: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			m, store := newTestManager(t, 0)
 			prompts := promptsTo(m)
-			if err := store.AddWorker("alice", yesmen.Worker{Name: "w1", Title: "Paused task", Task: "a task", StartedAt: time.Now()}); err != nil {
+			if err := store.AddWorker("alice", yesmen.Worker{Name: "w1", Title: "Paused task", Task: "a task", StartedAt: time.Now().UTC()}); err != nil {
 				t.Fatal(err)
 			}
 			worker := ID("alice", "w1")
@@ -339,7 +349,11 @@ func TestFollowThroughLeavesStoppedWorkersAsleep(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			m.Stop(worker)
+			if c.system {
+				m.Stop(worker)
+			} else {
+				m.StopByUser(worker)
+			}
 			tasks := []yesmen.TaskEdit{{Title: str("Paused task"), Status: str("doing"), Owner: str("w1")}}
 			if c.other {
 				tasks = append(tasks, yesmen.TaskEdit{Title: str("Available task")})
@@ -348,28 +362,33 @@ func TestFollowThroughLeavesStoppedWorkersAsleep(t *testing.T) {
 				t.Fatal(err)
 			}
 			id := ID("alice", yesmen.LeadName)
-			lead, p, err := m.ensure(id)
-			if err != nil {
+			if _, _, err := m.ensure(id); err != nil {
 				t.Fatal(err)
 			}
-			m.followThrough(lead, p)
+			m.continueTasks("alice")
 			got := prompts(id)
-			if !c.other && !c.finished {
-				if len(got) != 0 {
+			if !c.other && !c.system {
+				time.Sleep(200 * time.Millisecond)
+				if got = prompts(id); len(got) != 0 {
 					t.Fatalf("reminded to restart deliberately stopped work: %q", got)
 				}
 			} else {
-				if len(got) != 1 || !strings.HasPrefix(got[0], reminder) {
-					t.Fatalf("expected one reminder: %q", got)
+				waitCount(t, prompts, id, 1)
+				got = prompts(id)
+				if !strings.HasPrefix(got[0], reminder) {
+					t.Fatalf("expected one notice: %q", got)
 				}
 				if c.other && (strings.Contains(got[0], "Paused task") || !strings.Contains(got[0], "Available task")) {
-					t.Fatalf("reminder included paused work or lost available work: %s", got[0])
+					t.Fatalf("notice included paused work or lost available work: %s", got[0])
 				}
-				if c.finished && !strings.Contains(got[0], "finished and closed") {
+				if c.finished && !strings.Contains(got[0], "finished its run and was closed") {
 					t.Fatalf("normal completion was treated as a deliberate stop: %s", got[0])
 				}
-				if !strings.Contains(got[0], "Leave workers deliberately put to sleep by the user asleep") {
-					t.Fatalf("reminder does not preserve deliberate sleep: %s", got[0])
+				if c.system && !c.finished && !strings.Contains(got[0], "owner w1 is not working on it") {
+					t.Fatalf("a system sleep was treated as the user's: %s", got[0])
+				}
+				if !strings.Contains(got[0], "Leave what the user paused alone") {
+					t.Fatalf("notice does not preserve deliberate stops: %s", got[0])
 				}
 			}
 			if i, _ := m.Get(worker); i.Status != Stopped || m.running(worker) != nil {
@@ -379,37 +398,41 @@ func TestFollowThroughLeavesStoppedWorkersAsleep(t *testing.T) {
 	}
 }
 
-// Simulate a state change after followThrough read its board snapshot.
-// The final reservation must recheck it instead of queuing a stale reminder.
+// A change after the board was read, before the lead is reserved, is
+// rechecked instead of queuing a stale notice.
 func TestReminderRechecksAfterBoardRead(t *testing.T) {
 	for _, state := range []string{"queued message", "working lead", "pending report", "stopped lead"} {
 		t.Run(state, func(t *testing.T) {
-			m, _ := newTestManager(t, 0)
+			m, store := newTestManager(t, 0)
 			prompts := promptsTo(m)
+			if _, err := store.ChangeBoard("alice", yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: str("Stale task")}}}); err != nil {
+				t.Fatal(err)
+			}
 			id := ID("alice", yesmen.LeadName)
 			lead, p, err := m.ensure(id)
 			if err != nil {
 				t.Fatal(err)
 			}
-			m.mu.Lock()
-			inbox := lead.inbox
-			m.mu.Unlock()
-			switch state {
-			case "queued message":
-				m.unnudge(id)
-			case "working lead":
-				m.setStatus(lead, p, Working, "")
-			case "pending report":
-				m.mu.Lock()
-				m.agents[ID("alice", "w1")] = &agent{info: Info{Yesman: "alice", Name: "w1", Role: RoleWorker, Status: Idle}, reports: 1}
-				m.mu.Unlock()
-			case "stopped lead":
-				m.Stop(id)
+			m.beforeNotice = func() {
+				switch state {
+				case "queued message":
+					m.unnudge(id)
+				case "working lead":
+					m.setStatus(lead, p, Working, "")
+				case "pending report":
+					m.mu.Lock()
+					m.agents[ID("alice", "w1")] = &agent{info: Info{Yesman: "alice", Name: "w1", Role: RoleWorker, Status: Idle}, reports: 1}
+					m.mu.Unlock()
+				case "stopped lead":
+					m.Stop(id)
+				}
 			}
-			board := yesmen.Board{Tasks: []yesmen.Task{{ID: "t1", Title: "Stale task", Status: yesmen.TaskTodo}}}
-			m.remindOfBoard(lead, p, inbox, board, nil)
+			m.continueTasks("alice")
 			if got := prompts(id); len(got) != 0 {
-				t.Fatalf("dispatched stale reminder after %s: %q", state, got)
+				t.Fatalf("dispatched stale notice after %s: %q", state, got)
+			}
+			if c, _ := store.Continuation("alice"); len(c.Attempts) != 0 || len(c.Tasks) != 0 {
+				t.Fatalf("recorded a notice that was not sent: %+v", c)
 			}
 		})
 	}

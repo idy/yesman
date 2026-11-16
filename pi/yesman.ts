@@ -165,12 +165,22 @@ async function refreshHidden(signal?: AbortSignal) {
 	} catch {}
 }
 
+// waitText says what a blocked task waits for (Wait in internal/yesmen).
+function waitText(w: any): string {
+	let s = String(w.kind);
+	if (w.tasks?.length) s += ` ${w.tasks.join(", ")}`;
+	if (w.handoff) s += ` ${w.handoff}`;
+	if (w.reason) s += `: ${String(w.reason).replace(/\n/g, " ")}`;
+	return s;
+}
+
 function boardText(board: any): string {
 	const tasks: any[] = board?.tasks ?? [];
 	if (!tasks.length) return "The board is empty.";
 	const line = (t: any) => {
 		let s = `- ${t.id} [${t.status}] ${t.title}`;
 		if (t.owner) s += ` (owner ${t.owner})`;
+		if (t.wait) s += `\n  wait: ${waitText(t.wait)}`;
 		if (t.note) s += `\n  note: ${String(t.note).replace(/\n/g, "\n  ")}`;
 		if (t.detail) s += `\n  detail: ${String(t.detail).replace(/\n/g, "\n  ")}`;
 		return s;
@@ -431,6 +441,23 @@ export default function yesman(pi: ExtensionAPI) {
 		owner: Type.Optional(Type.String({ description: "The agent the task is handed to, usually a worker's name; empty to clear" })),
 		detail: Type.Optional(Type.String({ description: "What the task is, in Markdown" })),
 		note: Type.Optional(Type.String({ description: "Where it stands: why it is blocked, or its result with links (branch, PR)" })),
+		wait: Type.Optional(
+			Type.Object(
+				{
+					kind: Type.String({
+						description:
+							"tasks: until the tasks listed are done; user: until the user acts on an open Needs you request for this task; external: something outside yesman, such as CI or another party; paused: the user paused it (lead only; it stays paused until the user says otherwise). Empty to clear.",
+					}),
+					tasks: Type.Optional(Type.Array(Type.String(), { description: "For kind tasks: the IDs of the tasks it waits for" })),
+					handoff: Type.Optional(Type.String({ description: "For kind user: the Needs you request, such as n3, if it is not linked to this task" })),
+					reason: Type.Optional(Type.String({ description: "What it waits for and what lets it go on; required for external and paused" })),
+				},
+				{
+					description:
+						"What a blocked task waits for; setting it makes the task blocked, and any other status clears it. yesman tells the lead when a task's wait is over, and of open tasks no running worker carries.",
+				},
+			),
+		),
 	};
 	pi.registerTool({
 		name: "yesman_board",

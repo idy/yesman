@@ -46,6 +46,46 @@ type Task struct {
 	// done before yesman recorded this have neither.
 	DoneAt    time.Time `json:"doneAt,omitzero"`
 	DoneOwner string    `json:"doneOwner,omitempty"`
+	// Wait says what a blocked task waits for, so that yesman can tell its
+	// lead when it can go on. Only blocked tasks have one; a blocked task
+	// without one, such as one blocked before yesman recorded waits, is
+	// left blocked.
+	Wait *Wait `json:"wait,omitempty"`
+}
+
+// What a blocked task can wait for.
+const (
+	WaitTasks    = "tasks"    // other tasks being done
+	WaitUser     = "user"     // an open Needs you request
+	WaitExternal = "external" // something outside yesman, such as CI or a third party
+	WaitPaused   = "paused"   // the user paused it; only the lead sets or lifts it
+)
+
+// WaitKinds lists what a blocked task can wait for.
+var WaitKinds = []string{WaitTasks, WaitUser, WaitExternal, WaitPaused}
+
+// Wait is what a blocked task waits for and when it can go on.
+type Wait struct {
+	Kind string `json:"kind"`
+	// Tasks are the tasks that must be done first, for kind tasks.
+	Tasks []string `json:"tasks,omitempty"`
+	// Handoff is the Needs you request it waits on, for kind user, besides
+	// any request linked to the task.
+	Handoff string `json:"handoff,omitempty"`
+	// Reason says what it waits for and what lets it go on.
+	Reason string    `json:"reason,omitempty"`
+	Since  time.Time `json:"since"`
+}
+
+// Paused reports whether the user paused the task.
+func (t Task) Paused() bool { return t.Wait != nil && t.Wait.Kind == WaitPaused }
+
+// WaitEdit sets what a task waits for; an empty kind clears it.
+type WaitEdit struct {
+	Kind    string   `json:"kind"`
+	Tasks   []string `json:"tasks,omitempty"`
+	Handoff string   `json:"handoff,omitempty"`
+	Reason  string   `json:"reason,omitempty"`
 }
 
 // Open reports whether the task still needs work.
@@ -66,6 +106,8 @@ type TaskEdit struct {
 	Owner  *string `json:"owner,omitempty"`
 	Detail *string `json:"detail,omitempty"`
 	Note   *string `json:"note,omitempty"`
+	// Wait sets what the task waits for, which makes it blocked.
+	Wait *WaitEdit `json:"wait,omitempty"`
 }
 
 // BoardChange is one change to a board, applied whole or not at all.
@@ -88,7 +130,13 @@ const (
 	maxTitleLen  = 200
 	maxNoteLen   = 4000
 	maxDetailLen = 8000
+	maxWaitTasks = 20
+	maxReasonLen = 1000
 )
+
+// ErrPauseByLead refuses a worker's change to a task the user paused, or a
+// pause by a worker: only the lead, which hears the user, sets or lifts it.
+var ErrPauseByLead = errors.New("only the lead pauses a task or lifts a pause, when the user asks")
 
 // BoardFile is where a yesman's board is kept.
 func (y Yesman) BoardFile() string { return filepath.Join(y.MetaDir(), "board.json") }
@@ -118,13 +166,26 @@ func (s *Store) board(name string) (Board, error) {
 // ChangeBoard applies a change to a yesman's board and returns the board.
 // It changes nothing when any part of the change is invalid.
 func (s *Store) ChangeBoard(name string, c BoardChange) (Board, error) {
+	return s.ChangeBoardBy(name, c, true)
+}
+
+// ChangeBoardBy is ChangeBoard for the lead, or for a worker, which cannot
+// pause a task, lift a pause or change a paused task.
+func (s *Store) ChangeBoardBy(name string, c BoardChange, lead bool) (Board, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, err := s.board(name)
 	if err != nil {
 		return Board{}, err
 	}
+	before := slices.Clone(b.Tasks)
 	if err := b.apply(c, time.Now().UTC()); err != nil {
+		return Board{}, err
+	}
+	if !lead && pauseChanged(before, b.Tasks) {
+		return Board{}, ErrPauseByLead
+	}
+	if err := b.checkWaits(before); err != nil {
 		return Board{}, err
 	}
 	y, _ := s.Get(name)
@@ -132,6 +193,56 @@ func (s *Store) ChangeBoard(name string, c BoardChange) (Board, error) {
 		return Board{}, err
 	}
 	return b, nil
+}
+
+// pauseChanged reports whether a paused task was changed or removed, or a
+// task was paused.
+func pauseChanged(before, after []Task) bool {
+	old := map[string]Task{}
+	for _, t := range before {
+		old[t.ID] = t
+	}
+	seen := map[string]bool{}
+	for _, t := range after {
+		seen[t.ID] = true
+		o, ok := old[t.ID]
+		if t.Paused() && (!ok || !o.Paused()) {
+			return true
+		}
+		if ok && o.Paused() && (!t.Paused() || t.Status != o.Status || t.Owner != o.Owner) {
+			return true
+		}
+	}
+	for _, o := range before {
+		if o.Paused() && !seen[o.ID] {
+			return true
+		}
+	}
+	return false
+}
+
+// checkWaits checks that the tasks a new wait names exist, so that a typo
+// never leaves a task waiting for ever. A task waited on that is removed
+// later is the lead's to settle; yesman tells it.
+func (b *Board) checkWaits(before []Task) error {
+	old := map[string]*Wait{}
+	for _, t := range before {
+		old[t.ID] = t.Wait
+	}
+	for _, t := range b.Tasks {
+		if t.Wait == nil || t.Wait.Kind != WaitTasks || old[t.ID] == t.Wait {
+			continue
+		}
+		for _, id := range t.Wait.Tasks {
+			if id == t.ID {
+				return fmt.Errorf("task %s cannot wait for itself", t.ID)
+			}
+			if b.index(id) < 0 {
+				return fmt.Errorf("task %s waits for %s, which is not on the board", t.ID, id)
+			}
+		}
+	}
+	return nil
 }
 
 // TaskID reads the ID of a task as agents may write it: t3, T3, #3 or 3.
@@ -269,5 +380,64 @@ func edit(t *Task, e TaskEdit) error {
 		}
 		t.Note = strings.TrimSpace(*e.Note)
 	}
+	if e.Wait != nil {
+		w, err := newWait(*e.Wait, t.Wait)
+		if err != nil {
+			return fmt.Errorf("wait: %w", err)
+		}
+		t.Wait = w
+		if w != nil {
+			if e.Status != nil && t.Status != TaskBlocked {
+				return fmt.Errorf("a task that waits is blocked, not %s", t.Status)
+			}
+			t.Status = TaskBlocked
+		}
+	}
+	if t.Status != TaskBlocked {
+		t.Wait = nil // going on, or finished, it no longer waits
+	}
 	return nil
+}
+
+// newWait checks a wait as an agent gives it. An unchanged wait keeps when
+// it began.
+func newWait(e WaitEdit, old *Wait) (*Wait, error) {
+	kind := strings.ToLower(strings.TrimSpace(e.Kind))
+	if kind == "" {
+		return nil, nil
+	}
+	if !slices.Contains(WaitKinds, kind) {
+		return nil, fmt.Errorf("kind %q is not one of %s", e.Kind, strings.Join(WaitKinds, ", "))
+	}
+	w := &Wait{Kind: kind, Reason: strings.TrimSpace(e.Reason), Since: time.Now().UTC()}
+	if utf8.RuneCountInString(w.Reason) > maxReasonLen {
+		return nil, fmt.Errorf("the reason is longer than %d characters", maxReasonLen)
+	}
+	switch kind {
+	case WaitTasks:
+		for _, id := range e.Tasks {
+			if id = TaskID(id); id != "" && !slices.Contains(w.Tasks, id) {
+				w.Tasks = append(w.Tasks, id)
+			}
+		}
+		if len(w.Tasks) == 0 {
+			return nil, errors.New("name the tasks it waits for")
+		}
+		if len(w.Tasks) > maxWaitTasks {
+			return nil, fmt.Errorf("it can wait for at most %d tasks", maxWaitTasks)
+		}
+	case WaitUser:
+		w.Handoff = strings.ToLower(strings.TrimSpace(e.Handoff))
+	case WaitExternal, WaitPaused:
+		if w.Reason == "" {
+			return nil, fmt.Errorf("say in reason what it waits for and what lets it go on")
+		}
+	}
+	if kind != WaitTasks && len(e.Tasks) > 0 {
+		return nil, fmt.Errorf("tasks are for kind %s", WaitTasks)
+	}
+	if old != nil && old.Kind == w.Kind && slices.Equal(old.Tasks, w.Tasks) && old.Handoff == w.Handoff {
+		w.Since = old.Since
+	}
+	return w, nil
 }

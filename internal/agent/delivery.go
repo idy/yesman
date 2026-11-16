@@ -238,10 +238,12 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	release()
 	m.mu.Lock()
 	if m.agents[id] == a && !a.retiring {
-		a.nudged = false
 		a.inbox++
 	}
 	m.mu.Unlock()
+	// The user writing to a lead they stopped lets yesman tell it about its
+	// tasks again.
+	m.resumeByUser(id)
 	// Only the private receipt ID crosses this Go call. The pi command and
 	// user text remain byte-for-byte the same as the original submission path.
 	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, Origin{Source: OriginUser, Submission: messageID}, images...)

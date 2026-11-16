@@ -106,7 +106,12 @@ func main() {
 	a.keychain = appKeychain()
 	go a.unlockFromKeychain() // the system may ask the user first
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
-		BoardChanged:    func(yesman string) { _ = boardEvent.Broadcast(yesman) },
+		BoardChanged: func(yesman string) {
+			_ = boardEvent.Broadcast(yesman)
+			if a.agents != nil {
+				a.agents.TasksChanged(yesman) // a task done may let another go on
+			}
+		},
 		NeedsYouChanged: func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
 		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew}
 	if err := srv.Start(); err != nil {
@@ -157,6 +162,10 @@ func main() {
 		}
 		a.setupTray()
 		a.updates.start()
+		// Tell each lead of work nobody carries since the app last ran: a
+		// trigger lost when it quit is not lost. Leads the user stopped,
+		// and tasks told about already, stay as they are.
+		a.agents.Resume()
 		if os.Getenv("YESMAN_HIDDEN") == "" {
 			a.showWindow()
 		}

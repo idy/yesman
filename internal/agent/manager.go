@@ -164,11 +164,13 @@ type Manager struct {
 
 	mu              sync.Mutex
 	agents          map[string]*agent
-	tokens          map[string]string // credential -> agent ID, while its process runs
-	closed          bool              // StopAll permanently prevents further starts; guarded by mu
-	worktreeCleanup map[string]bool   // reservations preventing owner startup/input during final removal
-	shutdown        chan struct{}     // closed by StopAll to wake pending report retries
-	recallBytes     int               // full payload memory across all agent generations; guarded by mu
+	tokens          map[string]string        // credential -> agent ID, while its process runs
+	closed          bool                     // StopAll permanently prevents further starts; guarded by mu
+	worktreeCleanup map[string]bool          // reservations preventing owner startup/input during final removal
+	shutdown        chan struct{}            // closed by StopAll to wake pending report retries
+	recallBytes     int                      // full payload memory across all agent generations; guarded by mu
+	continuations   map[string]*continuation // by yesman; guarded by mu, see continuation.go
+	beforeNotice    func()                   // tests only: runs before a notice reserves the lead
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
 	// callsDone is signalled, under mu, when an agent's last caller
@@ -216,12 +218,9 @@ type agent struct {
 	// message's error, or nil; runSaid tells whether it had one at all.
 	runEnd  *RunError
 	runSaid bool
-	// nudged: the lead was reminded of open tasks, and neither the user nor
-	// a worker has written to it since.
-	nudged bool
 	// inbox changes when a message is queued or registered. settledInbox is
 	// the inbox at the last settle, so accepted prompts awaiting agent_start
-	// still prevent reminders. Both are guarded by the manager's mu.
+	// still defer telling the lead about its tasks. Both are guarded by the manager's mu.
 	inbox, settledInbox uint64
 }
 
@@ -644,7 +643,9 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			_, _ = m.syncModel(ctx, a, p)
 		}()
 		if !worker && !e.Aborted && !retiring {
-			go m.followThrough(a, p)
+			// A lead run the user stopped is theirs: it was recorded as a
+			// pause by AbortByUser, and nothing is evaluated for it.
+			go m.continueTasks(a.info.Yesman)
 		} else if handoff {
 			go func() {
 				defer m.handoffDone(a)
@@ -757,11 +758,21 @@ func (m *Manager) watch(a *agent, p *proc) {
 		a.info.Status, a.info.Detail = Stopped, ""
 	}
 	a.info.Dialog, a.info.UpdatedAt = nil, time.Now()
-	worker, detail := a.info.Role == RoleWorker, a.info.Detail
+	worker, detail, since := a.info.Role == RoleWorker, a.info.Detail, a.info.Since
 	m.mu.Unlock()
 	m.changed()
 	if failed && worker {
-		go m.tellLead(a, "failed", fmt.Sprintf("[yesman] Worker %q stopped unexpectedly (%s). It keeps its session; message it to start it again.", a.info.Name, clip(strings.Join(strings.Fields(detail), " "))))
+		go func() {
+			// Recorded for its generation, so that the failure outlives a
+			// restart and is told about once.
+			if err := m.cfg.Yesmen.FailWorker(a.info.Yesman, a.info.Name, since, time.Now().UTC()); err != nil {
+				log.Printf("yesman: record that %s failed: %v", a.info.ID, err)
+			}
+			m.tellLead(a, "failed", fmt.Sprintf("[yesman] Worker %q stopped unexpectedly (%s). It keeps its session; message it to start it again.", a.info.Name, clip(strings.Join(strings.Fields(detail), " "))))
+			m.continueTasks(a.info.Yesman)
+		}()
+	} else if failed {
+		go m.continueTasks(a.info.Yesman)
 	}
 }
 
@@ -787,6 +798,9 @@ func (m *Manager) promptImages(ctx context.Context, id, text string, images []Im
 		return err
 	}
 	m.unnudge(id)
+	if origin.Source == OriginUser {
+		m.resumeByUser(id)
+	}
 	return m.prompt(ctx, id, text, "steer", origin, images...)
 }
 
@@ -908,8 +922,14 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		a.modelMu.Lock()
 		m.mu.Lock()
 		a.prompts--
+		// A lead that settled while this prompt was still unanswered was
+		// not yet free to hear about its tasks: it is now.
+		settled := a.prompts == 0 && a.info.Role == RoleLead && a.info.Status == Idle && a.inbox == a.settledInbox && !a.retiring
 		m.mu.Unlock()
 		a.modelMu.Unlock()
+		if settled {
+			go m.continueTasks(a.info.Yesman)
+		}
 		done <- err
 	}()
 	select {
@@ -1156,6 +1176,12 @@ func (m *Manager) StopAll() {
 		m.closed = true
 		close(m.shutdown)
 	}
+	for _, c := range m.continuations {
+		if c.timer != nil {
+			c.timer.Stop()
+			c.timer = nil
+		}
+	}
 	ids := make([]string, 0, len(m.agents))
 	for id := range m.agents {
 		ids = append(ids, id)
@@ -1321,13 +1347,10 @@ func (m *Manager) handoffDone(a *agent) {
 	m.mu.Lock()
 	a.reports--
 	lead := m.agents[ID(a.info.Yesman, yesmen.LeadName)]
-	var p *proc
-	if !a.retiring && lead != nil && lead.workspaceSince.Equal(a.workspaceSince) {
-		p = lead.proc
-	}
+	current := !a.retiring && (lead == nil || lead.workspaceSince.IsZero() || lead.workspaceSince.Equal(a.workspaceSince))
 	m.mu.Unlock()
-	if p != nil {
-		go m.followThrough(lead, p)
+	if current {
+		go m.continueTasks(a.info.Yesman)
 	}
 }
 

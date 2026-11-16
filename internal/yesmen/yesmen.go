@@ -94,6 +94,11 @@ type Worker struct {
 	// FinishedAt is when its last run's report reached its lead, after
 	// which its process was closed; zero while it has work.
 	FinishedAt time.Time `json:"finishedAt,omitzero"`
+	// PausedAt is when the user stopped it or its run, zero once it is
+	// given work again. yesman never starts a paused worker by itself.
+	PausedAt time.Time `json:"pausedAt,omitzero"`
+	// FailedAt is when its process last ended unexpectedly.
+	FailedAt time.Time `json:"failedAt,omitzero"`
 }
 
 // Subject names a worker's work for the user: its title, else the title of
@@ -491,16 +496,45 @@ func (s *Store) FinishWorker(name, worker string, at time.Time) error {
 	return err
 }
 
-// ReopenWorker records that a finished worker has work again. It reports
-// whether the worker was finished.
+// ReopenWorker records that a worker was given work again: it is neither
+// finished, paused nor failed any more. It reports whether the worker was finished.
 func (s *Store) ReopenWorker(name, worker string) (bool, error) {
-	return s.updateWorker(name, worker, func(w *Worker) bool {
-		if w.FinishedAt.IsZero() {
+	var reopened bool
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		reopened = !w.FinishedAt.IsZero()
+		if !reopened && w.PausedAt.IsZero() && w.FailedAt.IsZero() {
 			return false
 		}
-		w.FinishedAt = time.Time{}
+		w.FinishedAt, w.PausedAt, w.FailedAt = time.Time{}, time.Time{}, time.Time{}
 		return true
 	})
+	return reopened, err
+}
+
+// PauseWorker records that the user stopped the worker started at since,
+// and FailWorker that its process ended unexpectedly. A worker of another
+// generation, hired again under the same name, is left alone.
+func (s *Store) PauseWorker(name, worker string, since, at time.Time) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if !w.StartedAt.Equal(since) {
+			return false
+		}
+		w.PausedAt = at
+		return true
+	})
+	return err
+}
+
+// FailWorker: see PauseWorker.
+func (s *Store) FailWorker(name, worker string, since, at time.Time) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if !w.StartedAt.Equal(since) {
+			return false
+		}
+		w.FailedAt = at
+		return true
+	})
+	return err
 }
 
 // updateWorker changes a worker's record, writing it only when fn reports a
