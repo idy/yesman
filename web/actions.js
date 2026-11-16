@@ -95,8 +95,10 @@ export function registerActions(shortcuts, host) {
     },
     {
       // Unbound: a key is the user's to give it in Settings › Shortcuts.
+      // It opens the Needs you pane of the yesman shown, beside its
+      // conversation.
       id: 'needs-you.show', label: 'Show Needs You', group: 'Go to', keywords: ['requests', 'inbox', 'waiting', 'handoffs'],
-      run: () => host.showNeedsYou(),
+      when: needAgent, run: () => host.showNeedsYou(),
     },
     ...GOTO.map((n) => ({
       id: `yesman.goto.${n}`, label: 'Go to yesman {n}', params: { n }, group: 'Go to', keys: [`Mod+${n}`], palette: false,

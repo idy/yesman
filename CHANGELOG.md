@@ -2,6 +2,19 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.37
+
+- Open Needs You beside the conversation as a Board-style pane for the yesman shown and its current hire. Use the Info card or command palette to view its requests; the global sidebar entry and all-yesmen page are removed. Opening a request goes to its agent and question without answering it, while preserving unsent drafts and images. Request-memory notices, unreadable-file errors and recently handled requests stay available in the pane.
+- Keep room for the message box beside Board or Needs You: the Info panel steps aside in narrow windows and returns when the pane closes. Preserve focus when opening, closing and refreshing the pane.
+- Show an X on the queued message's Cancel and edit button, keeping its labels and existing cancellation and full text-and-image restore behavior.
+- Use the application's context menus throughout the window, retaining existing row menus and offering selection, link and text-editing actions for their targets. On macOS, Control-click opens only the menu; editor Find fields keep their own editing actions. Menu Paste can attach PNG images in the message box within the existing limits, and a clipboard with nothing usable pastes nothing. Passwords and secret values remain protected.
+
+## 0.1.36
+
+- Fold consecutive runs that end only with a model error into one closed row that shows the count and the error text. Expand it to see each distinct error with its provider, model and count, copy the error text, and open each run's time and original work. A person's message, a reply, a partial reply or a stop ends the fold, and text that only mentions an error never counts as one. History and submission records are unchanged.
+- Mark an agent whose last finished run ended with a model error with a red exclamation mark, a label and a tooltip in the sidebar and header; a yesman's entry follows its lead's own state. Working, waiting, Needs You and asking keep their own marks. Stopping the run, or a later run that ends any other way, clears the mark while the conversation keeps its error rows. The mark is not kept across an app restart. A crashed agent process shows the same red mark.
+- Show an error recorded without a message as "The model returned an error without a message." and fold such errors together.
+
 ## 0.1.35
 
 - Add a global Needs You inbox for explicit requests that need human action across yesmen and agents. Ordinary worker questions stay with their lead; blocked Board tasks and queued messages do not add inbox items.

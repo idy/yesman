@@ -37,6 +37,7 @@ export const ICONS = Object.freeze({
   up: '\ue08e', // arrow-up
   x: '\ue4f6', // x
   alert: '\ue4e0', // warning
+  error: '\ue4e2', // warning-circle
   info: '\ue2ce', // info
   palette: '\ue6c8', // palette
   type: '\ue48a', // text-t

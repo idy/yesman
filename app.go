@@ -160,10 +160,12 @@ func (a *app) showWindow() {
 	}
 	a.win = w
 	w.Page().OnContextMenu(func(e *mygo.ContextMenuEvent) {
-		// App rows provide their own menus. Elsewhere retain native text
-		// editing actions without exposing browser navigation/debug items.
-		e.Menu.Remove(mygo.ContextMenuReload, mygo.ContextMenuInspect,
-			mygo.ContextMenuBack, mygo.ContextMenuForward, mygo.ContextMenuStop)
+		// The page answers every context menu with yesman's own: the rows'
+		// menus, or PageMenu (web/contextmenu.js), and prevents the event,
+		// so this runs only for one the page missed. Show none rather than
+		// the web view's, with Look Up, Translate, Search with Google, Share,
+		// Speech and Services on macOS.
+		e.PreventDefault()
 	})
 	w.OnClosed(func() {
 		a.wmu.Lock()
