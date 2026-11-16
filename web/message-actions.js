@@ -40,7 +40,7 @@ export function messageActions({ text, loadText, copy, done, fail, recall, promo
   const recallButton = recall ? h('button', {
     class: 'message-copy message-recall', type: 'button', title: recallLabel, 'aria-label': recallLabel,
     onclick: recall, disabled: busy, 'aria-busy': busy ? 'true' : null,
-  }, icon('arrowLeft')) : null;
+  }, icon('x')) : null;
   const promoteLabel = t('Send now');
   const promoteButton = promote ? h('button', {
     class: 'message-copy message-promote', type: 'button', title: t('Move to steering for the next input checkpoint'), 'aria-label': promoteLabel,
