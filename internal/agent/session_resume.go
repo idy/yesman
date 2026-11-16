@@ -31,10 +31,12 @@ const sessionHeaderLimit = 1 << 20
 //
 //   - one recorded in this same directory, under any path to it, is opened
 //     as it is;
-//   - one recorded where the workspace no longer is is forked: pi copies its
-//     whole history, entry IDs included, into a new session at the current
-//     path and leaves the original file untouched. The copy is then the
-//     newest session and is opened as it is from then on.
+//   - one recorded where the workspace no longer is is forked: its whole
+//     history, entry IDs included, is copied into a new session at the
+//     current path, and the original file is left untouched. The copy is
+//     then the newest session and is opened as it is from then on. spawn
+//     makes the copy with copySession rather than pi's --fork, which writes
+//     its copy in place, so that an interrupted copy is never a session.
 func resumeArgs(sessions, cwd string) []string {
 	entries, err := os.ReadDir(sessions)
 	if err != nil {
@@ -69,11 +71,11 @@ func resumeArgs(sessions, cwd string) []string {
 		return files[i].info.Name() > files[j].info.Name()
 	})
 	for _, f := range files {
-		recorded, ok := sessionCwd(f.path, f.info)
+		header, ok := readSessionHeader(f.path, f.info)
 		if !ok {
 			continue
 		}
-		if sameDir(recorded, cwd) {
+		if sameDir(header.cwd, cwd) {
 			return []string{"--session", f.path}
 		}
 		return []string{"--fork", f.path}
@@ -82,30 +84,40 @@ func resumeArgs(sessions, cwd string) []string {
 	return []string{"--continue"}
 }
 
-// sessionCwd reads the working directory recorded in a session file's
-// header, the first entry pi can parse. It reads only the file looked at,
-// without waiting should a named pipe have taken its place, and no further
-// than pi would.
-func sessionCwd(path string, looked os.FileInfo) (string, bool) {
+// sessionHead is what yesman reads of a session file's header.
+type sessionHead struct {
+	cwd     string
+	version json.RawMessage // as recorded, or nil
+	end     int64           // the offset just after the header's line
+}
+
+// readSessionHeader reads the header of a session file, the first entry pi
+// can parse. It reads only the file looked at, without waiting should a
+// named pipe have taken its place, and no further than pi would.
+func readSessionHeader(path string, looked os.FileInfo) (sessionHead, bool) {
 	f, err := os.OpenFile(path, sessionOpenFlags, 0)
 	if err != nil {
-		return "", false
+		return sessionHead{}, false
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() || !os.SameFile(looked, info) {
-		return "", false
+		return sessionHead{}, false
 	}
+	return parseSessionHeader(f)
+}
+
+func parseSessionHeader(f io.Reader) (sessionHead, bool) {
 	r := bufio.NewReader(io.LimitReader(f, sessionHeaderLimit+1))
 	read := 0
 	for {
 		line, err := r.ReadBytes('\n')
 		read += len(line)
 		if read > sessionHeaderLimit {
-			return "", false // a header past the bound is no session to pi either
+			return sessionHead{}, false // a header past the bound is no session to pi either
 		}
 		if err != nil && !errors.Is(err, io.EOF) {
-			return "", false
+			return sessionHead{}, false
 		}
 		// pi skips blank lines and lines it cannot parse, or that parse to a
 		// false value, before the header; any other entry first is no session.
@@ -116,17 +128,21 @@ func sessionCwd(path string, looked os.FileInfo) (string, bool) {
 			default:
 				header, _ := entry.(map[string]any)
 				if header["type"] != "session" {
-					return "", false
+					return sessionHead{}, false
 				}
 				if _, ok := header["id"].(string); !ok {
-					return "", false
+					return sessionHead{}, false
 				}
+				var fields struct {
+					Version json.RawMessage `json:"version"`
+				}
+				_ = json.Unmarshal(line, &fields)
 				cwd, _ := header["cwd"].(string)
-				return cwd, true
+				return sessionHead{cwd: cwd, version: fields.Version, end: int64(read)}, true
 			}
 		}
 		if err != nil {
-			return "", false
+			return sessionHead{}, false
 		}
 	}
 }

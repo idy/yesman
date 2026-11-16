@@ -533,6 +533,14 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	}
 	args := []string{"--mode", "rpc", "--session-dir", sessions, "-e", m.cfg.Extension}
 	resume := resumeArgs(sessions, y.Path)
+	if len(resume) == 2 && resume[0] == "--fork" {
+		// The copy is made whole before pi sees it; see copySession.
+		copied, err := copySession(startContext, sessions, resume[1], y.Path)
+		if err != nil {
+			return nil, modelState{}, fmt.Errorf("cannot copy %s's conversation to the workspace's new path: %w", name, err)
+		}
+		resume = []string{"--session", copied}
+	}
 	resumed := resume != nil
 	if resumed {
 		args = append(args, resume...)

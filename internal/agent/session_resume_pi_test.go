@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,4 +226,157 @@ func TestResumeAfterWorkspaceMovesWithManagedPi(t *testing.T) {
 	if again := sessionFiles(t, sessions); len(again) != len(files) {
 		t.Fatalf("restart made another session: %d files, had %d", len(again), len(files))
 	}
+}
+
+// A copy interrupted at the move, by a full disk, a crash or a kill, must
+// not become the session the next start resumes: pi's --fork wrote its copy
+// in place, and the next start resumed the shorter copy, silently missing
+// the rest of the conversation. Both kinds of copy are interrupted at the
+// same byte: pi's by a file size limit, yesman's by the fault hook.
+func TestInterruptedCopyIsNotResumedWithManagedPi(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("needs sh for the file size limit")
+	}
+	f := newManagedPiFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	before, after := filepath.Join(f.temp, "H004-volume"), filepath.Join(f.temp, "H002-volume")
+	store := yesmen.New(filepath.Join(before, "yesmen"), filepath.Join(before, "archive"))
+	if _, err := store.Hire("alice"); err != nil {
+		t.Fatal(err)
+	}
+	var limit atomic.Int64 // blocks of 512 bytes pi may write; 0 is none
+	cfg := f.cfg
+	command := cfg.Command
+	cfg.Command = func(ctx context.Context) (string, []string, error) {
+		name, args, err := command(ctx)
+		if n := limit.Load(); n > 0 && err == nil {
+			return "sh", append([]string{"-c", fmt.Sprintf(`ulimit -f %d && exec "$0" "$@"`, n), name}, args...), nil
+		}
+		return name, args, err
+	}
+	cfg.Yesmen = store
+	m := New(cfg)
+	id := ID("alice", yesmen.LeadName)
+	for i := range 12 {
+		sendAndSettle(t, ctx, m, id, deliveryTestID(30001+i), fmt.Sprintf("turn %d %s", i, strings.Repeat("x", 4000)), nil)
+	}
+	want := userTurns(t, ctx, m, id)
+	m.StopAll()
+	if err := os.Rename(before, after); err != nil {
+		t.Fatal(err)
+	}
+	sessions := filepath.Join(after, "yesmen", "alice", ".yesman", "sessions", "lead")
+	original := sessionFiles(t, sessions)
+	if len(original) != 1 {
+		t.Fatalf("fixture has %d sessions", len(original))
+	}
+	var size int64
+	for name := range original {
+		info, _ := os.Stat(filepath.Join(sessions, name))
+		size = info.Size()
+	}
+	// sh counts the limit in blocks of its own size.
+	probe := filepath.Join(f.temp, "probe")
+	_ = exec.Command("sh", "-c", `ulimit -f 1 && head -c 4096 /dev/zero > "$0"`, probe).Run()
+	unit := int64(512)
+	if info, err := os.Stat(probe); err == nil && info.Size() > 0 {
+		unit = info.Size()
+	}
+	blocks := size / 2 / unit
+	cut := blocks * unit // about half the copy
+
+	// The first start at the new path is interrupted halfway through the copy.
+	limit.Store(blocks)
+	forkCopyFault = func(written int64) error {
+		if written >= cut {
+			return errors.New("file too large")
+		}
+		return nil
+	}
+	cfg.Yesmen = yesmen.New(filepath.Join(after, "yesmen"), filepath.Join(after, "archive"))
+	m = New(cfg)
+	if _, err := m.Messages(ctx, id); err == nil {
+		t.Fatal("the interrupted start succeeded")
+	} else {
+		t.Logf("interrupted start: %v", err)
+	}
+	m.StopAll()
+	all, _ := os.ReadDir(sessions)
+	for _, e := range all {
+		if info, err := e.Info(); err == nil {
+			t.Logf("left: %s %d bytes (original %d, cut at %d)", e.Name(), info.Size(), size, cut)
+		}
+	}
+	limit.Store(0)
+	forkCopyFault = nil
+
+	// The next start shows the whole conversation, from a whole copy.
+	m = New(cfg)
+	defer func() { m.StopAll() }()
+	got := userTurns(t, ctx, m, id)
+	t.Logf("after an interrupted copy the history has %d of %d turns", len(got), len(want))
+	if !slices.Equal(got, want) {
+		t.Fatalf("history after an interrupted copy = %d turns, want %d", len(got), len(want))
+	}
+	m.StopAll()
+	// Every entry of the conversation is in the session resumed, the newest.
+	var originalIDs []string
+	for name := range original {
+		originalIDs = entryIDs(t, filepath.Join(sessions, name))
+	}
+	newest := ""
+	var newestTime time.Time
+	for name := range sessionFiles(t, sessions) {
+		info, _ := os.Stat(filepath.Join(sessions, name))
+		if info.ModTime().After(newestTime) {
+			newest, newestTime = name, info.ModTime()
+		}
+	}
+	resumed := map[string]bool{}
+	for _, id := range entryIDs(t, filepath.Join(sessions, newest)) {
+		resumed[id] = true
+	}
+	missing := 0
+	for _, id := range originalIDs {
+		if !resumed[id] {
+			missing++
+		}
+	}
+	t.Logf("the resumed session holds %d of the %d original entries", len(originalIDs)-missing, len(originalIDs))
+	if missing > 0 {
+		t.Fatalf("the resumed session is missing %d of the %d original entries", missing, len(originalIDs))
+	}
+	files := sessionFiles(t, sessions)
+	for name, sum := range original {
+		if files[name] != sum {
+			t.Fatalf("original session %s changed", name)
+		}
+	}
+	if len(files) != 2 {
+		t.Fatalf("%d session files after the move, want the original and one whole copy", len(files))
+	}
+	if stray, _ := filepath.Glob(filepath.Join(sessions, ".yesman-fork-*")); len(stray) != 0 {
+		t.Fatalf("staging left: %v", stray)
+	}
+}
+
+// entryIDs lists the IDs of a session file's entries, in order.
+func entryIDs(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, line := range strings.Split(string(data), "\n") {
+		var e struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		}
+		if json.Unmarshal([]byte(line), &e) == nil && e.Type != "session" && e.ID != "" {
+			ids = append(ids, e.ID)
+		}
+	}
+	return ids
 }
