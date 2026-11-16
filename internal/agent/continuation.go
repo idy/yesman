@@ -103,7 +103,9 @@ func (m *Manager) continueTasks(yesman string) {
 		return
 	}
 	c.running = true
+	m.evaluations.Add(1)
 	m.mu.Unlock()
+	defer m.evaluations.Done()
 	for {
 		m.evaluate(yesman, c)
 		m.mu.Lock()
@@ -114,6 +116,21 @@ func (m *Manager) continueTasks(yesman string) {
 		}
 		c.again = false
 		m.mu.Unlock()
+	}
+}
+
+// waitEvaluations waits, up to d, for the continuation evaluations running
+// to end; StopAll calls it once closed, so that none starts meanwhile.
+func (m *Manager) waitEvaluations(d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		m.evaluations.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		log.Printf("yesman: a task evaluation did not end within %v of quitting", d)
 	}
 }
 

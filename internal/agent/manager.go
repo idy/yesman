@@ -162,19 +162,22 @@ type Config struct {
 type Manager struct {
 	cfg Config
 
-	mu               sync.Mutex
-	agents           map[string]*agent
-	tokens           map[string]string        // credential -> agent ID, while its process runs
-	closed           bool                     // StopAll permanently prevents further starts; guarded by mu
-	worktreeCleanup  map[string]bool          // reservations preventing owner startup/input during final removal
-	shutdown         chan struct{}            // closed by StopAll to wake pending report retries
-	recallBytes      int                      // full payload memory across all agent generations; guarded by mu
-	continuations    map[string]*continuation // by yesman; guarded by mu, see continuation.go
-	beforeNotice     func()                   // tests only: runs before a notice reserves the lead
-	leadPauses       map[string]*leadPause    // by yesman, of the hire owning it: the user's pauses of leads; guarded by mu, see pause.go
-	workerPauses     map[string]*workerPause  // by agent ID: the user's pauses of workers; guarded by mu, see pause.go
-	pauseEpoch       uint64                   // numbers worker pause settings; guarded by mu
-	beforePromptDone func(*agent)             // tests only: runs once a prompt's RPC returned, before it ends
+	mu              sync.Mutex
+	agents          map[string]*agent
+	tokens          map[string]string        // credential -> agent ID, while its process runs
+	closed          bool                     // StopAll permanently prevents further starts; guarded by mu
+	worktreeCleanup map[string]bool          // reservations preventing owner startup/input during final removal
+	shutdown        chan struct{}            // closed by StopAll to wake pending report retries
+	recallBytes     int                      // full payload memory across all agent generations; guarded by mu
+	continuations   map[string]*continuation // by yesman; guarded by mu, see continuation.go
+	// evaluations counts the continuation evaluations running; one is added
+	// only under mu while not closed, so StopAll can wait for them.
+	evaluations      sync.WaitGroup
+	beforeNotice     func()                  // tests only: runs before a notice reserves the lead
+	leadPauses       map[string]*leadPause   // by yesman, of the hire owning it: the user's pauses of leads; guarded by mu, see pause.go
+	workerPauses     map[string]*workerPause // by agent ID: the user's pauses of workers; guarded by mu, see pause.go
+	pauseEpoch       uint64                  // numbers worker pause settings; guarded by mu
+	beforePromptDone func(*agent)            // tests only: runs once a prompt's RPC returned, before it ends
 	// tests only: runs as the user's pause of a lead begins to be written.
 	reviewBeforePersistPause func(paused bool)
 	// tests only: runs once a task notice is recorded, before it is sent.
@@ -1204,6 +1207,14 @@ func (m *Manager) Stop(id string) {
 		m.mu.Unlock()
 		return
 	}
+	m.stopAgentLocked(a, nil)
+}
+
+// stopAgentLocked is Stop for the agent object a, which the caller chose
+// under mu, held on entry and released here: never another agent given the
+// same name since. With only set, only that process of a is stopped, the
+// one the caller checked; a process started since is left alone.
+func (m *Manager) stopAgentLocked(a *agent, only *proc) {
 	a.stopping = true
 	if a.startCancel != nil {
 		a.startCancel()
@@ -1221,7 +1232,7 @@ func (m *Manager) Stop(id string) {
 	m.mu.Lock()
 	p := a.proc
 	m.mu.Unlock()
-	if p == nil {
+	if p == nil || only != nil && p != only {
 		return
 	}
 	p.stop(10 * time.Second)
@@ -1266,7 +1277,14 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 	if err != nil || state.IsStreaming || state.IsCompacting {
 		return false
 	}
-	m.Stop(id)
+	// Only this agent's process asked, still idle: not one of the same name
+	// started since.
+	m.mu.Lock()
+	if m.agents[id] != a || a.proc != p || a.starting != nil || a.prompts != 0 || a.recalls != 0 || a.reports != 0 || a.info.Status != Idle {
+		m.mu.Unlock()
+		return false
+	}
+	m.stopAgentLocked(a, p)
 	return true
 }
 
@@ -1338,6 +1356,10 @@ func (m *Manager) StopAll() {
 		wg.Go(func() { m.Stop(id) })
 	}
 	wg.Wait()
+	// A continuation evaluation already running writes the workspace's
+	// record; it ends before StopAll does. Its sends end with the processes
+	// stopped above, and no new one starts once closed.
+	m.waitEvaluations(10 * time.Second)
 	m.mu.Lock()
 	var writers []*deliveryWriter
 	for _, a := range m.agents {
@@ -1580,6 +1602,9 @@ func (m *Manager) closeIfFinished(a *agent, run runMark, finishedAt time.Time) {
 		if !active {
 			return errStopped
 		}
+		if reviewR6BeforeFinish != nil {
+			reviewR6BeforeFinish(a) // tests: the finish is slow to begin
+		}
 		if finishedAt.IsZero() {
 			ws, err := m.cfg.Yesmen.Workers(yesman)
 			if err != nil || !slices.ContainsFunc(ws, func(w yesmen.Worker) bool { return w.Name == name && !w.FinishedAt.IsZero() }) {
@@ -1590,7 +1615,15 @@ func (m *Manager) closeIfFinished(a *agent, run runMark, finishedAt time.Time) {
 			return err
 		}
 		// Prompts wait for modelMu, held here, and start it again once closed.
-		m.Stop(a.info.ID)
+		// Only this agent, still on the run that finished: the workspace's
+		// record says nothing of a worker of the same name given work since,
+		// which has an agent and a process of its own.
+		m.mu.Lock()
+		if m.agents[a.info.ID] != a || !lastRunLocked(a, run) || a.info.Status != Idle || a.prompts != 0 || a.recalls != 0 {
+			m.mu.Unlock()
+			return nil
+		}
+		m.stopAgentLocked(a, p)
 		return nil
 	})
 }
@@ -1728,3 +1761,7 @@ func lastLines(s string, n int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// reviewR6BeforeFinish, tests only: runs as a finished worker's close,
+// its scope checked, is about to record it in the workspace.
+var reviewR6BeforeFinish func(*agent)
