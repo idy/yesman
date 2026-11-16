@@ -46,8 +46,7 @@ const OUTCOMES = {
 };
 const errorText = (err) => String(err?.message || err?.error || err);
 
-// macOS 15 renamed the pane; the Screen row is its upper list there.
-const settingsName = (id, os) => (id === 'screen' && Number.parseInt(os, 10) >= 15 ? 'Screen & System Audio Recording' : PERMISSIONS[id][0]);
+// Row names describe permission categories; System Settings pane names vary.
 const SIGNING = { adhoc: 'ad-hoc signed', signed: 'signed', unsigned: 'unsigned' };
 
 export function createGrants({ call, shown }) {
@@ -93,8 +92,7 @@ export function createGrants({ call, shown }) {
   function row(item) {
     const spec = PERMISSIONS[item.id];
     if (!spec) return null;
-    const [, description, glyph] = spec;
-    const name = settingsName(item.id, view?.os);
+    const [name, description, glyph] = spec;
     const busy = pending?.id === item.id || item.busy;
     const note = feedback?.id === item.id ? feedback : null;
     const nativePending = view?.items.some(value => value.busy);

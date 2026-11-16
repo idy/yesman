@@ -101,9 +101,18 @@ try {
    assert.match(await audio.innerText(),/no public status check[\s\S]*System Audio Recording Only/);
    assert.equal(await audio.locator('[data-grant-action="request"]').count(),0);
    assert.equal(await audio.locator('[data-grant-action="settings"]').count(),1);
-   // macOS 15+ names the Screen row after its list; the identity of the
-   // checked copy and the ad-hoc build explanation are visible.
-   assert.equal(await row('screen').locator('h3').innerText(),'Screen & System Audio Recording');
+   // Permission-category names do not guess the OS pane's rename version.
+   // Identity and the ad-hoc build explanation remain visible.
+   assert.equal(await row('screen').locator('h3').innerText(),'Screen Recording');
+   assert.equal(await action('screen','settings').getAttribute('aria-label'),'Open Settings: Screen Recording');
+   for(const lang of ['en','zh-Hans'])for(const os of ['13.0','14.0','14.2','14.7','15.0']){
+    await page.evaluate(([lang,os])=>{fixture.os=os;changeLocale(lang);},[lang,os]);
+    await refresh().click();await ready();
+    assert.equal(await row('screen').locator('h3').innerText(),lang==='en'?'Screen Recording':'屏幕录制');
+    assert.equal(await action('screen','settings').getAttribute('aria-label'),lang==='en'?'Open Settings: Screen Recording':'打开系统设置：屏幕录制');
+   }
+   await page.evaluate(()=>{fixture.os='15.0';changeLocale('en');});
+   await refresh().click();await ready();
    assert.match(await page.locator('.grant-identity').innerText(),/macOS checks this copy: \/Applications\/yesman\.app \(ad-hoc signed\)/);
    assert.match(await row('accessibility').innerText(),/different build[\s\S]*cannot determine why[\s\S]*remove that entry with − and add this copy again with \+/);
    assert.equal(await row('accessibility').locator('.grant-state').innerText(),'Not granted');
@@ -116,7 +125,7 @@ try {
     assert.equal(await row(id).locator('.grant-state').innerText(),before);
    }
    assert.equal(await page.evaluate(()=>calls.filter(c=>c[0]==='GrantAction'&&c[2]==='request').length),0);
-   // Older macOS: Screen Recording name, no system audio permission/Settings,
+   // Older macOS: same permission-category name, no audio permission/Settings,
    // and no identity line for an unidentified copy.
    await page.evaluate(()=>{window.modern=structuredClone(fixture);fixture.os='14.1';delete fixture.app;Object.assign(fixture.items.find(i=>i.id==='system-audio'),{state:'not-applicable',detail:'system-audio-os',settings:false});});
    await refresh().click();await ready();
@@ -208,22 +217,36 @@ try {
    }
    await page.evaluate(()=>fixture=macFixture);await refresh().click();await ready();
    // Real production typography, themes, translation, wrapping, and controls.
-   for(const lang of ['en','zh-Hans'])for(const theme of ['light','dark'])for(const width of [1180,760,640,480]){
+   for(const lang of ['en','zh-Hans'])for(const theme of ['light','dark'])for(const width of [1180,760,640,480])for(const pathCase of (width===480?['short','long']:['short'])){
+    // A legal unspaced 209-byte directory component must wrap without moving
+    // Refresh or permission actions outside the narrow Settings pane.
+    const appPath=pathCase==='long'?'/Applications/'+'DerivedData_'.repeat(17)+'build/yesman.app':'/Applications/yesman.app';
     await page.setViewportSize({width,height:900});
-    await page.evaluate(([lang,theme])=>{changeLocale(lang);document.documentElement.dataset.theme=theme;},[lang,theme]);
+    await page.evaluate(([lang,theme,appPath])=>{fixture.app.path=appPath;changeLocale(lang);document.documentElement.dataset.theme=theme;},[lang,theme,appPath]);
+    await refresh().click();await ready();
     await row('full-disk').waitFor();
     await page.waitForTimeout(250); // allow the existing Settings drawer transition to settle
     assert(!/null|undefined/.test(await page.locator('.grant-page').innerText()));
     await page.evaluate(()=>document.querySelector('.page').scrollTop=0);
-    const geometry=await page.locator('.grant-page').evaluate(el=>({width:el.clientWidth,scroll:el.scrollWidth,rows:[...el.querySelectorAll('.grant-row')].map(r=>({id:r.dataset.permission,width:r.clientWidth,scroll:r.scrollWidth}))}));
-    assert(geometry.scroll<=geometry.width+1,JSON.stringify({name,lang,theme,width,geometry}));
+    const geometry=await page.locator('.grant-page').evaluate(el=>({width:el.clientWidth,scroll:el.scrollWidth,pageWidth:el.closest('.page').clientWidth,pageScroll:el.closest('.page').scrollWidth,rows:[...el.querySelectorAll('.grant-row')].map(r=>({id:r.dataset.permission,width:r.clientWidth,scroll:r.scrollWidth}))}));
+    assert(geometry.scroll<=geometry.width+1,JSON.stringify({name,lang,theme,width,pathCase,geometry}));
+    assert(geometry.pageScroll<=geometry.pageWidth+1,JSON.stringify({name,lang,theme,width,pathCase,geometry}));
+    assert((await page.locator('.grant-identity').innerText()).includes(appPath),'complete literal app path is preserved');
+    assert.equal(await action('screen','settings').getAttribute('aria-label'),lang==='en'?'Open Settings: Screen Recording':'打开系统设置：屏幕录制');
     assert(geometry.rows.every(r=>r.scroll<=r.width+1));
     assert.equal(await page.locator('.grant-toolbar h2').innerText(),lang==='en'?'Grant':'授权');
-    await page.screenshot({path:out+'/'+[name,lang,theme,width].join('-')+'.png'});
+    await page.screenshot({path:out+'/'+[name,lang,theme,width,pathCase].join('-')+'.png'});
+    if(pathCase==='long'){
+     // Real hit-tested clicks, not forced/DOM-dispatched events.
+     await refresh().click();await ready();
+     const before=await row('system-audio').locator('.grant-state').innerText();
+     await action('system-audio','settings').click();await ready();
+     assert.equal(await row('system-audio').locator('.grant-state').innerText(),before);
+    }
     const navigation=await page.locator('#settings-nav').evaluate(el=>({items:el.children.length,pages:[...el.children].map(c=>c.dataset.page),height:el.getBoundingClientRect().height,scroll:el.scrollHeight,branch:el.closest('.settings-branch').outerHTML}));
     assert.deepEqual(navigation.pages,['general','shortcuts','grant','yesman','usage','repositories','secrets','variables','storage','pi','config','about']);
     assert(navigation.height>250,JSON.stringify({name,lang,theme,width,navigation}));
-    results.push({engine:name,lang,theme,width,geometry,navigation});
+    results.push({engine:name,lang,theme,width,pathCase,geometry,navigation});
    }
    // Closing the browser retires an outstanding action without page errors.
    await page.evaluate(()=>holdAction=true);
@@ -234,5 +257,5 @@ try {
   }finally{await browser.close();}
  }
  await writeFile(out+'/results.json',JSON.stringify(results,null,2));
- console.log('Grant: Chromium + WebKit lifecycle, actions, errors, focus, localization and 32 layout checks passed');
+ console.log('Grant: Chromium + WebKit lifecycle, actions, errors, focus, localization and 40 layout checks (including long paths) passed');
 }finally{await new Promise(resolve=>server.close(resolve));}

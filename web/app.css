@@ -431,6 +431,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 
 /* Settings › Grant: status and actions keep their own space at narrow widths. */
 .grant-page { display: grid; gap: 16px; }
+.grant-identity { min-width: 0; overflow-wrap: anywhere; }
 .grant-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .grant-toolbar h2 { margin: 0; }
 .grant-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(160px, 220px); gap: 12px 24px; padding: 16px; align-items: start; }
