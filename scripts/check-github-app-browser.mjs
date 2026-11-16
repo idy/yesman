@@ -97,6 +97,13 @@ try {
       await pageRoot.getByRole('textbox', { name: 'GitHub owner' }).fill('idy');
       await pageRoot.getByRole('textbox', { name: 'App name' }).fill('yesman fixture');
       await button('Start registration').click(); await button('Open registration').waitFor();
+      // Finished in the browser: returning to the window shows it saved and
+      // ended, and another registration can start.
+      await page.evaluate(() => { window.fixture.state.setup = { complete: true }; window.dispatchEvent(new Event('focus')); });
+      await pageRoot.getByText('App saved. Complete its repository installation, then save and test the scope below.', { exact: true }).waitFor();
+      assert.equal(await button('Open registration').count(), 0);
+      assert.equal(await button('Start registration').isDisabled(), false);
+      await button('Start registration').click(); await button('Open registration').waitFor();
       await button('Cancel registration').click(); await button('Start registration').waitFor();
       // Return to the page during an outstanding mutation: the busy state is
       // retained and its eventual fresh result survives navigation.

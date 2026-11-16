@@ -112,5 +112,10 @@ export function createGitHubAppPage({ call, shown, rerender, settingsSection, pr
         h('span', { class: 'mds-hint', id: 'github-app-scope-status', role: 'status' }, t(s.dirty ? 'Unsaved changes' : v.verified ? 'Connection verified' : 'Test before enabling'))),
       ...(v.connections ?? []).map((c) => h('p', { class: 'mds-hint' }, `${c.repository} · ${c.app.slug}[bot] · ${t('Installation ID')} ${c.installation_id}`))));
   }
+  // A registration finishes in the browser: coming back to the window reads
+  // whether it saved the App, while one is open on the page shown.
+  const onReturn = () => { if (shown() && document.visibilityState !== 'hidden' && s.view?.setup?.url && !s.busy) load(); };
+  window.addEventListener('focus', onReturn);
+  document.addEventListener('visibilitychange', onReturn);
   return { load, render };
 }

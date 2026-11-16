@@ -236,18 +236,30 @@ func (s *service) RegisterGitHubApp(owner, name string) (GitHubAppView, error) {
 	a.githubSetupCancel = cancel
 	go func() {
 		defer stop()
+		defer cancel()
 		select {
 		case result := <-registration.Results():
 			a.githubSetupMu.Lock()
-			// Only this invocation may update its UI state; cancellation clears URL.
+			// Only this invocation may update its UI state; cancellation or a
+			// newer registration already replaced the URL. The callback is
+			// single-use, so its result ends this registration at once: Settings
+			// stops showing it open and another may start.
 			if a.githubSetup.URL == entry {
+				a.githubSetup.URL = ""
+				a.githubSetupCancel = nil
 				a.githubSetup.Complete = result.Err == nil
 				if result.Err != nil {
 					a.githubSetup.Error = result.Err.Error()
 				}
 			}
 			a.githubSetupMu.Unlock()
-			<-ctx.Done()
+			// The consumed server accepts no other registration; keep it briefly
+			// so the callback's own page reaches the browser before it closes.
+			select {
+			case <-ctx.Done():
+			case <-time.After(githubSetupGrace):
+			}
+			return
 		case <-ctx.Done():
 		}
 		a.githubSetupMu.Lock()
@@ -263,6 +275,11 @@ func (s *service) RegisterGitHubApp(owner, name string) (GitHubAppView, error) {
 	// Do not call GitHubApp while holding githubSetupMu.
 	return GitHubAppView{View: a.githubApp.View(), Setup: a.githubSetup}, nil
 }
+
+// githubSetupGrace is how long a finished registration's local server stays
+// up to deliver the callback's page.
+const githubSetupGrace = 10 * time.Second
+
 func (a *app) stopGitHubAppSetup() {
 	a.githubSetupMu.Lock()
 	defer a.githubSetupMu.Unlock()

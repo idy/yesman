@@ -74,7 +74,8 @@ try{for(const [name,engine] of Object.entries({chromium,webkit})){
   await page.locator('.palette-option').filter({hasText:'Grant'}).first().click();await page.locator('.grant-row').last().waitFor();
   const mainFocus=await page.evaluate(()=>({tag:document.activeElement?.tagName,page:document.activeElement?.dataset.page,connected:document.activeElement?.isConnected}));
   assert.deepEqual(appFocus,mainFocus);assert.equal(appFocus.connected,true);assert.notEqual(appFocus.tag,'BODY');
-  await page.locator('#settings-nav [data-page="github-app"]').click();await pane.waitFor();
+  // Wait for the page's read to settle: its render replaces the toolbar.
+  await page.locator('#settings-nav [data-page="github-app"]').click();await pane.waitFor();await button('Enable App identity').waitFor();
   await button('Refresh').focus();assert.equal(await button('Refresh').evaluate(e=>e===document.activeElement),true);
   if(out)await page.screenshot({path:join(out,name+'-combined.png'),fullPage:true});
   assert.deepEqual(await page.evaluate(()=>window.unmocked),[]);assert.deepEqual(errors,[]);
