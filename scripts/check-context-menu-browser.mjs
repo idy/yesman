@@ -67,7 +67,8 @@ try {
             window.fixture.calls.push({ method: name, args: structuredClone(args) });
             switch (name) {
               case 'State': return { yesmen: [{ name: 'alice' }], agents };
-              case 'Repos': case 'Clones': return [];
+              case 'Repos': case 'Clones': case 'Pulls': return [];
+              case 'Info': return { knowledge: { notes: 0, index: false }, worktrees: [] };
               case 'Messages': return { messages: args[0] === 'alice/lead' ? [{ role: 'user', timestamp: 1, content: 'Show the schedule' }, { role: 'assistant', timestamp: 2, content: [{ type: 'text', text: reply }] }] : [], deliveries: [], seq: 0, queue: { known: true, steering: 0, followUp: 0 } };
               case 'Models': return { agent: agents.find((a) => a.id === args[0]), models: [{ id: 'm', provider: 'p', name: 'Model' }] };
               case 'PageMenu': case 'AgentMenu': case 'FileMenu': return window.fixture.next.shift() ?? (name === 'PageMenu' ? { action: '' } : '');
@@ -217,8 +218,23 @@ try {
         assert.deepEqual(r.prevented, [true]);
         assert.deepEqual(r.menus.map((c) => c.method), ['FileMenu']);
 
-        // ---- Sidebar, Needs You and empty space there ----
-        for (const [name, locator] of [['Needs You entry', page.locator('.needs-you-entry')], ['sidebar foot', page.locator('#side-foot')]]) {
+        // ---- Info, the current Needs You pane and the sidebar ----
+        await page.locator('#bar-actions button[aria-pressed]').first().click();
+        m = await mark();
+        await rightClick(await center(page.locator('[data-info-entry="needs-you"]')));
+        r = record('Info Needs You row', await since(m));
+        assert.deepEqual(r.prevented, [true]);
+        assert.deepEqual(r.menus.map((c) => c.method), ['PageMenu']);
+        await page.locator('[data-info-entry="needs-you"]').focus();
+        await page.keyboard.press('Enter');
+        m = await mark();
+        await rightClick(await center(page.locator('#needs-you .needs-you-empty')));
+        r = record('Needs You pane', await since(m));
+        assert.deepEqual(r.prevented, [true]);
+        assert.deepEqual(r.menus.map((c) => c.method), ['PageMenu']);
+        await page.locator('#needs-you [data-pane-control="close"]').click();
+        await page.locator('#bar-actions button[aria-pressed]').first().click();
+        for (const [name, locator] of [['sidebar foot', page.locator('#side-foot')]]) {
           m = await mark();
           await rightClick(await center(locator));
           r = record(name, await since(m));
