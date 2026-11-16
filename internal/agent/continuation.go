@@ -8,6 +8,7 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/idy/yesman/internal/yesmen"
@@ -196,12 +197,6 @@ type notice struct {
 // evaluate tells the lead of the tasks that need a next step, if it can be
 // told now and has something new to be told.
 func (m *Manager) evaluate(yesman string, c *continuation) {
-	m.mu.Lock()
-	_, _, _, state := m.leadStateLocked(yesman)
-	m.mu.Unlock()
-	if state == leadBusy {
-		return
-	}
 	y, err := m.cfg.Yesmen.Get(yesman)
 	if err != nil {
 		return
@@ -210,9 +205,6 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 	if err != nil {
 		log.Printf("yesman: continuation of %s: %v", yesman, err)
 		return
-	}
-	if !record.LeadPausedAt.IsZero() {
-		return // the user stopped the lead: nothing starts it but the user
 	}
 	board, err := m.cfg.Yesmen.Board(yesman)
 	if err != nil {
@@ -242,6 +234,19 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 	m.mu.Unlock()
 
 	items := classify(board, workers, runs, handoffs)
+	// Whatever the lead's state, a task that needs no notice now forgets the
+	// one it had, so that it is told again once it needs one; it keeps its
+	// count, so that a task going back and forth without progress stays
+	// bounded.
+	if record = m.forgetSettled(y, record, items); !record.LeadPausedAt.IsZero() {
+		return // the user stopped the lead: nothing starts it but the user
+	}
+	m.mu.Lock()
+	_, _, _, state := m.leadStateLocked(yesman)
+	m.mu.Unlock()
+	if state == leadBusy {
+		return
+	}
 	var listed []notice
 	actionable := 0
 	for _, n := range items {
@@ -275,6 +280,15 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 	text := noticeText(listed)
 	if m.beforeNotice != nil {
 		m.beforeNotice() // tests: something changes after the board was read
+	}
+	// The user's Stop records its pause under this lock: from here to the
+	// notice's dispatch, a pause either is seen now or comes after, and its
+	// Stop then ends what the notice started.
+	pause := m.pauseLock(yesman)
+	pause.Lock()
+	defer pause.Unlock()
+	if r, err := m.cfg.Yesmen.Continuation(yesman); err != nil || !r.LeadPausedAt.IsZero() {
+		return
 	}
 
 	// Reserve the lead, recheck it and record the attempt before sending,
@@ -378,6 +392,63 @@ func (m *Manager) recordAttempt(y yesmen.Yesman, listed []notice, at time.Time, 
 		})
 		return err
 	})
+}
+
+// forgetSettled clears the delivered notice of every task the board still
+// has that needs none now, and returns the record as it is then.
+func (m *Manager) forgetSettled(y yesmen.Yesman, record yesmen.Continuation, items []notice) yesmen.Continuation {
+	needs := map[string]bool{}
+	for _, n := range items {
+		needs[n.task.ID] = true
+	}
+	stale := false
+	for id, r := range record.Tasks {
+		if !needs[id] && r.Sig != "" {
+			stale = true
+		}
+	}
+	if !stale {
+		return record
+	}
+	var out yesmen.Continuation
+	err := m.cfg.Yesmen.Use(y.Name, func(cur yesmen.Yesman) error {
+		if !cur.HiredAt.Equal(y.HiredAt) {
+			return yesmen.ErrRehired
+		}
+		var err error
+		out, err = m.cfg.Yesmen.UpdateContinuation(y.Name, y.HiredAt, func(c *yesmen.Continuation) bool {
+			changed := false
+			for id, r := range c.Tasks {
+				if !needs[id] && r.Sig != "" {
+					r.Sig, r.Delivered = "", false
+					c.Tasks[id] = r
+					changed = true
+				}
+			}
+			return changed
+		})
+		return err
+	})
+	if err != nil {
+		log.Printf("yesman: continuation of %s: %v", y.Name, err)
+		return record
+	}
+	return out
+}
+
+// pauseLock orders a yesman's user pauses with its notices' dispatch.
+func (m *Manager) pauseLock(yesman string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pauses == nil {
+		m.pauses = map[string]*sync.Mutex{}
+	}
+	l := m.pauses[yesman]
+	if l == nil {
+		l = &sync.Mutex{}
+		m.pauses[yesman] = l
+	}
+	return l
 }
 
 func recentAttempts(all []time.Time, now time.Time) []time.Time {
@@ -586,6 +657,9 @@ func (m *Manager) pauseByUser(id string) {
 		return
 	}
 	now := time.Now().UTC()
+	pause := m.pauseLock(yesman)
+	pause.Lock()
+	defer pause.Unlock()
 	err = m.cfg.Yesmen.Use(yesman, func(y yesmen.Yesman) error {
 		if name == yesmen.LeadName {
 			_, err := m.cfg.Yesmen.UpdateContinuation(yesman, y.HiredAt, func(c *yesmen.Continuation) bool {

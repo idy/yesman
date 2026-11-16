@@ -192,7 +192,68 @@ func (s *Store) ChangeBoardBy(name string, c BoardChange, lead bool) (Board, err
 	if err := writeJSON(y.BoardFile(), b); err != nil {
 		return Board{}, err
 	}
+	// Best effort: a record that cannot be read or written is left as it
+	// is, and never holds up the board.
+	_ = s.forgetNotices(y, before, b.Tasks)
 	return b, nil
+}
+
+// forgetNotices forgets what the lead was told about tasks that moved: whose
+// status, owner or wait changed, that were removed, or that wait for a task
+// whose status changed. Such a task, back in the state it was told about,
+// is told about again.
+func (s *Store) forgetNotices(y Yesman, before, after []Task) error {
+	old := map[string]Task{}
+	for _, t := range before {
+		old[t.ID] = t
+	}
+	now := map[string]bool{}
+	status := map[string]bool{} // tasks whose status changed
+	moved := map[string]bool{}
+	for _, t := range after {
+		now[t.ID] = true
+		o, ok := old[t.ID]
+		if !ok {
+			continue
+		}
+		if o.Status != t.Status {
+			status[t.ID] = true
+		}
+		if o.Status != t.Status || o.Owner != t.Owner || waitKey(o.Wait) != waitKey(t.Wait) {
+			moved[t.ID] = true
+		}
+	}
+	for id := range old {
+		if !now[id] {
+			moved[id], status[id] = true, true
+		}
+	}
+	for _, t := range after {
+		if t.Wait != nil && slices.ContainsFunc(t.Wait.Tasks, func(id string) bool { return status[id] }) {
+			moved[t.ID] = true
+		}
+	}
+	if len(moved) == 0 {
+		return nil
+	}
+	_, err := s.UpdateContinuation(y.Name, y.HiredAt, func(c *Continuation) bool {
+		changed := false
+		for id := range moved {
+			if _, ok := c.Tasks[id]; ok {
+				delete(c.Tasks, id)
+				changed = true
+			}
+		}
+		return changed
+	})
+	return err
+}
+
+func waitKey(w *Wait) string {
+	if w == nil {
+		return ""
+	}
+	return w.Kind + ":" + strings.Join(w.Tasks, ",") + ":" + w.Handoff
 }
 
 // pauseChanged reports whether a paused task was changed or removed, or a

@@ -171,6 +171,7 @@ type Manager struct {
 	recallBytes     int                      // full payload memory across all agent generations; guarded by mu
 	continuations   map[string]*continuation // by yesman; guarded by mu, see continuation.go
 	beforeNotice    func()                   // tests only: runs before a notice reserves the lead
+	pauses          map[string]*sync.Mutex   // by yesman: user pauses vs notice dispatch; guarded by mu
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
 	// callsDone is signalled, under mu, when an agent's last caller
