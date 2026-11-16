@@ -1553,7 +1553,7 @@ func (m *Manager) closeIfFinished(a *agent, run runMark, finishedAt time.Time) {
 		// last to end closes it, unless something new comes meanwhile.
 		a.closeAt, a.closeInbox, a.closeRun = finishedAt, a.inbox, a.settled
 	}
-	yesman, name := a.info.Yesman, a.info.Name
+	yesman, name, since := a.info.Yesman, a.info.Name, a.info.Since
 	m.mu.Unlock()
 	if !idle {
 		return
@@ -1585,7 +1585,7 @@ func (m *Manager) closeIfFinished(a *agent, run runMark, finishedAt time.Time) {
 			if err != nil || !slices.ContainsFunc(ws, func(w yesmen.Worker) bool { return w.Name == name && !w.FinishedAt.IsZero() }) {
 				return err
 			}
-		} else if err := m.cfg.Yesmen.FinishWorker(yesman, name, finishedAt); err != nil {
+		} else if err := m.cfg.Yesmen.FinishWorkerOf(yesman, name, since, finishedAt); err != nil {
 			log.Printf("yesman: finish %s: %v", a.info.ID, err)
 			return err
 		}

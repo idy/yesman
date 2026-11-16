@@ -523,6 +523,19 @@ func (s *Store) FinishWorker(name, worker string, at time.Time) error {
 	return err
 }
 
+// FinishWorkerOf is FinishWorker for the worker started at since only: a
+// worker of the same name started later is left alone.
+func (s *Store) FinishWorkerOf(name, worker string, since, at time.Time) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if !w.StartedAt.Equal(since) {
+			return false
+		}
+		w.FinishedAt = at
+		return true
+	})
+	return err
+}
+
 // ReopenWorker records that a worker was given work again: it is neither
 // finished, paused nor failed any more. It reports whether the worker was finished.
 func (s *Store) ReopenWorker(name, worker string) (bool, error) {
@@ -538,12 +551,17 @@ func (s *Store) ReopenWorker(name, worker string) (bool, error) {
 	return reopened, err
 }
 
-// ReopenWorkerIf is ReopenWorker, except that the user's pause is cleared
-// only if unpause, called under the lock PauseWorkerIf writes under, reports
-// so for the record: a Stop made since the worker was given work stays.
-func (s *Store) ReopenWorkerIf(name, worker string, unpause func(Worker) bool) (bool, error) {
+// ReopenWorkerIf is ReopenWorker for the worker started at since only: a
+// worker of the same name started later is left wholly alone. Its pause is
+// cleared only if unpause, called under the lock PauseWorkerIf writes under,
+// reports so for the record: a Stop made since the worker was given work
+// stays.
+func (s *Store) ReopenWorkerIf(name, worker string, since time.Time, unpause func(Worker) bool) (bool, error) {
 	var reopened bool
 	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if !w.StartedAt.Equal(since) {
+			return false // another worker of that name
+		}
 		reopened = !w.FinishedAt.IsZero()
 		clear := !w.PausedAt.IsZero() && unpause(*w)
 		if !reopened && w.FailedAt.IsZero() && !clear {

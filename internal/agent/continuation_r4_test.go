@@ -50,6 +50,7 @@ func TestR4WorkerPauseHeldWrittenAndLifted(t *testing.T) {
 		t.Fatalf("the worker does not show its unsaved Stop: %q", info.Detail)
 	}
 	m.continueTasks("alice") // the retry fails again: still held in memory
+	reviewR5Drain(t, m)      // the evaluation it joined, if one ran, has ended
 	if got := noticesOf(prompts("alice/lead")); len(got) > 0 {
 		t.Fatalf("notice about a worker the user stopped: %q", got)
 	}
@@ -57,6 +58,7 @@ func TestR4WorkerPauseHeldWrittenAndLifted(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.continueTasks("alice")
+	reviewR5Drain(t, m) // the evaluation it joined, if one ran, has ended
 	if w := workerRecord(t, s, "w1"); w.PausedAt.IsZero() {
 		t.Fatal("the pause was not written once storage worked")
 	}
@@ -161,6 +163,7 @@ func TestR4StaleLoadPauseKeepsNewHire(t *testing.T) {
 	}
 	addTasks(t, s, yesmen.TaskEdit{Title: str("Goal")})
 	m.continueTasks("alice")
+	reviewR5Drain(t, m) // the evaluation it joined, if one ran, has ended
 	if m.running("alice/lead") != nil {
 		t.Fatal("the new hire's lead the user stopped was started")
 	}

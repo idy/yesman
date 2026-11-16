@@ -69,17 +69,20 @@ func (m *Manager) pauseOf(y yesmen.Yesman) *leadPause {
 }
 
 // ownPause makes sure the pause kept of y's workspace is hire y's, and
-// reports whether it is. Another hire's record is replaced only once the
-// workspace confirms, under its lifecycle lease (which Archive waits for),
-// that y is the hire it has now; a stale y is refused and changes nothing.
+// reports whether it is. Another hire's record is replaced only once y is
+// known to be the hire the workspace has now: at once, without I/O, when
+// this Manager runs y's lead (see liveHireLocked), else once the workspace
+// confirms it under its lifecycle lease (which Archive waits for). A stale
+// y is refused and changes nothing.
 func (m *Manager) ownPause(y yesmen.Yesman) bool {
 	m.mu.Lock()
 	if m.leadPauses == nil {
 		m.leadPauses = map[string]*leadPause{}
 	}
 	lp := m.leadPauses[y.Name]
-	if lp == nil {
+	if lp == nil || !lp.hiredAt.Equal(y.HiredAt) && m.liveHireLocked(y) {
 		m.leadPauses[y.Name] = &leadPause{hiredAt: y.HiredAt}
+		lp = nil
 	}
 	if lp == nil || lp.hiredAt.Equal(y.HiredAt) {
 		m.mu.Unlock()
@@ -98,6 +101,17 @@ func (m *Manager) ownPause(y yesmen.Yesman) bool {
 		return nil
 	})
 	return err == nil
+}
+
+// liveHireLocked reports, under mu, whether this Manager runs the lead of
+// hire y: an agent started for that hire under its lifecycle lease and not
+// retiring. StopYesman marks it retiring, under mu, before Archive moves the
+// hire away, and another hire exists only after that: so it proves y is the
+// hire the workspace has now, without waiting for storage. Hire times are
+// compared for identity only.
+func (m *Manager) liveHireLocked(y yesmen.Yesman) bool {
+	a := m.agents[ID(y.Name, yesmen.LeadName)]
+	return a != nil && !a.retiring && !a.workspaceSince.IsZero() && a.workspaceSince.Equal(y.HiredAt)
 }
 
 // leadPausedLocked reports whether yesman's own messages may not reach the

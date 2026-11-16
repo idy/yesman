@@ -89,6 +89,7 @@ func TestR5ResumeWriteFailureRecovers(t *testing.T) {
 	}
 	repair()
 	m.continueTasks("alice")
+	reviewR5Drain(t, m) // the evaluation it joined, if one ran, has ended
 	w := workerRecord(t, s, "w1")
 	if !w.PausedAt.IsZero() {
 		t.Error("accepted explicit new work lost its pause-clear after I/O failure; retry leaves old durable pause")
@@ -139,6 +140,7 @@ func TestR5StopAfterResumeWins(t *testing.T) {
 			t.Fatal("the reopen given before the user's Stop cleared it")
 		}
 		m.continueTasks("alice")
+		reviewR5Drain(t, m) // the evaluation it joined, if one ran, has ended
 		if workerRecord(t, s, "w1").PausedAt.IsZero() {
 			t.Fatal("a retry cleared the user's later Stop")
 		}
@@ -154,6 +156,7 @@ func TestR5StopAfterResumeWins(t *testing.T) {
 		m.StopByUser("alice/w1") // unsaved too
 		repair()
 		m.continueTasks("alice")
+		reviewR5Drain(t, m) // the evaluation it joined, if one ran, has ended
 		w := workerRecord(t, s, "w1")
 		if w.PausedAt.IsZero() || w.PausedAt.Equal(first) {
 			t.Fatalf("the later Stop was not what was written: %v (first %v)", w.PausedAt, first)
@@ -185,6 +188,7 @@ func TestR5ResumeStaysWithItsWorker(t *testing.T) {
 	}
 	repair()
 	m.continueTasks("alice")
+	reviewR5Drain(t, m) // the evaluation it joined, if one ran, has ended
 	if w := workerRecord(t, s, "w1"); !w.PausedAt.Equal(newer) {
 		t.Fatalf("the old worker's resume cleared the new worker's pause: %v", w.PausedAt)
 	}

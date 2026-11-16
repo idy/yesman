@@ -183,9 +183,14 @@ func (m *Manager) reopenWorkerInScope(a *agent, resume workerResume) (bool, erro
 		if !active {
 			return errStopped
 		}
+		if reviewR5BeforeStoreReopen != nil {
+			reviewR5BeforeStoreReopen() // tests: the write is slow to begin
+		}
 		var err error
-		reopened, err = m.cfg.Yesmen.ReopenWorkerIf(y.Name, a.info.Name, func(w yesmen.Worker) bool {
-			return w.StartedAt.Equal(resume.since) && m.workerSettingCurrent(resume.id, resume.hiredAt, resume.since, resume.epoch)
+		// Only the worker that was given work: one of the same name started
+		// since keeps all it records.
+		reopened, err = m.cfg.Yesmen.ReopenWorkerIf(y.Name, a.info.Name, resume.since, func(yesmen.Worker) bool {
+			return m.workerSettingCurrent(resume.id, resume.hiredAt, resume.since, resume.epoch)
 		})
 		return err
 	})
@@ -214,3 +219,7 @@ func (m *Manager) reportScope(a *agent) (time.Time, bool) {
 	}
 	return scope, active
 }
+
+// reviewR5BeforeStoreReopen, tests only: runs as a worker given work, its
+// scope checked, is about to be reopened in the workspace.
+var reviewR5BeforeStoreReopen func()
