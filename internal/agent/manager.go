@@ -172,6 +172,7 @@ type Manager struct {
 	continuations    map[string]*continuation // by yesman; guarded by mu, see continuation.go
 	beforeNotice     func()                   // tests only: runs before a notice reserves the lead
 	leadPauses       map[string]*leadPause    // by yesman: the user's pauses of leads; guarded by mu, see pause.go
+	workerPauses     map[string]*workerPause  // by agent ID: the user's pauses of workers; guarded by mu, see pause.go
 	beforePromptDone func(*agent)             // tests only: runs once a prompt's RPC returned, before it ends
 	// tests only: runs as the user's pause of a lead begins to be written.
 	reviewBeforePersistPause func(paused bool)
@@ -230,6 +231,10 @@ type agent struct {
 	// Guarded by the manager's mu.
 	closeAt    time.Time
 	closeInbox uint64
+	closeRun   uint64
+	// settled counts the runs that settled: a report closes its worker only
+	// while no later run settled (see runMark).
+	settled uint64
 	// inbox changes when a message is queued or registered. settledInbox is
 	// the inbox at the last settle, so accepted prompts awaiting agent_start
 	// still defer telling the lead about its tasks. Both are guarded by the manager's mu.
@@ -273,16 +278,25 @@ func SplitID(id string) (yesman, name string, err error) {
 // the order they started.
 func (m *Manager) List() []Info {
 	ys, _ := m.cfg.Yesmen.List()
+	// The workspace is read first, without mu: slow storage holds up this
+	// list, never a Stop or a message.
+	type listed struct {
+		ws    []yesmen.Worker
+		board yesmen.Board
+	}
+	read := make([]listed, len(ys))
+	for i, y := range ys {
+		ws, _ := m.cfg.Yesmen.Workers(y.Name)
+		sort.SliceStable(ws, func(i, j int) bool { return ws[i].StartedAt.Before(ws[j].StartedAt) })
+		read[i] = listed{ws, m.boardFor(y.Name, ws)}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []Info
-	for _, y := range ys {
+	for i, y := range ys {
 		out = append(out, m.infoLocked(ID(y.Name, yesmen.LeadName), RoleLead, yesmen.Worker{StartedAt: y.HiredAt}, ""))
-		ws, _ := m.cfg.Yesmen.Workers(y.Name)
-		sort.SliceStable(ws, func(i, j int) bool { return ws[i].StartedAt.Before(ws[j].StartedAt) })
-		board := m.boardFor(y.Name, ws)
-		for _, w := range ws {
-			out = append(out, m.infoLocked(ID(y.Name, w.Name), RoleWorker, w, w.Subject(board)))
+		for _, w := range read[i].ws {
+			out = append(out, m.infoLocked(ID(y.Name, w.Name), RoleWorker, w, w.Subject(read[i].board)))
 		}
 	}
 	return out
@@ -644,9 +658,6 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 		}
 		worker, stopping, retiring := a.info.Role == RoleWorker, a.stopping, a.retiring
 		handoff := worker && !retiring && (!e.Aborted || !stopping)
-		// The run that settled: its report may close the worker only while
-		// nothing was given to it since.
-		run := runMark{p: p, inbox: a.inbox}
 		if handoff {
 			// The worker is still busy until its report reaches the lead.
 			// Reserve this before publishing Idle, without waiting on RPC.
@@ -654,6 +665,10 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 		}
 		a.info.Status, a.info.Detail, a.info.Dialog, a.info.UpdatedAt = Idle, "", nil, time.Now()
 		a.settledInbox = a.inbox
+		a.settled++
+		// The run that settled: its report may close the worker only while
+		// nothing was given to it since and no later run settled.
+		run := runMark{p: p, inbox: a.inbox, run: a.settled}
 		m.mu.Unlock()
 		m.changed()
 		go func() {
@@ -919,6 +934,11 @@ func (m *Manager) promptAdmitted(ctx context.Context, id, text, behavior, messag
 		return errLeadPaused
 	}
 	a.prompts++
+	if a.info.Role == RoleWorker {
+		// Given work: the user's pause of it is lifted (before the
+		// workspace records it, see persistWorkerPause).
+		m.liftWorkerPauseLocked(a)
+	}
 	// A task notice is deduped by its own record: refused, it must not
 	// leave the lead looking busy, which would hold off its retry.
 	if origin.Source != OriginYesman || origin.Kind != "tasks" {
@@ -946,6 +966,18 @@ func (m *Manager) promptAdmitted(ctx context.Context, id, text, behavior, messag
 // proc.sendAdmitted). No manager lock is held while sending or waiting for
 // pi's answer.
 func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, text, behavior, messageID string, origin Origin, admit func() error, images ...Image) error {
+	if check := admit; check != nil {
+		// Admitted only to the process it was meant for, still the agent's.
+		admit = func() error {
+			m.mu.Lock()
+			current := a.proc == p && !a.retiring
+			m.mu.Unlock()
+			if !current {
+				return errStopped
+			}
+			return check()
+		}
+	}
 	done := make(chan error, 1)
 	go func() {
 		// Cancelling the caller does not cancel the RPC already sent to pi.
@@ -993,9 +1025,9 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		a.modelMu.Lock()
 		m.mu.Lock()
 		a.prompts--
-		closeAt, closeInbox := time.Time{}, a.closeInbox
+		closeAt, closeMark := time.Time{}, runMark{p: p, inbox: a.closeInbox, run: a.closeRun}
 		if a.prompts == 0 && !a.closeAt.IsZero() {
-			if a.inbox == a.closeInbox {
+			if a.inbox == a.closeInbox && a.settled == a.closeRun {
 				closeAt = a.closeAt
 			}
 			a.closeAt = time.Time{}
@@ -1009,7 +1041,7 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 			go m.continueTasks(a.info.Yesman)
 		}
 		if !closeAt.IsZero() {
-			go m.closeWhenIdle(a, runMark{p: p, inbox: closeInbox}, closeAt)
+			go m.closeWhenIdle(a, closeMark, closeAt)
 		}
 		done <- err
 	}()
@@ -1041,7 +1073,7 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	}
 	if !wasRunning {
 		m.mu.Lock()
-		run := runMark{p: p, inbox: a.inbox}
+		run := runMark{p: p, inbox: a.inbox, run: a.settled}
 		m.mu.Unlock()
 		defer func() { go m.closeIfFinished(a, run, time.Time{}) }()
 	}
@@ -1461,19 +1493,28 @@ func (m *Manager) reportToLead(a *agent, run runMark) {
 	}
 }
 
-// runMark identifies a worker's run: the process it ran in and the count of
-// messages given to the worker (inbox) when it settled. The run is still
-// the worker's last while both are the same.
+// runMark identifies a worker's run: the process it ran in, the count of
+// messages given to the worker (inbox) and the count of runs that settled
+// when it settled. The run is still the worker's last while all three are
+// the same and pi runs nothing: a message given before it settled but sent
+// after starts a run of its own, which pi reports running, then settled.
 type runMark struct {
 	p     *proc
 	inbox uint64
+	run   uint64
 }
 
 // runOf marks the run of a that last settled, in p.
 func (m *Manager) runOf(a *agent, p *proc) runMark {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return runMark{p: p, inbox: a.settledInbox}
+	return runMark{p: p, inbox: a.settledInbox, run: a.settled}
+}
+
+// lastRunLocked reports whether run is still a's last, in its process, with
+// nothing given to it since; under mu.
+func lastRunLocked(a *agent, run runMark) bool {
+	return !a.retiring && a.proc == run.p && a.starting == nil && a.inbox == run.inbox && a.settled == run.run
 }
 
 // closeIfFinished ends a finished worker's process while it is idle with no
@@ -1490,15 +1531,30 @@ func (m *Manager) closeIfFinished(a *agent, run runMark, finishedAt time.Time) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
-	same := !a.retiring && a.proc == p && a.starting == nil && a.inbox == run.inbox
+	same := lastRunLocked(a, run)
 	idle := same && a.info.Status == Idle && a.prompts == 0 && a.recalls == 0
 	if !idle && !finishedAt.IsZero() && same && a.info.Status == Idle &&
 		a.recalls == 0 && a.prompts > 0 && a.inbox == a.settledInbox {
 		// Only prompts given before its run settled are still ending: the
 		// last to end closes it, unless something new comes meanwhile.
-		a.closeAt, a.closeInbox = finishedAt, a.inbox
+		a.closeAt, a.closeInbox, a.closeRun = finishedAt, a.inbox, a.settled
 	}
 	yesman, name := a.info.Yesman, a.info.Name
+	m.mu.Unlock()
+	if !idle {
+		return
+	}
+	// A message registered before the run settled may have been sent after
+	// it, and pi be running it before yesman hears: ask pi, under modelMu so
+	// that nothing new registers, then check the run is still the last.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	state, err := p.modelState(ctx)
+	cancel()
+	if err != nil || state.IsStreaming || state.IsCompacting {
+		return // it has work: its own report closes it
+	}
+	m.mu.Lock()
+	idle = lastRunLocked(a, run) && a.info.Status == Idle && a.prompts == 0 && a.recalls == 0
 	m.mu.Unlock()
 	if !idle {
 		return

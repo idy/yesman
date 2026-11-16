@@ -56,16 +56,25 @@ type leadPause struct {
 	deferred         []func()
 }
 
-// pauseOf returns the pause of a hire of a yesman, under mu.
+// pauseOf returns the pause of a hire of a yesman, under mu. It keeps a
+// record only for the latest hire it saw: a record of an older hire is
+// replaced, one of a newer hire never is. A call about an older hire, as a
+// late callback of an archived workspace makes, gets a record of its own
+// that is kept nowhere: it reads as unknown, so paused, and what is set on
+// it goes nowhere, including to the workspace (see currentSettingLocked).
 func (m *Manager) pauseOf(y yesmen.Yesman) *leadPause {
 	if m.leadPauses == nil {
 		m.leadPauses = map[string]*leadPause{}
 	}
 	lp := m.leadPauses[y.Name]
-	if lp == nil || !lp.hiredAt.Equal(y.HiredAt) {
-		lp = &leadPause{hiredAt: y.HiredAt}
-		m.leadPauses[y.Name] = lp
+	switch {
+	case lp != nil && lp.hiredAt.Equal(y.HiredAt):
+		return lp
+	case lp != nil && lp.hiredAt.After(y.HiredAt):
+		return &leadPause{hiredAt: y.HiredAt}
 	}
+	lp = &leadPause{hiredAt: y.HiredAt}
+	m.leadPauses[y.Name] = lp
 	return lp
 }
 
@@ -102,6 +111,9 @@ func (m *Manager) loadPause(y yesmen.Yesman) bool {
 	if err != nil {
 		log.Printf("yesman: read the pause of %s's lead: %v", y.Name, err)
 		return true // unknown: paused, and read again next time
+	}
+	if !c.HiredAt.Equal(y.HiredAt) {
+		return true // the workspace was hired again: not this hire's record
 	}
 	lp.known, lp.paused, lp.at, lp.persisted = true, !c.LeadPausedAt.IsZero(), c.LeadPausedAt, true
 	return lp.paused
@@ -235,42 +247,172 @@ func automatic(id string, origin Origin) bool {
 }
 
 // pauseByUser records that the user stopped an agent or its run, so that
-// yesman does not start it again by itself, across restarts too. A lead's
-// pause holds in memory at once; the returned write, which the caller does
-// after stopping it, saves it. A worker's is written before.
+// yesman does not start it again by itself, across restarts too. The pause
+// holds in memory at once, without waiting for storage; the returned write,
+// which the caller does after stopping the agent, saves it.
 func (m *Manager) pauseByUser(id string) func() error {
 	none := func() error { return nil }
 	yesman, name, err := SplitID(id)
 	if err != nil {
 		return none
 	}
+	if name != yesmen.LeadName {
+		return m.pauseWorker(id, yesman, name)
+	}
 	y, err := m.cfg.Yesmen.Get(yesman)
 	if err != nil {
 		return none
 	}
-	if name == yesmen.LeadName {
-		_, persist := m.setPause(y, true)
-		return persist
+	_, persist := m.setPause(y, true)
+	return persist
+}
+
+// workerPause is the user's pause of one worker incarnation (since) of one
+// hire of a workspace, as this Manager knows it; guarded by mu. It holds
+// until the worker is given work, which removes it, and is written to
+// the workspace (Worker.PausedAt) after the worker was stopped.
+type workerPause struct {
+	hiredAt, since, at time.Time
+	epoch              uint64
+	persisted          bool
+}
+
+// workerPausedLocked reports whether the user paused the worker named of
+// hire hiredAt, started at since, in memory; under mu.
+func (m *Manager) workerPausedLocked(yesman, name string, hiredAt, since time.Time) bool {
+	wp := m.workerPauses[ID(yesman, name)]
+	return wp != nil && wp.hiredAt.Equal(hiredAt) && wp.since.Equal(since)
+}
+
+// liftWorkerPauseLocked forgets the user's pause of a worker that is given
+// work; a write of it not yet made is then not made. Under mu.
+func (m *Manager) liftWorkerPauseLocked(a *agent) {
+	if wp := m.workerPauses[a.info.ID]; wp != nil && wp.hiredAt.Equal(a.workspaceSince) && wp.since.Equal(a.info.Since) {
+		delete(m.workerPauses, a.info.ID)
 	}
-	now := time.Now().UTC()
-	err = m.cfg.Yesmen.Use(yesman, func(y yesmen.Yesman) error {
+}
+
+// pauseWorker sets the user's pause of worker id in memory and returns its
+// write. The incarnation is the running agent's, read without I/O; only a
+// worker that is not loaded here is looked up in the workspace.
+func (m *Manager) pauseWorker(id, yesman, name string) func() error {
+	at := time.Now().UTC()
+	m.mu.Lock()
+	a := m.agents[id]
+	var hiredAt, since time.Time
+	if a != nil && !a.retiring && !a.workspaceSince.IsZero() && !a.info.Since.IsZero() {
+		hiredAt, since = a.workspaceSince, a.info.Since
+	}
+	m.mu.Unlock()
+	if hiredAt.IsZero() {
+		y, err := m.cfg.Yesmen.Get(yesman)
+		if err != nil {
+			return func() error { return err }
+		}
 		ws, err := m.cfg.Yesmen.Workers(yesman)
 		if err != nil {
-			return err
+			log.Printf("yesman: record that the user stopped %s: %v", id, err)
+			return func() error { return err }
 		}
 		i := slices.IndexFunc(ws, func(w yesmen.Worker) bool { return w.Name == name })
 		if i < 0 {
-			return nil
+			return func() error { return nil }
 		}
-		return m.cfg.Yesmen.PauseWorker(yesman, name, ws[i].StartedAt, now)
-	})
-	if err != nil {
-		log.Printf("yesman: record that the user stopped %s: %v", id, err)
+		hiredAt, since = y.HiredAt, ws[i].StartedAt
 	}
-	return none
+	m.mu.Lock()
+	if m.workerPauses == nil {
+		m.workerPauses = map[string]*workerPause{}
+	}
+	wp := m.workerPauses[id]
+	if wp == nil || !wp.hiredAt.Equal(hiredAt) || !wp.since.Equal(since) {
+		wp = &workerPause{hiredAt: hiredAt, since: since}
+		m.workerPauses[id] = wp
+	}
+	wp.epoch++
+	wp.at, wp.persisted = at, false
+	epoch := wp.epoch
+	m.mu.Unlock()
+	return func() error { return m.persistWorkerPause(id, yesman, name, hiredAt, since, at, epoch) }
 }
 
-// unsavedPause shows on a lead that its user's Stop was not saved.
+// persistWorkerPause writes setting epoch of a worker's pause, if it is
+// still the current one when workers.json is written: it is checked under
+// the lock giving the worker work writes under too, so a pause the worker
+// was given work after is never written. It reports a failure to write it.
+func (m *Manager) persistWorkerPause(id, yesman, name string, hiredAt, since, at time.Time, epoch uint64) error {
+	current := func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		wp := m.workerPauses[id]
+		return wp != nil && wp.hiredAt.Equal(hiredAt) && wp.since.Equal(since) && wp.epoch == epoch
+	}
+	err := m.cfg.Yesmen.Use(yesman, func(y yesmen.Yesman) error {
+		if !y.HiredAt.Equal(hiredAt) {
+			return yesmen.ErrRehired
+		}
+		return m.cfg.Yesmen.PauseWorkerIf(yesman, name, since, at, current)
+	})
+	if errors.Is(err, yesmen.ErrRehired) {
+		err = nil // not this hire's to write any more
+	}
+	m.mu.Lock()
+	wp := m.workerPauses[id]
+	if wp == nil || !wp.hiredAt.Equal(hiredAt) || !wp.since.Equal(since) || wp.epoch != epoch {
+		m.mu.Unlock()
+		return nil // given work or paused again meanwhile
+	}
+	if err != nil {
+		m.mu.Unlock()
+		log.Printf("yesman: record that the user stopped %s (kept in memory, tried again): %v", id, err)
+		return err
+	}
+	wp.persisted = true
+	a := m.agents[id]
+	cleared := a != nil && strings.HasPrefix(a.info.Detail, pauseUnsaved)
+	if cleared {
+		a.info.Detail, a.info.UpdatedAt = "", time.Now()
+	}
+	m.mu.Unlock()
+	if cleared {
+		m.changed()
+	}
+	return nil
+}
+
+// persistWorkerPauses writes the user's pauses of a hire's workers that
+// were not written yet; continuation calls it before it reads the workers.
+func (m *Manager) persistWorkerPauses(y yesmen.Yesman) {
+	type pending struct {
+		id, name       string
+		hiredAt, since time.Time
+		at             time.Time
+		epoch          uint64
+	}
+	var todo []pending
+	m.mu.Lock()
+	for id, wp := range m.workerPauses {
+		yesman, name, err := SplitID(id)
+		if err != nil || yesman != y.Name {
+			continue
+		}
+		if !wp.hiredAt.Equal(y.HiredAt) {
+			if wp.hiredAt.Before(y.HiredAt) {
+				delete(m.workerPauses, id) // an earlier hire's: gone with it
+			}
+			continue
+		}
+		if !wp.persisted {
+			todo = append(todo, pending{id, name, wp.hiredAt, wp.since, wp.at, wp.epoch})
+		}
+	}
+	m.mu.Unlock()
+	for _, p := range todo {
+		_ = m.persistWorkerPause(p.id, y.Name, p.name, p.hiredAt, p.since, p.at, p.epoch)
+	}
+}
+
+// unsavedPause shows on an agent that its user's Stop was not saved.
 func (m *Manager) unsavedPause(id string, err error) {
 	m.mu.Lock()
 	a := m.agents[id]

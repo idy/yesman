@@ -46,9 +46,13 @@ var errExited = errors.New("the agent's pi process has exited")
 // proc is a pi process in RPC mode: JSON records, one per line, on its
 // standard input and output.
 type proc struct {
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-	wmu   sync.Mutex
+	// tests only: run before a record waits for the write lock, and before
+	// its admission is decided.
+	reviewBeforeWrite func(any)
+	reviewBeforeAdmit func()
+	cmd               *exec.Cmd
+	stdin             io.WriteCloser
+	wmu               sync.Mutex
 
 	mu        sync.Mutex
 	pending   map[string]waiter
@@ -223,6 +227,9 @@ func (p *proc) sendAdmitted(v any, admit func() error) error {
 	if err != nil {
 		return err
 	}
+	if p.reviewBeforeWrite != nil {
+		p.reviewBeforeWrite(v)
+	}
 	p.wmu.Lock()
 	defer p.wmu.Unlock()
 	select {
@@ -231,6 +238,9 @@ func (p *proc) sendAdmitted(v any, admit func() error) error {
 	default:
 	}
 	if admit != nil {
+		if p.reviewBeforeAdmit != nil {
+			p.reviewBeforeAdmit()
+		}
 		if err := admit(); err != nil {
 			return err
 		}

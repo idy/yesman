@@ -552,6 +552,20 @@ func (s *Store) PauseWorker(name, worker string, since, at time.Time) error {
 	return err
 }
 
+// PauseWorkerIf is PauseWorker, made only if current reports true when
+// the record is written, under the lock ReopenWorker writes under: a pause
+// decided before the worker was given work again is not written after.
+func (s *Store) PauseWorkerIf(name, worker string, since, at time.Time, current func() bool) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if !w.StartedAt.Equal(since) || !current() {
+			return false
+		}
+		w.PausedAt = at
+		return true
+	})
+	return err
+}
+
 // FailWorker: see PauseWorker.
 func (s *Store) FailWorker(name, worker string, since, at time.Time) error {
 	_, err := s.updateWorker(name, worker, func(w *Worker) bool {

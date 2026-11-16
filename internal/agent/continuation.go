@@ -182,6 +182,7 @@ type ownerRun struct {
 	since  time.Time // the generation running
 	active bool
 	status Status
+	paused bool // the user stopped it, as this Manager knows
 }
 
 // notice is one task a notice lists.
@@ -202,6 +203,9 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 	if err != nil {
 		return
 	}
+	// Pauses the user set and that were not written yet are written first:
+	// such a write changes the workers, which the revision counts.
+	m.persistWorkerPauses(y)
 	// The revision is read before what it covers: if it is the same when the
 	// notice is recorded, nothing read here was overtaken (see recordAttempt).
 	rev := m.cfg.Yesmen.Revision(yesman)
@@ -233,6 +237,21 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 			continue
 		}
 		runs[a.info.Name] = ownerRun{since: a.info.Since, active: busyLocked(a), status: a.info.Status}
+	}
+	// A pause the user set holds whether or not it was written.
+	for id, wp := range m.workerPauses {
+		ys, name, err := SplitID(id)
+		if err != nil || ys != yesman || !wp.hiredAt.Equal(y.HiredAt) {
+			continue
+		}
+		r, ok := runs[name]
+		if !ok {
+			r = ownerRun{since: wp.since}
+		}
+		if r.since.Equal(wp.since) {
+			r.paused = true
+			runs[name] = r
+		}
 	}
 	m.mu.Unlock()
 
@@ -619,7 +638,7 @@ func unattended(t yesmen.Task, workers map[string]yesmen.Worker, runs map[string
 		return fmt.Sprintf("its owner %s was replaced by a new worker of that name, which was not given it", t.Owner),
 			hashOf("replaced", t.OwnerSince.UTC().Format(time.RFC3339Nano), w.StartedAt.UTC().Format(time.RFC3339Nano)), true
 	}
-	if !w.PausedAt.IsZero() {
+	if r, ok := runs[t.Owner]; !w.PausedAt.IsZero() || ok && r.paused && r.since.Equal(w.StartedAt) {
 		return "", "", false // the user stopped it: theirs to resume
 	}
 	if r, ok := runs[t.Owner]; ok && r.active && r.since.Equal(w.StartedAt) {

@@ -127,6 +127,12 @@ func fakePi() {
 				write(map[string]any{"type": "test_report_waiting"})
 				continue
 			}
+		case "test_release_one_report":
+			if len(heldReports) > 0 {
+				id := heldReports[0]
+				heldReports = heldReports[1:]
+				write(map[string]any{"type": "response", "id": id, "command": "get_last_assistant_text", "success": true, "data": map[string]any{"text": "first run report"}})
+			}
 		case "test_release_reports":
 			for _, id := range heldReports {
 				write(map[string]any{"type": "response", "id": id, "command": "get_last_assistant_text", "success": true, "data": map[string]any{"text": "done"}})
