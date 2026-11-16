@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { needsYouItems, closedHandoffs, summary, typeLabel } from '../web/needsyou.js';
+import { needsYouItems, requestsOf, closedHandoffs, summary, typeLabel } from '../web/needsyou.js';
 
 const snap = (agents, yesmen) => ({ agents, yesmen });
 const alice = { name: 'alice', hiredAt: '2026-01-01T00:00:00Z', handoffs: [] };
@@ -44,6 +44,30 @@ test('a same-name yesman hired again has new keys', () => {
   const before = needsYouItems(snap([], [{ ...alice, handoffs: [h] }]))[0].key;
   const after = needsYouItems(snap([], [{ ...alice, hiredAt: '2026-04-01T00:00:00Z', handoffs: [h] }]))[0].key;
   assert.notEqual(before, after);
+});
+
+test('a yesman\'s requests are its own, for its current hire', () => {
+  const hired = '2026-03-01T10:00:00.123456789Z';
+  const bobNow = { ...bob, hiredAt: hired, handoffs: [{ id: 'n1', type: 'manual', title: 'Plug in the phone', createdAt: hired }] };
+  const dialog = { id: 'q', method: 'confirm', title: 'Ship?' };
+  const agents = [
+    // Alice's lead asks: not Bob's.
+    { id: 'alice/lead', yesman: 'alice', role: 'lead', status: 'waiting', since: alice.hiredAt, dialog },
+    // The old Bob's lead, from a list of the agents read before he was hired again.
+    { id: 'bob/lead', yesman: 'bob', role: 'lead', status: 'waiting', since: '2026-02-01T00:00:00Z', dialog },
+    // A worker of this Bob, started after the hire, which its lead handed over.
+    { id: 'bob/w1', yesman: 'bob', role: 'worker', status: 'waiting', since: '2026-03-01T10:00:00.124Z', handedOver: true, dialog },
+  ];
+  const s = snap(agents, [alice, bobNow]);
+  assert.deepEqual(requestsOf(s, bobNow).map((i) => i.key).sort(), [`d:bob/w1@2026-03-01T10:00:00.124Z:q`, `h:bob@${hired}:n1`]);
+  assert.deepEqual(requestsOf(s, alice).map((i) => i.agent), ['alice/lead']);
+  // This Bob's own lead, started when he was hired, to the nanosecond.
+  const lead = { ...agents[1], since: hired };
+  assert.deepEqual(requestsOf(snap([lead], [bobNow]), bobNow).map((i) => i.kind).sort(), ['dialog', 'handoff']);
+  // A start not known is taken as it is, as is a yesman whose hire is not.
+  assert.equal(requestsOf(snap([{ ...lead, since: undefined }], [bobNow]), bobNow).length, 2);
+  assert.equal(requestsOf(snap(agents, [{ ...bobNow, hiredAt: undefined }]), { ...bobNow, hiredAt: undefined }).length, 3);
+  assert.deepEqual(requestsOf(s, null), []);
 });
 
 test('history is newest first and never pending', () => {

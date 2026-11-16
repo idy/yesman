@@ -287,6 +287,7 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 	})
 	// The scenario's other actors: pi processes asking, the lead's tool calls,
 	// and the user's archive, hire and remove actions elsewhere.
+	kept := map[string][]byte{} // handoff files made unreadable, to put back
 	mux.HandleFunc("POST /fixture/control", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Op      string `json:"op"`
@@ -320,6 +321,10 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 			err = s.RemoveWorker(req.Agent)
 		case "call-memory":
 			value, err = fixtureCallMemory(a.yesmen, req.Yesman, req.Message)
+		case "handoffs-file":
+			mu.Lock()
+			err = fixtureHandoffsFile(a.yesmen, req.Yesman, req.Message, kept)
+			mu.Unlock()
 		case "observed":
 			mu.Lock()
 			value = map[string]any{"notes": append([]map[string]string(nil), notes...), "prompts": prompts}
@@ -340,6 +345,32 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 	defer page.Close()
 	fmt.Println("NEEDS_YOU_BROWSER_URL=" + page.URL)
 	_, _ = io.Copy(io.Discard, os.Stdin)
+}
+
+// fixtureHandoffsFile makes a yesman's handoffs file unreadable ("break"),
+// as a damaged file is, or puts back what it held ("restore").
+func fixtureHandoffsFile(store *yesmen.Store, name, op string, kept map[string][]byte) error {
+	y, err := store.Get(name)
+	if err != nil {
+		return err
+	}
+	switch op {
+	case "break":
+		raw, err := os.ReadFile(y.HandoffsFile())
+		if err != nil {
+			return err
+		}
+		kept[name] = raw
+		return os.WriteFile(y.HandoffsFile(), []byte("{"), 0o600)
+	case "restore":
+		raw, ok := kept[name]
+		if !ok {
+			return fmt.Errorf("%s's handoffs file was not broken", name)
+		}
+		delete(kept, name)
+		return os.WriteFile(y.HandoffsFile(), raw, 0o600)
+	}
+	return fmt.Errorf("no handoffs-file op %q", op)
 }
 
 // fixtureCallMemory returns a yesman's tool-call memory, after putting it,

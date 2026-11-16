@@ -78,6 +78,9 @@ export function createBoard(host) {
     const closed = tasks.filter((t) => !isOpen(t));
     const scroll = $('.board-body', aside)?.scrollTop ?? 0;
     const focused = document.activeElement?.closest?.('#board [data-key]')?.dataset.key;
+    // The close button keeps focus when the board is drawn again, say once it
+    // has loaded.
+    const onClose = !!document.activeElement?.closest?.('#board .files-head-actions');
 
     const count = b ? (open.length ? t('{n} open', { n: formatNumber(open.length) }) : '') : '';
     const body = h('div', { class: 'board-body' });
@@ -111,6 +114,7 @@ export function createBoard(host) {
       body);
     body.scrollTop = scroll;
     if (focused) $(`#board [data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+    else if (onClose) $('#board .files-head-actions button')?.focus({ preventScroll: true });
   }
 
   function row(y, task) {
