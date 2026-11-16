@@ -252,13 +252,18 @@ restored drafts have the same in-memory lifetime as other composer drafts.
 
 Reliable pending human receipt rows show **Cancel and edit**. Their footer uses
 **Waiting · follow-up** or **Steering · waiting for input checkpoint**, never
-Sending after native acceptance. Pending/failure visibility does not depend on
-the eight-entry `Convo.sent` display cache or a later submitted ID. Current
-failures stay visible for their agent generation. Earlier nonactionable unbound
-receipts fold into one default-collapsed group from PR67; they never grant queue
-actions. Receipt binding uses only an explicit recorded submission identity,
-including identical text/images, so late events and reloading do not add a second
-bubble. A recorded message shows **Taken by pi**, which does not promise provider
+Sending after native acceptance. The conversation is pi's messages; a receipt
+draws a row only while it is open: sending/accepted/queued/steering or native
+pending, cancelled with a restorable original, the latest `failed`/`unconfirmed`
+submission, or `interrupted` until a later submission is bound to another pi
+session. Taken (`dispatched`), `handled` and other finished receipts draw
+nothing, including after compaction removes their messages from context; their
+receipts stay in Go for idempotence and audit. Visibility does not depend on the
+eight-entry `Convo.sent` display cache, which only supplies a visible row's exact
+text and images, so live and reloaded windows agree. Receipt binding uses only an
+explicit recorded submission identity, including identical text/images, so late
+events and reloading do not add a second bubble. A recorded message reads as an
+ordinary message without a delivery label; being taken does not promise provider
 execution has finished.
 
 `SubmissionPayload` reads complete text/images from the existing bounded volatile

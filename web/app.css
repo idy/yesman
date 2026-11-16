@@ -137,24 +137,6 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .delivery-image-count { color: var(--mds-muted); font-size: var(--mds-text-caption); margin-top: 4px; }
 .delivery-status { color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; padding-inline: 4px; overflow-wrap: anywhere; }
 .delivery-status[data-state="failed"], .delivery-status[data-state="interrupted"] { color: var(--mds-error); }
-.delivery-status.delivery-status--historical { color: var(--mds-muted); }
-.msg-delivery--compact { gap: 2px; }
-.delivery-compact { max-width: 100%; color: var(--mds-muted); font-size: var(--mds-text-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-inline: 4px; }
-/* Earlier submissions no message is tied to: one light line, opened to read them. */
-.receipts { align-self: flex-end; max-width: 82%; min-width: 0; }
-.receipts > summary {
-  display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; padding: 3px 6px; border-radius: var(--mds-radius-sm);
-  list-style: none; cursor: default; font-size: var(--mds-text-caption); color: var(--mds-muted);
-}
-.receipts > summary::-webkit-details-marker { display: none; }
-.receipts > summary:hover { background: var(--mds-hover); }
-.receipts > summary:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: -2px; }
-.receipts-label { flex: none; color: var(--mds-ink-secondary); white-space: nowrap; }
-.receipts-note { margin: 6px 0; padding-inline: 4px; color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; overflow-wrap: anywhere; }
-.receipts-caret { flex: none; display: inline-flex; width: 12px; height: 12px; font-size: 12px; color: var(--mds-muted); transition: transform .15s ease; }
-.receipts[open] > summary .receipts-caret { transform: rotate(90deg); }
-.receipts-body { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; min-width: 0; margin: 4px 0 2px; padding-right: 12px; border-right: 2px solid var(--mds-line); }
-.receipts-body > .msg-delivery { max-width: 100%; }
 .note--lead > .md { margin-top: 6px; }
 .msg-assistant { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 
@@ -235,7 +217,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .failure-run > time { padding-top: 5px; color: var(--mds-muted); font-size: var(--mds-text-caption); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .failure-run-empty { padding: 5px 8px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
 .dot-wrap .status-error-mark { width: 14px; height: 14px; font-size: 14px; color: var(--mds-error); }
-@media (prefers-reduced-motion: reduce) { .work[data-state="running"] .work-mark { animation: none; } .work-caret, .receipts-caret, .failures-caret { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .work[data-state="running"] .work-mark { animation: none; } .work-caret, .failures-caret { transition: none; } }
 
 .tool { border-radius: var(--mds-radius-sm); }
 .tool > summary {

@@ -119,9 +119,11 @@ try{for(const[name,engine]of selectedEngines)for(const language of ['en','zh-Han
   assert.equal(await input.inputValue(),'late reply stays with alice');assert.equal(await page.locator('.composer-image').count(),1);
   await input.fill('');await page.locator('.composer-image button').click();
   const imageOnly=await submit('',2);await row(imageOnly.args[1]).locator('.message-recall').waitFor();
+  assert.equal(await row(imageOnly.args[1]).locator('.message-copy:not(.message-recall)').isDisabled(),true);
   await input.press('ArrowUp');await page.waitForFunction(()=>document.querySelectorAll('.composer-image').length===2&&!document.querySelector('.composer textarea').readOnly);
   assert.equal(await input.inputValue(),'');
-  assert.equal(await row(imageOnly.args[1]).locator('.message-copy:not(.message-recall)').isDisabled(),true);
+  // Returned to the input, it is no longer sent: its row leaves.
+  await page.waitForFunction(id=>!document.querySelector(`[data-delivery="${id}"]`),imageOnly.args[1]);
   for(let n=0;n<2;n++)await page.locator('.composer-image button').first().click();
   const recovery=await submit('recover original after reload',2);
   await control('HoldCancel');
@@ -138,7 +140,7 @@ try{for(const[name,engine]of selectedEngines)for(const language of ['en','zh-Han
   assert.equal(await page.locator('.composer-image').count(),2);
   assert.equal(await page.locator('.composer-image img').first().getAttribute('src'),`data:image/png;base64,${bytes.toString('base64')}`);
   await control('ReleaseProvider');
-  const nativeCopy = page.locator('#thread > .msg-user .message-copy, #thread > .msg-delivery[data-bound="true"] > .message-footer > .message-actions > .message-copy');
+  const nativeCopy = page.locator('#thread > .msg-user .message-copy, #thread > .msg-delivery[data-bound="true"] > .msg-user > .message-actions > .message-copy');
   await nativeCopy.first().waitFor();
   await nativeCopy.first().click();assert.equal(await page.evaluate(()=>window.copied.at(-1)),'hold');
   assert.equal(await page.locator('#thread > .msg-user .message-recall, #thread > .msg-delivery[data-bound="true"] .message-recall').count(),0);

@@ -105,17 +105,16 @@ test('a message sent while the agent works splits its work without moving or swa
     [sub(1), { id: sub(1), state: 'accepted', order: 1 }],
     [sub(2), { id: sub(2), state: 'steering', order: 2 }],
     [sub(3), { id: sub(3), state: 'queued', order: 3, text: 'a third, still queued' }],
-    [sub(4), { id: sub(4), state: 'unconfirmed', order: 4, text: 'not tied to any message' }],
+    [sub(4), { id: sub(4), revision: 2, state: 'dispatched', order: 4, text: 'taken, its message not in view' }],
   ]);
   const convo = { messages, tools: tools([t1, 'done'], [t2, 'running']), deliveries };
   const rows = project(convo, { status: 'working' });
-  assert.deepEqual(shape(rows), ['user', 'work(thinking,tool):done', 'user', 'work(thinking,tool):running', 'receipts', 'receipt']);
+  assert.deepEqual(shape(rows), ['user', 'work(thinking,tool):done', 'user', 'work(thinking,tool):running', 'receipt']);
   assert.equal(rows[0].delivery.id, sub(1));
   assert.equal(rows[2].delivery.id, sub(2));
-  // The queued one is the person's message still to come; the untied one with
-  // nothing more to know is folded.
-  assert.deepEqual(rows[4].deliveries.map((d) => d.id), [sub(4)]);
-  assert.equal(rows[5].delivery.id, sub(3));
+  // The queued one is the person's message still to come; the one pi took
+  // shows nothing more.
+  assert.equal(rows[4].delivery.id, sub(3));
   // The run ends without a reply: its last work ended, nothing says done for it.
   assert.equal(project({ ...convo, tools: tools([t1, 'done'], [t2, 'done']) }, { status: 'idle' })[3].state, 'ended');
   // A process that died mid-tool is interrupted; in older history the tool is unfinished.
@@ -293,29 +292,40 @@ test('empty and redacted thinking add nothing; text is kept even when it reads l
 
 // Receipts outlive the messages they were for: those from before messages were
 // tied to receipts, and those whose message a summary of earlier conversation
-// replaced, are kept by the server for its retention period.
-const receipt = (n, state, extra = {}) => [sub(n), { id: sub(n), revision: 2, state, order: n, text: `submission ${n}`, imageCount: 0, ...extra }];
+// replaced, are kept by the server for its retention period. The conversation
+// is pi's messages; a receipt shows only while it is open.
+const receipt = (n, state, extra = {}) => [sub(n), { id: sub(n), session: 'p1:s1', revision: 2, state, order: n, text: `submission ${n}`, imageCount: 0, ...extra }];
+const receiptRows = (rows) => rows.filter((r) => r.type === 'receipt').map((r) => r.delivery.id);
 
-test('earlier receipts no message is tied to fold into one row, and the conversation stays whole', () => {
-  const messages = [{ role: 'compactionSummary', summary: 's', tokensBefore: 1, timestamp: at() }];
+test('submissions pi took take no row, even when their messages are summarized away, and the conversation stays whole', () => {
+  // The reported case: six messages pi recorded, then a summary replaced them.
+  const summary = { role: 'compactionSummary', summary: 's', tokensBefore: 1, timestamp: at() };
+  const taken = new Map(Array.from({ length: 6 }, (_, i) => receipt(i + 1, 'dispatched')));
+  let rows = project({ messages: [summary, user('after the summary', { source: 'user', submission: sub(7) }), assistant([text('answer')])],
+    deliveries: new Map([...taken, receipt(7, 'dispatched')]) }, { status: 'idle' });
+  assert.deepEqual(rows.map((r) => r.type), ['note', 'user', 'text']);
+  assert.equal(rows[1].delivery.id, sub(7));
+  assert(!rows.some((r) => r.type === 'receipt' || r.type === 'receipts'));
+  // A long history from before messages were tied to receipts.
+  const messages = [summary];
   for (let n = 1; n <= 24; n++) {
     messages.push(user(`question ${n}`, null, n % 5 === 0 ? 2 : 0), assistant([text(`answer ${n}`)]));
   }
   messages.push(user('a bound question', { source: 'user', submission: sub(26) }, 1), assistant([text('bound answer')]));
   messages.push(user('another bound one', { source: 'user', submission: sub(27) }), assistant([text('second bound answer')]));
   const deliveries = new Map([
-    ...Array.from({ length: 24 }, (_, i) => receipt(i + 1, 'unconfirmed', i === 9 ? { text: '', imageCount: 2 } : {})),
+    ...Array.from({ length: 24 }, (_, i) => receipt(i + 1, i % 2 ? 'unconfirmed' : 'dispatched', i === 9 ? { text: '', imageCount: 2 } : {})),
     receipt(25, 'handled'),
     receipt(26, 'unconfirmed', { imageCount: 1 }),
     receipt(27, 'accepted'),
     receipt(28, 'failed', { error: 'rejected' }),
     receipt(29, 'unconfirmed', { error: 'the bridge lost its answer' }),
-    receipt(30, 'interrupted'),
+    receipt(30, 'cancelled'),
     receipt(31, 'queued'),
     receipt(32, 'sending', { revision: 1 }),
     ['local', { id: 'local', revision: 0, state: 'sending', text: 'on its way' }],
   ]);
-  const rows = project({ messages, deliveries, lastSent: 'local' }, { status: 'working' });
+  rows = project({ messages, deliveries, lastSent: 'local' }, { status: 'working' });
   // Every person's message and every reply is there, in order, whatever its receipt.
   const people = rows.filter((r) => r.type === 'user');
   assert.deepEqual(people.map((r) => r.message.content[0].text), [...Array.from({ length: 24 }, (_, i) => `question ${i + 1}`), 'a bound question', 'another bound one']);
@@ -323,81 +333,100 @@ test('earlier receipts no message is tied to fold into one row, and the conversa
   assert.deepEqual(rows.filter((r) => r.type === 'text').map((r) => r.text).slice(-3), ['answer 24', 'bound answer', 'second bound answer']);
   assert.equal(rows.filter((r) => r.type === 'text').length, 26);
   assert.deepEqual(people.filter((r) => r.delivery).map((r) => r.delivery.id), [sub(26), sub(27)]);
-  // What is still on its way or queued keeps its own row. What needs nothing
-  // more, and failures later submissions superseded, are one row.
-  const tail = rows.slice(rows.findIndex((r) => r.type === 'receipts'));
-  assert.deepEqual(tail.map((r) => r.type), ['receipts', 'receipt', 'receipt', 'receipt']);
-  assert.equal(tail[0].key, 'd:earlier');
-  assert.deepEqual(tail[0].deliveries.map((d) => d.id), [...Array.from({ length: 25 }, (_, i) => sub(i + 1)), sub(28), sub(29), sub(30)]);
-  assert.deepEqual(tail.slice(1).map((r) => r.delivery.id).sort(), [sub(31), sub(32), 'local'].sort());
+  // Only what is still on its way or queued has a row; taken, handled,
+  // recalled, and problems a later submission moved past have none.
+  assert.deepEqual(rows.slice(rows.length - 3).map((r) => r.type), ['receipt', 'receipt', 'receipt']);
+  assert.deepEqual(receiptRows(rows), [sub(31), sub(32), 'local']);
+  assert(!rows.some((r) => r.type === 'receipts'));
 });
 
-test('the latest failure stays in view until a later submission, and old settled ones never take a row', () => {
-  const old = Array.from({ length: 22 }, (_, i) => receipt(i + 1, 'unconfirmed'));
+test('the latest refusal or uncertain answer stays in view until anything is sent after it', () => {
+  const old = Array.from({ length: 22 }, (_, i) => receipt(i + 1, i % 3 === 1 ? 'unconfirmed' : 'dispatched'));
   const messages = Array.from({ length: 22 }, (_, i) => user(`old ${i + 1}`));
-  // Nothing sent since, and nothing left to know: one folded row, no line of its own.
+  // Nothing sent since, and nothing left to know: nothing at the foot.
   let rows = project({ messages, deliveries: new Map(old) });
-  assert.deepEqual(rows.slice(-2).map((r) => r.type), ['user', 'receipts']);
-  assert.equal(rows.at(-1).deliveries.length, 22);
-  const key = rows.at(-1).key;
-  // The latest refused, interrupted or uncertain: it is in view.
-  for (const last of [receipt(23, 'failed', { error: 'rejected' }), receipt(23, 'interrupted'), receipt(23, 'unconfirmed', { error: 'lost' }),
+  assert.deepEqual(rows.map((r) => r.type), Array(22).fill('user'));
+  // The latest refused, uncertain, or never heard of by the server: in view.
+  for (const last of [receipt(23, 'failed', { error: 'rejected' }), receipt(23, 'unconfirmed', { error: 'lost' }), receipt(23, 'unconfirmed'),
     ['local', { id: 'local', revision: 0, state: 'unconfirmed', text: 'the bridge failed' }]]) {
     rows = project({ messages, deliveries: new Map([...old, last]), lastSent: 'local' });
-    assert.deepEqual(rows.slice(-2).map((r) => r.type), ['receipts', 'receipt'], last[1].state);
-    assert.equal(rows.at(-1).delivery.id, last[0]);
-    assert.equal(rows.at(-2).key, key, 'the folded row keeps its key');
+    assert.deepEqual(receiptRows(rows), [last[0]], last[1].state);
   }
-  // A new submission on its way supersedes the failure; the failure joins the
-  // folded row, still saying it was not sent.
-  rows = project({ messages, deliveries: new Map([...old, receipt(23, 'failed', { error: 'rejected' }), ['local', { id: 'local', revision: 0, state: 'sending', text: 'new' }]]), lastSent: 'local' });
-  assert.deepEqual(rows.slice(-2).map((r) => r.type), ['receipts', 'receipt']);
-  assert.deepEqual(rows.at(-2).deliveries.map((d) => d.state).slice(-1), ['failed']);
-  assert.equal(rows.at(-1).delivery.id, 'local');
-  // ...and when its message arrives tied to it, no receipt row is left.
+  // A new submission on its way moves past the refusal at once...
+  const failed = receipt(23, 'failed', { error: 'rejected' });
+  rows = project({ messages, deliveries: new Map([...old, failed, ['local', { id: 'local', revision: 0, state: 'sending', text: 'new' }]]), lastSent: 'local' });
+  assert.deepEqual(receiptRows(rows), ['local']);
+  // ...and the refusal does not come back when the new one is answered, taken, or itself fails.
+  for (const next of [receipt(24, 'accepted'), receipt(24, 'dispatched'), receipt(24, 'failed', { error: 'again' })]) {
+    rows = project({ messages, deliveries: new Map([...old, failed, next]) });
+    assert.deepEqual(receiptRows(rows), next[1].state === 'dispatched' ? [] : [sub(24)], next[1].state);
+  }
+  // When its message arrives tied to it, no receipt row is left.
   const sent = user('new', { source: 'user', submission: sub(24) });
-  const snapshot = () => ({ messages: [...messages, sent], deliveries: new Map([...old, receipt(23, 'failed', { error: 'rejected' }), receipt(24, 'accepted')]) });
+  const snapshot = () => ({ messages: [...messages, sent], deliveries: new Map([...old, failed, receipt(24, 'accepted')]) });
   rows = project(snapshot());
-  assert.deepEqual(rows.slice(-2).map((r) => r.type), ['user', 'receipts']);
-  assert.equal(rows.at(-1).deliveries.length, 23);
-  assert.equal(rows.at(-2).delivery.id, sub(24));
+  assert.deepEqual(rows.slice(-2).map((r) => r.type), ['user', 'user']);
+  assert.equal(rows.at(-1).delivery.id, sub(24));
   // The same snapshot again draws the same rows.
   assert.deepEqual(project(snapshot()).map((r) => r.key), rows.map((r) => r.key));
 });
 
-test('what this window sent shows as sent, with its state, until a message is tied to it', () => {
+test('interrupted submissions stay until something is sent to a later session, never guessed taken', () => {
+  // The app quit with a follow-up and a steering message queued; the steering
+  // one was taken first. The follow-up's interruption comes after that.
+  const follow = receipt(1, 'interrupted', { text: 'continue' });
+  const steer = receipt(2, 'dispatched');
+  const also = receipt(3, 'interrupted', { session: '' }); // registered, never reached pi
+  let rows = project({ messages: [user('steer', { source: 'user', submission: sub(2) })], deliveries: new Map([follow, steer, also]) });
+  assert.deepEqual(receiptRows(rows), [sub(1), sub(3)]);
+  // A reply or an empty queue says nothing about them.
+  rows = project({ messages: [user('steer', { source: 'user', submission: sub(2) }), assistant([text('done')])], deliveries: new Map([follow, steer, also]) }, { status: 'idle' });
+  assert.deepEqual(receiptRows(rows), [sub(1), sub(3)]);
+  // A submission this window has not heard back about yet does not decide it.
+  rows = project({ messages: [], deliveries: new Map([follow, steer, also, ['local', { id: 'local', revision: 0, state: 'sending', text: 'next' }]]), lastSent: 'local' });
+  assert.deepEqual(receiptRows(rows), [sub(1), sub(3), 'local']);
+  // Once one is registered in the restarted session, the person has moved past them.
+  rows = project({ messages: [], deliveries: new Map([follow, steer, also, receipt(4, 'steering', { session: 'p2:s1' })]) });
+  assert.deepEqual(receiptRows(rows), [sub(4)]);
+  // Pi's own message tied to an interrupted one: recorded, so it is the message.
+  rows = project({ messages: [user('continue', { source: 'user', submission: sub(1) })], deliveries: new Map([follow, steer]) });
+  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['user', sub(1)]]);
+});
+
+test('what this window sent shows as sent while its row is open, and leaves once pi takes it', () => {
   const payload = { text: 'the whole message, longer than its preview', images: [{ type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' }] };
   const messages = [user('earlier')];
-  // Queued, then the run was stopped: pi says nothing more, but it is this
-  // window's and in no message yet.
-  const deliveries = new Map([receipt(1, 'unconfirmed'), receipt(2, 'unconfirmed', { text: 'the whole', preview: true, imageCount: 1 }), receipt(3, 'handled')]);
+  const queued = receipt(2, 'queued', { text: 'the whole', preview: true, imageCount: 1, nativePending: true });
   const sent = new Map([[sub(2), payload], [sub(3), { text: '/command', images: [] }]]);
-  let rows = project({ messages, deliveries, sent });
-  assert.deepEqual(rows.map((r) => r.type), ['user', 'receipts', 'receipt', 'receipt']);
-  assert.deepEqual(rows[1].deliveries.map((d) => d.id), [sub(1)]);
-  assert.equal(rows[2].delivery.id, sub(2));
-  assert.equal(rows[2].sent, payload);
-  assert.equal(rows[3].delivery.state, 'handled');
-  // Once its message is tied to it, the message carries it.
-  rows = project({ messages: [...messages, user('the whole message, longer than its preview', { source: 'user', submission: sub(2) }, 1)], deliveries, sent });
-  assert.deepEqual(rows.map((r) => r.type), ['user', 'user', 'receipts', 'receipt']);
+  let rows = project({ messages, deliveries: new Map([receipt(1, 'dispatched'), queued, receipt(3, 'handled')]), sent, lastSent: sub(3) });
+  assert.deepEqual(rows.map((r) => r.type), ['user', 'receipt']);
   assert.equal(rows[1].delivery.id, sub(2));
+  assert.equal(rows[1].sent, payload);
+  // Taken while still held here and the latest: it leaves, even before pi's
+  // message is tied to it (a summary may have replaced it).
+  rows = project({ messages, deliveries: new Map([receipt(1, 'dispatched'), receipt(2, 'dispatched'), receipt(3, 'handled')]), sent, lastSent: sub(2) });
+  assert.deepEqual(rows.map((r) => r.type), ['user']);
+  // Once its message is tied to it, the message carries it.
+  rows = project({ messages: [...messages, user('the whole message, longer than its preview', { source: 'user', submission: sub(2) }, 1)], deliveries: new Map([queued]), sent });
+  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['user', undefined], ['user', sub(2)]]);
   // Two submissions with the same text are two, each tied by its own ID.
   const twice = new Map([receipt(4, 'steering', { text: 'same' }), receipt(5, 'steering', { text: 'same' })]);
   rows = project({ messages: [user('same', { source: 'user', submission: sub(5) })], deliveries: twice });
   assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['user', sub(5)], ['receipt', sub(4)]]);
+  // Recalled: its row stays while the original can still go back to the input.
+  rows = project({ messages: [], deliveries: new Map([receipt(6, 'cancelled', { canRestore: true }), receipt(7, 'cancelled')]) });
+  assert.deepEqual(receiptRows(rows), [sub(6)]);
 });
 
 test('a submission the server never heard of is superseded by the next one this window sends', () => {
-  const old = Array.from({ length: 3 }, (_, i) => receipt(i + 1, 'unconfirmed'));
+  const old = Array.from({ length: 3 }, (_, i) => receipt(i + 1, 'dispatched'));
   // The bridge failed before the server heard of it: only this window knows it.
   const lost = ['lost', { id: 'lost', revision: 0, state: 'unconfirmed', text: 'did this arrive?' }];
   let rows = project({ messages: [], deliveries: new Map([...old, lost]), lastSent: 'lost' });
-  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['receipts', undefined], ['receipt', 'lost']]);
+  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['receipt', 'lost']]);
   // An edited draft is sent instead, and the server answers for it.
   rows = project({ messages: [], deliveries: new Map([...old, lost, receipt(4, 'steering', { text: 'edited' })]), lastSent: sub(4) });
-  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['receipts', undefined], ['receipt', sub(4)]]);
-  assert.deepEqual(rows[0].deliveries.map((d) => d.id), [sub(1), sub(2), sub(3), 'lost']);
+  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['receipt', sub(4)]]);
   rows = project({ messages: [], deliveries: new Map([...old, lost, receipt(4, 'unconfirmed', { error: 'lost' })]), lastSent: sub(4) });
-  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['receipts', undefined], ['receipt', sub(4)]]);
+  assert.deepEqual(rows.map((r) => [r.type, r.delivery?.id]), [['receipt', sub(4)]]);
 });
