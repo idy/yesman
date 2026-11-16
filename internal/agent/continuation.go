@@ -183,6 +183,9 @@ type ownerRun struct {
 	active bool
 	status Status
 	paused bool // the user stopped it, as this Manager knows
+	// resumed: it was given work since, which the workspace may not record
+	// yet: a pause it records for this generation is lifted.
+	resumed bool
 }
 
 // notice is one task a notice lists.
@@ -238,7 +241,8 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 		}
 		runs[a.info.Name] = ownerRun{since: a.info.Since, active: busyLocked(a), status: a.info.Status}
 	}
-	// A pause the user set holds whether or not it was written.
+	// A pause the user set, or lifted by giving work, holds whether or not
+	// it was written.
 	for id, wp := range m.workerPauses {
 		ys, name, err := SplitID(id)
 		if err != nil || ys != yesman || !wp.hiredAt.Equal(y.HiredAt) {
@@ -249,7 +253,7 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 			r = ownerRun{since: wp.since}
 		}
 		if r.since.Equal(wp.since) {
-			r.paused = true
+			r.paused, r.resumed = wp.paused, !wp.paused
 			runs[name] = r
 		}
 	}
@@ -638,10 +642,12 @@ func unattended(t yesmen.Task, workers map[string]yesmen.Worker, runs map[string
 		return fmt.Sprintf("its owner %s was replaced by a new worker of that name, which was not given it", t.Owner),
 			hashOf("replaced", t.OwnerSince.UTC().Format(time.RFC3339Nano), w.StartedAt.UTC().Format(time.RFC3339Nano)), true
 	}
-	if r, ok := runs[t.Owner]; !w.PausedAt.IsZero() || ok && r.paused && r.since.Equal(w.StartedAt) {
+	r, ok := runs[t.Owner]
+	mine := ok && r.since.Equal(w.StartedAt)
+	if !w.PausedAt.IsZero() && !(mine && r.resumed) || mine && r.paused {
 		return "", "", false // the user stopped it: theirs to resume
 	}
-	if r, ok := runs[t.Owner]; ok && r.active && r.since.Equal(w.StartedAt) {
+	if mine && r.active {
 		return "", "", false
 	}
 	gen := w.StartedAt.UTC().Format(time.RFC3339Nano)

@@ -56,42 +56,71 @@ type leadPause struct {
 	deferred         []func()
 }
 
-// pauseOf returns the pause of a hire of a yesman, under mu. It keeps a
-// record only for the latest hire it saw: a record of an older hire is
-// replaced, one of a newer hire never is. A call about an older hire, as a
-// late callback of an archived workspace makes, gets a record of its own
-// that is kept nowhere: it reads as unknown, so paused, and what is set on
-// it goes nowhere, including to the workspace (see currentSettingLocked).
+// pauseOf returns the pause kept here of hire y, or nil; under mu. One is
+// kept per workspace, of the hire that owns it (see ownPause): a call about
+// another hire, as a late callback of an archived workspace makes, finds
+// nothing, and changes nothing. Hire times identify a hire but are not
+// ordered: a clock set back gives a later hire an earlier time.
 func (m *Manager) pauseOf(y yesmen.Yesman) *leadPause {
+	if lp := m.leadPauses[y.Name]; lp != nil && lp.hiredAt.Equal(y.HiredAt) {
+		return lp
+	}
+	return nil
+}
+
+// ownPause makes sure the pause kept of y's workspace is hire y's, and
+// reports whether it is. Another hire's record is replaced only once the
+// workspace confirms, under its lifecycle lease (which Archive waits for),
+// that y is the hire it has now; a stale y is refused and changes nothing.
+func (m *Manager) ownPause(y yesmen.Yesman) bool {
+	m.mu.Lock()
 	if m.leadPauses == nil {
 		m.leadPauses = map[string]*leadPause{}
 	}
 	lp := m.leadPauses[y.Name]
-	switch {
-	case lp != nil && lp.hiredAt.Equal(y.HiredAt):
-		return lp
-	case lp != nil && lp.hiredAt.After(y.HiredAt):
-		return &leadPause{hiredAt: y.HiredAt}
+	if lp == nil {
+		m.leadPauses[y.Name] = &leadPause{hiredAt: y.HiredAt}
 	}
-	lp = &leadPause{hiredAt: y.HiredAt}
-	m.leadPauses[y.Name] = lp
-	return lp
+	if lp == nil || lp.hiredAt.Equal(y.HiredAt) {
+		m.mu.Unlock()
+		return true
+	}
+	m.mu.Unlock()
+	err := m.cfg.Yesmen.Use(y.Name, func(cur yesmen.Yesman) error {
+		if !cur.HiredAt.Equal(y.HiredAt) {
+			return yesmen.ErrRehired
+		}
+		m.mu.Lock()
+		if lp := m.leadPauses[y.Name]; lp == nil || !lp.hiredAt.Equal(y.HiredAt) {
+			m.leadPauses[y.Name] = &leadPause{hiredAt: y.HiredAt}
+		}
+		m.mu.Unlock()
+		return nil
+	})
+	return err == nil
 }
 
 // leadPausedLocked reports whether yesman's own messages may not reach the
 // lead of this hire now, under mu. Unknown counts as paused.
 func (m *Manager) leadPausedLocked(y yesmen.Yesman) bool {
 	lp := m.pauseOf(y)
-	return !lp.known || lp.paused
+	return lp == nil || !lp.known || lp.paused
 }
 
 // loadPause makes sure the pause of y's lead is known, reading it from the
 // workspace, and writes a setting made here that was not written yet. It
 // does its I/O outside mu, and reports whether the lead is paused.
 func (m *Manager) loadPause(y yesmen.Yesman) bool {
+	if !m.ownPause(y) {
+		return true // not the workspace's hire any more: nothing to start
+	}
 	m.mu.Lock()
-	lp := m.pauseOf(y)
-	known, unsaved, epoch, paused, at := lp.known, lp.local && !lp.persisted, lp.epoch, lp.paused, lp.at
+	var known, unsaved, paused bool
+	var epoch uint64
+	var at time.Time
+	if lp := m.pauseOf(y); lp != nil {
+		known, unsaved, epoch, paused, at = lp.known, lp.local && !lp.persisted, lp.epoch, lp.paused, lp.at
+	}
 	m.mu.Unlock()
 	if unsaved {
 		_ = m.persistPause(y, epoch, paused, at)
@@ -104,8 +133,7 @@ func (m *Manager) loadPause(y yesmen.Yesman) bool {
 	c, err := m.cfg.Yesmen.Continuation(y.Name)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	lp = m.pauseOf(y)
-	if lp.known {
+	if lp := m.pauseOf(y); lp != nil && lp.known {
 		return lp.paused // the user acted meanwhile, which wins
 	}
 	if err != nil {
@@ -114,6 +142,10 @@ func (m *Manager) loadPause(y yesmen.Yesman) bool {
 	}
 	if !c.HiredAt.Equal(y.HiredAt) {
 		return true // the workspace was hired again: not this hire's record
+	}
+	lp := m.pauseOf(y)
+	if lp == nil {
+		return true // owned by another hire meanwhile
 	}
 	lp.known, lp.paused, lp.at, lp.persisted = true, !c.LeadPausedAt.IsZero(), c.LeadPausedAt, true
 	return lp.paused
@@ -156,7 +188,7 @@ func (m *Manager) persistPause(y yesmen.Yesman, epoch uint64, paused bool, at ti
 		m.mu.Unlock()
 		return nil // set again meanwhile, or hired again: not this setting's to write
 	}
-	lp := m.leadPauses[y.Name]
+	lp := m.pauseOf(y)
 	if err != nil {
 		m.mu.Unlock()
 		log.Printf("yesman: record the pause of %s's lead (kept in memory, tried again): %v", y.Name, err)
@@ -178,17 +210,27 @@ func (m *Manager) persistPause(y yesmen.Yesman, epoch uint64, paused bool, at ti
 // currentSettingLocked reports, under mu, whether setting epoch of the
 // pause of hire y is still the current one. It never makes a hire's pause.
 func (m *Manager) currentSettingLocked(y yesmen.Yesman, epoch uint64) bool {
-	lp := m.leadPauses[y.Name]
-	return lp != nil && lp.hiredAt.Equal(y.HiredAt) && lp.epoch == epoch
+	lp := m.pauseOf(y)
+	return lp != nil && lp.epoch == epoch
 }
 
 // setPause sets the user's pause of y's lead in memory, and returns what
 // was kept for the lead when it lifts the pause, and the write of the
-// setting, which the caller does once the process is dealt with.
+// setting, which the caller does once the process is dealt with. y is the
+// hire the caller just read from the workspace; a hire the workspace no
+// longer has sets nothing.
 func (m *Manager) setPause(y yesmen.Yesman, paused bool) ([]func(), func() error) {
+	none := func() error { return nil }
+	if !m.ownPause(y) {
+		return nil, none
+	}
 	at := time.Now().UTC()
 	m.mu.Lock()
 	lp := m.pauseOf(y)
+	if lp == nil {
+		m.mu.Unlock()
+		return nil, none // owned by another hire meanwhile
+	}
 	if lp.known && !lp.paused && !paused && (!lp.local || lp.persisted) {
 		epoch := lp.epoch
 		m.mu.Unlock()
@@ -227,8 +269,8 @@ func (m *Manager) loadPauseRecord(y yesmen.Yesman) bool {
 func (m *Manager) deferForLead(yesman string, since time.Time, send func()) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	lp := m.leadPauses[yesman]
-	if lp == nil || !lp.hiredAt.Equal(since) || lp.known && !lp.paused {
+	lp := m.pauseOf(yesmen.Yesman{Name: yesman, HiredAt: since})
+	if lp == nil || lp.known && !lp.paused {
 		return false
 	}
 	if len(lp.deferred) >= deferredLimit {
@@ -267,28 +309,86 @@ func (m *Manager) pauseByUser(id string) func() error {
 	return persist
 }
 
-// workerPause is the user's pause of one worker incarnation (since) of one
-// hire of a workspace, as this Manager knows it; guarded by mu. It holds
-// until the worker is given work, which removes it, and is written to
-// the workspace (Worker.PausedAt) after the worker was stopped.
+// workerPause is the user's setting of the pause of one worker incarnation
+// (since) of one hire of a workspace, as this Manager knows it; guarded by
+// mu. A Stop pauses it; being given work lifts the pause. Either is set
+// here first and written to the workspace (Worker.PausedAt) after: a
+// setting not written yet is kept, holds here, and is tried again. Every
+// setting is numbered (epoch, from m.pauseEpoch), and a write commits only
+// the current one, deciding so under the lock workers.json is written
+// under: an older setting written late never undoes a newer one.
 type workerPause struct {
 	hiredAt, since, at time.Time
+	paused             bool
 	epoch              uint64
 	persisted          bool
+	failure            string // why a lifted pause was not written yet
 }
 
-// workerPausedLocked reports whether the user paused the worker named of
-// hire hiredAt, started at since, in memory; under mu.
-func (m *Manager) workerPausedLocked(yesman, name string, hiredAt, since time.Time) bool {
-	wp := m.workerPauses[ID(yesman, name)]
-	return wp != nil && wp.hiredAt.Equal(hiredAt) && wp.since.Equal(since)
+// resumeUnsaved starts the Detail shown on a worker given work whose pause
+// could not be cleared in its workspace.
+const resumeUnsaved = "Given work, but its Stop could not be cleared in the workspace: yesman tries again"
+
+// workerResume names the setting that lifted a worker's pause when it was
+// given work.
+type workerResume struct {
+	id             string
+	hiredAt, since time.Time
+	epoch          uint64
 }
 
-// liftWorkerPauseLocked forgets the user's pause of a worker that is given
-// work; a write of it not yet made is then not made. Under mu.
-func (m *Manager) liftWorkerPauseLocked(a *agent) {
-	if wp := m.workerPauses[a.info.ID]; wp != nil && wp.hiredAt.Equal(a.workspaceSince) && wp.since.Equal(a.info.Since) {
-		delete(m.workerPauses, a.info.ID)
+// setWorkerPauseLocked makes the current setting of worker id's pause and
+// returns its epoch; under mu.
+func (m *Manager) setWorkerPauseLocked(id string, hiredAt, since, at time.Time, paused bool) uint64 {
+	if m.workerPauses == nil {
+		m.workerPauses = map[string]*workerPause{}
+	}
+	m.pauseEpoch++
+	m.workerPauses[id] = &workerPause{hiredAt: hiredAt, since: since, at: at, paused: paused, epoch: m.pauseEpoch}
+	return m.pauseEpoch
+}
+
+// workerSettingCurrent reports whether setting epoch of the pause of worker
+// id, of hire hiredAt and started at since, is still the current one.
+func (m *Manager) workerSettingCurrent(id string, hiredAt, since time.Time, epoch uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	wp := m.workerPauses[id]
+	return wp != nil && wp.hiredAt.Equal(hiredAt) && wp.since.Equal(since) && wp.epoch == epoch
+}
+
+// resumeWorkerLocked lifts the user's pause of worker a, which is given
+// work, and returns the setting for the write that records it (see
+// reopenWorkerInScope). Under mu.
+func (m *Manager) resumeWorkerLocked(a *agent) workerResume {
+	r := workerResume{id: a.info.ID, hiredAt: a.workspaceSince, since: a.info.Since}
+	r.epoch = m.setWorkerPauseLocked(r.id, r.hiredAt, r.since, time.Time{}, false)
+	return r
+}
+
+// resumedWorker settles the setting r after its write, which err says
+// failed or not. Written, nothing needs it any more; not written, it is
+// kept, shown and tried again (see persistWorkerPauses).
+func (m *Manager) resumedWorker(r workerResume, err error) {
+	if errors.Is(err, errStopped) || errors.Is(err, yesmen.ErrRehired) {
+		err = nil // not this hire's or this agent's to write any more
+	}
+	m.mu.Lock()
+	wp := m.workerPauses[r.id]
+	if wp == nil || !wp.hiredAt.Equal(r.hiredAt) || !wp.since.Equal(r.since) || wp.epoch != r.epoch {
+		m.mu.Unlock()
+		return // set again meanwhile
+	}
+	shown := wp.failure != ""
+	if err == nil {
+		delete(m.workerPauses, r.id)
+	} else {
+		wp.failure = err.Error()
+		shown = true
+	}
+	m.mu.Unlock()
+	if shown {
+		m.changed()
 	}
 }
 
@@ -321,17 +421,7 @@ func (m *Manager) pauseWorker(id, yesman, name string) func() error {
 		hiredAt, since = y.HiredAt, ws[i].StartedAt
 	}
 	m.mu.Lock()
-	if m.workerPauses == nil {
-		m.workerPauses = map[string]*workerPause{}
-	}
-	wp := m.workerPauses[id]
-	if wp == nil || !wp.hiredAt.Equal(hiredAt) || !wp.since.Equal(since) {
-		wp = &workerPause{hiredAt: hiredAt, since: since}
-		m.workerPauses[id] = wp
-	}
-	wp.epoch++
-	wp.at, wp.persisted = at, false
-	epoch := wp.epoch
+	epoch := m.setWorkerPauseLocked(id, hiredAt, since, at, true)
 	m.mu.Unlock()
 	return func() error { return m.persistWorkerPause(id, yesman, name, hiredAt, since, at, epoch) }
 }
@@ -341,12 +431,7 @@ func (m *Manager) pauseWorker(id, yesman, name string) func() error {
 // the lock giving the worker work writes under too, so a pause the worker
 // was given work after is never written. It reports a failure to write it.
 func (m *Manager) persistWorkerPause(id, yesman, name string, hiredAt, since, at time.Time, epoch uint64) error {
-	current := func() bool {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		wp := m.workerPauses[id]
-		return wp != nil && wp.hiredAt.Equal(hiredAt) && wp.since.Equal(since) && wp.epoch == epoch
-	}
+	current := func() bool { return m.workerSettingCurrent(id, hiredAt, since, epoch) }
 	err := m.cfg.Yesmen.Use(yesman, func(y yesmen.Yesman) error {
 		if !y.HiredAt.Equal(hiredAt) {
 			return yesmen.ErrRehired
@@ -380,35 +465,48 @@ func (m *Manager) persistWorkerPause(id, yesman, name string, hiredAt, since, at
 	return nil
 }
 
-// persistWorkerPauses writes the user's pauses of a hire's workers that
-// were not written yet; continuation calls it before it reads the workers.
+// persistWorkerResume writes setting r, which lifted a worker's pause, if
+// it is still the current one when workers.json is written.
+func (m *Manager) persistWorkerResume(r workerResume, yesman, name string) {
+	current := func() bool { return m.workerSettingCurrent(r.id, r.hiredAt, r.since, r.epoch) }
+	err := m.cfg.Yesmen.Use(yesman, func(y yesmen.Yesman) error {
+		if !y.HiredAt.Equal(r.hiredAt) {
+			return yesmen.ErrRehired
+		}
+		return m.cfg.Yesmen.ResumeWorkerIf(yesman, name, r.since, current)
+	})
+	if err != nil && !errors.Is(err, yesmen.ErrRehired) {
+		log.Printf("yesman: record that %s was given work (kept in memory, tried again): %v", r.id, err)
+	}
+	m.resumedWorker(r, err)
+}
+
+// persistWorkerPauses writes the settings of the pauses of a hire's workers
+// that were not written yet; continuation calls it before it reads the
+// workers. Another hire's are left to it (see ForgetYesman).
 func (m *Manager) persistWorkerPauses(y yesmen.Yesman) {
 	type pending struct {
-		id, name       string
-		hiredAt, since time.Time
-		at             time.Time
-		epoch          uint64
+		name   string
+		r      workerResume
+		at     time.Time
+		paused bool
 	}
 	var todo []pending
 	m.mu.Lock()
 	for id, wp := range m.workerPauses {
 		yesman, name, err := SplitID(id)
-		if err != nil || yesman != y.Name {
+		if err != nil || yesman != y.Name || !wp.hiredAt.Equal(y.HiredAt) || wp.persisted {
 			continue
 		}
-		if !wp.hiredAt.Equal(y.HiredAt) {
-			if wp.hiredAt.Before(y.HiredAt) {
-				delete(m.workerPauses, id) // an earlier hire's: gone with it
-			}
-			continue
-		}
-		if !wp.persisted {
-			todo = append(todo, pending{id, name, wp.hiredAt, wp.since, wp.at, wp.epoch})
-		}
+		todo = append(todo, pending{name, workerResume{id, wp.hiredAt, wp.since, wp.epoch}, wp.at, wp.paused})
 	}
 	m.mu.Unlock()
 	for _, p := range todo {
-		_ = m.persistWorkerPause(p.id, y.Name, p.name, p.hiredAt, p.since, p.at, p.epoch)
+		if p.paused {
+			_ = m.persistWorkerPause(p.r.id, y.Name, p.name, p.r.hiredAt, p.r.since, p.at, p.r.epoch)
+		} else {
+			m.persistWorkerResume(p.r, y.Name, p.name)
+		}
 	}
 }
 

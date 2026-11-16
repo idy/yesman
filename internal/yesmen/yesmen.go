@@ -538,6 +538,40 @@ func (s *Store) ReopenWorker(name, worker string) (bool, error) {
 	return reopened, err
 }
 
+// ReopenWorkerIf is ReopenWorker, except that the user's pause is cleared
+// only if unpause, called under the lock PauseWorkerIf writes under, reports
+// so for the record: a Stop made since the worker was given work stays.
+func (s *Store) ReopenWorkerIf(name, worker string, unpause func(Worker) bool) (bool, error) {
+	var reopened bool
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		reopened = !w.FinishedAt.IsZero()
+		clear := !w.PausedAt.IsZero() && unpause(*w)
+		if !reopened && w.FailedAt.IsZero() && !clear {
+			return false
+		}
+		w.FinishedAt, w.FailedAt = time.Time{}, time.Time{}
+		if clear {
+			w.PausedAt = time.Time{}
+		}
+		return true
+	})
+	return reopened, err
+}
+
+// ResumeWorkerIf clears the user's pause of the worker started at since, if
+// current reports true when the record is written, under the lock
+// PauseWorkerIf writes under. It changes nothing else.
+func (s *Store) ResumeWorkerIf(name, worker string, since time.Time, current func() bool) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if w.PausedAt.IsZero() || !w.StartedAt.Equal(since) || !current() {
+			return false
+		}
+		w.PausedAt = time.Time{}
+		return true
+	})
+	return err
+}
+
 // PauseWorker records that the user stopped the worker started at since,
 // and FailWorker that its process ended unexpectedly. A worker of another
 // generation, hired again under the same name, is left alone.

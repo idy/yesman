@@ -171,13 +171,16 @@ type Manager struct {
 	recallBytes      int                      // full payload memory across all agent generations; guarded by mu
 	continuations    map[string]*continuation // by yesman; guarded by mu, see continuation.go
 	beforeNotice     func()                   // tests only: runs before a notice reserves the lead
-	leadPauses       map[string]*leadPause    // by yesman: the user's pauses of leads; guarded by mu, see pause.go
+	leadPauses       map[string]*leadPause    // by yesman, of the hire owning it: the user's pauses of leads; guarded by mu, see pause.go
 	workerPauses     map[string]*workerPause  // by agent ID: the user's pauses of workers; guarded by mu, see pause.go
+	pauseEpoch       uint64                   // numbers worker pause settings; guarded by mu
 	beforePromptDone func(*agent)             // tests only: runs once a prompt's RPC returned, before it ends
 	// tests only: runs as the user's pause of a lead begins to be written.
 	reviewBeforePersistPause func(paused bool)
 	// tests only: runs once a task notice is recorded, before it is sent.
 	reviewBeforeTaskSend func()
+	// tests only: runs as a worker given work begins to be reopened.
+	reviewBeforeReopen func()
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
 	// callsDone is signalled, under mu, when an agent's last caller
@@ -353,6 +356,14 @@ func (m *Manager) infoLocked(id, role string, w yesmen.Worker, subject string) I
 	}
 	i.Yesman, i.Name, _ = SplitID(id)
 	i.Role, i.Number, i.Title, i.Task, i.Since, i.FinishedAt = role, w.Number, subject, w.Task, w.StartedAt, w.FinishedAt
+	if wp := m.workerPauses[id]; role == RoleWorker && wp != nil && !wp.paused && wp.failure != "" && wp.since.Equal(w.StartedAt) {
+		// Given work, which the workspace does not record yet.
+		msg := resumeUnsaved + " (" + wp.failure + ")"
+		if i.Detail != "" {
+			msg += "; " + i.Detail
+		}
+		i.Detail = msg
+	}
 	return i
 }
 
@@ -934,10 +945,11 @@ func (m *Manager) promptAdmitted(ctx context.Context, id, text, behavior, messag
 		return errLeadPaused
 	}
 	a.prompts++
+	var resume workerResume
 	if a.info.Role == RoleWorker {
-		// Given work: the user's pause of it is lifted (before the
-		// workspace records it, see persistWorkerPause).
-		m.liftWorkerPauseLocked(a)
+		// Given work: the user's pause of it is lifted, in memory first,
+		// kept until the workspace records it (see resumeWorkerLocked).
+		resume = m.resumeWorkerLocked(a)
 	}
 	// A task notice is deduped by its own record: refused, it must not
 	// leave the lead looking busy, which would hold off its retry.
@@ -947,8 +959,10 @@ func (m *Manager) promptAdmitted(ctx context.Context, id, text, behavior, messag
 	m.mu.Unlock()
 	if a.info.Role == RoleWorker {
 		// A message gives a finished worker work again.
-		if reopened, err := m.reopenWorkerInScope(a); err != nil {
-			log.Printf("yesman: reopen %s: %v", id, err)
+		reopened, err := m.reopenWorkerInScope(a, resume)
+		m.resumedWorker(resume, err)
+		if err != nil {
+			log.Printf("yesman: reopen %s (its pause is kept lifted in memory, tried again): %v", id, err)
 		} else if reopened {
 			m.changed()
 		}
