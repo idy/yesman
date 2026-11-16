@@ -265,7 +265,10 @@ and nothing is resent. The person sending that ID again, or an accepted update
 (this generation, newer revision, still retained) that is not finished, drops
 the ID from the hidden set and persists that, so the new attempt's outcome shows
 live and after reload; lower revisions and earlier generations cannot. If the
-set cannot be written, it is removed so a reload never hides more than the page.
+set cannot be written, the page tries to remove the whole stored key (every
+conversation's Hides); when that works, a reload shows rather than hides. If
+removal is refused too, only the page's memory is reliable, and a reload after
+storage recovers may read the old Hides again.
 Taken (`dispatched`), `handled` and other finished receipts draw
 nothing, including after compaction removes their messages from context; their
 receipts stay in Go for idempotence and audit. Visibility does not depend on the

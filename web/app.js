@@ -157,9 +157,12 @@ function saveHandled(c) {
   const keys = Object.keys(all);
   for (const key of keys.slice(0, Math.max(0, keys.length - 64))) delete all[key];
   try { localStorage.setItem(HANDLED_STORE, JSON.stringify(all)); } catch {
-    // Unwritable: this page still hides what it hid until it reloads. Drop
-    // what was stored so a reload never hides what this page shows again.
-    try { localStorage.removeItem(HANDLED_STORE); } catch { /* Nothing stored can be read either. */ }
+    // Unwritable: this page still hides what it hid until it reloads. Try to
+    // remove the whole stored key (every conversation's Hides); if that works,
+    // a reload shows rather than hides. If removal is refused too, only this
+    // page's memory is reliable: a reload after storage recovers may read the
+    // old Hides again.
+    try { localStorage.removeItem(HANDLED_STORE); } catch { /* Best effort, see above. */ }
   }
 }
 // reopenHandled drops the Hide of a submission tried again; true if it had one.
