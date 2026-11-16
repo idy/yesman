@@ -172,43 +172,49 @@ func metaHiredAt(meta *os.Root, metaMu *sync.Mutex) (time.Time, error) {
 // place, or one swapped in while it is opened, is refused unread. lock is
 // held only while the file is opened and read.
 func readRegular(root *os.Root, name string, limit int64, lock sync.Locker) ([]byte, error) {
+	data, _, err := readRegularFile(root, name, limit, lock)
+	return data, err
+}
+
+// readRegularFile is readRegular, also returning the file read as opened.
+func readRegularFile(root *os.Root, name string, limit int64, lock sync.Locker) ([]byte, os.FileInfo, error) {
 	fi, err := root.Lstat(name)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, errors.New("not a regular file (a link, pipe, directory or device)")
+		return nil, nil, errors.New("not a regular file (a link, pipe, directory or device)")
 	}
 	if fi.Size() > limit {
-		return nil, fmt.Errorf("larger than %d bytes", limit)
+		return nil, nil, fmt.Errorf("larger than %d bytes", limit)
 	}
 	if handoffFault != nil {
 		if err := handoffFault("meta", name); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	lock.Lock()
 	defer lock.Unlock()
 	file, err := root.OpenFile(name, os.O_RDONLY|openNoBlock, 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !opened.Mode().IsRegular() || !os.SameFile(fi, opened) {
-		return nil, errors.New("it changed while it was opened")
+		return nil, nil, errors.New("it changed while it was opened")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("larger than %d bytes", limit)
+		return nil, nil, fmt.Errorf("larger than %d bytes", limit)
 	}
-	return data, nil
+	return data, opened, nil
 }
 
 func (f *handoffsFile) read() (Handoffs, error) {

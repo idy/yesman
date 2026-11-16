@@ -1,7 +1,9 @@
 package yesmen
 
 import (
+	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -42,6 +44,66 @@ type TaskNotice struct {
 	At       time.Time `json:"at"`
 	// Delivered is set once pi accepted the notice, never before.
 	Delivered bool `json:"delivered,omitempty"`
+	// extra keeps the fields of the notice this version does not know, as
+	// they were. A notice recorded anew for its task is a new notice: they
+	// described the old one and go with it.
+	extra map[string]json.RawMessage
+}
+
+// taskNoticeFields is TaskNotice's known fields, encoded as usual.
+type taskNoticeFields TaskNotice
+
+var taskNoticeKeys = jsonKeys(reflect.TypeFor[TaskNotice]())
+
+// MarshalJSON writes the notice with the fields it kept.
+func (n TaskNotice) MarshalJSON() ([]byte, error) {
+	known, err := json.Marshal(taskNoticeFields(n))
+	if err != nil || len(n.extra) == 0 {
+		return known, err
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(known, &obj); err != nil {
+		return nil, err
+	}
+	for k, v := range n.extra {
+		if _, ok := obj[k]; !ok {
+			obj[k] = v
+		}
+	}
+	return json.Marshal(obj)
+}
+
+// UnmarshalJSON reads a notice, which must be an object, and keeps the
+// fields this version does not know.
+func (n *TaskNotice) UnmarshalJSON(data []byte) error {
+	obj, err := recordObject(data, "sig", "progress", "count", "at", "delivered")
+	if err != nil {
+		return fmt.Errorf("a task notice: %w", err)
+	}
+	var f taskNoticeFields
+	if err := json.Unmarshal(data, &f); err != nil {
+		return err
+	}
+	*n = TaskNotice(f)
+	n.extra = unknownFields(obj, taskNoticeKeys...)
+	return nil
+}
+
+// recordObject reads data as a JSON object whose fields named are not null.
+func recordObject(data []byte, notNull ...string) (map[string]json.RawMessage, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, errors.New("it is null, not an object")
+	}
+	for _, k := range notNull {
+		if raw, ok := obj[k]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return nil, fmt.Errorf("its %s is null", k)
+		}
+	}
+	return obj, nil
 }
 
 const (
@@ -90,6 +152,7 @@ type continuationFile struct {
 	ws    *os.Root
 	meta  *os.Root
 	found os.FileInfo // nil: there was none
+	sum   [sha256.Size]byte
 }
 
 func (f *continuationFile) close() {
@@ -115,28 +178,33 @@ func (s *Store) openContinuation(name string) (*continuationFile, Continuation, 
 		return f, Continuation{}, fmt.Errorf("%s: %w", y.ContinuationFile(), err)
 	}
 	c := Continuation{HiredAt: y.HiredAt}
-	before, _ := f.meta.Lstat(continuationName)
-	data, err := readRegular(f.meta, continuationName, maxContinuationBytes, &sync.Mutex{})
+	data, opened, err := readRegularFile(f.meta, continuationName, maxContinuationBytes, &sync.Mutex{})
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 	case err != nil:
 		return f, Continuation{}, fmt.Errorf("%s: %w; it was left as it is", y.ContinuationFile(), err)
 	default:
-		// The file read is the one found before and after: its identity is
-		// what replace checks.
+		// The file read is still the one there: its identity and bytes
+		// are what replace checks.
 		after, err := f.meta.Lstat(continuationName)
-		if err != nil || before == nil || !os.SameFile(before, after) {
+		if err != nil || !os.SameFile(opened, after) {
 			return f, Continuation{}, fmt.Errorf("%s changed while it was read; it was left as it is", y.ContinuationFile())
 		}
-		f.found = after
+		f.found, f.sum = opened, sha256.Sum256(data)
 		var read Continuation
 		if err := decodeContinuation(data, &read); err != nil {
 			return f, Continuation{}, fmt.Errorf("%s: %w; it was left as it is", y.ContinuationFile(), err)
 		}
-		if read.HiredAt.Equal(y.HiredAt) {
+		switch {
+		case read.HiredAt.Equal(y.HiredAt):
 			c = read
-		} else {
-			c.extra = read.extra // another hire's record: its own fields go
+		case read.HiredAt.IsZero():
+			// Only a workspace hired before hires were recorded has none.
+			return f, Continuation{}, fmt.Errorf("%s: its hiredAt is zero; it was left as it is", y.ContinuationFile())
+		default:
+			// A valid record of another hire, never a damaged one: its
+			// own fields go.
+			c.extra = read.extra
 		}
 	}
 	if c.Tasks == nil {
@@ -145,15 +213,29 @@ func (s *Store) openContinuation(name string) (*continuationFile, Continuation, 
 	return f, c, nil
 }
 
+// decodeContinuation reads a record, which must be one: an object with the
+// hire it belongs to and valid times. Anything else is damage, not an
+// empty record, and is left for someone to look at: the lead counts as
+// paused while it is there.
 func decodeContinuation(data []byte, c *Continuation) error {
-	if err := json.Unmarshal(data, c); err != nil {
+	obj, err := recordObject(data, "hiredAt", "leadPausedAt", "attempts", "tasks")
+	if err != nil {
 		return err
 	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(data, &obj); err != nil {
+	if _, ok := obj["hiredAt"]; !ok {
+		return errors.New("it has no hiredAt")
+	}
+	var read Continuation
+	if err := json.Unmarshal(data, &read); err != nil {
 		return err
 	}
-	c.extra = unknownFields(obj, continuationKeys...)
+	for _, at := range read.Attempts {
+		if at.IsZero() {
+			return errors.New("an attempt has no time")
+		}
+	}
+	read.extra = unknownFields(obj, continuationKeys...)
+	*c = read
 	return nil
 }
 
@@ -226,7 +308,9 @@ func (f *continuationFile) replace(c Continuation) error {
 	return nil
 }
 
-// unchanged checks that the file there is still the one read, or still none.
+// unchanged checks that the file there is still the one read, with the
+// bytes read, or still none. A change after this check, before the rename,
+// cannot be excluded: renames do not compare and swap.
 func (f *continuationFile) unchanged() error {
 	cur, err := f.meta.Lstat(continuationName)
 	switch {
@@ -239,6 +323,15 @@ func (f *continuationFile) unchanged() error {
 		return err
 	case f.found == nil || !cur.Mode().IsRegular() || !os.SameFile(cur, f.found):
 		return fmt.Errorf("%s was replaced after it was read; it was left as it is", f.y.ContinuationFile())
+	}
+	data, opened, err := readRegularFile(f.meta, continuationName, maxContinuationBytes, &sync.Mutex{})
+	switch {
+	case err != nil:
+		return fmt.Errorf("%s: %w; it was left as it is", f.y.ContinuationFile(), err)
+	case !os.SameFile(opened, f.found):
+		return fmt.Errorf("%s was replaced after it was read; it was left as it is", f.y.ContinuationFile())
+	case sha256.Sum256(data) != f.sum:
+		return fmt.Errorf("%s was changed after it was read; it was left as it is", f.y.ContinuationFile())
 	}
 	return nil
 }

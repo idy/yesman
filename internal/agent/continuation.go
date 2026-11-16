@@ -192,6 +192,7 @@ type notice struct {
 	verify         bool // a legacy wait, only listed for the lead to check
 	count          int
 	previousNotice yesmen.TaskNotice
+	noticed        bool // previousNotice is one: the task had a record
 }
 
 // evaluate tells the lead of the tasks that need a next step, if it can be
@@ -263,7 +264,7 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 		if n.count > noticesPerState {
 			continue // told enough while it did not move: the lead decides
 		}
-		n.previousNotice = prev
+		n.previousNotice, n.noticed = prev, seen
 		listed = append(listed, n)
 		if !n.verify {
 			actionable++
@@ -334,17 +335,34 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 		}
 		return
 	}
+	if m.reviewBeforeTaskSend != nil {
+		m.reviewBeforeTaskSend() // tests: the user acts before the notice is sent
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	origin := Origin{Source: OriginYesman, Kind: "tasks"}
+	// Admitted only as it is written to pi: nothing read was changed since,
+	// no worker took up a task it lists, and the user did not pause the
+	// lead, whether it was idle, asleep or started for this.
+	current := func() error {
+		if m.cfg.Yesmen.Revision(yesman) != rev || m.carriedLocked(yesman, listed) {
+			return errOvertaken
+		}
+		return nil
+	}
 	if state == leadIdle {
-		err = m.sendPrompt(ctx, lead, p, text, "followUp", origin)
+		err = m.sendPromptDelivery(ctx, lead, p, text, "followUp", "", origin, m.admitAuto(y, current))
 	} else {
 		since := y.HiredAt
-		err = m.promptDelivery(ctx, ID(yesman, yesmen.LeadName), text, "followUp", "", nil, &since, origin)
+		err = m.promptAdmitted(ctx, ID(yesman, yesmen.LeadName), text, "followUp", "", nil, &since, origin, current)
 	}
-	if errors.Is(err, errLeadPaused) {
-		return // the user stopped it meanwhile: it hears when they write to it
+	if errors.Is(err, errLeadPaused) || errors.Is(err, errOvertaken) {
+		// Never written: it was not a notice, and costs nothing.
+		m.unrecordAttempt(y, listed, now)
+		if errors.Is(err, errOvertaken) {
+			m.reevaluate(c)
+		}
+		return // paused: the lead hears when the user writes to it
 	}
 	if err != nil {
 		log.Printf("yesman: tell the lead of %s about its tasks: %v", yesman, err)
@@ -415,6 +433,42 @@ func (m *Manager) recordAttempt(y yesmen.Yesman, listed []notice, at time.Time, 
 		}
 		return err
 	})
+}
+
+// unrecordAttempt takes back an attempt recorded for a notice that was
+// never written to pi: the time it took of the budget, and what it
+// recorded of each task it listed, unless recorded again since.
+func (m *Manager) unrecordAttempt(y yesmen.Yesman, listed []notice, at time.Time) {
+	err := m.cfg.Yesmen.Use(y.Name, func(cur yesmen.Yesman) error {
+		if !cur.HiredAt.Equal(y.HiredAt) {
+			return yesmen.ErrRehired
+		}
+		_, err := m.cfg.Yesmen.UpdateContinuation(y.Name, y.HiredAt, func(c *yesmen.Continuation) bool {
+			changed := false
+			if i := slices.IndexFunc(c.Attempts, func(t time.Time) bool { return t.Equal(at) }); i >= 0 {
+				c.Attempts = slices.Delete(c.Attempts, i, i+1)
+				changed = true
+			}
+			for _, n := range listed {
+				r, ok := c.Tasks[n.task.ID]
+				if !ok || r.Sig != n.sig || !r.At.Equal(at) || r.Delivered {
+					continue
+				}
+				if n.noticed {
+					c.Tasks[n.task.ID] = n.previousNotice
+				} else {
+					delete(c.Tasks, n.task.ID)
+				}
+				changed = true
+			}
+			return changed
+		})
+		return err
+	})
+	if err != nil {
+		// Kept as an attempt, it counts against the budget: never more.
+		log.Printf("yesman: take back the continuation attempt of %s: %v", y.Name, err)
+	}
 }
 
 // forgetSettled clears the delivered notice of every task the board still
