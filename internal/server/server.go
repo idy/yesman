@@ -91,6 +91,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/repos", s.handle(s.addRepo))
 	mux.HandleFunc("POST /v1/checkout", s.handle(s.checkout))
 	mux.HandleFunc("POST /v1/worktrees/remove", s.handle(s.removeWorktree))
+	mux.HandleFunc("POST /v1/files", s.handle(s.files))
 	mux.HandleFunc("GET /v1/agents", s.handle(s.agents))
 	mux.HandleFunc("POST /v1/workers", s.handle(s.startWorker))
 	mux.HandleFunc("POST /v1/workers/send", s.handle(s.sendWorker))
@@ -688,6 +689,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	}
 
 	writeWorktreeCleanupContext(&b, y, me)
+	writeTemporaryFilesContext(&b, y, me)
 
 	rel := ".yesman/knowledge"
 	w("\n## Knowledge\n\n")

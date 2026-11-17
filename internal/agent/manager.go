@@ -539,6 +539,19 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	} else {
 		args = append(args, "--name", ID(y.Name, name))
 	}
+	// Each start gets its own temporary and evidence directories in the
+	// workspace (workspace_temp.go). Without them the agent does not start:
+	// programs would silently fall back to the system's temporary directory.
+	temp, err := reserveAgentTemp(y.Path, ID(y.Name, name), name, role)
+	if err != nil {
+		return nil, modelState{}, fmt.Errorf("prepare the agent's temporary directory: %w", err)
+	}
+	ran := false
+	defer func() {
+		if !ran {
+			temp.release()
+		}
+	}()
 	token := newToken()
 	env := append(os.Environ(), m.cfg.Env...)
 	env = append(env,
@@ -549,6 +562,7 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 		"YESMAN_ROLE="+role,
 		"YESMAN_WORKSPACE="+y.Path,
 	)
+	env = withEnv(env, temp.env())
 	path := m.cfg.Pi
 	if m.cfg.Command != nil {
 		ctx, cancel := context.WithTimeout(startContext, 10*time.Minute)
@@ -567,6 +581,7 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	if err != nil {
 		return nil, modelState{}, err
 	}
+	p.temp = temp
 	m.mu.Lock()
 	a.token, a.tokenProc = token, p
 	m.tokens[token] = a.info.ID
@@ -589,6 +604,7 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	// A lead's new session starts as the model chosen when its yesman was
 	// hired; a resumed one keeps the model it was using. Workers are given
 	// theirs by StartWorkerAs.
+	ran = true
 	if c, ok := ParseChoice(y.Model); ok && role == RoleLead && !resumed {
 		// A model pi no longer has must not keep the lead from starting:
 		// it runs as pi's own default instead.

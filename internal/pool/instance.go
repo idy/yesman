@@ -69,6 +69,13 @@ func newWorktreeInstance(repo, path string) (string, error) {
 	return id, nil
 }
 
+// WorktreeInstance reads, without running Git, the private instance ID of
+// the worktree at path of the pool repository name. It identifies the
+// checkout; it never grants ownership by itself.
+func (p *Pool) WorktreeInstance(name, path string) (string, error) {
+	return readWorktreeInstance(p.dir(name), path)
+}
+
 func readWorktreeInstance(repo, path string) (string, error) {
 	dir, err := privateWorktreeDir(repo, path)
 	if err != nil {
