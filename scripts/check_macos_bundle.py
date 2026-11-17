@@ -38,7 +38,8 @@ def signature(path):
             fields[key] = value
     flags = re.search(r'\bflags=0x[0-9a-f]+\(([^)]*)\)', text)
     requirement = subprocess.run(['codesign', '-d', '-r-', str(path)], capture_output=True)
-    designated = re.search(r'^designated => (.+)$', requirement.stdout.decode() + requirement.stderr.decode(), re.M)
+    # An implicit requirement, as ad hoc's cdhash one, prints as a comment.
+    designated = re.search(r'^(# )?designated => (.+)$', requirement.stdout.decode() + requirement.stderr.decode(), re.M)
     return {
         'identifier': fields.get('Identifier'),
         'teamIdentifier': fields.get('TeamIdentifier'),
@@ -47,7 +48,8 @@ def signature(path):
         'flags': flags.group(1).split(',') if flags else [],
         # A secure timestamp prints Timestamp=; a signature without one prints Signed Time=.
         'secureTimestamp': fields.get('Timestamp'),
-        'designatedRequirement': designated.group(1).strip() if designated else None,
+        'designatedRequirement': designated.group(2).strip() if designated else None,
+        'implicitRequirement': bool(designated and designated.group(1)),
     }
 
 
