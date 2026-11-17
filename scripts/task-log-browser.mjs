@@ -28,7 +28,7 @@ window.filesFixture={
 };
 const recordPath='.yesman/task-log/2026-01-15-t3-picker.md';
 const nl=String.fromCharCode(10);
-filesFixture[recordPath]=filesFixture[recordPath].replace('## Validation',('Synthetic historical paragraph'+nl+nl).repeat(160)+'## Validation')+nl+nl+'[Top](#picker-detail)'+nl;
+filesFixture[recordPath]=filesFixture[recordPath].replace('## Validation',('Synthetic historical paragraph'+nl+nl).repeat(160)+'## Validation')+nl+nl+'[Top](#picker-detail)'+nl+nl+('Later historical evidence paragraph'+nl+nl).repeat(180);
 filesFixture[toc]+=nl+'[Custom history](task-log/'+encodeURIComponent('资料')+'/'+encodeURIComponent('旧 记录.md')+')'+nl;
 filesFixture[toc]+=nl+Array.from({length:100},(_,i)=>'- [Record '+i+'](task-log/2026-01-15-t3-picker.md) — historical result '+i).join(nl)+nl;
 const agents=['alice','bob'].map(name=>({id:name+'/lead',name:'lead',yesman:name,role:'lead',status:'idle'}));
@@ -87,8 +87,29 @@ try {
    await page.goto(url);
    await page.locator('[data-agent="alice/lead"]').click();
    const files=page.locator('#files');
+   assert.equal(await files.isVisible(),false);
+   assert.equal(await page.evaluate(()=>location.hash),'');
+   await page.locator('#dock textarea').fill('Keep the unsent draft');
+   // Back to a no-log entry closes only this reader, including an in-flight
+   // read. Its late result must not reopen it; Forward explicitly can.
+   const toc='.yesman/task-log.md';
+   await page.evaluate(path=>{delayed['alice:'+path]=true;},toc);
    await page.getByRole('button',{name:'Working Logs',exact:true}).click();
+   await page.waitForFunction(path=>releases['alice:'+path],toc);
+   await page.goBack();await page.waitForFunction(()=>location.hash==='');
+   assert.equal(await files.isVisible(),false);
+   await page.evaluate(async path=>{delayed['alice:'+path]=false;releases['alice:'+path]();await new Promise(requestAnimationFrame);},toc);
+   assert.equal(await files.isVisible(),false,'late log read cannot reclaim a no-route view');
+   await page.goForward();
    await files.getByRole('link',{name:'Picker',exact:true}).waitFor();
+   // A different pane and its conversation draft keep ownership when Back
+   // leaves the log URL. Forward still opens the explicit log destination.
+   await page.locator('[data-info-entry="needs-you"]').click();
+   await page.getByRole('button',{name:'Close Needs You',exact:true}).waitFor();
+   await page.goBack();await page.waitForFunction(()=>location.hash==='');
+   assert.equal(await page.getByRole('button',{name:'Close Needs You',exact:true}).isVisible(),true);
+   assert.equal(await page.locator('#dock textarea').inputValue(),'Keep the unsent draft');
+   await page.goForward();await files.getByRole('link',{name:'Picker',exact:true}).waitFor();
    assert.equal(await files.getByRole('button',{name:'Source',exact:true}).count(),0);
    assert.equal(await files.getByText('<!-- yesman-task-log-toc v1 -->',{exact:true}).count(),0);
    await files.getByRole('link',{name:'Picker',exact:true}).click();
@@ -108,6 +129,21 @@ try {
    await page.keyboard.press('Escape');
    assert.equal(await page.evaluate(()=>document.activeElement.id),'validation');
    assert.match(page.url(),/#task-log=/);
+   // An anchored history entry stores where the reader actually scrolled,
+   // while a fresh click on that same fragment still jumps to its heading.
+   await page.evaluate(()=>new Promise(requestAnimationFrame));
+   const anchorTop=await files.locator('#files-view').evaluate(e=>e.scrollTop);
+   await files.locator('#files-view').hover();await page.mouse.wheel(0,430);
+   await page.waitForFunction(initial=>document.getElementById('files-view').scrollTop>initial+300,anchorTop);
+   await page.waitForFunction(()=>history.state?.workingLog?.scroll===document.getElementById('files-view').scrollTop);
+   const anchoredPosition=await files.locator('#files-view').evaluate(e=>e.scrollTop);
+   await files.getByRole('button',{name:'Contents',exact:true}).click();
+   await files.getByRole('link',{name:'Picker',exact:true}).waitFor();
+   await page.goBack();await files.locator('#validation').waitFor();
+   assert.ok(Math.abs((await files.locator('#files-view').evaluate(e=>e.scrollTop))-anchoredPosition)<2,'Back restores the anchored reading position');
+   assert.equal(await page.evaluate(()=>document.activeElement.id),'validation');
+   await files.getByRole('link',{name:'Jump',exact:true}).click();
+   assert.ok(Math.abs((await files.locator('#files-view').evaluate(e=>e.scrollTop))-anchorTop)<2,'fresh fragment click jumps to heading');
    await files.locator('.files-crumb--scope').click();
    assert.equal(await page.locator('.files-menu [role="menuitem"][aria-current="true"]').count(),1);
    await page.keyboard.press('Escape');
@@ -152,6 +188,11 @@ try {
    await files.locator('.cm-content').fill('# Edited plain');
    await page.keyboard.press(process.platform==='darwin'?'Meta+s':'Control+s');
    await page.waitForFunction(()=>calls.some(c=>c[0]==='WriteFile'&&c[2]==='notes.md'&&c[3].includes('Edited plain')));
+   // Browser history without a log destination never closes ordinary Files.
+   await page.evaluate(()=>history.pushState({ordinaryFixture:true},'','#ordinary-reading'));
+   await page.goBack();await page.waitForFunction(()=>location.hash==='');
+   assert.equal(await files.locator('.cm-content').innerText(),'# Edited plain');
+   assert.equal(await files.isVisible(),true);
    await page.getByRole('button',{name:'Working Logs',exact:true}).click();
    await files.getByRole('link',{name:'Picker',exact:true}).click();
    await files.getByRole('link',{name:'Backup',exact:true}).click();

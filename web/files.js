@@ -90,6 +90,7 @@ export function createFiles(host) {
   let watching = null;
   let wide = false;
   let restoredRoute = null;
+  let routedWorkspace = null; // only the log reader opened by this router
   const logPositions = new Map(); // bounded session positions; no document bodies
   function rememberLogPosition() {
     const section=$('#files-view');
@@ -115,7 +116,22 @@ export function createFiles(host) {
   window.addEventListener('popstate', () => {
     restoredRoute = null;
     const route = logRoute();
-    if (route && route.name !== host.yesman()?.name) host.selectWorkspace?.(route.name);
+    if (!route) {
+      const owner = routedWorkspace;
+      routedWorkspace = null;
+      const p = current();
+      // A no-log history entry releases only our visible log reader. An
+      // ordinary document, another workspace or another pane keeps its view.
+      if (p?.name === owner && isTaskLog(p.active)) {
+        rememberLogPosition();
+        p.pendingAnchor = false;
+        p.pendingScroll = null;
+        p.loads?.set(p.active, (p.loads.get(p.active) ?? 0) + 1);
+        host.setOpen(false);
+      }
+      return;
+    }
+    if (route.name !== host.yesman()?.name) host.selectWorkspace?.(route.name);
     restoreRoute();
   });
 
@@ -349,11 +365,13 @@ export function createFiles(host) {
     rememberLogPosition();
     const destination = Number.isFinite(scroll) ? scroll : (logPositions.get(`${y.name}\u0001${rel}`) ?? 0);
     if (isTaskLog(rel)) {
+      routedWorkspace = y.name;
       if (route) saveLogRoute(y.name, rel, anchor, false, destination);
       restoredRoute = `${y.name}\u0001${location.hash}`;
     } else if (route && logRoute()?.name === y.name) {
       history.replaceState(null, '', location.pathname + location.search);
       restoredRoute = null;
+      routedWorkspace = null;
     }
     let p = pane(y);
     if (!within(rel, p.root)) {
@@ -379,8 +397,11 @@ export function createFiles(host) {
     const sameAnchorPage = p.active === rel && isTaskLog(rel) && Boolean(anchor);
     p.active = rel;
     p.taskAnchor = anchor;
-    p.pendingAnchor = isTaskLog(rel) && Boolean(anchor);
-    p.pendingScroll = isTaskLog(rel) && !anchor ? destination : null;
+    // A restored entry's saved reading offset wins over its original anchor.
+    // Fresh fragment actions still jump to the heading, even on this page.
+    const restoringScroll = !route && Number.isFinite(scroll);
+    p.pendingAnchor = isTaskLog(rel) && Boolean(anchor) && !restoringScroll;
+    p.pendingScroll = isTaskLog(rel) && (restoringScroll || !anchor) ? destination : null;
     // Show where it is in the tree.
     for (let dir = parentOf(rel); dir !== '.' && dir !== p.root; dir = parentOf(dir)) p.expanded.add(dir);
     if (!host.isOpen()) host.setOpen(true);
@@ -1225,7 +1246,11 @@ export function createFiles(host) {
       if (!section.dataset.fresh) section.scrollTop = top;
       const target = p.taskAnchor ? article.querySelector(`[id="${CSS.escape(p.taskAnchor)}"]`) : article.querySelector('h1,h2,h3,h4,h5,h6');
       if (p.pendingAnchor && target) { target.scrollIntoView(); target.focus({ preventScroll: true }); }
-      else if (p.pendingScroll != null) { section.scrollTop=p.pendingScroll; section.tabIndex=-1;section.focus({preventScroll:true}); }
+      else if (p.pendingScroll != null) {
+        section.scrollTop = p.pendingScroll;
+        section.tabIndex = -1;
+        (p.taskAnchor && target ? target : section).focus({ preventScroll: true });
+      }
       if (isTaskLog(rel) && p.taskAnchor && !target) {
         const fallback = h('p', { class: 'files-notice', role: 'status' }, t('This anchor is not on this page. For migrated history, open the complete original from Contents and search for the heading.'));
         if (rel === TASK_LOG) {
