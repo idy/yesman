@@ -166,6 +166,13 @@ jobs:
         with:
           ref: ${{ needs.download.outputs.source }}
           persist-credentials: false
+      # The candidate above is only build input. The producer which handles the
+      # updater key comes from this workflow's own reviewed commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .qa-producer
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -173,13 +180,16 @@ jobs:
         with:
           name: released-upgrade-inputs
           path: ${{ runner.temp }}/released-inputs
-      # Only this packaging step receives the existing updater key. It builds
+      # Only this packaging step receives the existing updater key. The producer
+      # removes it from its environment before any subprocess and gives it only
+      # to the two signers (MyGo through a short-lived key file, then the
+      # precompiled upgrade-assets helper), never to go/git/compilers. It builds
       # private QA successors; never executes an app or publishes a release.
       - name: Package and sign private QA successors
         env:
           MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: python3 scripts/prepare-upgrade-qa.py "$RUNNER_TEMP/released-inputs" "$RUNNER_TEMP/gate-inputs"
+        run: python3 .qa-producer/scripts/prepare-upgrade-qa.py "$RUNNER_TEMP/released-inputs" "$RUNNER_TEMP/gate-inputs"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signed-upgrade-inputs-${{ matrix.os }}

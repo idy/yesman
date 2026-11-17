@@ -34,6 +34,11 @@ func main() {
 }
 
 func run() error {
+	helper := len(os.Args) == 3 && os.Args[1] == "-build-upgrade-assets"
+	if helper && (os.Getenv("MYGO_UPDATER_PRIVATE_KEY") != "" || !filepath.IsAbs(os.Args[2])) {
+		// Compile the signer without its key; only its later execution gets it.
+		return fmt.Errorf("-build-upgrade-assets needs an absolute output path and no MYGO_UPDATER_PRIVATE_KEY")
+	}
 	// The adapter applies only to this app and the build command. Do not
 	// accidentally adapt another project, mygo dev, or a newer dependency.
 	config, err := os.ReadFile("mygo.json")
@@ -128,7 +133,7 @@ func run() error {
 		}
 		cmd = exec.Command("go", "test", "github.com/egoist/mygo", "-run", "^Test(YesmanRename|Updater|SwapFiles|Relaunch)", "-count=1", "-v", "-timeout=5m")
 	}
-	if len(os.Args) == 3 && (os.Args[1] == "-upgrade-assets" || os.Args[1] == "-verify-upgrade-assets") {
+	if len(os.Args) == 3 && (os.Args[1] == "-upgrade-assets" || os.Args[1] == "-verify-upgrade-assets" || helper) {
 		dir := filepath.Join(staged, "cmd", "yesman-upgrade-assets")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -139,6 +144,9 @@ func run() error {
 		cmd = exec.Command("go", "run", "github.com/egoist/mygo/cmd/yesman-upgrade-assets", os.Args[2])
 		if os.Args[1] == "-verify-upgrade-assets" {
 			cmd.Args = append(cmd.Args, "verify")
+		}
+		if helper {
+			cmd = exec.Command("go", "build", "-o", os.Args[2], "github.com/egoist/mygo/cmd/yesman-upgrade-assets")
 		}
 	}
 	// GOFLAGS propagates the same staged module to the CLI and app build.

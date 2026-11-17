@@ -65,7 +65,15 @@ checks canonical allocated tags, public/draft flags,
 all six ordinary predecessor manifests, stable tag commits, unique nonempty
 assets and API SHA256 digests. It downloads the original signed archives,
 manifests/deltas and each tag's original web source. The signing jobs receive the
-existing updater private key only during packaging. They preserve both official
+existing updater private key only during packaging. Its producer comes from the
+workflow's own commit (`.qa-producer`); the candidate checkout is build input
+only. The producer removes the key from its environment before any subprocess:
+`go env`, git, the Go/cgo compilers and the upgrade-assets helper's compilation
+never receive it. Each MyGo build signs through a fresh owner-only key file named
+by the temporary QA `mygo.json` and removed after that build; the precompiled
+helper alone gets the key in its execution environment. A missing, mismatched
+or unused key fails the step rather than leaving an unsigned successor. This is
+environment isolation, not a same-user filesystem sandbox. They preserve both official
 manifests byte-for-byte and make two private QA successor packages from exact
 candidate source to test another update and real failed-install recovery.
 Neither runtime jobs nor their artifacts receive the private key.
