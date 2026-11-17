@@ -15,7 +15,8 @@ type Identity struct {
 }
 
 func (i Identity) valid() bool {
-	return i.Platform != "" && i.Volume != "" && i.ID != "" && i.Birth != ""
+	return i.Platform != "" && i.Volume != "" && i.ID != "" && i.Birth != "" &&
+		(i.Platform != "darwin" || i.Birth != "0:0")
 }
 func requireIdentity(f *os.File, expected Identity) error {
 	actual, err := fileIdentity(f)
