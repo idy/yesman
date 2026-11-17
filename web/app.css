@@ -1064,6 +1064,26 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 .board-empty[data-tone="error"] { color: var(--mds-error); }
 @media (prefers-reduced-motion: reduce) { .board-fold { transition: none; } }
 
+/* GitHub App: public identity and scope only; key import stays in native Go. */
+.github-app-page .mds-row-label { min-width: 0; }
+.github-app-page .mds-row-label h3 { overflow-wrap: anywhere; }
+.github-app-page .mds-row-control { min-width: 0; max-width: 100%; }
+.github-app-field { display: grid; gap: 6px; min-width: 0; font-size: var(--mds-text-note); }
+.github-app-field .mds-input { width: 100%; min-width: 0; }
+.github-app-register { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: end; gap: 12px; padding: 14px 16px; }
+.github-app-import, .github-app-unlock { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; max-width: 100%; }
+.github-app-import .github-app-field, .github-app-unlock .github-app-field { width: 190px; max-width: 100%; }
+.github-app-page textarea { width: 300px; max-width: 100%; min-height: 86px; resize: vertical; }
+.github-app-workspaces { display: grid; gap: 8px; text-align: left; }
+.github-app-workspaces label { display: flex; align-items: center; gap: 8px; overflow-wrap: anywhere; }
+.github-app-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 16px; }
+@media (max-width: 620px) {
+  .github-app-register { grid-template-columns: minmax(0, 1fr); }
+  .github-app-page .mds-row--preference { flex-wrap: wrap; gap: 12px; }
+  .github-app-page .mds-row-control { width: 100%; justify-content: flex-start; }
+  .github-app-page textarea { width: 100%; }
+}
+
 /* Needs you: a pane as the board, of what the yesman shown waits on the user
    for, each request a row of what it asks, a line of its text, its kind and
    wait, and who asks. */

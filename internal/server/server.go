@@ -22,6 +22,7 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/crew"
 	"github.com/idy/yesman/internal/github"
+	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
@@ -49,6 +50,8 @@ type Server struct {
 	// Secrets and Variables, when set, are set in agents' commands.
 	Secrets   *secrets.Vault
 	Variables *secrets.Variables
+	// GitHubApp is a backend-only vault/broker, separate from command secrets.
+	GitHubApp *githubapp.Manager
 
 	url           string
 	worktreeMu    sync.Mutex
@@ -89,6 +92,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/workers/remove", s.handle(s.removeWorker))
 	mux.HandleFunc("GET /v1/env", s.handle(s.env))
 	mux.HandleFunc("GET /v1/env/describe", s.handle(s.describeEnv))
+	mux.HandleFunc("GET /v1/github-app/mode", s.handle(s.githubAppMode))
+	mux.HandleFunc("POST /v1/github-app/pulls", s.handle(s.githubAppPull))
 	mux.HandleFunc("POST /v1/workers/answer", s.handle(s.answerWorker))
 	mux.HandleFunc("POST /v1/origin", s.origin)
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
@@ -104,8 +109,8 @@ func (s *Server) Handler() http.Handler {
 type caller struct {
 	agent  agent.Info
 	yesman yesmen.Yesman
-	// token is checked again before a change commits: by Agents.BeginChange
-	// for the board, by Agents.CallerOperation for Needs you.
+	// token is checked again before mutation by BeginChange, CallerOperation
+	// or the cancellable App BeginOperation. It never leaves this server.
 	token string
 }
 
@@ -527,6 +532,9 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, error) {
 	board, _ := s.Yesmen.Board(c.yesman.Name)
 	text := BuildContext(ctx, s.Pool, s.Agents, c.yesman, c.agent, board) + s.envContext(c.agent.Role == agent.RoleLead)
+	if s.GitHubApp != nil {
+		text += s.GitHubApp.Context(c.yesman.Name, c.yesman.HiredAt.UTC().Format(time.RFC3339Nano))
+	}
 	if c.agent.Role == agent.RoleLead && s.Crew != nil {
 		text += CrewContext(s.Crew(ctx), c.agent)
 	}

@@ -187,6 +187,7 @@ type agent struct {
 	info                           Info
 	proc                           *proc
 	token                          string
+	operations                     map[*externalOperation]struct{}
 	tokenProc                      *proc         // the process token was given to
 	seq                            uint64        // the last event's number
 	turn                           []Event       // the events of the assistant message in progress
@@ -1055,6 +1056,7 @@ func (m *Manager) Stop(id string) {
 		return
 	}
 	a.stopping = true
+	cancelOperationsLocked(a, a.tokenProc)
 	if a.startCancel != nil {
 		a.startCancel()
 	}
@@ -1161,6 +1163,7 @@ func (m *Manager) StopAll() {
 		ids = append(ids, id)
 		a := m.agents[id]
 		a.retiring = true
+		cancelOperationsLocked(a, a.tokenProc)
 	}
 	m.mu.Unlock()
 	// Initializers already published their agent before leaving the manager
@@ -1265,6 +1268,7 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 			return errStopped
 		}
 		a.retiring, a.removing = true, true
+		cancelOperationsLocked(a, a.tokenProc)
 	}
 	m.mu.Unlock()
 	fail := func(err error) error {
