@@ -1,6 +1,11 @@
 // Simplified Chinese for the page, by the English of each message (see
 // web/i18n.js). A message left out shows in English.
 export default {
+  "Contents": "目录",
+  "Reload": "重新载入",
+  "Complete original": "完整原文",
+  "Legacy slice: Markdown may continue across files. The complete original preserves its formatting and old anchors.": "历史分片：Markdown 结构可能跨越文件。完整原文保留原始排版与旧锚点。",
+  "This anchor is not on this page. For migrated history, open the complete original from Contents and search for the heading.": "本页没有此锚点。若为已迁移的历史，请从目录打开完整原文并查找该标题。",
   "GitHub App": "GitHub App",
   "GitHub App command routing is unavailable. Install GitHub CLI or repair the private runtime wrapper and restart. You can disable App identity to use the existing credentials.": "GitHub App 命令路由不可用。请安装 GitHub CLI，或修复私有 runtime wrapper 后重启。也可以停用 App 身份，继续使用原有凭据。",
   "App avatar": "App 头像",
@@ -430,6 +435,8 @@ export default {
   "Kept {name}: {reason}.": "已保留 {name}：{reason}。",
   "kept: {reason}": "保留：{reason}",
   "Knowledge": "知识库",
+  "Working log": "工作日志",
+  "Read the working log in the files pane": "在文件窗格中阅读工作日志",
   "Read task and PR history in the files pane": "在文件窗格中阅读任务和 PR 历史",
   "Show all files, Knowledge, the Working Logs or another worktree": "显示全部文件、知识库、工作日志或其他工作树",
   "Working Logs": "工作日志",

@@ -1,0 +1,13 @@
+/* Task history uses the existing Markdown reader. At narrow window widths
+   it needs the available pane, rather than three competing side columns. */
+@media (max-width: 900px) {
+  .files[data-history] {
+    position: fixed; inset: var(--titlebar) 0 0; z-index: 5;
+    width: auto !important; max-width: none; border-left: 0;
+  }
+  .files[data-history] .files-body[data-tree="true"] { grid-template-columns: minmax(0, 1fr); }
+  .files[data-history] :is(.files-tree, .files-resize, [data-action="tree"], [data-action="collapse"]) { display: none; }
+  .files[data-history] .files-bar { flex-wrap: wrap; gap: 4px; padding-block: 4px; }
+  .files[data-history] .files-crumbs { flex-basis: 100%; }
+  .files[data-history] .files-bar-actions { margin-left: 0; }
+}

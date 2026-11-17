@@ -11,6 +11,7 @@
 import { $, h, icon } from './dom.js';
 import { counts, formatSize } from './diff.js';
 import { t, tn, formatNumber } from './i18n.js';
+import { isTaskLog } from './task-log.js';
 
 // How long each part is kept before the panel asks again by itself.
 const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
@@ -172,7 +173,7 @@ export function createInfo(host) {
     const shown = host.files();
     return {
       key: 'working-logs', label: t('Working Logs'), title: t('Read task and PR history in the files pane'),
-      current: shown?.yesman === y.name && shown.path === '.yesman/task-log.md',
+      current: shown?.yesman === y.name && isTaskLog(shown.path),
       open: () => host.openTaskLog(),
     };
   }
