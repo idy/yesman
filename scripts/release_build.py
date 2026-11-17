@@ -20,9 +20,14 @@ out of the environment:
   another name.
 
 The derived configuration is mygo.json with its paths made absolute (and
-resources/ linked), in a fresh directory under the ignored build/: MyGo takes
-it as the project directory while go still builds this module, so binaries
-keep their exact, clean source revision. Developer ID mode adds
+resources/ linked), in a fresh directory under the ignored build/. The build
+still runs `go tool mygo build` from the repository root, so the repository's
+packaging adapter (tools/mygo -> tools/package -> the pinned MyGo) checks the
+tracked mygo.json and builds as it would; MyGo takes the derived directory as
+the project directory while go still builds this module, so binaries keep
+their exact, clean source revision. windows.installerInclude and
+macos.entitlements must be regular files inside the repository reached
+without links; their paths are made absolute. Developer ID mode adds
 macos.notarize, naming the keychain that `macos_signing.py setup` prepared,
 whose state it validates first. The tracked mygo.json is never changed:
 plain `go tool mygo build` stays an ad-hoc build. The files are readable by
@@ -59,7 +64,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Each key of mygo.json that the derived configuration knows how to carry.
 # Another key, as one with a path, must be taught here before releases build.
 KNOWN = {
-    '': {'name', 'slug', 'identifier', 'version', 'icon', 'copyright', 'license', 'out', 'macos', 'updates'},
+    '': {'name', 'slug', 'identifier', 'version', 'icon', 'copyright', 'license', 'out', 'windows', 'linux', 'macos', 'updates'},
+    'windows': {'installDirName', 'installerInclude'},
+    'linux': {'command'},
     'macos': {'minimumSystemVersion', 'entitlements', 'infoPlist'},
     'updates': {'publicKey', 'github', 'deltas'},
 }
@@ -82,19 +89,42 @@ def derive(tracked, root, key_file, notarize=None):
     if icon and not icon.startswith('resources/'):
         raise SigningError('mygo.json icon must be under resources/')
     config = copy.deepcopy(tracked)
-    config['main'] = str(root)  # the Go package: this module, with its embeds and VCS state
+    # The Go package: this module's root, with its embeds and VCS state. The
+    # packaging adapter (tools/package) builds the legacy launcher from
+    # main + "/tools/launcher", so main must stay the module root (a tracked
+    # main is an unknown key above, refused).
+    config['main'] = str(root)
     config['out'] = str(root / tracked.get('out', 'dist'))
     macos = config.setdefault('macos', {})
     if 'entitlements' in macos:
-        macos['entitlements'] = str(root / macos['entitlements'])
+        macos['entitlements'] = str(inside(root, macos['entitlements'], 'macos.entitlements'))
     if notarize:
         macos['notarize'] = notarize
+    include = tracked.get('windows', {}).get('installerInclude')
+    if include is not None:
+        config['windows']['installerInclude'] = str(inside(root, include, 'windows.installerInclude'))
     if 'updates' in config:
         if (root / 'CHANGELOG.md').is_file():
             config['updates']['changelog'] = str(root / 'CHANGELOG.md')
         if key_file:
             config['updates']['privateKey'] = str(key_file)
     return config
+
+
+def inside(root, relative, what):
+    """root/relative, a regular file reached without links and staying within root."""
+    if not isinstance(relative, str) or not relative or os.path.isabs(relative) or '\\' in relative:
+        raise SigningError('mygo.json %s must be a relative path inside the repository' % what)
+    path, parts = root, pathlib.PurePosixPath(relative).parts
+    for part in parts:
+        if part in ('', '.', '..'):
+            raise SigningError('mygo.json %s must be a relative path inside the repository' % what)
+        path = path / part
+        if path.is_symlink():
+            raise SigningError('mygo.json %s must not go through a link' % what)
+    if not path.is_file():
+        raise SigningError('mygo.json %s is not a file in the repository' % what)
+    return path
 
 
 def write_private(path, text):

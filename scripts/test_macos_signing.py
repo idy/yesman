@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import pathlib
+import plistlib
 import re
 import shutil
 import signal
@@ -86,6 +87,9 @@ class Fixture:
             shutil.copy2(SCRIPTS / script, self.source / 'scripts' / script)
         self.set_team(team)
         (self.source / 'mygo.json').write_text(mygo if mygo is not None else (ROOT / 'mygo.json').read_text())
+        for referenced in ('packaging/macos/permissions.entitlements.plist', 'packaging/windows/compatibility.nsh'):
+            (self.source / referenced).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / referenced, self.source / referenced)
         (self.source / 'resources').mkdir()
         (self.source / 'resources/icon.png').write_bytes(b'png')
         (self.source / 'CHANGELOG.md').write_text('# Changelog\n')
@@ -765,6 +769,10 @@ def launcher_cases(temporary):
             assert config['identifier'] == tracked['identifier'] and config['main'] == str(fixture.source.resolve())
             assert config['out'] == str(fixture.source.resolve() / 'build') and config['icon'] == tracked['icon']
             assert call['resources'] == str(fixture.source.resolve() / 'resources')
+            # v0.1.39's packaging fields: names carried as they are, the NSIS include made absolute.
+            assert config['linux'] == tracked['linux'] and config['windows']['installDirName'] == tracked['windows']['installDirName']
+            assert config['windows']['installerInclude'] == str(fixture.source.resolve() / tracked['windows']['installerInclude'])
+            assert config['macos']['entitlements'] == str(fixture.source.resolve() / tracked['macos']['entitlements'])
             if mode == 'developer-id':
                 [folder] = fixture.folders()
                 assert config['macos']['notarize'] == {'keychainProfile': 'yesman-release-notary', 'keychain': str(folder / 'signing.keychain-db')}
@@ -779,10 +787,19 @@ def launcher_cases(temporary):
         ('key-under-another-name', {'inputs': {'SOME_OTHER_VAR': 'x' + UPDATER_KEY}}, 'appears in another environment variable'),
         ('unknown-config-key', {'mygo': dict(tracked, frontendDist='web')}, 'does not carry'),
         ('discovered-package-json', {'file': 'package.json'}, 'would not be visible'),
+        ('unknown-windows-key', {'mygo': dict(tracked, windows=dict(tracked['windows'], certificate='x'))}, 'does not carry'),
+        ('main-set', {'mygo': dict(tracked, main='./cmd/app')}, 'does not carry'),
+        ('include-absolute', {'mygo': dict(tracked, windows=dict(tracked['windows'], installerInclude='/etc/hosts'))}, 'relative path inside'),
+        ('include-parent', {'mygo': dict(tracked, windows=dict(tracked['windows'], installerInclude='../outside.nsh'))}, 'relative path inside'),
+        ('include-missing', {'mygo': dict(tracked, windows=dict(tracked['windows'], installerInclude='packaging/windows/none.nsh'))}, 'not a file'),
+        ('include-through-link', {'mygo': dict(tracked, windows=dict(tracked['windows'], installerInclude='linked/compatibility.nsh')),
+                                  'link': 'linked'}, 'through a link'),
     ]:
         fixture = Fixture(temporary, 'refuse-' + name, {}, mygo=json.dumps(change['mygo']) if 'mygo' in change else None)
         if 'file' in change:
             (fixture.source / change['file']).write_text('{}')
+        if 'link' in change:
+            (fixture.source / change['link']).symlink_to(fixture.source / 'packaging/windows', target_is_directory=True)
         report, real_bin = fake_go(fixture)
         process = launch(fixture, ['--platform', 'linux/amd64', '--system', 'Linux', '--upload'], inputs=change.get('inputs'), real_bin=real_bin)
         assert process.returncode == 1 and message in process.stderr and not report.exists(), (name, process.stderr)
@@ -844,6 +861,10 @@ def workflow_cases(temporary):
             for use in re.findall(r'(?:secrets|vars)\.(?:MACOS_[A-Z0-9_]+|MYGO_UPDATER_PRIVATE_KEY)', line):
                 seen.setdefault((workflow.name, step), set()).add(use)
     allowed[('release.yml', 'Build and upload')] = {'secrets.MYGO_UPDATER_PRIVATE_KEY'}
+    # v0.1.39's dispatch-only naming upgrade gate signs private QA successors
+    # with the existing key (scripts/prepare-upgrade-qa.py); it never
+    # publishes and gets no Apple secret. It is that gate's design, unchanged here.
+    allowed[('application-upgrade-draft.yml', 'Package and sign private QA successors')] = {'secrets.MYGO_UPDATER_PRIVATE_KEY'}
     assert seen == allowed, seen
     record('signing-inputs-confined', steps=sorted('%s: %s' % key for key in seen))
 
@@ -932,9 +953,17 @@ def mygo_cases(temporary):
     assert plain.returncode == 0, plain.stdout[-2000:] + plain.stderr[-2000:]
     tracked_app = source / 'build/darwin-arm64/yesman.app'
     assert 'Signature=adhoc' in subprocess.run(['/usr/bin/codesign', '-dv', str(tracked_app)], capture_output=True, text=True).stderr
-    tracked_tree = tree(tracked_app)
+    tracked_tree = comparable(tracked_app, env)
+    # v0.1.39's layout through the repository's packaging adapter: the stable
+    # bundle path, the "Yes Man" main image and the old executable name as a link.
+    with open(tracked_app / 'Contents/Info.plist', 'rb') as info:
+        assert plistlib.load(info)['CFBundleExecutable'] == 'Yes Man'
+    assert tracked_tree['Contents/MacOS/yesman'] == 'link:Yes Man' and tracked_tree['Contents/MacOS/Yes Man'].startswith('go:')
+    built = json.loads(subprocess.check_output(['go', 'version', '-m', '-json', str(tracked_app / 'Contents/MacOS/Yes Man')], env=env))
+    settings = {s['Key']: s['Value'] for s in built['Settings']}
+    assert settings['vcs.revision'] == revision and settings['vcs.modified'] == 'false', settings
     shutil.rmtree(source / 'build')
-    record('plain-build-without-inputs-succeeds', exit=plain.returncode)
+    record('plain-build-without-inputs-succeeds', exit=plain.returncode, mainImage='Yes Man')
 
     def build(name, platforms, mode, identity, scenario, state='', upload=False):
         fixture = Fixture(temporary, 'mygo-' + name, scenario)
@@ -1039,8 +1068,9 @@ def mygo_cases(temporary):
     assert not [c for c in fixture.calls('xcrun') if not c.get('passthrough')], 'ad-hoc builds must not notarize'
     signed = [c for c in fixture.calls('codesign') if '--sign' in c['args']]
     assert signed and all(c['args'][c['args'].index('--sign') + 1] == '-' and '--options' not in c['args'] for c in signed), signed
-    assert tree(source / 'build/darwin-arm64/yesman.app', skip_signature=True) == {k: v for k, v in tracked_tree.items() if '_CodeSignature' not in k}, \
-        'the derived configuration builds the tracked configuration\'s app'
+    candidate = comparable(source / 'build/darwin-arm64/yesman.app', env)
+    assert candidate == tracked_tree, ('the derived configuration builds the tracked configuration\'s app',
+                                       sorted(k for k in set(candidate) | set(tracked_tree) if candidate.get(k) != tracked_tree.get(k)))
     for arch in ('arm64', 'amd64'):
         [archive] = archives(arch)
         verified = subprocess.run([str(temporary / 'verify-update'), public, str(source / 'build/darwin-{0}/update-darwin-{0}.json'.format(arch)), str(archive)],
@@ -1058,6 +1088,7 @@ def mygo_cases(temporary):
         stage = source / 'build' / platforms.replace('/', '-')
         expected = {p.name for p in stage.iterdir()}
         tracked_manifest = json.loads((stage / ('update-%s.json' % platforms.replace('/', '-'))).read_text())
+        tracked_members = archive_members(stage, env)
         fixture = Fixture(temporary, 'mygo-' + system, {})
         shutil.rmtree(source / 'build')
         process = subprocess.run([sys.executable, str(source / 'scripts/release_build.py'), '--platform', platforms, '--system', system],
@@ -1066,6 +1097,12 @@ def mygo_cases(temporary):
         assert {p.name for p in stage.iterdir()} == expected
         manifest = json.loads((stage / ('update-%s.json' % platforms.replace('/', '-'))).read_text())
         assert {k: manifest[k] for k in ('version', 'url', 'notes')} == {k: tracked_manifest[k] for k in ('version', 'url', 'notes')}
+        # The same files in the update archive: v0.1.39's "Yes Man" main image
+        # and the legacy launcher under the old name, built from this module.
+        members = archive_members(stage, env)
+        assert members == tracked_members, sorted(k for k in set(members) | set(tracked_members) if members.get(k) != tracked_members.get(k))
+        suffix = '.exe' if system == 'Windows' else ''
+        assert members.get('Yes Man' + suffix, '').startswith('go:') and members.get('yesman' + suffix, '').startswith('go:'), sorted(members)
         [archive] = [p for p in stage.iterdir() if p.name.endswith('.tar.gz') or p.name.endswith('.zip')] or [None]
         if archive:
             verified = subprocess.run([str(temporary / 'verify-update'), public, str(stage / ('update-%s.json' % platforms.replace('/', '-'))), str(archive)],
@@ -1073,6 +1110,60 @@ def mygo_cases(temporary):
             assert verified.stdout.strip() == 'ok'
         record('mygo-launcher-matches-tracked', platform=platforms, files=len(expected))
     subprocess.run(['git', 'status', '--porcelain'], cwd=source, env=env, check=True)
+
+
+def archive_members(stage, env):
+    """The update archive of a Linux or Windows stage: each member's digest, or its normalized Go build information."""
+    [archive] = [p for p in stage.iterdir() if p.name.endswith(('.tar.gz', '.zip'))]
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        if archive.name.endswith('.zip'):
+            import zipfile
+            with zipfile.ZipFile(archive) as z:
+                assert not [m for m in z.namelist() if m.startswith('/') or '..' in pathlib.PurePosixPath(m).parts]
+                z.extractall(work)
+        else:
+            with tarfile.open(archive) as t:
+                names = t.getnames()
+                assert not [m for m in names if m.startswith('/') or '..' in pathlib.PurePosixPath(m).parts], names
+                t.extractall(work)
+        return comparable(work, env, executables=(b'\x7fELF', b'MZ'))
+
+
+MACHO = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe')
+
+
+def comparable(app, env, executables=None):
+    """What two builds of one source must share: every file but the signature, links, and each Go binary's build information.
+
+    The packaging adapter stages the pinned MyGo in a fresh temporary
+    directory each run, which go records as the module's replacement path;
+    that path, and so the binary's bytes and build ID, differ between any two
+    builds. Everything else of the build information (revision, VCS state,
+    every module version, every build setting) must be equal.
+    """
+    app, found = pathlib.Path(app), {}
+    for p in sorted(app.rglob('*')):
+        rel = str(p.relative_to(app))
+        if '_CodeSignature' in p.parts:
+            continue
+        if p.is_symlink():
+            found[rel] = 'link:' + os.readlink(p)
+        elif p.is_file():
+            data = p.read_bytes()
+            magic = executables or MACHO
+            listed = (subprocess.run(['go', 'version', '-m', '-json', str(p)], env=env, capture_output=True, text=True)
+                      if any(data.startswith(m) for m in magic) else None)
+            if listed is not None and listed.returncode == 0:
+                info = json.loads(listed.stdout)
+                for dep in info.get('Deps') or []:
+                    if dep.get('Replace') and os.path.isabs(dep['Replace'].get('Path', '')):
+                        assert pathlib.Path(dep['Replace']['Path']).name == 'mygo' and dep['Path'] == 'github.com/egoist/mygo', dep
+                        dep['Replace']['Path'] = '<staged pinned MyGo>'
+                found[rel] = 'go:' + hashlib.sha256(json.dumps(info, sort_keys=True).encode()).hexdigest()
+            else:
+                found[rel] = hashlib.sha256(data).hexdigest()
+    return found
 
 
 def tree(app, skip_signature=False):
