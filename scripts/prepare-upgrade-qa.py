@@ -36,7 +36,11 @@ def _on_signal(signum,frame):
     # between creating a Windows child and putting it in the job.
     first=STOP.signum is None
     if first:STOP.signum=signum
-    if STOP.group is not None:STOP.group.signal_stop(escalate=not first)
+    group=STOP.group
+    if group is not None:
+        try:group.signal_stop(escalate=not first)
+        except Exception as error:  # recorded; the blocked wait then stops waiting
+            with contextlib.suppress(Exception):group.signal_error=group.signal_error or 'stop request failed: %r'%(error,)
 
 def check_stop():
     if STOP.signum is not None:raise Stopped('stopped by signal %d'%STOP.signum)
@@ -77,9 +81,13 @@ class OwnedGroup:
     """Owner of every subprocess of one producer run (see docs/production-upgrade.md)."""
     GRACE=5.0
     QUIET=2.0
+    POLL=0.2
+    # First letters of process states ps reports on Linux and macOS.
+    STATES=frozenset('DIKLPRSTUWXZt')
 
     def __init__(self):
         self.closed=False;self.failed=None;self.retained=[];self.timer=None;self.waiting=[]
+        self.stop_at=None;self.signal_error=None
         if WINDOWS:
             self.job=_k32.CreateJobObjectW(None,None)
             if not self.job:raise ctypes.WinError(ctypes.get_last_error())
@@ -98,7 +106,9 @@ class OwnedGroup:
 
     # -- membership --------------------------------------------------------
     def live(self):
-        """Live (non-zombie) members including the POSIX anchor; None when that cannot be told."""
+        """Live (non-zombie) members including the POSIX anchor; None when that cannot be told.
+        One malformed, duplicate or missing row makes the whole listing unknown: a
+        member is never treated as absent because its row could not be read."""
         if WINDOWS:
             info=_Accounting();size=wintypes.DWORD()
             if not _k32.QueryInformationJobObject(self.job,1,ctypes.byref(info),ctypes.sizeof(info),ctypes.byref(size)):return None
@@ -107,37 +117,50 @@ class OwnedGroup:
             listing=subprocess.run(['/bin/ps','-A','-o','pid=,pgid=,stat='],capture_output=True,stdin=subprocess.DEVNULL,env={'PATH':'/usr/bin:/bin','LC_ALL':'C'},timeout=15)
         except (OSError,subprocess.SubprocessError):return None
         if listing.returncode!=0:return None
-        live,seen=[],False
+        rows={}
         for line in listing.stdout.decode(errors='replace').splitlines():
+            if not line.strip():continue
             fields=line.split()
-            if len(fields)<3:continue
-            try:pid,group=int(fields[0]),int(fields[1])
-            except ValueError:continue
-            seen=True
-            if group==self.pgid and not fields[2].startswith(('Z','X')):live.append(pid)
-        return live if seen else None
+            if len(fields)!=3 or not all(f.isascii() and f.isdigit() for f in fields[:2]) or fields[2][0] not in self.STATES:return None
+            pid=int(fields[0])
+            if pid in rows:return None
+            rows[pid]=(int(fields[1]),fields[2])
+        # A complete listing shows this producer and the (unreaped) anchor.
+        if os.getpid() not in rows or rows.get(self.pgid,(None,''))[0]!=self.pgid:return None
+        return [pid for pid,(group,state) in rows.items() if group==self.pgid and state[0] not in 'ZX']
 
     def _quiet(self,live):
         """Only the anchor (POSIX) or nothing (Windows) remains."""
         return live==[] if WINDOWS else live==[self.pgid]
 
     def _kill(self,number):
+        """Signals the group; never raises. Returns None when sent (or nothing is left), else why not.
+        macOS refuses (EPERM) a group of only exited (zombie) members, so a failure means
+        stopped only if a complete membership listing then shows no live member."""
         try:os.killpg(self.pgid,number)
-        except ProcessLookupError:pass
-        except PermissionError:pass  # macOS: a group left with only an exited (zombie) member
+        except ProcessLookupError:return None
+        except Exception as error:return '%s to %s failed: %s'%(signal.Signals(number).name,self.ident,error)
+        return None
 
     def signal_stop(self,escalate):
-        """From a signal handler: TERM now and KILL after GRACE (a further signal: KILL now)."""
+        """From a signal handler: TERM now and KILL after GRACE (a further signal: KILL now).
+        A failure is recorded; the blocked wait sees it and stops waiting."""
         if self.closed:return
-        if WINDOWS:_k32.TerminateJobObject(self.job,1);return
-        self._kill(signal.SIGKILL if escalate else signal.SIGTERM)
+        if self.stop_at is None:self.stop_at=time.monotonic()
+        if WINDOWS:
+            if not _k32.TerminateJobObject(self.job,1):self.signal_error=self.signal_error or 'TerminateJobObject failed: %d'%ctypes.get_last_error()
+            return
+        error=self._kill(signal.SIGKILL if escalate else signal.SIGTERM)
+        if error:self.signal_error=self.signal_error or error
         if self.timer is None:
             # A consumer that ignores TERM must not keep the blocked wait (and
             # so the drain and cleanup) from ever happening.
             self.timer=threading.Timer(self.GRACE,self._escalate);self.timer.daemon=True;self.timer.start()
 
     def _escalate(self):
-        if not self.closed:self._kill(signal.SIGKILL)
+        if not self.closed:
+            error=self._kill(signal.SIGKILL)
+            if error and not self.closed:self.signal_error=self.signal_error or error
 
     def _release(self):
         """Marks the owner closed; afterwards no timer can signal the group ID."""
@@ -151,15 +174,45 @@ class OwnedGroup:
         check_stop()
         env=dict(os.environ) if env is None else env
         place={} if cwd is None else {'cwd':cwd}
-        if WINDOWS:result=self._run_windows(args,cwd,env,stdout,stderr,capture,timeout)
-        elif capture:result=subprocess.check_output(args,**place,env=env,stdin=subprocess.DEVNULL,stderr=stderr,timeout=timeout,process_group=self.pgid)
-        else:subprocess.run(args,**place,env=env,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,timeout=timeout,check=True,process_group=self.pgid);result=None
+        out=subprocess.PIPE if capture else stdout
+        if WINDOWS:p=self._launch_windows(args,cwd,env,out,stderr)
+        else:p=subprocess.Popen(args,**place,env=env,stdin=subprocess.DEVNULL,stdout=out,stderr=stderr,process_group=self.pgid)
+        output=self._wait(p,args,timeout)
+        if p.returncode:raise subprocess.CalledProcessError(p.returncode,args,output)
         self.settle(aborting=False)
         check_stop()
-        return result
+        return output if capture else None
 
-    def _run_windows(self,args,cwd,env,stdout,stderr,capture,timeout):
-        p=subprocess.Popen(args,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE if capture else stdout,stderr=stderr,creationflags=0x4)  # CREATE_SUSPENDED
+    def _abandon(self):
+        """Why a stopped run must stop waiting for its consumer, or None."""
+        if STOP.signum is None:return None
+        if self.signal_error:return 'stopped by signal %d; %s'%(STOP.signum,self.signal_error)
+        if self.stop_at is not None and time.monotonic()-self.stop_at>=3*self.GRACE:
+            return 'stopped by signal %d; a consumer was still running %.0fs later'%(STOP.signum,3*self.GRACE)
+        return None
+
+    def _wait(self,p,args,timeout):
+        """Bounded, interruptible wait: short waits (a Windows wait is not interrupted by the
+        console-control handler, and a failed stop request must not block forever).
+        The settle/drain that follows decides whether members are gone."""
+        self.waiting.append(p)
+        deadline=None if timeout is None else time.monotonic()+timeout
+        try:
+            while True:
+                try:output,_=p.communicate(timeout=self.POLL);break
+                except subprocess.TimeoutExpired:pass
+                reason=self._abandon()
+                if reason:raise Stopped(reason)
+                if deadline is not None and time.monotonic()>=deadline:raise subprocess.TimeoutExpired(args,timeout)
+        except BaseException:
+            if p.stdout:
+                with contextlib.suppress(OSError):p.stdout.close()
+            raise
+        with contextlib.suppress(ValueError):self.waiting.remove(p)
+        return output
+
+    def _launch_windows(self,args,cwd,env,stdout,stderr):
+        p=subprocess.Popen(args,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,creationflags=0x4)  # CREATE_SUSPENDED
         try:
             if not _k32.AssignProcessToJobObject(self.job,int(p._handle)):raise ctypes.WinError(ctypes.get_last_error())
             check_stop()
@@ -169,17 +222,7 @@ class OwnedGroup:
             _k32.TerminateProcess(int(p._handle),1);p.wait()
             if p.stdout:p.stdout.close()
             raise
-        self.waiting.append(p)
-        # Short waits let the console-control handler run (a Windows wait is not
-        # interrupted by it); communicate may be retried after TimeoutExpired.
-        deadline=None if timeout is None else time.monotonic()+timeout
-        while True:
-            try:output,_=p.communicate(timeout=0.2);break
-            except subprocess.TimeoutExpired:
-                if deadline is not None and time.monotonic()>=deadline:raise subprocess.TimeoutExpired(args,timeout)
-        self.waiting.remove(p)
-        if p.returncode:raise subprocess.CalledProcessError(p.returncode,args,output)
-        return output
+        return p
 
     # -- settling ----------------------------------------------------------
     def settle(self,aborting):
@@ -202,8 +245,9 @@ class OwnedGroup:
         if self.closed:return
         if self.failed:raise Undrained(self.failed)
         live=None
+        error=None
         if WINDOWS:
-            _k32.TerminateJobObject(self.job,1)
+            if not _k32.TerminateJobObject(self.job,1):error='TerminateJobObject failed: %d'%ctypes.get_last_error()
             end=time.monotonic()+2*self.GRACE
             while True:
                 live=self.live()
@@ -217,14 +261,21 @@ class OwnedGroup:
             for number in (signal.SIGTERM,signal.SIGKILL):
                 end=time.monotonic()+self.GRACE
                 while True:
-                    self._kill(number)
+                    error=self._kill(number)
                     live=self.live()
                     if live==[]:
                         # The anchor was kept unreaped until now, so the group ID stayed ours.
-                        self._release();self.anchor.wait(timeout=10);self.anchor.stdin.close();return
+                        self._release();self.anchor.wait(timeout=10);self.anchor.stdin.close()
+                        for p in self.waiting:
+                            with contextlib.suppress(subprocess.TimeoutExpired):p.wait(timeout=10)
+                        self.waiting=[];return
+                    if error and live is not None:
+                        # Live members that cannot be signalled: waiting would not stop them.
+                        self.failed='%s: live members %s not stopped (%s)'%(self.ident,live,error)
+                        raise Undrained(self.failed)
                     if time.monotonic()>=end:break
                     time.sleep(0.05)
-        self.failed='%s: %s not confirmed stopped'%(self.ident,'members unknown' if live is None else 'live members %s'%live)
+        self.failed='%s: %s not confirmed stopped%s'%(self.ident,'members unknown' if live is None else 'live members %s'%live,' (%s)'%error if error else '')
         raise Undrained(self.failed)
 
     def close(self):

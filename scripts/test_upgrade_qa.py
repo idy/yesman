@@ -513,6 +513,119 @@ class Lifecycle(unittest.TestCase):
             for number, handler in previous.items():
                 signal.signal(number, handler)
 
+    @unittest.skipIf(WINDOWS, 'POSIX membership comes from ps; Windows counts job members in the kernel')
+    def test_an_unreadable_member_row_is_not_absence(self):
+        # Real ps output; only the live grandchild's PGID field is made unreadable.
+        pidfile, args = self.start('exit', SLEEP)
+        real_run, corrupted = subprocess.run, []
+
+        def ps(cmd, *a, **kw):
+            result = real_run(cmd, *a, **kw)
+            if cmd[0] == '/bin/ps' and os.path.exists(pidfile):
+                grand = pathlib.Path(pidfile).read_text().split()[1]
+                lines = []
+                for line in result.stdout.decode().splitlines():
+                    fields = line.split()
+                    if fields and fields[0] == grand:
+                        fields[1] = 'unparseable'
+                        corrupted.append(line)
+                        line = ' '.join(fields)
+                    lines.append(line)
+                result.stdout = ('\n'.join(lines) + '\n').encode()
+            return result
+        with patch.object(qa.subprocess, 'run', ps):
+            with self.assertRaisesRegex(RuntimeError, 'members unknown'):
+                with qa.key_file(PRIVATE, self.group) as path:
+                    self.group.run(args, timeout=30)
+        self.assertTrue(corrupted)
+        self.assertTrue(gone(self.pids(pidfile)))
+        self.assertFalse(os.path.exists(path))  # removed only after a complete listing showed the group empty
+        self.assertTrue(self.group.closed)
+
+    @unittest.skipIf(WINDOWS, 'POSIX membership comes from ps')
+    def test_partial_or_malformed_listings_are_unknown(self):
+        listing = subprocess.run(['/bin/ps', '-A', '-o', 'pid=,pgid=,stat='], capture_output=True, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}).stdout
+        rows = listing.decode().splitlines()
+        anchor = [r for r in rows if r.split()[0] == str(self.group.pgid)]
+        cases = {
+            'header': ['  PID  PGID STAT'] + rows,
+            'bad-state': rows + ['%d %d ?' % (2**22 + 1, self.group.pgid)],
+            'extra-field': rows + ['%d %d S x' % (2**22 + 1, self.group.pgid)],
+            'signed-pid': rows + ['+%d %d S' % (2**22 + 1, self.group.pgid)],
+            'duplicate': rows + anchor,
+            'no-anchor': [r for r in rows if r not in anchor],
+            'no-producer': [r for r in rows if r.split()[0] != str(os.getpid())],
+            'empty': [],
+        }
+        for name, lines in cases.items():
+            with self.subTest(name), patch.object(qa.subprocess, 'run', lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, ('\n'.join(lines) + '\n').encode(), b'')):
+                self.assertIsNone(self.group.live())
+        with patch.object(qa.subprocess, 'run', lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, listing, b'')):
+            self.assertEqual(self.group.live(), [self.group.pgid])
+
+    @unittest.skipIf(WINDOWS, 'POSIX group signalling')
+    def test_a_failed_stop_signal_retains_inputs_without_waiting(self):
+        # The consumer and its child ignore TERM and hold the stdout pipe; signalling the group fails.
+        import errno
+        for error in (PermissionError(errno.EPERM, 'injected'), OSError(errno.EIO, 'injected')):
+            with self.subTest(type(error).__name__):
+                if not self.group.closed:
+                    self.group.drain()
+                self.group = group = qa.OwnedGroup()
+                previous = qa._install_handlers()
+                qa.STOP.signum, qa.STOP.group = None, group
+                pidfile = str(self.dir / ('failed-signal-%s' % secrets.token_hex(4)))
+                real_killpg, pids, kept = os.killpg, [], {}
+
+                def failing(pgid, number):
+                    if pgid == group.pgid:
+                        raise error
+                    real_killpg(pgid, number)
+                try:
+                    with patch.object(qa.os, 'killpg', failing):
+                        start = time.monotonic()
+                        with self.assertRaises(qa.Undrained):
+                            with qa.owned_dir('qa-failed-signal-', group) as source:
+                                pathlib.Path(source, 'config').write_text('synthetic')
+                                with qa.key_file(PRIVATE, group) as path:
+                                    kept.update(source=source, path=path)
+
+                                    def stop():
+                                        self.pids(pidfile)
+                                        time.sleep(0.3)
+                                        os.kill(os.getpid(), signal.SIGTERM)  # exactly one signal
+                                    threading.Thread(target=stop).start()
+                                    group.run(PY + [STUBBORN, pidfile], capture=True)
+                        elapsed = time.monotonic() - start
+                    pids = self.pids(pidfile)
+                    self.assertLess(elapsed, 5)
+                    self.assertTrue(all(alive(p) for p in pids))  # truthfully not drained
+                    self.assertEqual(pathlib.Path(kept['path']).read_text().strip(), PRIVATE)
+                    self.assertEqual(pathlib.Path(kept['source'], 'config').read_text(), 'synthetic')
+                    self.assertEqual({r['path'] for r in group.retained}, {kept['source'], os.path.dirname(kept['path'])})
+                    self.assertIn('injected', group.failed)
+                finally:
+                    for number, handler in previous.items():
+                        signal.signal(number, handler)
+                    qa.STOP.signum, qa.STOP.group = None, None
+                    if group.timer is not None:
+                        group.timer.cancel()
+                        group.timer.join()
+                    # The test, not the producer, stops its own members and files.
+                    try:
+                        os.killpg(group.pgid, signal.SIGKILL)
+                    except PermissionError:
+                        pass
+                    self.assertTrue(gone(pids or self.pids(pidfile)))
+                    for p in group.waiting:
+                        p.wait(10)
+                    group.anchor.wait(10)
+                    group.anchor.stdin.close()
+                    group.closed = True
+                    if kept:
+                        shutil.rmtree(kept['source'], ignore_errors=True)
+                        shutil.rmtree(os.path.dirname(kept['path']), ignore_errors=True)
+
     def test_unconfirmed_drain_keeps_the_key_and_reports(self):
         pidfile, args = self.start('wait', SLEEP)
         thread, box = self.run_in_thread(args, timeout=60)

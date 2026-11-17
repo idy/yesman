@@ -80,11 +80,16 @@ Every producer subprocess runs in one owned process group (Linux/macOS, joined
 before exec) or job object (Windows). After each subprocess, and before any key
 file, QA source/config or helper is removed, the producer confirms the group or
 job has no other live member; on failure or TERM/INT/HUP (Windows Ctrl-C/Break)
-it stops and confirms all members first. Removal is bound to the created
+it stops and confirms all members first. Membership counts only from a complete
+listing: one unreadable, duplicate or missing row makes it unknown, never an
+absent member. A stop request that cannot signal the members, or consumers still
+running 15 seconds after it, ends the wait instead of blocking. Removal is bound to the created
 file/directory identity: a replaced pathname is left alone and reported, and the
 key file is cleared through its held handle. If members cannot be confirmed
-stopped, those resources are kept, listed in `qa-producer-retained-*.json` in
-`RUNNER_TEMP`, and the step fails. A process that deliberately leaves the POSIX
+stopped (unknown membership, or live members that cannot be signalled), those
+resources are kept as they are, the producer closes its own handles to them,
+lists them in `qa-producer-retained-*.json` in `RUNNER_TEMP`, and the step fails;
+those members may still be running. A process that deliberately leaves the POSIX
 group, or a SIGKILL of the producer, is outside this guarantee (Windows still
 terminates the job when its handle closes). This is environment isolation, not a
 same-user filesystem sandbox. They preserve both official
