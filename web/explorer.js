@@ -55,16 +55,27 @@ function store(key, px) {
   else localStorage.removeItem(`yesman.explorer.${key}`);
 }
 
-// The pane leaves the conversation beside it at least 320px.
-function clampPane(px, min) {
+// The room a pane leaves the conversation beside it, as app.css's pane
+// widths do, and the width below which an explorer shows one column
+// (explorer.css), with the least its content and navigation keep.
+export const CONVERSATION_MIN = 280;
+export const TWO_COLUMNS = 600;
+const CONTENT_MIN = 260;
+const NAV_MIN = 180;
+
+// The widest a pane may be now, beside the sidebar and the info panel.
+function paneMax() {
   const side = ($('#side')?.getBoundingClientRect().width ?? 0) + ($('#yesman-info')?.getBoundingClientRect().width ?? 0);
-  const max = Math.max(280, window.innerWidth - side - 320);
-  return Math.round(Math.min(Math.max(px, min), max));
+  return Math.max(240, window.innerWidth - side - CONVERSATION_MIN);
 }
+const clampPane = (px, min) => Math.round(Math.min(Math.max(px, min), paneMax()));
 
 // resizer returns the separators of pane aside, named key: one at its left
 // edge for the pane's width, and one between content and navigation. Both
-// keep what the user chose across launches, per pane.
+// keep what the user chose across launches, per pane, as a preference: the
+// stylesheet fits it to the room there is now, as the window, the info
+// panel or the pane changes (--explorer-pane-width, --explorer-nav-width),
+// and it applies again once there is room.
 export function resizer(key, { min = 320 } = {}) {
   const paneKey = `${key}.width`;
   const navKey = `${key}.nav`;
@@ -73,7 +84,8 @@ export function resizer(key, { min = 320 } = {}) {
     // apply sets the widths kept on aside, the pane, after it is drawn.
     apply(aside) {
       const w = stored(paneKey);
-      aside.style.width = w ? `${clampPane(w, min)}px` : '';
+      if (w) aside.style.setProperty('--explorer-pane-width', `${Math.max(w, min)}px`);
+      else aside.style.removeProperty('--explorer-pane-width');
       const n = stored(navKey);
       if (n) aside.style.setProperty('--explorer-nav-width', `${n}px`);
       else aside.style.removeProperty('--explorer-nav-width');
@@ -86,16 +98,17 @@ export function resizer(key, { min = 320 } = {}) {
         current: () => aside.getBoundingClientRect().width,
         apply: (px, done) => {
           const w = clampPane(px, min);
-          aside.style.width = `${w}px`;
+          aside.style.setProperty('--explorer-pane-width', `${w}px`);
           if (done) store(paneKey, w);
         },
-        reset: () => { store(paneKey, 0); aside.style.width = ''; },
+        reset: () => { store(paneKey, 0); aside.style.removeProperty('--explorer-pane-width'); },
       });
       return el;
     },
     nav(aside) {
       const el = separator(t('Width of the navigation'));
-      const clamp = (px) => Math.round(Math.min(Math.max(px, 180), aside.getBoundingClientRect().width - 260));
+      const room = () => ($('.explorer', aside) ?? aside).getBoundingClientRect().width;
+      const clamp = (px) => Math.round(Math.max(NAV_MIN, Math.min(px, room() - CONTENT_MIN)));
       dragHandle(el, {
         widthAt: (x) => aside.getBoundingClientRect().right - x,
         current: () => $('.explorer-nav', aside)?.getBoundingClientRect().width ?? 260,
@@ -131,7 +144,10 @@ export const narrowBack = (label, onclick, key = 'back') => h('button', { class:
 // A node with children (or lazy) expands; selecting a node calls select(node).
 // expanded is a Set of ids the caller keeps; toggle(node, open) changes it.
 // Single click selects, the chevron or Left/Right expand and collapse.
-export function treeView({ id, label, nodes, expanded, selected, select, toggle, empty }) {
+// The row focused is not the row selected: one row takes Tab, the one last
+// focused (active, which the caller keeps from onActive) while it is drawn,
+// else the selected one, else the first; focus moving in the tree moves it.
+export function treeView({ id, label, nodes, expanded, selected, select, toggle, empty, active = null, onActive = null }) {
   const root = h('div', { class: 'explorer-tree', id, role: 'tree', 'aria-label': label });
   const rows = [];
   const walk = (list, depth, parent) => {
@@ -163,10 +179,15 @@ export function treeView({ id, label, nodes, expanded, selected, select, toggle,
   };
   walk(nodes, 0, null);
   if (!nodes.length && empty) root.append(h('p', { class: 'explorer-note', role: 'presentation' }, empty));
-  // Only one row takes Tab: the selected one, else the first.
-  const stop = rows.find((r) => r.node.id === selected) ?? rows[0];
+  const stop = rows.find((r) => r.node.id === active) ?? rows.find((r) => r.node.id === selected) ?? rows[0];
   if (stop) stop.row.tabIndex = 0;
   const byRow = new Map(rows.map((r) => [r.row, r]));
+  root.addEventListener('focusin', (e) => {
+    const r = byRow.get(e.target);
+    if (!r) return;
+    rove(root, r.row);
+    onActive?.(r.node.id);
+  });
   const activate = (r, how) => {
     if (r.node.selectable === false) { if (r.branch) toggle(r.node, !r.open); return; }
     select(r.node, how);
@@ -207,10 +228,21 @@ export function treeView({ id, label, nodes, expanded, selected, select, toggle,
   return root;
 }
 
-// focusNode puts focus on the row of node id in tree el, if it is drawn.
+// rove makes row the one row of tree root that takes Tab.
+function rove(root, row) {
+  for (const r of root.querySelectorAll('.explorer-row[tabindex="0"]')) if (r !== row) r.tabIndex = -1;
+  row.tabIndex = 0;
+}
+
+// focusNode puts focus on the row of node id in tree el, if it is drawn; it
+// becomes the row that takes Tab.
 export function focusNode(el, id) {
   const row = el && [...el.querySelectorAll('.explorer-row')].find((r) => r.dataset.node === id);
-  if (row) { row.tabIndex = 0; row.focus({ preventScroll: true }); row.scrollIntoView({ block: 'nearest' }); }
+  if (row) {
+    rove(el.closest('[role="tree"]') ?? el, row);
+    row.focus({ preventScroll: true });
+    row.scrollIntoView({ block: 'nearest' });
+  }
   return Boolean(row);
 }
 

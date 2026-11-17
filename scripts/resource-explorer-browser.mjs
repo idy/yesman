@@ -4,7 +4,7 @@
 // is answered here or recorded as unmocked, which fails the run.
 //
 // YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs \
-//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual \
+//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual,layout,keys \
 //   EXPLORER_SHOTS=/path/for/screenshots node scripts/resource-explorer-browser.mjs
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -16,7 +16,7 @@ const root = fileURLToPath(new URL('../web/', import.meta.url));
 const shots = process.env.EXPLORER_SHOTS;
 if (shots) await mkdir(shots, { recursive: true });
 const engines = (process.env.EXPLORER_ENGINES || 'chromium,webkit').split(',');
-const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual').split(','));
+const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual,layout,keys').split(','));
 
 const bridge = `<script>
 window.calls=[];window.unmocked=[];window.delayed={};window.releases={};
@@ -327,7 +327,200 @@ async function visualPart(page, engine) {
   await shot(page, `${engine}-topics-wide-zh-dark`);
 }
 
-const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart };
+const frames = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+const geometry = (page, id) => page.evaluate((id) => {
+  const a = document.querySelector(id), c = a.querySelector('.explorer-content'), n = a.querySelector('.explorer-nav');
+  const w = (e) => (e && e.getClientRects().length ? Math.round(e.getBoundingClientRect().width) : 0);
+  return { pane: w(a), content: w(c), nav: w(n), info: w(document.querySelector('#yesman-info')), scroll: document.scrollingElement.scrollWidth, view: innerWidth };
+}, id);
+const twoColumns = (g, what) => {
+  assert.ok(g.content >= 260 && g.nav >= 180, `${what}: content and navigation side by side ${JSON.stringify(g)}`);
+  assert.ok(g.scroll <= g.view, `${what}: no page overflow`);
+};
+
+// The default window (1180x780, info shown) and common desktop widths give
+// Topics and Needs You both columns: the info panel makes way, without
+// changing the user's choice to show it, and shows again when they close.
+async function layoutPart(page, engine) {
+  const pref = () => page.evaluate(() => localStorage.getItem('yesman.info'));
+  const before = await pref();
+  for (const [width, height] of [[1180, 780], [1280, 800], [1366, 768]]) {
+    await page.setViewportSize({ width, height });
+    for (const [entry, id] of [['topics', '#topics'], ['needs-you', '#needs-you']]) {
+      // By keyboard: WebKit does not focus a clicked button.
+      await page.locator(`#yesman-info [data-info-entry="${entry}"]`).focus();
+      await page.keyboard.press('Enter');
+      await page.locator(`${id} .explorer`).waitFor();
+      await frames(page);
+      const g = await geometry(page, id);
+      twoColumns(g, `${engine} ${entry} ${width}`);
+      assert.equal(g.info, 0, 'the info panel makes way');
+      assert.equal(await page.getByRole('button', { name: 'Show the info', exact: true }).getAttribute('aria-pressed'), 'false');
+      assert.ok(await page.evaluate((id) => document.querySelector(id).contains(document.activeElement), id), 'focus moved into the pane from the hidden info row');
+      if (width === 1180 && engine === 'chromium') await shot(page, `${engine}-${entry}-1180x780-default`);
+      await page.locator(`${id} [aria-label="${entry === 'topics' ? 'Close the topics' : 'Close Needs You'}"]`).focus();
+      await page.keyboard.press('Enter');
+      await page.locator('#yesman-info').waitFor();
+      assert.equal(await page.evaluate(() => document.activeElement?.dataset.infoEntry), entry, 'closing gives focus back to the info row');
+    }
+  }
+  assert.equal(await pref(), before, 'the info preference is not changed');
+  // Showing the info beside the pane is the user's choice for that pane:
+  // one column, back to the list, until the pane closes.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator('#yesman-info [data-info-entry="topics"]').click();
+  await page.locator('#topics .explorer').waitFor();
+  await page.getByRole('button', { name: 'Show the info', exact: true }).click();
+  await page.locator('#yesman-info').waitFor();
+  await frames(page);
+  let g = await geometry(page, '#topics');
+  assert.equal(g.info, 288);
+  assert.equal(await page.locator('#topics .explorer-content').isVisible() && await page.locator('#topics .explorer-nav').isVisible(), false, 'beside the info: one column');
+  assert.equal(await page.getByRole('button', { name: 'Hide the info', exact: true }).getAttribute('aria-pressed'), 'true');
+  assert.equal(await pref(), before, 'showing it for this pane keeps the preference');
+  await page.locator('#topics [aria-label="Close the topics"]').click();
+  await page.locator('#yesman-info [data-info-entry="topics"]').click();
+  await page.locator('#topics .explorer').waitFor();
+  await frames(page);
+  twoColumns(await geometry(page, '#topics'), 'reopened: makes way again');
+  // The board is unaffected.
+  await page.locator('#topics [aria-label="Close the topics"]').click();
+  await page.getByRole('button', { name: 'Show the board', exact: true }).click();
+  await page.locator('#board').waitFor();
+  assert.ok((await geometry(page, '#board')).info > 0, 'the board keeps the info beside it');
+  await page.getByRole('button', { name: 'Hide the board', exact: true }).click();
+  // Wide: the info stays beside two columns; a window shrinking past the
+  // room makes it give way, and widening shows it again.
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.locator('#yesman-info [data-info-entry="needs-you"]').click();
+  await page.locator('#needs-you .explorer').waitFor();
+  await frames(page);
+  g = await geometry(page, '#needs-you');
+  twoColumns(g, 'wide with info');
+  assert.equal(g.info, 288);
+  if (engine === 'chromium') await shot(page, `${engine}-needs-1600-info`);
+  await page.locator('#yesman-info [data-info-entry="needs-you"]').focus();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.waitForFunction(() => !document.querySelector('#yesman-info').getClientRects().length);
+  assert.ok(await page.evaluate(() => document.querySelector('#needs-you').contains(document.activeElement)), 'focus the shrinking hid goes into the pane');
+  twoColumns(await geometry(page, '#needs-you'), 'shrunk');
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.locator('#yesman-info').waitFor();
+  // A remembered wide pane and navigation never take the content's or the
+  // conversation's room, and apply again once there is room.
+  await page.evaluate(() => { localStorage.setItem('yesman.explorer.needs-you.width', '1400'); localStorage.setItem('yesman.explorer.needs-you.nav', '900'); });
+  await page.locator('#needs-you [data-pane-control="refresh"]').click();
+  for (const width of [1600, 1440, 1180, 1100, 1800]) {
+    await page.setViewportSize({ width, height: 800 });
+    await frames(page);
+    g = await geometry(page, '#needs-you');
+    const conversation = await page.evaluate(() => Math.round(document.querySelector('.main').getBoundingClientRect().width));
+    assert.ok(conversation >= 279, `${width}: the conversation keeps its room (${conversation})`);
+    if (g.pane >= 600) twoColumns(g, `persisted ${width}`);
+    else assert.ok(g.content > 0 || g.nav > 0, 'narrow: one column');
+    if (width === 1100) {
+      // One column: choosing a request moves focus to the way back to the
+      // list, which gives it back to the row.
+      if (engine === 'chromium') await shot(page, `${engine}-needs-persisted-1100`);
+      await page.locator('#needs-you .needs-you-open[data-request$=":n2"]').focus();
+      await page.keyboard.press('Enter');
+      await page.locator('#needs-you .needs-you-detail-title', { hasText: 'Log in to the package registry' }).waitFor();
+      assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'list');
+      assert.equal(await page.locator('#needs-you .explorer-nav').isVisible(), false);
+      await page.keyboard.press('Enter');
+      assert.equal(await page.evaluate(() => document.activeElement?.dataset.request), 'h:alice@2026-03-01T08:00:00Z:n2');
+    }
+  }
+  // The pane's 1px border is outside the explorer the 260px are kept in.
+  assert.ok(Math.abs(g.nav - Math.min(900, g.pane - 1 - 260)) <= 1, `the preference applies again with room ${JSON.stringify(g)}`);
+  assert.equal(await page.evaluate(() => localStorage.getItem('yesman.explorer.needs-you.nav')), '900', 'the preference is kept, not overwritten');
+  // Shrinking the pane with its own separator keeps the content.
+  await page.locator('#needs-you .explorer-resize--pane').focus();
+  for (let i = 0; i < 25; i++) await page.keyboard.press('ArrowRight');
+  g = await geometry(page, '#needs-you');
+  if (g.pane >= 600) twoColumns(g, 'pane separator');
+  await page.evaluate(() => { localStorage.removeItem('yesman.explorer.needs-you.width'); localStorage.removeItem('yesman.explorer.needs-you.nav'); });
+}
+
+// One Tab stop per tree, following focus, not selection; Knowledge's Right
+// enters an open outline; a typed answer survives other yesmen.
+async function keysPart(page, engine) {
+  const stops = (sel) => page.locator(`${sel} [tabindex="0"]`).evaluateAll((es) => es.map((e) => e.dataset.node ?? e.dataset.path));
+  await page.locator('[data-info-entry="working-logs"]').click();
+  await page.locator('#files-records').waitFor();
+  await page.locator('[data-node="d:2026-03-01"]').focus();
+  await page.keyboard.press('ArrowRight');
+  await page.waitForFunction(() => document.querySelector('[data-node="d:2026-03-01"]').getAttribute('aria-expanded') === 'true');
+  assert.deepEqual(await stops('#files-records'), ['d:2026-03-01'], 'expanding moves, not adds, the stop');
+  await page.keyboard.press('ArrowDown');
+  assert.deepEqual(await stops('#files-records'), ['r:.yesman/task-log/2026-03-01-t5-days.md']);
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Shift+Tab');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.node), 'r:.yesman/task-log/2026-03-01-t5-days.md', 'Shift+Tab comes back to the row last focused');
+  await page.fill('#files-records-find', '2026');
+  await page.fill('#files-records-find', '');
+  assert.deepEqual(await stops('#files-records'), ['r:.yesman/task-log/2026-03-01-t5-days.md'], 'a redraw keeps one stop on the row last focused');
+  await page.locator('#files-records [data-node="r:.yesman/task-log/2026-03-02-release.md"] > .explorer-line').click();
+  await page.locator('#files-view [id="release"]').waitFor();
+  assert.deepEqual(await stops('#files-records'), ['r:.yesman/task-log/2026-03-02-release.md'], 'a click moves the stop');
+  // Topics: the same tree.
+  await page.locator('[data-info-entry="topics"]').click();
+  await page.locator('#topics-tree').waitFor();
+  await page.locator('#topics [data-key="topic-tp1"] > .explorer-line').click();
+  await page.locator('#topics [data-key="topic-tp1"]').focus();
+  await page.keyboard.press('ArrowDown');
+  await page.locator('#topics [data-key="refresh"]').click();
+  await page.waitForFunction(() => !document.querySelector('#topics [data-key="refresh"]').disabled);
+  assert.deepEqual(await stops('#topics-tree'), ['s:tp1:summary'], 'Topics: one stop, on the row last focused, after a refresh');
+  // Knowledge: Right on an open note enters its outline; Left goes back.
+  await page.locator('[data-info-entry="knowledge"]').click();
+  const list = page.locator('#files-tree-list');
+  await list.locator('[data-path=".yesman/knowledge/rules.md"]').click();
+  await list.locator('.tree-outline').first().waitFor();
+  await list.locator('[data-path=".yesman/knowledge/rules.md"]').focus();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.path), '.yesman/knowledge/rules.md#durable-rules');
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.path), '.yesman/knowledge/rules.md');
+  assert.equal((await stops('#files-tree-list')).length, 1, 'the files tree has one stop');
+  await page.keyboard.press('ArrowLeft');
+  await page.waitForFunction(() => document.querySelector('#files-tree-list [data-path=".yesman/knowledge/rules.md"]').getAttribute('aria-expanded') === 'false');
+  // Needs You: an answer typed for alice's open dialog survives bob, State
+  // refreshes and alice's workspace being unreadable for a while; it goes
+  // once alice is hired again.
+  const pane = page.locator('#needs-you');
+  const input = pane.locator('[data-detail-control="answer-text"]');
+  const showNeeds = async (who) => { await page.locator(`[data-agent="${who}/lead"]`).first().click(); await page.locator('[data-info-entry="needs-you"]').click(); await pane.locator('.needs-you-list, .needs-you-empty').first().waitFor(); };
+  const refresh = async () => { const n = await page.evaluate(() => calls.filter((c) => c[0] === 'State').length); await pane.locator('[data-pane-control="refresh"]').click(); await page.waitForFunction((n) => calls.filter((c) => c[0] === 'State').length > n, n); await frames(page); };
+  await showNeeds('alice');
+  await input.fill('Keep my unsent answer');
+  await input.evaluate((e) => e.setSelectionRange(5, 7));
+  // The app's own change event redraws the pane while the user types.
+  const n = await page.evaluate(() => calls.filter((c) => c[0] === 'State').length);
+  await page.evaluate(() => handlers.changed?.());
+  await page.waitForFunction((n) => calls.filter((c) => c[0] === 'State').length > n, n);
+  await frames(page);
+  assert.deepEqual(await page.evaluate(() => [document.activeElement?.dataset.detailControl, document.activeElement.selectionStart, document.activeElement.selectionEnd]), ['answer-text', 5, 7], 'a refresh keeps focus and caret');
+  await showNeeds('bob');
+  await refresh();
+  await page.evaluate(() => { window.hidden = fixtureState.yesmen.splice(0, 1)[0]; });
+  await refresh();
+  await page.evaluate(() => { fixtureState.yesmen.unshift(window.hidden); });
+  await refresh();
+  await showNeeds('alice');
+  assert.equal(await input.inputValue(), 'Keep my unsent answer', 'kept across bob, refreshes and an unreadable alice');
+  assert.equal(await page.evaluate(() => calls.filter((c) => c[0] === 'Answer').length), 0);
+  if (engine === 'chromium') await shot(page, `${engine}-needs-draft-kept`);
+  await showNeeds('bob');
+  await page.evaluate(() => { fixtureState.yesmen[0].hiredAt = '2026-03-05T00:00:00Z'; });
+  await refresh();
+  await page.evaluate(() => { fixtureState.yesmen[0].hiredAt = '2026-03-01T08:00:00Z'; });
+  await refresh();
+  await showNeeds('alice');
+  assert.equal(await input.inputValue(), '', 'an answer typed for an earlier hire is gone');
+}
+
+const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart };
 try {
   for (const name of engines) {
     const browser = await pw[name].launch({ headless: true });

@@ -1002,7 +1002,7 @@ export function createFiles(host) {
       } });
     return h('nav', { class: 'files-tree', 'aria-label': t('Files') },
       h('label', { class: 'search files-search' }, icon('search'), input),
-      h('div', { class: 'files-tree-list', id: 'files-tree-list', role: 'tree', 'aria-label': p.label, onkeydown: (e) => treeKey(e, p) }));
+      h('div', { class: 'files-tree-list', id: 'files-tree-list', role: 'tree', 'aria-label': p.label, onkeydown: (e) => treeKey(e, p), onfocusin: (e) => treeFocus(e, p) }));
   }
 
   let findSeq = 0;
@@ -1133,11 +1133,21 @@ export function createFiles(host) {
     }
     list.replaceChildren(...rows);
     list.scrollTop = top;
-    if (focused) $(`#files-tree-list [data-path="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
-    // Only one row takes Tab; the arrows move between them.
+    // Only one row takes Tab: the one focused last while it is drawn, else
+    // the selected one, else the first; the arrows move between them.
     const rowsEls = [...list.querySelectorAll('[data-path]')];
-    const tabStop = rowsEls.find((r) => r.getAttribute('aria-selected') === 'true') ?? rowsEls[0];
+    const tabStop = rowsEls.find((r) => r.dataset.path === (focused ?? p.treeActive)) ?? rowsEls.find((r) => r.getAttribute('aria-selected') === 'true') ?? rowsEls[0];
     for (const r of rowsEls) r.tabIndex = r === tabStop ? 0 : -1;
+    if (focused) $(`#files-tree-list [data-path="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+  }
+
+  // Focus moving in the files tree moves its one Tab stop with it.
+  function treeFocus(e, p) {
+    const rowEl = e.target.closest?.('[data-path]');
+    if (!rowEl || rowEl !== e.target) return;
+    for (const r of e.currentTarget.querySelectorAll('[data-path][tabindex="0"]')) if (r !== rowEl) r.tabIndex = -1;
+    rowEl.tabIndex = 0;
+    p.treeActive = rowEl.dataset.path;
   }
 
   function treeKey(e, p) {
@@ -1166,7 +1176,8 @@ export function createFiles(host) {
       case 'Home': go(rows[0]); break;
       case 'End': go(rows.at(-1)); break;
       case 'ArrowRight':
-        if (dir && !p.expanded.has(rel)) { e.preventDefault(); toggleDir(p, rel); } else if (dir) go(rows[at + 1]);
+        // An open folder, or a note with its outline open, goes to its first child.
+        if (dir && !p.expanded.has(rel)) { e.preventDefault(); toggleDir(p, rel); } else if (dir || outline) go(rows[at + 1]);
         break;
       case 'ArrowLeft':
         if (dir && p.expanded.has(rel)) { e.preventDefault(); toggleDir(p, rel); } else if (parentOf(rel) !== '.') go($(`#files-tree-list [data-path="${CSS.escape(parentOf(rel))}"]`));
@@ -1247,6 +1258,7 @@ export function createFiles(host) {
     }
     const tree = treeView({
       id: 'files-records', label: t('Records by day'), nodes, selected: `r:${p.active}`,
+      active: p.recordsActive, onActive: (id) => { p.recordsActive = id; },
       expanded: q ? new Set(nodes.map((n) => n.id)) : p.recordDays,
       toggle: (n, on) => {
         if (on) p.recordDays.add(n.id); else p.recordDays.delete(n.id);

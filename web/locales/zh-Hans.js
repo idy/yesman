@@ -1358,4 +1358,5 @@ export default {
   "The contents are too large to list in full; open Contents to read them.": "目录过大，无法完整列出；请打开目录阅读。",
   "No record matches “{query}”.": "没有与“{query}”匹配的记录。",
   "No records yet.": "还没有记录。",
+  "This answer is kept only while it shows: {n} other unsent answers are kept already.": "这条回答只在显示时保留：已保留另外 {n} 条未发送的回答。",
 };

@@ -5,7 +5,7 @@
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
 import { orderWorkers } from './sidebar.js';
-import { explorerBody, listView, narrowBack, resizer, scrollMemory } from './explorer.js';
+import { CONVERSATION_MIN, TWO_COLUMNS, explorerBody, listView, narrowBack, resizer, scrollMemory } from './explorer.js';
 import { needsYouItems, requestsOf, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
 import { messageActions, messageText, receiptText } from './message-actions.js';
 import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
@@ -70,6 +70,11 @@ const runFailed = (a) => !!a.runError && (a.status === 'idle' || a.status === 's
 const runErrorText = (text) => (text?.trim() ? text : t('The model returned an error without a message.'));
 const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: yesmanLabel(a.yesman) }) : runFailed(a) ? t('Last run ended with an error') : statusText(a.status));
 const statusTone = (a) => (asking(a) ? 'asking' : runFailed(a) ? 'error' : a.status);
+
+// Whether the user kept the info panel beside the pane open now, and whether
+// it makes way for it (infoYields, below).
+let infoKept = false;
+let infoYielded = false;
 
 const state = {
   snap: { yesmen: [], agents: [] },
@@ -1405,9 +1410,29 @@ let needsYouHistoryOpen = false;
 const needsYouChosen = new Map(); // needsYouScope() -> { key, at, focus }
 const needsYouSizes = resizer('needs-you', { min: 360 });
 const needsYouPlaces = scrollMemory();
-// What is typed into a dialog's text answer in the pane, by request key, so
-// that a redraw keeps it; only for requests still open.
-const needsYouDrafts = new Map();
+// What is typed into a dialog's text answer in the pane, by request key,
+// with the yesman and hire it was typed for, so that a redraw, or showing
+// another yesman and coming back, keeps it. It goes once the request is
+// known to be closed (pruneNeedsYouDrafts); a bounded number are kept.
+const needsYouDrafts = new Map(); // key -> { yesman, hiredAt, text }
+const NEEDS_YOU_DRAFTS = 64;
+
+// pruneNeedsYouDrafts drops the answers typed for requests the whole state
+// shows closed: answered, cancelled, timed out, of an agent stopped or
+// started again, or of a yesman hired again since. A yesman the state does
+// not list (its workspace cannot be read) is unknown, not closed: its
+// answers are kept.
+function pruneNeedsYouDrafts() {
+  const yesmen = new Map(state.snap.yesmen.map((y) => [y.name, y]));
+  const open = new Map();
+  for (const [k, d] of needsYouDrafts) {
+    const y = yesmen.get(d.yesman);
+    if (!y) continue;
+    if ((y.hiredAt ?? '') !== d.hiredAt) { needsYouDrafts.delete(k); continue; }
+    if (!open.has(y.name)) open.set(y.name, new Set(needsYouOf(y).map((item) => item.key)));
+    if (!open.get(y.name).has(k)) needsYouDrafts.delete(k);
+  }
+}
 
 const needsYouRow = (aside, key) => key && aside.querySelector(`.needs-you-open[data-request="${CSS.escape(key)}"]`);
 
@@ -1507,7 +1532,7 @@ function renderNeedsYouPane() {
   const narrowFocus = gone ? 'nav' : was?.focus ?? 'nav';
   if (chosen) needsYouChosen.set(scope, { key: chosen.key, at: items.indexOf(chosen), focus: narrowFocus });
   else needsYouChosen.delete(scope);
-  for (const k of needsYouDrafts.keys()) if (!items.some((item) => item.key === k)) needsYouDrafts.delete(k);
+  pruneNeedsYouDrafts();
 
   const nav = h('div', { class: 'explorer-nav-scroll needs-you-body' });
   let content;
@@ -1657,11 +1682,17 @@ function needsYouDetail(y, item) {
     if (input) {
       input.dataset.detailControl = 'answer-text';
       input.setAttribute('aria-label', requestWhat(item));
-      if (needsYouDrafts.has(item.key)) input.value = needsYouDrafts.get(item.key);
+      if (needsYouDrafts.has(item.key)) input.value = needsYouDrafts.get(item.key).text;
+      // Past the bound, no other answer is dropped to make room: this one
+      // is kept while it shows, and the pane says so.
+      const full = h('p', { class: 'ask-hint', role: 'status', hidden: true },
+        t('This answer is kept only while it shows: {n} other unsent answers are kept already.', { n: formatNumber(NEEDS_YOU_DRAFTS) }));
       input.addEventListener('input', () => {
-        needsYouDrafts.set(item.key, input.value);
-        while (needsYouDrafts.size > 64) needsYouDrafts.delete(needsYouDrafts.keys().next().value);
+        const keep = needsYouDrafts.has(item.key) || needsYouDrafts.size < NEEDS_YOU_DRAFTS;
+        if (keep) needsYouDrafts.set(item.key, { yesman: y.name, hiredAt: y.hiredAt ?? '', text: input.value });
+        full.hidden = keep;
       });
+      ask.append(full);
     }
     box.append(ask);
   } else {
@@ -1918,7 +1949,7 @@ function renderBarActions() {
       ? button('power', t('Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.'), () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
-    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }, 'pane.info') : null,
+    a ? button('listDashes', infoShown() ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(infoShown()) }, 'pane.info') : null,
     a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }, 'pane.board') : null,
     a ? button('topics', state.pane === 'topics' ? t('Hide the topics') : t('Show the topics'), () => togglePane('topics'), { 'aria-pressed': String(state.pane === 'topics') }, 'pane.topics') : null,
     a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }, 'pane.files') : null,
@@ -3531,7 +3562,7 @@ const info = createInfo({
     const a = selectedAgent();
     return a ? yesmanOf(a.id) : null;
   },
-  isOpen: () => state.panelOpen,
+  isOpen: () => infoShown(),
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
@@ -3554,12 +3585,49 @@ const info = createInfo({
   openURL: (url) => call('OpenURL', url).catch(fail),
 });
 
+// The info panel makes way for Topics and Needs You while, beside it, they
+// could not show their content and navigation side by side and still leave
+// the conversation its room; it shows again once the pane closes. This
+// never changes whether the user keeps the panel shown (yesman.info).
+// Showing it while it makes way keeps it beside that pane, until the pane
+// closes or another opens; the pane then shows one column at a time.
+function infoYields() {
+  if (!state.panelOpen || (state.pane !== 'topics' && state.pane !== 'needs-you')) return false;
+  // Below 1072px app.css hides the panel beside these panes, kept or not.
+  if (window.matchMedia('(max-width: 1071px)').matches) return true;
+  if (infoKept) return false;
+  const css = getComputedStyle(document.documentElement);
+  const side = $('#side')?.getBoundingClientRect().width || parseFloat(css.getPropertyValue('--side-width')) || 0;
+  const panel = parseFloat(css.getPropertyValue('--info-width')) || 0;
+  return window.innerWidth < side + panel + TWO_COLUMNS + CONVERSATION_MIN;
+}
+const infoShown = () => state.panelOpen && !infoYields();
+
 function togglePanel() {
-  state.panelOpen = !state.panelOpen;
-  localStorage.setItem('yesman.info', state.panelOpen ? 'shown' : 'hidden');
+  if (infoShown()) {
+    state.panelOpen = false;
+    infoKept = false;
+    localStorage.setItem('yesman.info', 'hidden');
+  } else {
+    if (!state.panelOpen) localStorage.setItem('yesman.info', 'shown');
+    state.panelOpen = true;
+    infoKept = true;
+  }
   info.render();
   renderBarActions();
 }
+
+// As the window changes, the info panel makes way, or shows again; focus it
+// hid goes to the pane's heading.
+window.addEventListener('resize', () => {
+  const now = infoYields();
+  if (now === infoYielded) return;
+  infoYielded = now;
+  const lost = now && $('#yesman-info')?.contains(document.activeElement);
+  info.render();
+  renderBarActions();
+  if (lost) $(state.pane === 'topics' ? '#topics .topics-search' : '#needs-you .needs-you-heading')?.focus({ preventScroll: true });
+});
 
 // ---------- Board pane ----------
 
@@ -3678,7 +3746,9 @@ function setPane(pane) {
   const visible = had && had !== document.body && shown(had);
   const inPane = !!had?.closest?.('#board, #needs-you, #topics, #files');
   const entry = had?.closest?.('#yesman-info [data-info-entry]')?.dataset.infoEntry;
+  if (state.pane !== pane) infoKept = false;
   state.pane = pane;
+  infoYielded = infoYields();
   renderInfo();
   renderBarActions();
   // Only focus this change hid moves: to the pane opened, or, once it

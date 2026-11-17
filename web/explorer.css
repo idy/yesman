@@ -1,12 +1,16 @@
 /* The resource explorer (explorer.js): content on the left, its navigation
    on the right, in the panes beside the conversation. Below 600px of pane
-   width it is one column, content or navigation by [data-focus]. */
+   width it is one column, content or navigation by [data-focus].
+   The widths the user dragged to (--explorer-pane-width, --explorer-nav-width)
+   are preferences: the pane keeps the conversation its 280px (app.css), and
+   the navigation keeps the content 260px, whatever the window, the info
+   panel or the pane's width does since. */
 
 .explorer-pane { position: relative; container-type: inline-size; }
-.needs-you-pane { --board-width: 680px; }
-.topics { --topics-width: 760px; }
+.needs-you-pane { --board-width: var(--explorer-pane-width, 680px); }
+.topics { --topics-width: var(--explorer-pane-width, 760px); }
 
-.explorer { position: relative; flex: 1 1 auto; display: grid; grid-template-columns: minmax(0, 1fr) var(--explorer-nav-width, 264px); min-width: 0; min-height: 0; }
+.explorer { position: relative; flex: 1 1 auto; display: grid; grid-template-columns: minmax(0, 1fr) min(var(--explorer-nav-width, 264px), calc(100% - 260px)); min-width: 0; min-height: 0; }
 .explorer-content { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .explorer-nav { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--mds-line); background: var(--mds-sidebar); }
 .explorer-nav-tools { flex: 0 0 auto; display: grid; gap: 6px; padding: 8px 8px 4px; }

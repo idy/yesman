@@ -249,6 +249,7 @@ export function createTopics(host) {
     const selected = v.part && v.selected ? `s:${v.selected}:${v.part}` : v.selected ? `t:${v.selected}` : null;
     scroller.append(treeView({
       id: 'topics-tree', label: t('Topics'), nodes, expanded: open, selected,
+      active: v.active, onActive: (id) => { v.active = id; },
       toggle: (node, on) => {
         if (on) v.expanded.add(node.id); else v.expanded.delete(node.id);
         render();

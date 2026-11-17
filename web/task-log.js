@@ -68,6 +68,8 @@ export function headingAnchors(article) {
 // A record's date is a real calendar day written in the log itself: the
 // TOC line's leading YYYY-MM-DD, else the YYYY-MM-DD- prefix of its file
 // name. File times are never used: copying or restoring a log changes them.
+// Only days from 1970-01-01 on count, as a working log cannot be older; an
+// earlier one, like any other, leaves the record in the No date group.
 export function validDay(text) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text ?? '');
   if (!m) return null;

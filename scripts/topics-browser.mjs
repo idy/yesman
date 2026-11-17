@@ -128,6 +128,12 @@ async function run(engineName, engine) {
     await topicsRow.click();
     await page.locator('#topics .board-empty', { hasText: 'No topics yet' }).waitFor();
     assert.equal(await page.locator('#board').isHidden(), true);
+    // At 1360px the info makes way for Topics' two columns; the titlebar's
+    // Show the info keeps it beside this pane, one column at a time, as the
+    // rest of this scenario reads it (resource explorer).
+    assert.equal(await page.locator('#yesman-info').isVisible(), false);
+    await page.locator('#bar-actions button[aria-label="Show the info"]').click();
+    await topicsRow.waitFor();
     assert.equal(await topicsRow.getAttribute('aria-current'), 'page');
 
     // Create two topics; Markdown renders, HTML stays text.
@@ -260,6 +266,11 @@ async function run(engineName, engine) {
     assert.equal(await page.locator('#thread .msg-user--topic img').count(), 1, 'the image stays with topic B');
     await page.locator('#thread .msg-user--topic .topic-chip', { hasText: 'tp2' }).click();
     await page.locator('#topics h3.topic-title', { hasText: 'Image limits' }).waitFor();
+    // Opened anew after the reload, Topics has the info make way again;
+    // keep it beside, one column at a time, as above.
+    assert.equal(await page.locator('#yesman-info').isVisible(), false);
+    await page.locator('#bar-actions button[aria-label="Show the info"]').click();
+    await page.locator('#yesman-info [data-info-entry="topics"]').waitFor();
     // Its conversation lists the native message, and shows it exactly.
     await page.locator('#topics .topic-message button').first().click();
     await page.locator('#thread .msg-found:is(.msg-user--topic, :has(.msg-user--topic))').waitFor();
