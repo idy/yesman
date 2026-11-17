@@ -25,6 +25,7 @@ Apple: the stand-ins pass only ad-hoc signing of temporary files to codesign.
 Setup's "hosted runner" condition is simulated only around stand-in tools.
 """
 import argparse
+import ast
 import base64
 import hashlib
 import json
@@ -827,6 +828,23 @@ def admission_cases(temporary):
             assert_clean(fixture)
         record('admitted-tool-error-stops-or-keeps', variant=case)
 
+    # The gate's pipe, or the start of its first process, fails: no tool runs, the original error is
+    # reported (not a stand-in from the not-yet-admitted bookkeeping), and setup cleans up.
+    for case, injected in (
+        ('pipe-fails', 'real, once = m.os.pipe, [1]\ndef failing():\n    if once:\n        once.pop()\n        raise OSError(24, "injected pipe failure")\n'
+                       '    return real()\nm.os.pipe = failing\n'),
+        ('start-fails', 'real, once = m.subprocess.Popen, [1]\ndef failing(*a, **k):\n    if once:\n        once.pop()\n'
+                        '        raise OSError(35, "injected start failure")\n    return real(*a, **k)\nm.subprocess.Popen = failing\n'),
+    ):
+        fixture = Fixture(temporary, 'not-started-' + case, good_identity())
+        code = 'import sys; sys.argv = ["m", "setup"]; sys.path.insert(0, %r); import macos_signing as m\n%sm.main()\n' % (
+            str(fixture.source / 'scripts'), injected)
+        process = subprocess.run([sys.executable, '-c', code], env=fixture.env(full_inputs()), capture_output=True, text=True, timeout=60)
+        assert process.returncode == 1 and 'injected' in process.stderr and 'UnboundLocalError' not in process.stderr, process.stderr
+        assert [c for c in fixture.calls() if c['args'][:1] != ['list-keychains']] == [], fixture.calls()
+        assert_clean(fixture)
+        record('tool-start-failure-reports-its-error', variant=case)
+
 
 def password_cases(temporary):
     """R5 review: passwords reach security and notarytool byte for byte; only base64 and the Apple ID are normalized."""
@@ -1073,6 +1091,45 @@ def step_script(workflow, step):
     return '\n'.join(lines) + '\n'
 
 
+QA_STEP = ('        env:\n          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}\n'
+           '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+           '        run: python3 .qa-producer/scripts/prepare-upgrade-qa.py "$RUNNER_TEMP/released-inputs" "$RUNNER_TEMP/gate-inputs"')
+
+
+def qa_producer():
+    """The QA step's key goes only to the workflow's own producer, which removes it before any subprocess.
+
+    The step runs exactly the producer checked out from the workflow's own
+    commit (not the candidate source); that producer's main() pops the key
+    first; and CI runs its tests (only the two signers receive the key) on
+    every system it ships for. Changing any of these fails this check.
+    """
+    text = (ROOT / '.github/workflows/application-upgrade-draft.yml').read_text()
+    job = text.split('\n  sign-qa:\n', 1)[1].split('\n  native:\n', 1)[0]
+    step = job.split('      - name: Package and sign private QA successors\n', 1)[1].split('\n      - ', 1)[0]
+    assert step == QA_STEP, step
+    before = job.split('      - name: Package and sign private QA successors\n', 1)[0]
+    assert '          ref: ${{ github.sha }}\n          path: .qa-producer\n          persist-credentials: false\n' in before
+    assert text.count('secrets.MYGO_UPDATER_PRIVATE_KEY') == 1
+    producer = ast.parse((ROOT / 'scripts/prepare-upgrade-qa.py').read_text())
+    assigned = {t.id: n.value.value for n in producer.body if isinstance(n, ast.Assign) for t in n.targets
+                if isinstance(t, ast.Name) and isinstance(n.value, ast.Constant)}
+    assert assigned.get('KEY') == 'MYGO_UPDATER_PRIVATE_KEY', assigned.get('KEY')
+    [main] = [n for n in producer.body if isinstance(n, ast.FunctionDef) and n.name == 'main']
+    first = main.body[0]
+    assert (isinstance(first, ast.Assign) and isinstance(first.value, ast.Call) and ast.unparse(first.value.func) == 'os.environ.pop'
+            and ast.unparse(first.value.args[0]) == 'KEY'), ast.unparse(first)
+    calls = [n for n in producer.body if isinstance(n, ast.Expr)]
+    assert [ast.unparse(n) for n in calls if not isinstance(n.value, ast.Constant)] == [], 'the producer runs nothing at import'
+    tests = (ROOT / 'scripts/test_upgrade_qa.py').read_text()
+    for name in ('test_only_the_signers_receive_the_key', 'test_workflow_runs_the_trusted_producer'):
+        assert 'def %s(' % name in tests, name
+    ci = (ROOT / '.github/workflows/ci.yml').read_text()
+    test_job = ci.split('\n  test:\n', 1)[1].split('\n  macos-startup:\n', 1)[0]
+    assert 'os: [ubuntu-latest, macos-latest, windows-latest]' in test_job and 'run: python3 -B scripts/test_upgrade_qa.py' in test_job
+    record('qa-producer-confines-updater-key')
+
+
 def workflow_cases(temporary):
     smoke = step_script('macos-draft-smoke.yml', 'Verify unchanged final app startup')
     for variant, team, extra in [('adhoc', '', ['--expect-adhoc']), ('team', TEAM, ['--expect-team-id', TEAM]), ('older-tag', None, []), ('bad-team', 'idy', None)]:
@@ -1111,12 +1168,11 @@ def workflow_cases(temporary):
             for use in re.findall(r'(?:secrets|vars)\.(?:MACOS_[A-Z0-9_]+|MYGO_UPDATER_PRIVATE_KEY)', line):
                 seen.setdefault((workflow.name, step), set()).add(use)
     allowed[('release.yml', 'Build and upload')] = {'secrets.MYGO_UPDATER_PRIVATE_KEY'}
-    # Inherited from v0.1.39, not confined: its dispatch-only upgrade gate signs
-    # private QA successors with the existing key (scripts/prepare-upgrade-qa.py),
-    # whose own build still passes the key to its compilers. That gap is tracked
-    # and fixed separately; this only records where the key is placed today.
+    # The dispatch-only upgrade gate signs private QA successors with the
+    # existing key. Allowed only as the producer that confines it: see qa_producer().
     allowed[('application-upgrade-draft.yml', 'Package and sign private QA successors')] = {'secrets.MYGO_UPDATER_PRIVATE_KEY'}
     assert seen == allowed, seen
+    qa_producer()
     record('signing-inputs-confined', steps=sorted('%s: %s' % key for key in seen))
 
     raw = (ROOT / 'mygo.json').read_bytes()

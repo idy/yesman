@@ -418,6 +418,7 @@ def run_owned(label, args, env, timeout=None, capture=True, cwd=None, participan
     that positive confirmation, never because the stop was not reached.
     """
     pipe = subprocess.PIPE if capture else None
+    admitted = False  # bound before anything can fail, so a failed pipe or start raises its own error
     _signals['shield'] += 1  # a signal during the start is held, then raised below
     try:
         gate, release = os.pipe()
@@ -432,7 +433,7 @@ def run_owned(label, args, env, timeout=None, capture=True, cwd=None, participan
         # From here on the child is this function's: every path below either
         # reaps it after a confirmed stop or keeps it listed as undrained.
         entry = {'label': label, 'group': child.pid}
-        recorded, admitted = [], False
+        recorded = []
         try:
             try:
                 for participant in participants:
