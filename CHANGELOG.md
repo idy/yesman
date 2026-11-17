@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.39
+
+- Display the desktop application and its main process as Yes Man on macOS, Windows and Linux, including the window, native application metadata and new installer shortcuts.
+- Keep the existing installation locations, bundle identifier, update feeds and signing key, workspace identities and user data paths. The `yesman` command and older executable paths remain compatible; Windows command-line calls retain their arguments, streams and exit status.
+- Preserve automatic updates from the previous application name, including restart through the legacy entry points, subsequent updates and failure recovery. Existing user-created shortcuts and pins keep their paths; the new Windows installer refreshes its standard shortcuts.
+
 ## 0.1.38
 
 - Add optional Settings › GitHub App configuration for agent-created pull requests, with a separate encrypted key vault and explicit repository and workspace selection. App identity starts disabled when no App configuration exists.
