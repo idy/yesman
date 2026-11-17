@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/safefs/linktest"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -35,9 +36,7 @@ func readSHA(t *testing.T, f *boardFixture, token, path string) string {
 
 func symlinkOrSkip(t *testing.T, target, link string) {
 	t.Helper()
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlinks unavailable here, not tested: %v", err)
-	}
+	linktest.Symlink(t, target, link)
 }
 
 func TestManagedWriteAndEditKeepWorking(t *testing.T) {
@@ -118,6 +117,41 @@ func TestManagedFilesRefuseLinksInsideTheGrant(t *testing.T) {
 	// The real names still work.
 	if code := postFile(f, w.Token, map[string]any{"op": "write", "path": in("real/doc.txt"), "content": "EDITED", "expect": sum}).Code; code != 200 {
 		t.Fatalf("edit by the real name: %d", code)
+	}
+}
+
+// On Windows a directory junction inside the grant is refused like a link
+// (elsewhere the test is skipped as not applicable).
+func TestManagedFilesRefuseJunctionsInsideTheGrant(t *testing.T) {
+	f := newBoardFixture(t)
+	y := f.hire("alice")
+	w := startHelper(t, f)
+	scratch, _, _ := f.m.ProcessTemp(w.Token)
+	in := func(name string) string {
+		return filepath.Join(y.Path, filepath.FromSlash(scratch.Rel), filepath.FromSlash(name))
+	}
+	if code := postFile(f, w.Token, map[string]any{"op": "write", "path": in("real/doc.txt"), "content": "KEEP"}).Code; code != 200 {
+		t.Fatalf("ordinary write: %d", code)
+	}
+	linktest.Junction(t, in("real"), in("junction"))
+	for _, req := range []map[string]any{
+		{"op": "write", "path": in("junction/doc.txt"), "content": "THROUGH JUNCTION"},
+		{"op": "write", "path": in("junction/new.txt"), "content": "THROUGH JUNCTION"},
+		{"op": "read", "path": in("junction/doc.txt")},
+		{"op": "access", "path": in("junction/doc.txt")},
+		{"op": "mkdir", "path": in("junction/sub")},
+	} {
+		if res := postFile(f, w.Token, req); res.Code == 200 {
+			t.Errorf("%v through a junction answered 200: %s", req["op"], res.Body)
+		}
+	}
+	if got := readString(t, in("real/doc.txt")); got != "KEEP" {
+		t.Fatalf("file behind the junction changed to %q", got)
+	}
+	for _, p := range []string{in("real/new.txt"), in("real/sub")} {
+		if _, err := os.Lstat(p); err == nil {
+			t.Fatalf("%s was created through a junction", p)
+		}
 	}
 }
 

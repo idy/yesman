@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/idy/yesman/internal/safefs"
 )
 
 // fetchInterval is how long a fetch counts as fresh: checkouts within it
@@ -75,6 +77,10 @@ type Worktree struct {
 	// CleanupID identifies the actual Git instance, including UI/user trees.
 	// A nonce alone grants no agent ownership or cleanup authorization.
 	CleanupID string `json:"cleanupId,omitempty"`
+	// Root is the identity of the directory a new checkout was made in,
+	// measured right after creation through a handle of that directory
+	// carrying CleanupID. Only AddWorktree sets it.
+	Root *safefs.Identity `json:"-"`
 }
 
 // NameFromURL derives a pool name from a remote URL: host and path without
@@ -528,6 +534,11 @@ func (p *Pool) AddWorktree(ctx context.Context, r Repo, opts WorktreeOptions) (W
 		return Worktree{}, err
 	}
 	id, err := newWorktreeInstance(r.Path, opts.Dest)
+	var root *safefs.Identity
+	var rootErr error
+	if err == nil {
+		root, rootErr = rootIdentity(r.Path, opts.Dest, id)
+	}
 	tl.Unlock()
 	if err != nil {
 		return Worktree{}, fmt.Errorf("checkout exists but instance registration failed; retain it: %w", err)
@@ -544,6 +555,12 @@ func (p *Pool) AddWorktree(ctx context.Context, r Repo, opts WorktreeOptions) (W
 			}
 			wt.Dir = filepath.Base(opts.Dest)
 			wt.Warning = warning
+			wt.Root = root
+			if rootErr != nil {
+				// The checkout stands; only writes through yesman's
+				// write and edit tools will not be granted for it.
+				wt.Warning = strings.TrimPrefix(wt.Warning+"; checkout directory identity not recorded: "+rootErr.Error(), "; ")
+			}
 			return wt, nil
 		}
 	}

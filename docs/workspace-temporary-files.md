@@ -34,28 +34,34 @@ A worker's `write` and `edit` are pi's own tools; their file operations are done
 **What may be written.** Grants come only from trusted state:
 
 - the calling process's own scratch and evidence directories, still the very directories reserved for it;
-- worktrees whose lifecycle record names the caller's current generation as owner, with purpose author or release, not removed, and whose private Git instance is the recorded checkout.
+- worktrees whose lifecycle record names the caller's current generation as owner, with purpose author or release, not removed, whose directory is still the one yesman created for that checkout, and whose private Git instance is the recorded checkout.
 
 A path, a directory name, `owner.json` or a task name grants nothing. Review checkouts, other directories, `.git`, yesman's metadata, other agents and other workspaces are refused.
 
-The grant is chosen from the path first. A scratch or evidence write reads no checkout's metadata. A worktree write reads only the chosen checkout's: its `.git` file, the `gitdir` backpointer and the instance marker, each a small regular file opened without following a link or waiting on a FIFO, so a broken or unrelated checkout cannot hold up or redirect a write.
+The grant is chosen from the path first. A scratch or evidence write reads no checkout's metadata. A worktree write reads only the chosen checkout's: its `.git` file, the `gitdir` backpointer and the instance marker, each a small regular file opened through its parent directory's handle without following a link or reparse point and without waiting on a FIFO, so a broken or unrelated checkout cannot hold up or redirect a write. The pool reads the same files the same way when it lists and removes checkouts.
+
+**Checkout directory identity.** When yesman makes a checkout, the pool opens the new directory right after Git creates it, under the same locks, checks through that handle that it carries the new instance, and measures the directory's identity: its inode number (the NTFS file index on Windows, which includes a sequence number) and its creation time. The identity is saved in the checkout's lifecycle record with the instance and the owner's generation (`worktrees.json`, `root`). It is never measured later: a record without one, because the checkout was made before identities were kept or its file system reports no creation time, gives no write/edit grant, and the record is not filled in. To use write and edit there, make a new checkout with `yesman_checkout` (purpose author or release, for your open task); shell commands are unaffected, and old records, their history and Git's registrations are left as they are. The device number is not kept, because macOS numbers devices when they are mounted; the directory must instead be on the workspace's own file system.
 
 **When.** The write is admitted with the process credential's change gate (`BeginChange`) inside the workspace's `Use`, and held until the write is done. A write of a stopped or replaced process either lands before Stop returns, in that process's own directories, or not at all.
 
-A worktree write also holds the pool's lock of that worktree directory (`Pool.WithWorktree`). The pool takes the same lock, exclusively, while it adds or removes a checkout there. Under it the write opens the worktree directory, checks the opened directory's instance against the record and writes through that open directory. So a removal waits for a write in progress, a write after a removal or a new checkout at the same path is refused for the old record, and a directory put in place of the checkout is never written for it. The instance is Git's own registration (the private directory's backpointer and yesman's marker): a copy of a checkout that also copies its `.git` file is the checkout for Git too, and is not told apart.
+A worktree write also holds the pool's lock of that worktree directory (`Pool.WithWorktree`). The pool takes the same lock, exclusively, while it adds or removes a checkout there. Under it the write opens the worktree directory, requires the opened directory to have the recorded identity and to carry the recorded Git instance, and writes through that open directory. So a removal waits for a write in progress, a write after a removal or a new checkout at the same path is refused for the old record, and any other directory at the checkout's path, whatever files it holds, is not written for it.
 
 Lock order: the workspace's checkout lock, the workspace's `Use`, the agent's change lease, the pool's repository lock, the worktree lock. The Manager's own lock is never held while a file operation or a pool lock is waited on.
 
 **How.** Every name below the workspace is opened relative to its parent's open directory, without following links:
 
 - **macOS and Linux:** `openat` with `O_NOFOLLOW`, one component at a time, holding each directory open. The kernel refuses a link at any component, so a link, or a parent swapped for one, inside or outside the grant, is never traversed.
-- **Windows:** each name is first looked at without following it, and a symlink, junction or other reparse point is refused. It is then opened through its parent's `os.Root`, and the opened object must be the one looked at. A link put there in between opens something else and is refused. What is not detected is a program of the same user moving the checked file or directory itself between those two steps.
+- **Windows:** `NtCreateFile` relative to the parent's handle, with `OBJ_DONT_REPARSE` (the open fails at a reparse point) and `FILE_OPEN_REPARSE_POINT` (a reparse point would be opened itself, never its target). The handle that comes back must not carry `FILE_ATTRIBUTE_REPARSE_POINT` and must be the kind asked for, directory or file. Symbolic links, junctions and other reparse points are refused by the open itself.
+
+The primitives are in `internal/safefs`, shared by the write entry and the pool.
 
 Files are opened without truncation and without waiting on a FIFO. They must be regular files with one link. Reads are bounded at 32 MiB, and mode and line endings are kept.
 
 **Edits.** An edit's write carries the hash of what it read. It changes only that existing file: it creates neither the file nor a missing directory, and is refused if the file changed or was removed since it was read, leaving the removal in place. Only a write without a read, pi's `write` tool, creates the file and its directories.
 
 The lead keeps its own narrower rule for Knowledge and the Working log.
+
+**Limits.** These checks are about which object this write opens. They do not stop another program of the same user from changing files, including a checkout's files or its registration, and the directory identity is file-system metadata: a program able to make a directory with the same inode number and creation time is not told apart. A checkout moved to another file system, or across volumes, loses its identity match and needs a new checkout.
 
 ## Not covered
 

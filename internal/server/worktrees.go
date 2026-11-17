@@ -97,7 +97,13 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 	if err != nil {
 		return wt, err
 	}
-	records = append(records, yesmen.WorktreeRecord{ID: wt.CleanupID, Dir: wt.Dir, Repo: wt.Repo, Owner: c.agent.Name, OwnerSince: c.agent.Since, Purpose: purpose, Task: req.Task, Branch: wt.Branch, Head: wt.Head})
+	rec := yesmen.WorktreeRecord{ID: wt.CleanupID, Dir: wt.Dir, Repo: wt.Repo, Owner: c.agent.Name, OwnerSince: c.agent.Since, Purpose: purpose, Task: req.Task, Branch: wt.Branch, Head: wt.Head}
+	if wt.Root != nil {
+		// Measured by the pool at creation; bound here with the instance
+		// and the owner's generation (files.go checkInstance).
+		rec.Root = &yesmen.WorktreeRoot{Ino: wt.Root.Ino, Birth: wt.Root.Birth}
+	}
+	records = append(records, rec)
 	if err := s.Yesmen.SaveWorktreeRecords(y.Name, records); err != nil {
 		// Do not delete the checkout on a failed metadata write. Unknown
 		// resources are protected and can be reported for manual recovery.
