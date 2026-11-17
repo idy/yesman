@@ -56,6 +56,7 @@ func rpcChild(dir string) {
 	if os.Getenv("YESMAN_TEST_TEMP_PROBE") != "" {
 		probeTemp(dir, name)
 	}
+	failInit(dir) // files_contract_test.go
 	in := bufio.NewScanner(os.Stdin)
 	out := json.NewEncoder(os.Stdout)
 	for in.Scan() {

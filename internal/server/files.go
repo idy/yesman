@@ -28,15 +28,28 @@ import (
 //     release, and whose private Git instance is the recorded checkout; and
 //     the temporary and evidence directories Manager reserved for the calling
 //     process. A path, a directory name, owner.json or a task name grants
-//     nothing.
+//     nothing. The grant is chosen from the path before any checkout's
+//     metadata is read, and only the chosen checkout's is read: small regular
+//     files, through handles, never waiting on one.
 //   - The change is admitted with BeginChange inside the Store's Use, and held
 //     across the commit, so a write of a stopped or replaced process either
 //     lands before Stop returns, in that process's own directories, or not at
-//     all.
-//   - All I/O goes through os.Root opened at the grant root, so a link or a
-//     parent swapped for one cannot take it outside. Files are opened without
+//     all. A worktree's instance is checked, and its directory opened, while
+//     the pool cannot add or remove that checkout (Pool.WithWorktree), and the
+//     I/O goes through that opened directory: a directory put in its place
+//     later is never written. Lock order: the workspace's checkout lock, then
+//     the Store's Use, then the agent's change lease, then the pool's
+//     repository lock, then the worktree's lock. The Manager's own lock is
+//     never held across any of it.
+//   - Every name below the workspace is opened relative to its parent's
+//     handle without following links (files_unix.go, files_windows.go): a
+//     link anywhere, inside the grant or out of it, is refused, so no write
+//     reaches .git or another directory through one. Files are opened without
 //     truncation, checked to be a regular file with one link, compared with
 //     the content an edit read, and only then truncated and written.
+//   - An edit's write carries the hash of what it read and only changes that
+//     existing file: it creates neither the file nor a directory, so a file
+//     removed meanwhile stays removed. A plain write creates what it needs.
 //
 // This covers these two tools only. Shell commands and anything else the
 // agent runs write with the process's own permissions; it is not a sandbox.
@@ -48,13 +61,17 @@ type fileRequest struct {
 	Op      string  `json:"op"`
 	Path    string  `json:"path"`
 	Content *string `json:"content,omitempty"`
-	Expect  string  `json:"expect,omitempty"`
+	// Expect, when present, makes a write an edit of the existing file whose
+	// content had this SHA-256.
+	Expect *string `json:"expect,omitempty"`
 }
 
 type fileGrant struct {
 	rel     string      // slash-separated directory below the workspace
 	created fs.FileInfo // identity the directory must still have, if known
 	private bool        // a reserved directory: new subdirectories are 0700
+	// A worktree: its pool repository and the instance its record names.
+	repo, instance string
 }
 
 func (s *Server) files(ctx context.Context, c caller, r *http.Request) (any, error) {
@@ -76,12 +93,18 @@ func (s *Server) files(ctx context.Context, c caller, r *http.Request) (any, err
 			return err
 		}
 		defer release()
-		grant, sub, err := s.fileGrant(ctx, c, y, req.Path, req.Op == "mkdir")
+		grant, sub, err := s.fileGrant(c, y, req.Path, req.Op == "mkdir")
 		if err != nil {
 			return err
 		}
-		out, err = doFile(y.Path, grant, sub, req)
-		return err
+		if grant.repo == "" {
+			out, err = s.commitFile(y, grant, sub, req)
+			return err
+		}
+		return s.Pool.WithWorktree(filepath.Join(y.Path, filepath.FromSlash(grant.rel)), func() error {
+			out, err = s.commitFile(y, grant, sub, req)
+			return err
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -90,55 +113,159 @@ func (s *Server) files(ctx context.Context, c caller, r *http.Request) (any, err
 }
 
 // fileGrant finds the grant path falls in, from trusted state, and returns
-// the part of path below it.
-func (s *Server) fileGrant(ctx context.Context, c caller, y yesmen.Yesman, target string, dir bool) (fileGrant, []string, error) {
+// the part of path below it. It reads no checkout's metadata; commitFile
+// checks the chosen checkout's instance.
+func (s *Server) fileGrant(c caller, y yesmen.Yesman, target string, dir bool) (fileGrant, []string, error) {
 	rest, err := workspaceRelative(y.Path, target)
 	if err != nil {
 		return fileGrant{}, nil, err
 	}
-	var grants []fileGrant
-	if scratch, evidence, ok := s.Agents.ProcessTemp(c.token); ok {
-		grants = append(grants, fileGrant{rel: scratch.Rel, created: scratch.Info, private: true}, fileGrant{rel: evidence.Rel, created: evidence.Info, private: true})
-	}
-	if records, err := s.Yesmen.WorktreeRecords(y.Name); err == nil && s.Pool != nil {
-		for _, rec := range records {
-			if rec.Removed || rec.Owner != c.agent.Name || !rec.OwnerSince.Equal(c.agent.Since) || (rec.Purpose != "author" && rec.Purpose != "release") || !plainComponent(rec.Dir) {
-				continue
-			}
-			if id, err := s.Pool.WorktreeInstance(rec.Repo, filepath.Join(y.Path, rec.Dir)); err != nil || id != rec.ID {
-				continue
-			}
-			grants = append(grants, fileGrant{rel: rec.Dir})
-		}
-	}
-	for _, g := range grants {
+	below := func(g fileGrant) ([]string, bool) {
 		prefix := strings.Split(g.rel, "/")
 		if len(rest) < len(prefix) || (!dir && len(rest) == len(prefix)) {
-			continue
+			return nil, false
 		}
-		match := true
 		for i := range prefix {
 			if !sameName(rest[i], prefix[i]) {
-				match = false
+				return nil, false
+			}
+		}
+		return rest[len(prefix):], true
+	}
+	scratch, evidence, haveTemp := s.Agents.ProcessTemp(c.token)
+	if haveTemp {
+		for _, g := range []fileGrant{{rel: scratch.Rel, created: scratch.Info, private: true}, {rel: evidence.Rel, created: evidence.Info, private: true}} {
+			if sub, ok := below(g); ok {
+				return g, sub, nil
+			}
+		}
+	}
+	if len(rest) > 0 && s.Pool != nil {
+		if records, err := s.Yesmen.WorktreeRecords(y.Name); err == nil {
+			// The latest record of the directory is the checkout there now.
+			for i := len(records) - 1; i >= 0; i-- {
+				rec := records[i]
+				if !sameName(rec.Dir, rest[0]) {
+					continue
+				}
+				if rec.Removed || rec.Owner != c.agent.Name || !rec.OwnerSince.Equal(c.agent.Since) || (rec.Purpose != "author" && rec.Purpose != "release") || !plainComponent(rec.Dir) || rec.ID == "" {
+					break
+				}
+				if sub, ok := below(fileGrant{rel: rec.Dir}); ok {
+					return fileGrant{rel: rec.Dir, repo: rec.Repo, instance: rec.ID}, sub, nil
+				}
 				break
 			}
 		}
-		if match {
-			return g, rest[len(prefix):], nil
-		}
 	}
 	where := "your own worktrees (author or release checkouts yesman_checkout made for you)"
-	if scratch, evidence, ok := s.Agents.ProcessTemp(c.token); ok {
+	if haveTemp {
 		where += fmt.Sprintf(", %s and %s", filepath.Join(y.Path, filepath.FromSlash(scratch.Rel)), filepath.Join(y.Path, filepath.FromSlash(evidence.Rel)))
 	}
 	return fileGrant{}, nil, fmt.Errorf("write and edit only change files in %s; %s is not one of them. Other workspace files, yesman's metadata, other agents' directories and anything outside the workspace are refused", where, target)
+}
+
+// commitFile opens the grant's directory and performs req inside it.
+func (s *Server) commitFile(y yesmen.Yesman, g fileGrant, sub []string, req fileRequest) (any, error) {
+	ws, err := openWorkspace(y.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer ws.close()
+	root, err := openPath(ws, strings.Split(g.rel, "/"), nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", g.rel, err)
+	}
+	defer root.close()
+	if g.created != nil {
+		// The very directory reserved when this agent started.
+		if info, err := root.stat(); err != nil || !os.SameFile(info, g.created) {
+			return nil, fmt.Errorf("%s was replaced since this agent started; it is not written", g.rel)
+		}
+	}
+	if g.repo != "" {
+		if err := s.checkInstance(y, g, root); err != nil {
+			return nil, err
+		}
+	}
+	return doFile(root, g, sub, req)
+}
+
+// checkInstance requires the opened worktree directory to be the checkout
+// its lifecycle record names: its .git file, read through root, must name
+// the private Git directory carrying that instance.
+func (s *Server) checkInstance(y yesmen.Yesman, g fileGrant, root *dirHandle) error {
+	refuse := func(why error) error {
+		return fmt.Errorf("%s is not the checkout made for you (%v); it is not written", g.rel, why)
+	}
+	f, err := root.openFile(".git", os.O_RDONLY)
+	if err != nil {
+		return refuse(err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return refuse(err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxGitFile {
+		return refuse(errors.New("its .git is not a small regular file"))
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxGitFile+1))
+	if err != nil {
+		return refuse(err)
+	}
+	if len(data) > maxGitFile {
+		return refuse(errors.New("its .git is not a small regular file"))
+	}
+	id, err := s.Pool.InstanceOf(g.repo, filepath.Join(y.Path, filepath.FromSlash(g.rel)), data)
+	if err != nil {
+		return refuse(err)
+	}
+	if id != g.instance {
+		return refuse(errors.New("another checkout instance"))
+	}
+	return nil
+}
+
+// maxGitFile bounds a worktree's .git file: one line naming a directory.
+const maxGitFile = 8 << 10
+
+// openPath opens the directories names below d, one at a time without
+// following links. With perm, a missing one is made.
+func openPath(d *dirHandle, names []string, perm *fs.FileMode) (*dirHandle, error) {
+	cur := d
+	for _, name := range names {
+		if perm != nil {
+			if err := cur.mkdir(name, *perm); err != nil {
+				closeUnless(cur, d)
+				return nil, err
+			}
+		}
+		next, err := cur.openDir(name)
+		closeUnless(cur, d)
+		if err != nil {
+			return nil, err
+		}
+		cur = next
+	}
+	if cur == d {
+		// The caller closes what it is given back separately.
+		return d.openDir(".")
+	}
+	return cur, nil
+}
+
+func closeUnless(h, keep *dirHandle) {
+	if h != keep {
+		h.close()
+	}
 }
 
 // workspaceRelative splits target, an absolute path, into names below the
 // workspace. The workspace may be spelled through an alias (/var and
 // /private/var, a drive letter's case): the nearest existing ancestor that
 // is the workspace marks where the names start. Names are checked here;
-// links below are left to os.Root.
+// links below are refused as each name is opened.
 func workspaceRelative(workspace, target string) ([]string, error) {
 	if !filepath.IsAbs(target) || strings.HasPrefix(target, `\\?\`) || strings.HasPrefix(target, `\\.\`) {
 		return nil, fmt.Errorf("%s is not an absolute file path", target)
@@ -199,55 +326,43 @@ func sameName(a, b string) bool {
 	return a == b
 }
 
-// doFile performs req inside the grant.
-func doFile(workspace string, g fileGrant, sub []string, req fileRequest) (any, error) {
-	ws, err := os.OpenRoot(workspace)
-	if err != nil {
-		return nil, err
-	}
-	defer ws.Close()
-	// The grant directory itself must be a plain directory, and the very one
-	// reserved when its identity is known.
-	parts := strings.Split(g.rel, "/")
-	for i := range parts {
-		info, err := ws.Lstat(strings.Join(parts[:i+1], "/"))
-		if err != nil {
-			return nil, err
-		}
-		if info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() {
-			return nil, fmt.Errorf("%s is not a plain directory", strings.Join(parts[:i+1], "/"))
-		}
-		if i == len(parts)-1 && g.created != nil && !os.SameFile(info, g.created) {
-			return nil, fmt.Errorf("%s was replaced since this agent started; it is not written", g.rel)
-		}
-	}
-	root, err := ws.OpenRoot(g.rel)
-	if err != nil {
-		return nil, err
-	}
-	defer root.Close()
-	if info, err := root.Stat("."); err != nil || (g.created != nil && !os.SameFile(info, g.created)) {
-		return nil, fmt.Errorf("%s was replaced since this agent started; it is not written", g.rel)
-	}
+// doFile performs req below root, the grant's directory.
+func doFile(root *dirHandle, g fileGrant, sub []string, req fileRequest) (any, error) {
 	name := strings.Join(sub, "/")
 	dirPerm := fs.FileMode(0o777)
 	if g.private {
 		dirPerm = 0o700
 	}
-	switch req.Op {
-	case "mkdir":
-		if name == "" {
-			return map[string]any{}, nil
+	if req.Op == "mkdir" {
+		d, err := openPath(root, sub, &dirPerm)
+		if err != nil {
+			return nil, err
 		}
-		return map[string]any{}, root.MkdirAll(name, dirPerm)
+		return map[string]any{}, d.close()
+	}
+	if len(sub) == 0 {
+		return nil, errors.New("a file path is needed")
+	}
+	// A plain write makes missing directories; nothing else creates any.
+	var mkPerm *fs.FileMode
+	if req.Op == "write" && req.Expect == nil {
+		mkPerm = &dirPerm
+	}
+	parent, err := openPath(root, sub[:len(sub)-1], mkPerm)
+	if err != nil {
+		return nil, err
+	}
+	defer parent.close()
+	leaf := sub[len(sub)-1]
+	switch req.Op {
 	case "access":
-		f, err := openRegular(root, name, os.O_RDWR)
+		f, err := openRegular(parent, name, leaf, os.O_RDWR)
 		if err != nil {
 			return nil, err
 		}
 		return map[string]any{}, f.Close()
 	case "read":
-		f, err := openRegular(root, name, os.O_RDONLY)
+		f, err := openRegular(parent, name, leaf, os.O_RDONLY)
 		if err != nil {
 			return nil, err
 		}
@@ -265,23 +380,25 @@ func doFile(workspace string, g fileGrant, sub []string, req fileRequest) (any, 
 		if req.Content == nil {
 			return nil, errors.New("no content to write")
 		}
-		if dir := strings.Join(sub[:len(sub)-1], "/"); dir != "" {
-			if err := root.MkdirAll(dir, dirPerm); err != nil {
-				return nil, err
-			}
+		flag := os.O_RDWR
+		if req.Expect == nil {
+			flag |= os.O_CREATE
 		}
-		f, err := openRegular(root, name, os.O_RDWR|os.O_CREATE)
+		f, err := openRegular(parent, name, leaf, flag)
 		if err != nil {
+			if req.Expect != nil && errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("%s was removed since edit read it; it is not recreated", name)
+			}
 			return nil, err
 		}
 		defer f.Close()
-		if req.Expect != "" {
+		if req.Expect != nil {
 			data, err := io.ReadAll(io.LimitReader(f, maxManagedRead+1))
 			if err != nil {
 				return nil, err
 			}
 			sum := sha256.Sum256(data)
-			if hex.EncodeToString(sum[:]) != req.Expect {
+			if hex.EncodeToString(sum[:]) != *req.Expect {
 				return nil, fmt.Errorf("%s changed since edit read it; read it again", name)
 			}
 		}
@@ -296,13 +413,10 @@ func doFile(workspace string, g fileGrant, sub []string, req fileRequest) (any, 
 	return nil, fmt.Errorf("unknown file operation %q", req.Op)
 }
 
-// openRegular opens name below root without truncating, never waiting on a
-// FIFO, and accepts only a regular file with a single link.
-func openRegular(root *os.Root, name string, flag int) (*os.File, error) {
-	if name == "" {
-		return nil, errors.New("a file path is needed")
-	}
-	f, err := root.OpenFile(name, flag|nonblockFlag, 0o666)
+// openRegular opens leaf in parent without truncating, following a link or
+// waiting on a FIFO, and accepts only a regular file with a single link.
+func openRegular(parent *dirHandle, name, leaf string, flag int) (*os.File, error) {
+	f, err := parent.openFile(leaf, flag)
 	if err != nil {
 		return nil, err
 	}

@@ -36,6 +36,7 @@ type Pool struct {
 
 	mu      sync.Mutex
 	locks   map[string]*sync.Mutex
+	trees   map[string]*sync.RWMutex // treeLock
 	fetched map[string]time.Time
 }
 
@@ -520,10 +521,14 @@ func (p *Pool) AddWorktree(ctx context.Context, r Repo, opts WorktreeOptions) (W
 	if err := os.MkdirAll(filepath.Dir(opts.Dest), 0o755); err != nil {
 		return Worktree{}, err
 	}
+	tl := p.treeLock(opts.Dest)
+	tl.Lock()
 	if _, err := git(ctx, r.Path, args...); err != nil {
+		tl.Unlock()
 		return Worktree{}, err
 	}
 	id, err := newWorktreeInstance(r.Path, opts.Dest)
+	tl.Unlock()
 	if err != nil {
 		return Worktree{}, fmt.Errorf("checkout exists but instance registration failed; retain it: %w", err)
 	}
@@ -652,6 +657,9 @@ func (p *Pool) RemoveWorktree(ctx context.Context, path string, force bool) erro
 	l := p.lock(filepath.ToSlash(strings.TrimSuffix(rel, ".git")))
 	l.Lock()
 	defer l.Unlock()
+	tl := p.treeLock(path)
+	tl.Lock()
+	defer tl.Unlock()
 	args := []string{"worktree", "remove", path}
 	if force {
 		args = []string{"worktree", "remove", "--force", path}

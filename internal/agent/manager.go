@@ -546,6 +546,9 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	if err != nil {
 		return nil, modelState{}, fmt.Errorf("prepare the agent's temporary directory: %w", err)
 	}
+	// Only a reservation no process ever ran with is released: from the
+	// moment the process exists, whatever it wrote there stays, even when
+	// its start then fails or is cancelled.
 	ran := false
 	defer func() {
 		if !ran {
@@ -581,6 +584,7 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	if err != nil {
 		return nil, modelState{}, err
 	}
+	ran = true
 	p.temp = temp
 	m.mu.Lock()
 	a.token, a.tokenProc = token, p
@@ -604,7 +608,6 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	// A lead's new session starts as the model chosen when its yesman was
 	// hired; a resumed one keeps the model it was using. Workers are given
 	// theirs by StartWorkerAs.
-	ran = true
 	if c, ok := ParseChoice(y.Model); ok && role == RoleLead && !resumed {
 		// A model pi no longer has must not keep the lead from starting:
 		// it runs as pi's own default instead.

@@ -28,7 +28,9 @@ import (
 // The caches are shared by the workspace's agents and kept across runs: the
 // Go build and module caches and npm's cache are made for concurrent use by
 // several processes. Nothing here deletes them, or any directory, except a
-// reservation whose process never started.
+// reservation no process was ever started with: once the operating system
+// has started the process, its directories stay, even if pi then fails to
+// initialize or the start is cancelled.
 //
 // These are default locations, not a sandbox: a command can still name
 // another path or set the variables again. HOME, USERPROFILE, XDG config
@@ -161,8 +163,9 @@ func (t *agentTemp) env() []string {
 	)
 }
 
-// release removes the reservation of a process that never ran, each
-// directory only if it is still the one created.
+// release removes the reservation of a process that was never started,
+// each directory only if it is still the one created. Never call it once
+// the process exists.
 func (t *agentTemp) release() {
 	root, err := os.OpenRoot(t.workspace)
 	if err != nil {

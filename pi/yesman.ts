@@ -274,8 +274,12 @@ function managedFiles(signal?: AbortSignal) {
 			read.set(path, r.sha256);
 			return Buffer.from(r.data, "base64");
 		},
+		// A write after this tool read the file is an edit of that existing
+		// file at the version read; the app neither creates it nor its
+		// directory. A write without a read creates what it needs.
 		writeFile: async (path: string, content: string) => {
-			await send("write", path, { content, expect: read.get(path) ?? "" });
+			const expect = read.get(path);
+			await send("write", path, expect === undefined ? { content } : { content, expect });
 		},
 	};
 }
