@@ -9,6 +9,7 @@
 //	    workers.json       the workers its lead started
 //	    worker-starts.json when each worker started, removed ones too
 //	    board.json         the task board its agents keep
+//	    topics.json        questions and discussions worth keeping (topics.go)
 //	    knowledge/         durable guidance shared by every agent; INDEX.md lists it
 //	    task-log.md        short history TOC, maintained by the lead
 //	    task-log/          dated per-task/PR/release Markdown details
@@ -132,6 +133,8 @@ type Store struct {
 	lmu    sync.Mutex
 	locks  map[string]*sync.RWMutex // per yesman: Use reads, Archive writes
 	hlocks map[string]*sync.Mutex   // per yesman: its handoffs, in turn
+	// topicLocks serialize each workspace's topic file; guarded by lmu.
+	topicLocks map[string]chan struct{}
 }
 
 // New returns the store of workspaces under root, archiving into archive.

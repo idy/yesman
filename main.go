@@ -154,6 +154,7 @@ func main() {
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
 		BoardChanged:    func(yesman string) { _ = boardEvent.Broadcast(yesman) },
 		NeedsYouChanged: func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
+		TopicsChanged:   a.topicsChanged,
 		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew, GitHubApp: a.githubApp}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)

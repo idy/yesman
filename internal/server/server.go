@@ -40,6 +40,8 @@ type Server struct {
 	// NeedsYouChanged is told when what waits on a yesman's user changes,
 	// with the handoff a lead added, if it added one.
 	NeedsYouChanged func(yesman string, added *yesmen.Handoff)
+	// TopicsChanged is told when the lead changes a yesman's topics.
+	TopicsChanged func(yesman string)
 	// AddRepo, when set, clones a GitHub repository into the pool in place
 	// of resolving and cloning it here, so the app can show it cloning.
 	AddRepo func(ctx context.Context, repo string) (pool.Repo, error)
@@ -61,6 +63,9 @@ type Server struct {
 	// beforeBoardChange, set only by tests, runs once a board change was
 	// admitted, just before it is written.
 	beforeBoardChange func()
+	// beforeTopicChange, set only by tests, runs as beforeBoardChange does,
+	// once a topic change from an agent was admitted.
+	beforeTopicChange func()
 }
 
 // Start listens on a loopback port and serves in the background.
@@ -100,6 +105,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
 	mux.HandleFunc("GET /v1/needs-you", s.handle(s.needsYou))
 	mux.HandleFunc("POST /v1/needs-you", s.handle(s.changeNeedsYou))
+	mux.HandleFunc("GET /v1/topics", s.handle(s.topics))
+	mux.HandleFunc("POST /v1/topics", s.handle(s.changeTopics))
 	return mux
 }
 
@@ -534,6 +541,10 @@ func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, e
 	text := BuildContext(ctx, s.Pool, s.Agents, c.yesman, c.agent, board) + s.envContext(c.agent.Role == agent.RoleLead)
 	if s.GitHubApp != nil {
 		text += s.GitHubApp.Context(c.yesman.Name, c.yesman.HiredAt.UTC().Format(time.RFC3339Nano))
+	}
+	if c.agent.Role == agent.RoleLead {
+		topics, err := s.Yesmen.Topics(c.yesman.Name, c.yesman.HiredAt)
+		text += TopicsContext(topics, err)
 	}
 	if c.agent.Role == agent.RoleLead && s.Crew != nil {
 		text += CrewContext(s.Crew(ctx), c.agent)

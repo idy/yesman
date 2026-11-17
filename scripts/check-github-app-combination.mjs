@@ -43,7 +43,7 @@ try{for(const [name,engine] of Object.entries({chromium,webkit})){
   await page.goto(url);await page.locator('[data-agent="alice/lead"]').first().click();
   if(!await page.locator('#yesman-info [data-info-entry]').count())await page.getByRole('button',{name:'Show the info',exact:true}).click();
   await page.locator('#yesman-info [data-info-entry="needs-you"]').waitFor();
-  assert.deepEqual(await page.locator('#yesman-info [data-info-entry]').evaluateAll(es=>es.map(e=>e.dataset.infoEntry)),['knowledge','working-logs','needs-you']);
+  assert.deepEqual(await page.locator('#yesman-info [data-info-entry]').evaluateAll(es=>es.map(e=>e.dataset.infoEntry)),['knowledge','working-logs','needs-you','topics']);
   await page.locator('#settings-button').click();
   await page.locator('#settings-nav [data-page="github-app"]').click();
   const pane=page.locator('#github-app-page');await pane.waitFor();

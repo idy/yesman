@@ -82,6 +82,8 @@ async function answer(m, args) {
   case 'FilesMenu': return '';
   case 'Submit': return {id:args[1],revision:1,state:'accepted',agentSince:''};
   case 'Shortcuts': return saved();
+  // Lead conversations read their yesman's topics, to name messages sent from one.
+  case 'Topics': return [];
   case 'SetShortcuts': {
     await hold();
     const next = saved();
@@ -220,7 +222,7 @@ async function palette(x, check) {
     reason: el.querySelector('.palette-option-reason')?.textContent ?? '', keys: [...el.querySelectorAll('.keycap')].map((k) => k.textContent),
   })));
   x.options = options;
-  assert.equal(options.length, 39); // 36 actions, one per Settings page among them, and 3 conversations
+  assert.equal(options.length, 41); // 38 actions (Topics among them), one per Settings page among them, and 3 conversations
   for (const o of options) {
     assert.ok(o.label, o.key);
     if (o.disabled) assert.ok(o.reason, o.key);
