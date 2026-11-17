@@ -117,10 +117,53 @@ def drained():
 
 
 class Participant:
-    """An open directory a tool may use; check(fd) says whether it is still the expected one."""
+    """An open directory a tool may use; check(fd) says whether it is still the expected one.
 
-    def __init__(self, fd, label, check=None):
-        self.fd, self.label, self.check = fd, label, check
+    parent, when given, is a held descriptor of its parent directory that
+    close() closes with fd.
+    """
+
+    def __init__(self, fd, label, check=None, parent=None):
+        self.fd, self.label, self.check, self.parent = fd, label, check, parent
+
+    def close(self):
+        for fd in (self.fd, self.parent):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+
+def leads(path, parent, fd):
+    """Whether the pathname path, which tools open, still leads to the open directory fd, through the held parent."""
+    try:
+        entry, held = os.stat(path, follow_symlinks=False), os.fstat(fd)
+    except OSError:
+        return False
+    return (entry.st_dev, entry.st_ino) == (held.st_dev, held.st_ino) and names(parent, path.name, fd)
+
+
+def held(folder, check):
+    """A Participant for the directory folder, which tools use by pathname, or None if it cannot be opened.
+
+    folder is opened through its held parent. Its check passes only while
+    folder's pathname still leads, through that parent, to the held
+    directory and check(fd) holds: a directory renamed away, or a parent
+    replaced, between opening and a tool's admission is not admitted, as
+    the tool would open whatever the pathname then names. The caller closes
+    it (close()).
+    """
+    try:
+        parent = os.open(folder.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        fd = os.open(folder.name, DIRECTORY, dir_fd=parent)
+    except OSError:
+        os.close(parent)
+        return None
+    return Participant(fd, str(folder), lambda fd: leads(folder, parent, fd) and check(fd), parent)
 
 
 class locked:
@@ -797,8 +840,10 @@ def borrow(text):
 
     Returns the notary profile, the keychain and a Participant whose use is
     recorded before the tool runs, so that the always-run cleanup leaves the
-    keychain alone while that tool's processes may run. The caller closes
-    participant.fd.
+    keychain alone while that tool's processes may run. The tool is given
+    the keychain's pathname, so the record is made only while that pathname
+    still leads to the checked directory (held). The caller closes the
+    participant (close()).
     """
     folder, state = parse_state(text)
 
@@ -809,14 +854,12 @@ def borrow(text):
             return stat.S_ISREG(os.stat(KEYCHAIN, dir_fd=fd, follow_symlinks=False).st_mode)
         except OSError:
             return False
-    try:
-        fd = os.open(folder, DIRECTORY)
-    except OSError:
+    participant = held(folder, check)
+    if participant is None or not participant.check(participant.fd):
+        if participant is not None:
+            participant.close()
         raise SigningError('The signing state does not name a keychain that setup prepared')
-    if not check(fd):
-        os.close(fd)
-        raise SigningError('The signing state does not name a keychain that setup prepared')
-    return PROFILE, folder / KEYCHAIN, Participant(fd, str(folder), check)
+    return PROFILE, folder / KEYCHAIN, participant
 
 
 def kept(fd, label):
@@ -967,7 +1010,10 @@ def setup(root=ROOT):
         # Every tool setup runs records its use of the directory before it
         # runs (run_owned), so a cleanup never removes what a tool still uses.
         state = parse_state(state_text)[1]
-        signing = Participant(os.open(folder, DIRECTORY), str(folder), lambda fd: validate(fd, state))
+        # Its tools are given pathnames in folder: admitted only while folder still leads to it (held).
+        signing = held(folder, lambda fd: validate(fd, state))
+        if signing is None:
+            raise SigningError('%s changed as it was made' % folder)
         with using([signing]):
             # Published before any keychain exists, so the always-run cleanup
             # step can remove what a killed setup leaves. If this write fails,
@@ -1038,7 +1084,7 @@ def setup(root=ROOT):
         raise
     finally:
         if signing is not None:
-            os.close(signing.fd)
+            signing.close()
     print('Prepared Developer ID signing: %s (%s), notary profile %s' % (name, sha1, PROFILE))
 
 

@@ -66,7 +66,7 @@ import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from macos_signing import (DIRECTORY, Participant, SigningError, borrow, clean_environment, drained, empty,  # noqa: E402
-                           install_signal_handlers, kept, locked, names, run_owned, shielded, use_groups)
+                           install_signal_handlers, kept, leads, locked, names, run_owned, shielded, use_groups)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Each key of mygo.json that the derived configuration knows how to carry.
@@ -160,11 +160,7 @@ class Owned:
 
     def current(self, fd=None):
         """Whether the path still leads, through its parent, to the held directory."""
-        try:
-            entry, held = os.stat(self.path, follow_symlinks=False), os.fstat(self.fd)
-        except OSError:
-            return False
-        return (entry.st_dev, entry.st_ino) == (held.st_dev, held.st_ino) and names(self.parent, self.path.name, self.fd)
+        return leads(self.path, self.parent, self.fd)
 
     def participant(self):
         return Participant(self.fd, str(self.path), self.current)
@@ -248,7 +244,7 @@ def build(platforms, system, mode, identity, state, upload, root=ROOT):
         _build(targets, upload, sign, notarize, borrowed, key, token, root)
     finally:
         if borrowed is not None:
-            os.close(borrowed.fd)
+            borrowed.close()
 
 
 def _build(targets, upload, sign, notarize, borrowed, key, token, root):

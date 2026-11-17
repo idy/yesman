@@ -893,6 +893,122 @@ def replacement_cases(temporary):
         record('launcher-removes-only-its-directories', variant=target)
 
 
+# Runs setup or the release build with record_use wrapped: just before the
+# first record in the signing directory (the moment a tool is admitted), it
+# renames that directory or its parent aside and puts a foreign directory
+# with another keychain at the same pathname, then lets the real record_use
+# decide. argv: scripts, setup|build, none|directory|parent, runner temp,
+# aside, observation file.
+SWAP_DRIVER = '''
+import json, os, pathlib, sys
+scripts, mode, target, runner_temp, aside, observation = sys.argv[1:7]
+sys.path.insert(0, scripts)
+import macos_signing as m
+original, swapped = m.record_use, []
+def record_use(participant, group):
+    folder = pathlib.Path(participant.label)
+    if target != 'none' and not swapped and folder.parent == pathlib.Path(runner_temp) and folder.name.startswith('yesman-signing-'):
+        victim = folder if target == 'directory' else folder.parent
+        victim.rename(aside)
+        victim.mkdir(mode=0o700)
+        folder.mkdir(mode=0o700, exist_ok=True)
+        (folder / m.KEYCHAIN).write_bytes(FOREIGN)
+        (folder / 'unknown').write_bytes(b'not this run')
+        swapped.append(str(folder))
+    return original(participant, group)
+m.record_use = record_use
+result = {}
+try:
+    if mode == 'build':
+        import release_build as b
+        b.build('darwin/arm64', 'macOS', 'developer-id', IDENTITY, os.environ['SIGNING_STATE'], False)
+    else:
+        m.setup()
+    result['ok'] = True
+except BaseException as error:
+    result.update(ok=False, error=str(error))
+result['swapped'] = swapped
+pathlib.Path(observation).write_text(json.dumps(result))
+'''
+FOREIGN = b'a foreign synthetic keychain'
+
+
+def swapped_run(fixture, mode, target, state=None):
+    aside, observation = fixture.dir / 'aside', fixture.dir / 'observation.json'
+    env = fixture.env(full_inputs() if mode == 'setup' else {'MYGO_UPDATER_PRIVATE_KEY': UPDATER_KEY})
+    if state is not None:
+        env['SIGNING_STATE'] = state
+    code = SWAP_DRIVER.replace('FOREIGN', repr(FOREIGN)).replace('IDENTITY', repr(SHA))
+    process = subprocess.run([sys.executable, '-c', code, str(fixture.source / 'scripts'), mode, target, str(fixture.runner_temp), str(aside),
+                              str(observation)], env=env, cwd=fixture.source, capture_output=True, text=True, timeout=60)
+    assert process.returncode == 0, process.stderr
+    return process, json.loads(observation.read_text()), aside
+
+
+def foreign_untouched(folder):
+    """Whether the directory put at the signing pathname still holds exactly what was put there."""
+    return (sorted(p.name for p in folder.iterdir()) == ['signing.keychain-db', 'unknown']
+            and (folder / 'signing.keychain-db').read_bytes() == FOREIGN and (folder / 'unknown').read_bytes() == b'not this run')
+
+
+def admission_path_cases(temporary, build=('none', 'directory', 'parent'), setup=('directory', 'parent')):
+    """final-main48870 review F1: a signing directory is admitted only while its pathname still leads to it.
+
+    Tools are given pathnames in the signing directory (the derived
+    config's keychain, setup's security arguments). Renaming the checked
+    directory or its parent aside and putting another at that pathname just
+    before admission must keep the tool from running, record nothing in
+    either directory and leave both, and their unrelated files, alone.
+    """
+    for target in build:
+        fixture, state = prepared(temporary, 'admission-path-build-' + target)
+        folder = fixture.folders()[0]
+        effect = fixture.dir / 'tool-effect.json'
+        (fixture.bin / 'go').write_text(
+            '#!%s\nimport json, pathlib, sys\nconfig = json.loads((pathlib.Path(sys.argv[-1]) / "mygo.json").read_text())\n'
+            'keychain = pathlib.Path(config["macos"]["notarize"]["keychain"])\n'
+            'pathlib.Path(%r).write_text(json.dumps({"foreign": keychain.read_bytes() == %r, "records": len(list(keychain.parent.glob("use-*")))}))\n'
+            % (sys.executable, str(effect), FOREIGN))
+        (fixture.bin / 'go').chmod(0o755)
+        process, result, aside = swapped_run(fixture, 'build', target, state)
+        if target == 'none':
+            assert result['ok'] and not result['swapped'], result
+            assert json.loads(effect.read_text()) == {'foreign': False, 'records': 1}
+            assert list(folder.glob('use-*')) == []
+            assert fixture.signing('cleanup', state=state).returncode == 0 and fixture.folders() == []
+            record('signing-directory-admitted-by-pathname', mode='build', variant=target)
+            continue
+        assert result['swapped'] == [str(folder)], result
+        assert not result['ok'] and 'mygo build was not started' in result['error'] and 'is no longer the directory this run uses' in result['error'], result
+        assert not effect.exists(), 'the tool ran with a foreign keychain at its pathname'
+        original = aside if target == 'directory' else aside / folder.name
+        assert (original / 'signing.keychain-db').is_file() and (original / 'receipt.json').is_file()
+        assert list(original.glob('use-*')) == [] and list(folder.glob('use-*')) == []
+        assert foreign_untouched(folder)
+        if target == 'parent':
+            # The launcher's own directory moved with the parent: emptied where it went, and reported.
+            assert 'was replaced while the build ran' in process.stderr, process.stderr
+            assert [list(p.iterdir()) for p in aside.glob('yesman-release-*')] == [[]]
+        else:
+            assert list(fixture.runner_temp.iterdir()) == [folder] and list((fixture.source / 'build').iterdir()) == []
+        cleanup = fixture.signing('cleanup', state=state)
+        assert cleanup.returncode != 0 and 'leaving it alone' in cleanup.stderr, cleanup.stderr
+        assert foreign_untouched(folder) and (original / 'signing.keychain-db').is_file()
+        record('signing-directory-admitted-by-pathname', mode='build', variant=target)
+    for target in setup:
+        fixture = Fixture(temporary, 'admission-path-setup-' + target, good_identity())
+        process, result, aside = swapped_run(fixture, 'setup', target)
+        assert len(result['swapped']) == 1, result
+        folder = pathlib.Path(result['swapped'][0])
+        assert not result['ok'] and 'Reading the keychain search list was not started' in result['error'] and 'is no longer the directory this run uses' in result['error'], result
+        assert fixture.calls() == [], 'a tool ran'
+        original = aside if target == 'directory' else aside / folder.name
+        assert sorted(p.name for p in original.iterdir()) == ['receipt.json'], 'the moved directory holds only its receipt'
+        assert foreign_untouched(folder)
+        assert 'leaving it alone' in process.stderr, process.stderr
+        record('signing-directory-admitted-by-pathname', mode='setup', variant=target)
+
+
 def signatures(**changes):
     """Stand-in signatures of a correct two-architecture build, with per-key changes."""
     dr = 'identifier "dev.idy.yesman" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = %s' % TEAM
@@ -1523,6 +1639,7 @@ def main():
         admission_cases(temporary)
         password_cases(temporary)
         replacement_cases(temporary)
+        admission_path_cases(temporary)
         verify_cases(temporary)
         launcher_cases(temporary)
         workflow_cases(temporary)
