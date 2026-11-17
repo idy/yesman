@@ -135,8 +135,9 @@ func newWorktreeInstance(repo, path string) (string, error) {
 // rootIdentity is called right after newWorktreeInstance, under the same
 // locks: it opens the new checkout's directory without following a link,
 // checks through that handle that it carries instance id, and returns the
-// directory's identity. A file system that reports no creation time gives
-// no identity, and no write grant follows from it.
+// directory's identity. A file system that reports no creation time, or a
+// zero one (ambiguous with none), gives no identity, and no write grant
+// follows from it.
 func rootIdentity(repo, path, id string) (*safefs.Identity, error) {
 	wt, err := openWorktree(path)
 	if err != nil {
@@ -163,8 +164,8 @@ func rootIdentity(repo, path, id string) (*safefs.Identity, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !ident.HasBirth {
-		return nil, errors.New("the file system reports no creation time for the checkout's directory")
+	if !ident.Usable() {
+		return nil, errors.New("the file system reports no usable creation time for the checkout's directory")
 	}
 	return &ident, nil
 }

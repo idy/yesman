@@ -133,6 +133,93 @@ func TestManagedWorktreeIdentityIsRecordedAndChecked(t *testing.T) {
 	}
 }
 
+// The identity comparison, on supplied identities: a recorded or current
+// identity without a usable creation time (none, or zero, which macOS also
+// reports for none) is refused, as is any mismatch; a matching nonzero one
+// passes.
+func TestSameRootNeedsAUsableCreationTime(t *testing.T) {
+	ws := safefs.Identity{Dev: 3, Ino: 1, Birth: 10, HasBirth: true}
+	good := safefs.Identity{Dev: 3, Ino: 0xF00, Birth: 0xF00, HasBirth: true}
+	if err := sameRoot(good, ws, &fooIdentity); err != nil {
+		t.Fatalf("matching identity: %v", err)
+	}
+	zero := yesmen.WorktreeRoot{Ino: 0xF00, Birth: 0}
+	for name, c := range map[string]struct {
+		have safefs.Identity
+		rec  *yesmen.WorktreeRoot
+		why  string
+	}{
+		"no record":                  {good, nil, "no recorded"},
+		"no current creation time":   {safefs.Identity{Dev: 3, Ino: 0xF00}, &fooIdentity, "no usable creation time"},
+		"zero current creation time": {safefs.Identity{Dev: 3, Ino: 0xF00, HasBirth: true}, &fooIdentity, "no usable creation time"},
+		"zero record, none now":      {safefs.Identity{Dev: 3, Ino: 0xF00}, &zero, "no usable creation time"},
+		"zero record, zero now":      {safefs.Identity{Dev: 3, Ino: 0xF00, HasBirth: true}, &zero, "no usable creation time"},
+		"zero record, real time now": {good, &zero, "no usable creation time"},
+		"other file system":          {safefs.Identity{Dev: 4, Ino: 0xF00, Birth: 0xF00, HasBirth: true}, &fooIdentity, "not the directory"},
+		"other inode":                {safefs.Identity{Dev: 3, Ino: 0xBA4, Birth: 0xF00, HasBirth: true}, &fooIdentity, "not the directory"},
+		"other creation time":        {safefs.Identity{Dev: 3, Ino: 0xF00, Birth: 0xF01, HasBirth: true}, &fooIdentity, "not the directory"},
+	} {
+		err := sameRoot(c.have, ws, c.rec)
+		if err == nil || !strings.Contains(err.Error(), c.why) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// A record whose creation time is zero (as a checkout on a file system
+// without creation times could have been recorded before) grants nothing:
+// the write is refused, the file, the records and the checkout's
+// registration are left as they are, and the record is not rebound to the
+// directory's current identity.
+func TestManagedWorktreeWithZeroCreationTimeIsRefused(t *testing.T) {
+	x := newWorktreeFixture(t)
+	x.checkout(t, "zero", "feature")
+	rec := recordOf(t, x, "zero")
+	if rec.Root == nil {
+		t.Fatal("the checkout's record has no directory identity")
+	}
+	setRoot(t, x, "zero", &yesmen.WorktreeRoot{Ino: rec.Root.Ino, Birth: 0})
+	dir := filepath.Join(x.y.Path, "zero")
+	target := filepath.Join(dir, "feature")
+	recordsFile := filepath.Join(x.y.Path, ".yesman", "worktrees.json")
+	snapshot := func() [3][]byte {
+		var s [3][]byte
+		for i, p := range []string{target, recordsFile, filepath.Join(dir, ".git")} {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s[i] = b
+		}
+		return s
+	}
+	before := snapshot()
+	for _, req := range []map[string]any{
+		{"op": "write", "path": target, "content": "ZERO"},
+		{"op": "write", "path": filepath.Join(dir, "made-by-zero"), "content": "ZERO"},
+		{"op": "mkdir", "path": filepath.Join(dir, "dir-by-zero")},
+	} {
+		res := postFile(x.f, x.w.Token, req)
+		if res.Code == 200 || !strings.Contains(res.Body.String(), "no usable creation time") {
+			t.Fatalf("%v: %d %s", req, res.Code, res.Body)
+		}
+	}
+	after := snapshot()
+	for i := range after {
+		if !bytes.Equal(after[i], before[i]) {
+			t.Fatalf("file %d changed by a refused write", i)
+		}
+	}
+	for _, name := range []string{"made-by-zero", "dir-by-zero"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			t.Fatalf("%s created under a zero-birth record", name)
+		}
+	}
+	if got := recordOf(t, x, "zero").Root; got == nil || got.Ino != rec.Root.Ino || got.Birth != 0 {
+		t.Fatalf("record rebound: %+v", got)
+	}
+}
+
 // A record without an identity (made before identities were kept) grants
 // nothing and is not filled in; a new managed checkout is the way back.
 func TestManagedWorktreeWithoutIdentityIsNotAdopted(t *testing.T) {

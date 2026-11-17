@@ -6,6 +6,8 @@ import (
 	"syscall"
 )
 
+// The creation time is st_birthtimespec; where the file system keeps none it
+// is {0, 0}, which reports no creation time (HasBirth false).
 func identity(f *os.File) (Identity, error) {
 	info, err := f.Stat()
 	if err != nil {
@@ -15,5 +17,6 @@ func identity(f *os.File) (Identity, error) {
 	if !ok {
 		return Identity{}, errors.New("cannot tell the file's identity")
 	}
-	return Identity{Dev: uint64(st.Dev), Ino: st.Ino, Birth: st.Birthtimespec.Nano(), HasBirth: true}, nil
+	birth, ok := birthFromTimespec(st.Birthtimespec.Sec, st.Birthtimespec.Nsec)
+	return Identity{Dev: uint64(st.Dev), Ino: st.Ino, Birth: birth, HasBirth: ok}, nil
 }

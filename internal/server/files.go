@@ -213,9 +213,6 @@ func (s *Server) checkInstance(y yesmen.Yesman, g fileGrant, ws, root *safefs.Di
 	refuse := func(why error) error {
 		return fmt.Errorf("%s is not the checkout made for you (%v); it is not written", g.rel, why)
 	}
-	if g.root == nil {
-		return refuse(errors.New("no recorded directory identity"))
-	}
 	have, err := root.Identity()
 	if err != nil {
 		return refuse(err)
@@ -224,8 +221,8 @@ func (s *Server) checkInstance(y yesmen.Yesman, g fileGrant, ws, root *safefs.Di
 	if err != nil {
 		return refuse(err)
 	}
-	if !have.HasBirth || have.Dev != wsID.Dev || have.Ino != g.root.Ino || have.Birth != g.root.Birth {
-		return refuse(errors.New("not the directory yesman created for it"))
+	if err := sameRoot(have, wsID, g.root); err != nil {
+		return refuse(err)
 	}
 	data, err := safefs.ReadSmall(root, ".git", maxGitFile)
 	if err != nil {
@@ -237,6 +234,24 @@ func (s *Server) checkInstance(y yesmen.Yesman, g fileGrant, ws, root *safefs.Di
 	}
 	if id != g.instance {
 		return refuse(errors.New("another checkout instance"))
+	}
+	return nil
+}
+
+// sameRoot requires have, the opened checkout directory's current identity,
+// to be the one recorded at creation, on the workspace's file system (ws).
+// A missing record, and a recorded or current identity without a usable
+// creation time (none, or zero, ambiguous with none), are refused: the
+// inode number alone does not name the directory yesman made.
+func sameRoot(have, ws safefs.Identity, rec *yesmen.WorktreeRoot) error {
+	if rec == nil {
+		return errors.New("no recorded directory identity")
+	}
+	if rec.Birth == 0 || !have.Usable() {
+		return errors.New("no usable creation time for the directory")
+	}
+	if have.Dev != ws.Dev || have.Ino != rec.Ino || have.Birth != rec.Birth {
+		return errors.New("not the directory yesman created for it")
 	}
 	return nil
 }
