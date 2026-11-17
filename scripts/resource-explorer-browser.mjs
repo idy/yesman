@@ -4,7 +4,7 @@
 // is answered here or recorded as unmocked, which fails the run.
 //
 // YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs \
-//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual,layout,keys \
+//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize \
 //   EXPLORER_SHOTS=/path/for/screenshots node scripts/resource-explorer-browser.mjs
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -16,7 +16,7 @@ const root = fileURLToPath(new URL('../web/', import.meta.url));
 const shots = process.env.EXPLORER_SHOTS;
 if (shots) await mkdir(shots, { recursive: true });
 const engines = (process.env.EXPLORER_ENGINES || 'chromium,webkit').split(',');
-const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual,layout,keys').split(','));
+const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize').split(','));
 
 const bridge = `<script>
 window.calls=[];window.unmocked=[];window.delayed={};window.releases={};
@@ -520,7 +520,140 @@ async function keysPart(page, engine) {
   assert.equal(await input.inputValue(), '', 'an answer typed for an earlier hire is gone');
 }
 
-const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart };
+// Past 64 remembered answers, the answer typed for the request shown stays,
+// with its selection and warning, through redraws while it shows; it never
+// replaces another answer, and goes once the request is left, closed or the
+// yesman hired again. Room freeing up makes it an ordinary remembered answer.
+async function capacityPart(page, engine) {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const pane = page.locator('#needs-you');
+  const input = pane.locator('[data-detail-control="answer-text"]');
+  const warning = pane.locator('.needs-you-ask [role="status"]');
+  const answers = () => page.evaluate(() => calls.filter((c) => c[0] === 'Answer').length);
+  const choose = (key) => pane.locator('.needs-you-open').evaluateAll((es, k) => es.find((e) => e.dataset.request === k).click(), key);
+  const redraw = async (how) => {
+    const n = await page.evaluate(() => calls.filter((c) => c[0] === 'State').length);
+    if (how === 'refresh') await pane.locator('[data-pane-control="refresh"]').evaluate((b) => b.click());
+    else await page.evaluate(() => handlers.changed?.());
+    await page.waitForFunction((n) => calls.filter((c) => c[0] === 'State').length > n, n);
+    await frames(page);
+  };
+  await page.evaluate(() => {
+    const h = fixtureState.yesmen[0].hiredAt;
+    fixtureState.agents.push(...Array.from({ length: 64 }, (_, i) => ({ id: 'alice/w' + i, name: 'w' + i, yesman: 'alice', role: 'worker', status: 'waiting', since: h, handedOver: true,
+      dialogAt: '2026-03-01T08:30:00Z', dialog: { id: 'q' + i, method: 'input', title: 'Request ' + i, message: 'An open answer' } })));
+  });
+  await page.locator('[data-info-entry="needs-you"]').click();
+  await redraw('refresh');
+  await page.waitForFunction(() => document.querySelectorAll('#needs-you .needs-you-open[data-request^="d:"]').length === 65);
+  const keys = await pane.locator('.needs-you-open[data-request^="d:"]').evaluateAll((es) => es.map((e) => e.dataset.request));
+  for (let i = 0; i < keys.length; i++) { await choose(keys[i]); await input.fill('Unsent ' + i); }
+  const last = keys.at(-1);
+  assert.equal(await warning.isVisible(), true, 'the 65th answer says it is kept only while shown');
+  await input.focus();
+  await input.evaluate((e) => e.setSelectionRange(2, 4));
+  const keptAs = async (what) => {
+    assert.equal(await input.inputValue(), 'Unsent 64', `${what}: text`);
+    assert.deepEqual(await page.evaluate(() => [document.activeElement?.dataset.detailControl, document.activeElement.selectionStart, document.activeElement.selectionEnd]), ['answer-text', 2, 4], `${what}: focus and selection`);
+    assert.equal(await warning.isVisible(), true, `${what}: warning`);
+  };
+  await redraw('changed');
+  await keptAs('changed');
+  await redraw('refresh');
+  await input.evaluate((e) => { e.focus(); e.setSelectionRange(2, 4); });
+  await keptAs('Check again');
+  await page.evaluate(() => setFixtureLocale('zh-Hans'));
+  await frames(page);
+  await keptAs('locale');
+  assert.match(await warning.innerText(), /仅在显示此请求时保留/);
+  if (engine === 'chromium') await shot(page, `${engine}-capacity-kept`);
+  await page.evaluate(() => setFixtureLocale('en'));
+  await frames(page);
+  assert.equal(await answers(), 0);
+  // The other 64 are untouched.
+  for (const i of [0, 31, 63]) { await choose(keys[i]); assert.equal(await input.inputValue(), 'Unsent ' + i); }
+  // Leaving the 65th lets it go; it does not move to another request.
+  await choose(last);
+  assert.equal(await input.inputValue(), '', 'left, the unremembered answer goes');
+  assert.equal(await warning.isVisible(), false);
+  // Typed again, then a remembered request closes: room frees, it is
+  // remembered like the others and survives leaving.
+  await input.fill('Unsent 64 again');
+  assert.equal(await warning.isVisible(), true);
+  await page.evaluate(() => { const a = fixtureState.agents.find((x) => x.id === 'alice/w0'); a.status = 'idle'; delete a.dialog; });
+  await redraw('changed');
+  assert.equal(await input.inputValue(), 'Unsent 64 again');
+  assert.equal(await warning.isVisible(), false, 'remembered now: no warning');
+  assert.equal(await pane.locator(`.needs-you-open[data-request="${keys[1]}"]`).count(), 0, 'w0 closed');
+  await choose(keys[2]);
+  await choose(last);
+  assert.equal(await input.inputValue(), 'Unsent 64 again', 'remembered once room freed');
+  // Another yesman never shows it; a new hire drops it.
+  await page.locator('[data-agent="bob/lead"]').first().click();
+  await page.locator('[data-info-entry="needs-you"]').click();
+  assert.equal(await input.count(), 0);
+  await page.evaluate(() => { fixtureState.yesmen[0].hiredAt = '2026-03-05T00:00:00Z'; });
+  await redraw('refresh');
+  await page.evaluate(() => { fixtureState.yesmen[0].hiredAt = '2026-03-01T08:00:00Z'; });
+  await redraw('refresh');
+  await page.locator('[data-agent="alice/lead"]').first().click();
+  await page.locator('[data-info-entry="needs-you"]').click();
+  await choose(last);
+  assert.equal(await input.inputValue(), '', 'an answer of an earlier hire is gone');
+  assert.equal(await answers(), 0);
+}
+
+// Info making way while it has focus moves focus into the pane, to a
+// visible control of the column the pane shows.
+async function resizePart(page, engine) {
+  const focus = () => page.evaluate(() => ({ key: document.activeElement?.dataset.key ?? document.activeElement?.className, inTopics: !!document.activeElement?.closest('#topics'), visible: !!document.activeElement?.getClientRects().length }));
+  // Kept beside Topics, a topic's content shown; 1000px hides Info.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator('[data-info-entry="topics"]').focus();
+  await page.keyboard.press('Enter');
+  await page.locator('#topics-tree').waitFor();
+  await page.getByRole('button', { name: 'Show the info', exact: true }).click();
+  await page.locator('#topics [data-key="topic-tp1"] > .explorer-line').click();
+  await page.locator('#yesman-info [data-info-entry="topics"]').focus();
+  await page.setViewportSize({ width: 1000, height: 780 });
+  await frames(page);
+  let f = await focus();
+  assert.deepEqual(f, { key: 'back', inTopics: true, visible: true }, `content shown: focus on the way back ${JSON.stringify(f)}`);
+  if (engine === 'chromium') await shot(page, `${engine}-kept-info-1000-focus`);
+  await page.keyboard.press('Enter');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'topic-tp1', 'Back still returns to the row');
+  // Navigation shown: the same move lands on the search.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator('#topics [aria-label="Close the topics"]').click();
+  await page.locator('[data-info-entry="topics"]').focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('button', { name: 'Show the info', exact: true }).click();
+  await page.locator('#yesman-info [data-info-entry="topics"]').focus();
+  await page.setViewportSize({ width: 1000, height: 780 });
+  await frames(page);
+  f = await focus();
+  assert.equal(f.key, 'search', `navigation shown: the search ${JSON.stringify(f)}`);
+  assert.equal(f.visible, true);
+  // Ordinary yield (not kept): 1600 → 1280 with focus in Info.
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.locator('#topics [aria-label="Close the topics"]').click();
+  await page.locator('[data-info-entry="topics"]').focus();
+  await page.keyboard.press('Enter');
+  await page.locator('#topics [data-key="topic-tp1"] > .explorer-line').click();
+  await page.locator('#yesman-info [data-info-entry="topics"]').focus();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await frames(page);
+  f = await focus();
+  assert.ok(f.inTopics && f.visible, `ordinary yield: visible focus in Topics ${JSON.stringify(f)}`);
+  // Focus elsewhere stays where it is.
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.locator('#dock textarea').focus();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await frames(page);
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', 'focus outside Info stays');
+}
+
+const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart };
 try {
   for (const name of engines) {
     const browser = await pw[name].launch({ headless: true });

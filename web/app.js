@@ -1416,6 +1416,10 @@ const needsYouPlaces = scrollMemory();
 // known to be closed (pruneNeedsYouDrafts); a bounded number are kept.
 const needsYouDrafts = new Map(); // key -> { yesman, hiredAt, text }
 const NEEDS_YOU_DRAFTS = 64;
+// Past that bound, the one answer being typed for the request shown, kept
+// apart and only while that very request, of that hire, stays shown: a
+// redraw keeps it, choosing another request or yesman lets it go.
+let needsYouOverflow = null; // { key, yesman, hiredAt, text }
 
 // pruneNeedsYouDrafts drops the answers typed for requests the whole state
 // shows closed: answered, cancelled, timed out, of an agent stopped or
@@ -1495,6 +1499,7 @@ function renderNeedsYouPane() {
   aside.setAttribute('aria-label', t('Needs You'));
   document.documentElement.dataset.needsYou = shown ? 'open' : 'closed';
   if (!shown) {
+    needsYouOverflow = null;
     aside.replaceChildren();
     delete aside.dataset.scope;
     delete aside.dataset.shown;
@@ -1533,6 +1538,7 @@ function renderNeedsYouPane() {
   if (chosen) needsYouChosen.set(scope, { key: chosen.key, at: items.indexOf(chosen), focus: narrowFocus });
   else needsYouChosen.delete(scope);
   pruneNeedsYouDrafts();
+  if (needsYouOverflow && (needsYouOverflow.key !== chosen?.key || needsYouOverflow.yesman !== name || needsYouOverflow.hiredAt !== (y?.hiredAt ?? ''))) needsYouOverflow = null;
 
   const nav = h('div', { class: 'explorer-nav-scroll needs-you-body' });
   let content;
@@ -1682,14 +1688,22 @@ function needsYouDetail(y, item) {
     if (input) {
       input.dataset.detailControl = 'answer-text';
       input.setAttribute('aria-label', requestWhat(item));
-      if (needsYouDrafts.has(item.key)) input.value = needsYouDrafts.get(item.key).text;
       // Past the bound, no other answer is dropped to make room: this one
-      // is kept while it shows, and the pane says so.
-      const full = h('p', { class: 'ask-hint', role: 'status', hidden: true },
-        t('This answer is kept only while it shows: {n} other unsent answers are kept already.', { n: formatNumber(NEEDS_YOU_DRAFTS) }));
+      // is kept apart while its request shows, and the pane says so. Once
+      // room frees, it is remembered like the others.
+      const draft = { yesman: y.name, hiredAt: y.hiredAt ?? '' };
+      const over = needsYouOverflow?.key === item.key ? needsYouOverflow : null;
+      if (over && needsYouDrafts.size < NEEDS_YOU_DRAFTS) { needsYouDrafts.set(item.key, { ...draft, text: over.text }); needsYouOverflow = null; }
+      if (needsYouDrafts.has(item.key)) input.value = needsYouDrafts.get(item.key).text;
+      else if (needsYouOverflow) input.value = needsYouOverflow.text;
+      const full = h('p', { class: 'ask-hint', role: 'status', hidden: !needsYouOverflow },
+        t('Kept only while this request is shown: {n} other unsent answers are already kept.', { n: formatNumber(NEEDS_YOU_DRAFTS) }));
       input.addEventListener('input', () => {
         const keep = needsYouDrafts.has(item.key) || needsYouDrafts.size < NEEDS_YOU_DRAFTS;
-        if (keep) needsYouDrafts.set(item.key, { yesman: y.name, hiredAt: y.hiredAt ?? '', text: input.value });
+        if (keep) {
+          needsYouDrafts.set(item.key, { ...draft, text: input.value });
+          if (needsYouOverflow?.key === item.key) needsYouOverflow = null;
+        } else needsYouOverflow = { key: item.key, ...draft, text: input.value };
         full.hidden = keep;
       });
       ask.append(full);
@@ -3613,12 +3627,13 @@ function togglePanel() {
     state.panelOpen = true;
     infoKept = true;
   }
+  infoYielded = infoYields();
   info.render();
   renderBarActions();
 }
 
 // As the window changes, the info panel makes way, or shows again; focus it
-// hid goes to the pane's heading.
+// hid goes into the pane, to a control of the column it shows (paneFocus).
 window.addEventListener('resize', () => {
   const now = infoYields();
   if (now === infoYielded) return;
@@ -3626,8 +3641,25 @@ window.addEventListener('resize', () => {
   const lost = now && $('#yesman-info')?.contains(document.activeElement);
   info.render();
   renderBarActions();
-  if (lost) $(state.pane === 'topics' ? '#topics .topics-search' : '#needs-you .needs-you-heading')?.focus({ preventScroll: true });
+  if (lost) paneFocus(state.pane)?.focus({ preventScroll: true });
 });
+
+// paneFocus is the first visible control of the explorer pane shown, in the
+// column it shows (content or navigation), else its close button.
+function paneFocus(pane) {
+  const aside = pane === 'topics' ? $('#topics') : pane === 'needs-you' ? $('#needs-you') : null;
+  if (!aside) return null;
+  const content = $('.explorer', aside)?.dataset.focus === 'content';
+  const choices = pane === 'topics'
+    ? (content ? ['[data-key="back"]', '[data-key="detail-title"]', '[data-key="edit-title"]'] : ['.topics-search', '#topics-tree .explorer-row[tabindex="0"]'])
+    : (content ? ['[data-key="list"]', '.needs-you-detail-title'] : ['.needs-you-open[aria-current="true"]', '.needs-you-open', '.needs-you-heading']);
+  const visible = (el) => el && !el.disabled && el.getClientRects().length > 0;
+  for (const sel of [...choices, '.files-head-actions button:last-child']) {
+    const el = $(sel, aside);
+    if (visible(el)) return el;
+  }
+  return null;
+}
 
 // ---------- Board pane ----------
 
