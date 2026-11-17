@@ -12,8 +12,10 @@ import (
 
 // TestManagedWriteThroughInstalledPiTools runs the installed pi runtime's
 // own write and edit tools with the extension's managed file operations
-// against the real API (scripts/check-managed-write-pi.mjs). It needs the
-// prepared runtime, as CI's YESMAN_TEST_RUNTIME, and node.
+// against the real API (scripts/check-managed-write-pi.mjs): ordinary write
+// and edit work, while a file outside the grants and a file changed after pi
+// read it are refused and left unchanged. It needs the prepared runtime, as
+// CI's YESMAN_TEST_RUNTIME, and node.
 func TestManagedWriteThroughInstalledPiTools(t *testing.T) {
 	rt := os.Getenv("YESMAN_TEST_RUNTIME")
 	node, err := exec.LookPath("node")
@@ -21,7 +23,7 @@ func TestManagedWriteThroughInstalledPiTools(t *testing.T) {
 		t.Skip("needs YESMAN_TEST_RUNTIME and node")
 	}
 	if runtime.GOOS == "windows" {
-		t.Skip("the parent swap needs symlinks, which CI users on Windows may not create")
+		t.Skip("not yet run against the installed pi runtime on Windows")
 	}
 	f := newBoardFixture(t)
 	y := f.hire("alice")
@@ -40,7 +42,7 @@ func TestManagedWriteThroughInstalledPiTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), `"oldEscaped":true`) || !strings.Contains(string(out), `"newRefused":true`) {
+	if !strings.Contains(string(out), `{"outsideRefused":true,"staleEditRefused":true,"ordinary":true}`) {
 		t.Fatalf("unexpected result: %s", out)
 	}
 	t.Logf("%s", out)
