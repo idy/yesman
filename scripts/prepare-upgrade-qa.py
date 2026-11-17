@@ -75,7 +75,8 @@ def main():
             assert before=={str(p.relative_to(tree)):hashlib.sha256(p.read_bytes()).hexdigest() for p in tree.rglob('*.go')}
             package=out/version/target;binary=package/('yesman.app/Contents/MacOS/Yes Man' if target.startswith('darwin-') else 'Yes Man'+('.exe' if target.startswith('windows-') else ''))
             # MyGo skips signing without a key; never continue with an unsigned successor.
-            archive=package/('yesman-'+version+'-'+target+'.tar.gz');manifest=json.loads((package/('update-'+target+'.json')).read_text(encoding='utf-8'))
+            archive=package/('yesman-'+version+'-'+target+'.tar.gz');signed=package/('update-'+target+'.json')
+            assert archive.is_file() and signed.is_file(),'unsigned QA successor';manifest=json.loads(signed.read_text(encoding='utf-8'))
             assert manifest['version']==version and manifest['size']==archive.stat().st_size and manifest['signature'],'unsigned QA successor'
             web=out/version/'web';shutil.copytree(tree/'web',web)
             stages.append({'Version':version,'Source':source,'Archive':str((package/('yesman-'+version+'-'+target+'.tar.gz')).relative_to(out)),'Manifest':str((package/('update-'+target+'.json')).relative_to(out)),'Web':str(web.relative_to(out)),'mainName':'Yes Man','binarySHA256':hashlib.sha256(binary.read_bytes()).hexdigest(),'sourceGoHashes':before,'official':False,'limits':['private QA version, normal production build from exact candidate source','temporary packaging version/notes/linked loopback feed; no source change or formal tag','not a future released version']})

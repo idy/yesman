@@ -167,6 +167,11 @@ class Producer(unittest.TestCase):
             manifest = next(pathlib.Path(args[args.index('-o') + 1]).rglob('update-*.json'))
             manifest.write_text(json.dumps({**json.loads(manifest.read_text()), 'signature': ''}))
 
+        def without_manifest(args, kw):
+            # MyGo skips signing (and on macOS the archive) when it finds no key.
+            self.good_build(args, kw)
+            next(pathlib.Path(args[args.index('-o') + 1]).rglob('update-*.json')).unlink()
+
         def interrupted(args, kw):
             self.good_build(args, kw)
             raise KeyboardInterrupt
@@ -175,7 +180,7 @@ class Producer(unittest.TestCase):
             self.good_build(args, kw)
             self.handlers[signal.SIGTERM](signal.SIGTERM, None)
 
-        for build, error in ((unsigned, AssertionError), (interrupted, KeyboardInterrupt), (stopped, SystemExit)):
+        for build, error in ((unsigned, AssertionError), (without_manifest, AssertionError), (interrupted, KeyboardInterrupt), (stopped, SystemExit)):
             self.calls, self.build = [], build
             with self.assertRaises(error):
                 self.main()
