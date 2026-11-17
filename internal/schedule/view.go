@@ -88,10 +88,14 @@ func (s *Service) View(name string) (View, error) {
 }
 
 func (s *Service) view(name string, since time.Time) (View, error) {
-	y, err := s.cfg.Yesmen.Get(name)
+	// The workspace is held while its state is found and read: its
+	// generation, checked here, stays the current one until then, so the
+	// state found is the current one's and no other's is replaced.
+	y, release, err := s.cfg.Yesmen.BeginUse(name)
 	if err != nil {
 		return View{}, err
 	}
+	defer release()
 	if err := hiredAt(y, since); err != nil {
 		return View{}, err
 	}

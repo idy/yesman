@@ -9,7 +9,24 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source = fs.readFileSync(new URL('./check-production-upgrade.py', import.meta.url), 'utf8');
-const driver = source.match(/DRIVER=r'''<script>\n([\s\S]*?)<\/script>'''/)[1];
+
+// driverOf returns the page driver in the runner's source as Python reads
+// it: with universal newlines, so a Windows checkout (CRLF) gives the same
+// driver as LF. null: the source has no DRIVER block.
+function driverOf(text) {
+  const match = text.replace(/\r\n?/g, '\n').match(/DRIVER=r'''<script>\n([\s\S]*?)<\/script>'''/);
+  return match ? match[1] : null;
+}
+const driver = driverOf(source);
+const missing = "scripts/check-production-upgrade.py has no DRIVER=r'''<script>…</script>''' block to run";
+
+test("the runner's page driver is found, with LF or CRLF line endings", () => {
+  assert.ok(driver !== null, missing);
+  const lf = source.replace(/\r\n?/g, '\n');
+  assert.equal(driverOf(lf), driver);
+  assert.equal(driverOf(lf.replace(/\n/g, '\r\n')), driver);
+  assert.equal(driverOf('# no driver here\r\n'), null);
+});
 
 async function run(scenario) {
   const posts = [], calls = [], timers = [];
@@ -34,6 +51,7 @@ async function run(scenario) {
       return {};
     },
   };
+  assert.ok(driver !== null, missing);
   vm.runInNewContext(driver.replaceAll('ENDPOINT', JSON.stringify('http://fixture.invalid')).replaceAll('TOKEN', JSON.stringify('synthetic')), context, { timeout: 500 });
   start();
   for (let i = 0; i < 4; i++) await new Promise(setImmediate);

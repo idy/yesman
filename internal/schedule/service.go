@@ -356,7 +356,9 @@ func (s *Service) ownerLocked() bool {
 	return true
 }
 
-// spaceFor returns the state of a workspace's current generation.
+// spaceFor returns the state of a workspace's current generation, y. Its
+// callers hold the workspace (Store.BeginUse) that y came from, so that y
+// is still its current generation: a generation it replaces is retired.
 func (s *Service) spaceFor(y yesmen.Yesman) *space {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2225,15 +2227,24 @@ func (s *Service) check(name string, since time.Time, runID string) (Run, error)
 		return Run{}, err
 	}
 	defer done()
-	y, err := s.cfg.Yesmen.Get(name)
+	// The workspace is held while the run is found, as by View, and let go
+	// before its receipt is read; what the receipt says is written only to
+	// the generation still current then (update).
+	y, release, err := s.cfg.Yesmen.BeginUse(name)
 	if err != nil {
 		return Run{}, err
 	}
 	if err := hiredAt(y, since); err != nil {
+		release()
 		return Run{}, err
 	}
 	sp := s.spaceFor(y)
 	sp.mu.Lock()
+	if sp.retired.Load() {
+		sp.mu.Unlock()
+		release()
+		return Run{}, errRetired
+	}
 	s.loadLocked(sp, y)
 	rec, active := sp.runs[runID], sp.active[runID]
 	var r Run
@@ -2242,6 +2253,7 @@ func (s *Service) check(name string, since time.Time, runID string) (Run, error)
 		r = rec.Run
 	}
 	sp.mu.Unlock()
+	release()
 	if rec == nil {
 		return Run{}, fmt.Errorf("no run %s", runID)
 	}
