@@ -201,10 +201,12 @@ func main() {
 			managedRuntime.Close()
 		}
 		// A restart records the agents it cuts short right before they
-		// stop. A worker whose run ends in between is recorded working: it
-		// goes on afterwards and reports again.
+		// stop, closing the agents to new starts and reports; once they
+		// have stopped, it records where the workers' reports got
+		// meanwhile. A plain Quit does neither.
 		a.restarts.beforeStop(a.agents.CloseForRestart)
 		a.agents.StopAll()
+		a.restarts.afterStop(a.agents.ReconcileRestart)
 	})
 	mygo.App.OnQuitCanceled(a.restarts.canceled)
 	mygo.App.WhenReady(func() {

@@ -2,22 +2,94 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/idy/yesman/internal/restart"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
-// CloseForRestart closes the manager to new starts, as StopAll does first,
-// and returns the agents whose work an explicit restart of the app
-// interrupts: those running a turn, workers waiting on a question to their
-// lead or whose report is on its way, and agents waiting on the user (kept
-// to be told, never woken). Agents that are idle, asleep, being put to
-// sleep, failed, starting or retired are not listed: a run the user stopped
-// leaves its agent idle. It reads memory only, under the manager's lock;
-// StopAll still stops the agents.
+// handoff is how far a worker's report of one run has got: one of the
+// restart.Report states, and the digest of its final message once read.
+// run tells this report from the next run's; guarded by the manager's mu.
+type reportHandoff struct {
+	run    uint64
+	state  string
+	digest string
+}
+
+func (h reportHandoff) report() *restart.Report {
+	return &restart.Report{State: h.state, Digest: h.digest}
+}
+
+// sendTrack follows one prompt from its admission to pi's answer, for a
+// report whose fate must be known across a restart. admit runs under the
+// manager's mu as the prompt registers, and refuses it by returning false;
+// result runs once after, with restart.ReportNotSent when the prompt was
+// not dispatched or pi refused it, ReportAccepted when pi took it, and
+// ReportUncertain when it was sent and no answer came.
+type sendTrack struct {
+	admit  func() bool
+	result func(state string)
+}
+
+// reportTrack tracks the delivery of report run of a to its lead. Once
+// the manager has closed for a restart or a quit, nothing more is
+// admitted: the state recorded then is final for this instance. once
+// admits no other attempt after one sent with no answer, which may have
+// arrived: a report handed on after a restart is not sent twice.
+func (m *Manager) reportTrack(ctx context.Context, a *agent, run uint64, once bool) *sendTrack {
+	return &sendTrack{
+		admit: func() bool {
+			if m.closed || ctx.Err() != nil || a.handoff.run != run ||
+				once && a.handoff.state == restart.ReportUncertain {
+				return false
+			}
+			a.handoff.state = restart.ReportUncertain // sent from here on, until pi answers
+			return true
+		},
+		result: func(state string) {
+			m.mu.Lock()
+			if a.handoff.run == run && a.handoff.state != restart.ReportAccepted {
+				a.handoff.state = state
+			}
+			m.mu.Unlock()
+		},
+	}
+}
+
+// endHandoff forgets report run of a once its delivery ended while the
+// manager runs. After a restart or quit closed it, the state stays for
+// ReconcileRestart.
+func (m *Manager) endHandoff(a *agent, run uint64) {
+	m.mu.Lock()
+	if !m.closed && a.handoff.run == run {
+		a.handoff = reportHandoff{run: run}
+	}
+	m.mu.Unlock()
+}
+
+func digest(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+// CloseForRestart closes the manager to new starts and to new deliveries
+// of reports, as StopAll does first, and returns the agents whose work an
+// explicit restart of the app interrupts: those running a turn, workers
+// waiting on a question to their lead or whose report has not been settled,
+// and agents waiting on the user (kept to be told, never woken). Agents that
+// are idle, asleep, being put to sleep, failed, starting or retired are not
+// listed: a run the user stopped leaves its agent idle, and the notice of
+// it is not a report. It reads memory only, under the manager's lock;
+// StopAll still stops the agents, and ReconcileRestart then updates the
+// list with what settled meanwhile.
 func (m *Manager) CloseForRestart() []restart.Agent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -25,30 +97,32 @@ func (m *Manager) CloseForRestart() []restart.Agent {
 		m.closed = true
 		close(m.shutdown)
 	}
+	m.restartRuns = map[string]uint64{}
 	var out []restart.Agent
-	for _, a := range m.agents {
+	for id, a := range m.agents {
 		if a.retiring || a.removing || a.stopping || a.proc == nil || a.starting != nil ||
 			a.info.Since.IsZero() || a.workspaceSince.IsZero() {
 			continue
 		}
-		var reason string
+		e := restart.Agent{
+			Yesman: a.info.Yesman, Name: a.info.Name, Role: a.info.Role,
+			WorkspaceHiredAt: a.workspaceSince.UTC(), AgentSince: a.info.Since.UTC(),
+		}
 		switch {
 		case a.info.Status == Working:
-			reason = restart.ReasonWorking
+			e.Reason = restart.ReasonWorking
 		case a.info.Status == Waiting && a.info.Role == RoleWorker &&
 			!(a.handedOver != "" && dialogID(a.info.Dialog) == a.handedOver):
-			reason = restart.ReasonQuestion
+			e.Reason = restart.ReasonQuestion
 		case a.info.Status == Waiting:
-			reason = restart.ReasonNeedsYou
-		case a.info.Role == RoleWorker && a.reports > 0:
-			reason = restart.ReasonReport
+			e.Reason = restart.ReasonNeedsYou
+		case a.info.Role == RoleWorker && a.handoff.state != "":
+			e.Reason, e.Report = restart.ReasonReport, a.handoff.report()
 		default:
 			continue
 		}
-		out = append(out, restart.Agent{
-			Yesman: a.info.Yesman, Name: a.info.Name, Role: a.info.Role,
-			WorkspaceHiredAt: a.workspaceSince.UTC(), AgentSince: a.info.Since.UTC(), Reason: reason,
-		})
+		m.restartRuns[id] = a.reportRun
+		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Yesman != out[j].Yesman {
@@ -59,21 +133,93 @@ func (m *Manager) CloseForRestart() []restart.Agent {
 	return out
 }
 
+// ReconcileRestart runs after StopAll, for the agents CloseForRestart
+// listed. It waits, within ctx, for the report handoffs the shutdown cut
+// short to end, then returns the list updated with where each report got:
+// a worker listed working whose run settled meanwhile is listed for its
+// report, which was not sent, and a report listed as on its way gets the
+// state it ended in. A report that still has not ended stays uncertain.
+func (m *Manager) ReconcileRestart(ctx context.Context, entries []restart.Agent) []restart.Agent {
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		m.mu.Lock()
+		busy := false
+		for _, a := range m.agents {
+			busy = busy || a.reports > 0
+		}
+		m.mu.Unlock()
+		if !busy {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-tick.C:
+			continue
+		}
+		break
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := slices.Clone(entries)
+	for i, e := range out {
+		if e.Role != RoleWorker || e.Reason != restart.ReasonWorking && e.Reason != restart.ReasonReport {
+			continue
+		}
+		id := ID(e.Yesman, e.Name)
+		a := m.agents[id]
+		if a == nil || !a.info.Since.Equal(e.AgentSince) || !a.workspaceSince.Equal(e.WorkspaceHiredAt) || a.handoff.state == "" {
+			continue
+		}
+		run, listed := m.restartRuns[id]
+		switch {
+		case !listed:
+		case e.Reason == restart.ReasonWorking && a.handoff.run > run,
+			e.Reason == restart.ReasonReport && a.handoff.run == run:
+			out[i].Reason, out[i].Report = restart.ReasonReport, a.handoff.report()
+		}
+	}
+	return out
+}
+
+// Why a resume sent nothing because its time ran out first.
+func notAdmitted(err error) error {
+	return fmt.Errorf("its time to continue ran out before anything was sent (%w); it waits for a message", err)
+}
+
 // Resume lets an agent a restart interrupted go on, once: it checks the
-// agent is still the one recorded, in the same workspace, unfinished and
-// not already running, then starts it with its session and sends it note,
-// or, for a worker whose report was on its way, hands its final message to
-// the lead again. It returns a restart outcome; error explains a failure.
-// It never sends the messages the agent had been given.
+// agent is still the one recorded, in the same workspace, unfinished, not
+// asleep and not already running, starts it with its session, and sends it
+// note. A worker whose report was known not to have reached its lead hands
+// that report on instead, with no new run; one whose report the lead's pi
+// took is recorded finished, as it would have been; one whose report may or
+// may not have arrived is left as it is. It returns a restart outcome;
+// error explains it. It never sends the messages the agent had been given.
+//
+// Everything Resume waits for ends with ctx: the time to start, and to
+// take the agent's model lock. Once both are had, it checks again, under
+// the manager's lock, that its time has not run out and that the agent is
+// still the one recorded and free; only then does the note or report
+// register. Expiry before that sends nothing; a note registered and sent,
+// whose answer had not come when time ran out, is uncertain.
 func (m *Manager) Resume(ctx context.Context, r restart.Agent, note string) (string, error) {
 	id := ID(r.Yesman, r.Name)
 	if _, _, err := SplitID(id); err != nil {
 		return restart.Gone, err
 	}
+	if err := ctx.Err(); err != nil {
+		return restart.Failed, notAdmitted(err)
+	}
+	if r.Reason == restart.ReasonReport && r.Report == nil {
+		// A claimed intent always says; where a report got is otherwise
+		// unknown, and it is not sent.
+		r.Report = &restart.Report{State: restart.ReportUncertain}
+	}
 	var (
 		a       *agent
 		p       *proc
 		outcome string
+		why     error
 		ran     bool
 	)
 	err := m.cfg.Yesmen.Use(r.Yesman, func(y yesmen.Yesman) error {
@@ -107,10 +253,6 @@ func (m *Manager) Resume(ctx context.Context, r restart.Agent, note string) (str
 				return nil
 			}
 		}
-		if r.Reason == restart.ReasonNeedsYou {
-			outcome = restart.Waiting
-			return nil
-		}
 		m.mu.Lock()
 		closed := m.closed
 		var running, slept bool
@@ -128,9 +270,25 @@ func (m *Manager) Resume(ctx context.Context, r restart.Agent, note string) (str
 		case running:
 			outcome = restart.Active // the user or the lead talked to it first
 			return nil
+		case r.Reason == restart.ReasonNeedsYou:
+			outcome = restart.Waiting
+			return nil
+		case r.Reason == restart.ReasonReport && r.Report.State == restart.ReportAccepted:
+			// Its lead's pi took the report; the old instance had not yet
+			// recorded the worker finished. Record it, sending nothing.
+			if err := m.cfg.Yesmen.FinishWorker(y.Name, r.Name, time.Now().UTC()); err != nil {
+				return err
+			}
+			outcome = restart.Accepted
+			why = errors.New("its report had reached its lead's queue before the restart; it is not sent again, and whether the lead read it is not known")
+			return nil
+		case r.Reason == restart.ReasonReport && r.Report.State == restart.ReportUncertain:
+			outcome = restart.Uncertain
+			why = errors.New("its report was being sent to its lead when Yes Man restarted and no answer came, so it may or may not have arrived; it is not sent again: ask the worker or the lead")
+			return nil
 		}
 		var err error
-		a, p, err = m.ensureIn(y, id, r.Name)
+		a, p, err = m.ensureInCtx(ctx, y, id, r.Name)
 		return err
 	})
 	switch {
@@ -138,76 +296,136 @@ func (m *Manager) Resume(ctx context.Context, r restart.Agent, note string) (str
 		return restart.Gone, err
 	case errors.Is(err, errStopped):
 		return restart.Stopped, nil
+	case ctx.Err() != nil && err != nil:
+		return restart.Failed, notAdmitted(err)
 	case err != nil:
 		return restart.Failed, err
 	case outcome != "":
-		return outcome, nil
-	}
-	// Started after its time ran out: it waits for a message, unnoted, so
-	// that a start that took too long does not wake it later.
-	if err := ctx.Err(); err != nil {
-		return restart.Failed, err
+		return outcome, why
 	}
 
 	if r.Reason == restart.ReasonReport {
-		m.mu.Lock()
-		ok := m.agents[id] == a && a.proc == p && !a.retiring && !a.stopping && a.info.Since.Equal(r.AgentSince) &&
-			a.info.Status == Idle && a.prompts == 0 && a.reports == 0
-		if ok {
-			a.reports++ // busy until the report reaches the lead, as after a run
-		}
-		m.mu.Unlock()
-		if !ok {
-			return restart.Active, nil
-		}
-		defer m.handoffDone(a)
-		if err := m.reportToLeadAgain(ctx, a, p); err != nil {
+		return m.resumeReport(ctx, r, id, a, p)
+	}
+	if outcome, err := m.admitResume(ctx, r, id, a, p, func() {
+		a.prompts++
+		a.inbox++
+		a.nudged = false
+	}); outcome != "" {
+		return outcome, err
+	}
+	state := make(chan string, 1)
+	track := &sendTrack{result: func(s string) { state <- s }}
+	err = m.sendPromptTracked(ctx, a, p, note, "followUp", "", Origin{Source: OriginYesman, Kind: "restart"}, track)
+	if err == nil {
+		return restart.Resumed, nil
+	}
+	select {
+	case s := <-state:
+		if s == restart.ReportNotSent {
 			if errors.Is(err, errStopped) {
 				return restart.Stopped, nil
 			}
 			return restart.Failed, err
 		}
-		return restart.Reported, nil
-	}
-
-	// Register before dispatch, as prompts do, and only if nothing came
-	// first: a message the user or the lead sent meanwhile goes on instead.
-	a.modelMu.Lock()
-	m.mu.Lock()
-	switch {
-	case m.agents[id] != a || a.proc != p || a.retiring || a.stopping || !a.info.Since.Equal(r.AgentSince):
-		outcome = restart.Stopped
-	case a.info.Status != Idle || a.prompts > 0 || m.worktreeCleanup[id]:
-		outcome = restart.Active
+		return restart.Uncertain, fmt.Errorf("its note was sent and no answer came (%w); it may be continuing", err)
 	default:
-		a.prompts++
-		a.inbox++
-		a.nudged = false
+		// Time ran out while pi had the note and had not answered.
+		return restart.Uncertain, fmt.Errorf("its note was sent and pi had not answered when time ran out (%w); it may be continuing", err)
 	}
-	m.mu.Unlock()
-	a.modelMu.Unlock()
-	if outcome != "" {
-		return outcome, nil
-	}
-	if err := m.sendPrompt(ctx, a, p, note, "followUp", Origin{Source: OriginYesman, Kind: "restart"}); err != nil {
-		if errors.Is(err, errStopped) {
-			return restart.Stopped, nil
-		}
-		return restart.Failed, err
-	}
-	return restart.Resumed, nil
 }
 
-// reportToLeadAgain hands a worker's final message to its lead after a
-// restart cut its handoff short, and closes the worker once it is
-// delivered. The lead may have had it already.
-func (m *Manager) reportToLeadAgain(ctx context.Context, a *agent, p *proc) error {
+// admitResume takes a's model lock within ctx, then checks under the
+// manager's lock that the restart may still act: time is left, the manager
+// is open, the agent and its process are the ones started for it and not
+// stopping, and nothing else is under way. Then reg registers its work, and
+// admitResume returns no outcome; otherwise it returns the outcome.
+func (m *Manager) admitResume(ctx context.Context, r restart.Agent, id string, a *agent, p *proc, reg func()) (string, error) {
+	if err := lockWithin(ctx, &a.modelMu); err != nil {
+		return restart.Failed, notAdmitted(err)
+	}
+	defer a.modelMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	exited := false
+	select {
+	case <-p.done:
+		exited = true
+	default:
+	}
+	switch {
+	case ctx.Err() != nil:
+		return restart.Failed, notAdmitted(ctx.Err())
+	case m.closed || m.agents[id] != a || a.proc != p || a.retiring || a.stopping:
+		return restart.Stopped, nil
+	case exited:
+		return restart.Failed, errors.New("its pi exited before anything was sent")
+	case !a.info.Since.Equal(r.AgentSince) || !a.workspaceSince.Equal(r.WorkspaceHiredAt):
+		return restart.Gone, nil
+	case a.info.Status != Idle || a.prompts > 0 || a.reports > 0 || a.recalls > 0 || m.worktreeCleanup[id]:
+		return restart.Active, nil
+	}
+	reg()
+	return "", nil
+}
+
+// lockWithin locks mu, or gives up when ctx ends. Waiting by trying lets a
+// message that waits for mu go first.
+func lockWithin(ctx context.Context, mu *sync.Mutex) error {
+	if mu.TryLock() {
+		return nil
+	}
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+			if mu.TryLock() {
+				return nil
+			}
+		}
+	}
+}
+
+// resumeReport hands on a worker's report that was known not to have
+// reached its lead, without a new run: it reads the worker's final message
+// from its session, checks it is the one recorded when it was read before,
+// and tells the lead. It then closes the worker, finished.
+func (m *Manager) resumeReport(ctx context.Context, r restart.Agent, id string, a *agent, p *proc) (string, error) {
+	var run uint64
+	if outcome, err := m.admitResume(ctx, r, id, a, p, func() {
+		a.reports++ // busy until the report reaches the lead, as after a run
+		a.reportRun++
+		run = a.reportRun
+		a.handoff = reportHandoff{run: run, state: restart.ReportNotSent, digest: r.Report.Digest}
+	}); outcome != "" {
+		return outcome, err
+	}
+	defer m.handoffDone(a)
+	defer m.endHandoff(a, run)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	report := m.finalMessage(ctx, p)
-	if err := m.tellLeadWithin(ctx, a, "report", reportText(a.info.Name, report, true)); err != nil {
-		return err
+	text, err := m.readFinal(ctx, p) // a read: no new run
+	if err != nil {
+		return restart.Failed, fmt.Errorf("its final message could not be read, so its report was not sent: %w", err)
 	}
-	m.closeIfFinished(a, p, time.Now().UTC())
-	return nil
+	if r.Report.Digest != "" && digest(text) != r.Report.Digest {
+		return restart.Uncertain, errors.New("its final message is no longer the one it finished with before the restart, so its report was not sent: ask the worker")
+	}
+	err = m.tellLeadTracked(ctx, a, "report", reportText(a.info.Name, text, true), m.reportTrack(ctx, a, run, true))
+	m.mu.Lock()
+	state := a.handoff.state // where the last attempt got
+	m.mu.Unlock()
+	switch {
+	case err == nil || state == restart.ReportAccepted:
+		m.closeIfFinished(a, p, time.Now().UTC())
+		return restart.Reported, nil
+	case state == restart.ReportUncertain:
+		return restart.Uncertain, fmt.Errorf("its report was sent to its lead and no answer came (%w); it is not sent again", err)
+	case errors.Is(err, errStopped):
+		return restart.Stopped, nil
+	}
+	return restart.Failed, fmt.Errorf("its report did not reach the lead: %w", err)
 }

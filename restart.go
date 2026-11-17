@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -16,8 +17,9 @@ import (
 
 // Restart and continue: the window, the tray and Restart to update all
 // restart through one path. The intent is recorded as the old instance
-// quits, before its agents stop; the next instance claims it once and lets
-// the agents it lists go on. Quit records nothing.
+// quits, before its agents stop, and recorded again once they have, with
+// where the workers' reports got meanwhile; the next instance claims it
+// once and lets the agents it lists go on. Quit records nothing.
 
 // restartEvent tells the page what the last restart came to, or that one
 // is under way.
@@ -39,11 +41,12 @@ type restarts struct {
 	version  func() string
 	now      func() time.Time
 	changed  func(RestartView)
-	timeout  time.Duration // for each agent to go on
+	timeout  time.Duration // for all the agents of a restart to go on
+	drain    time.Duration // for reports the shutdown cut short to end
 
 	mu      sync.Mutex
 	pending *pendingRestart
-	written string // the ID of the intent this instance wrote
+	written *restart.Intent // the intent this instance wrote
 	last    *restart.Result
 	loaded  bool
 }
@@ -60,6 +63,7 @@ func newRestarts(dir *restart.Dir) *restarts {
 		now:      time.Now,
 		changed:  func(v RestartView) { _ = restartEvent.Broadcast(v) },
 		timeout:  resumeTimeout,
+		drain:    reportDrain,
 	}
 }
 
@@ -111,8 +115,35 @@ func (r *restarts) beforeStop(closeAgents func() []restart.Agent) {
 		return
 	}
 	r.mu.Lock()
-	r.written = p.id
+	r.written = &in
 	r.mu.Unlock()
+}
+
+// afterStop runs once the agents have stopped, for a restart whose intent
+// was written: reconcile waits, at most drain, for the reports the
+// shutdown cut short, and says where each got. A change is recorded over
+// the intent, so that a report that settled meanwhile is handed on rather
+// than redone, and one that reached the lead is not sent again. If it
+// cannot be recorded, the first record stands: a report then shown as on
+// its way stays uncertain, and is not sent again.
+func (r *restarts) afterStop(reconcile func(context.Context, []restart.Agent) []restart.Agent) {
+	r.mu.Lock()
+	w := r.written
+	r.mu.Unlock()
+	if w == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.drain)
+	defer cancel()
+	agents := reconcile(ctx, w.Agents)
+	if reflect.DeepEqual(agents, w.Agents) {
+		return
+	}
+	in := *w
+	in.Agents = agents
+	if err := r.dir.Write(in); err != nil {
+		log.Print("restart: where reports got could not be recorded; the first record stands: ", err)
+	}
 }
 
 // canceled runs when a quit was canceled: the restart did not happen, and
@@ -120,11 +151,11 @@ func (r *restarts) beforeStop(closeAgents func() []restart.Agent) {
 func (r *restarts) canceled() {
 	r.mu.Lock()
 	written := r.written
-	r.pending, r.written = nil, ""
+	r.pending, r.written = nil, nil
 	v := r.viewLocked()
 	r.mu.Unlock()
-	if written != "" {
-		if err := r.dir.Cancel(written); err != nil {
+	if written != nil {
+		if err := r.dir.Cancel(written.ID); err != nil {
 			log.Print("restart: ", err)
 		}
 	}
@@ -134,10 +165,14 @@ func (r *restarts) canceled() {
 // resumer resumes one agent; Manager.Resume in the app.
 type resumer func(ctx context.Context, a restart.Agent, note string) (string, error)
 
-// Bounds of resuming after a restart.
+// Bounds of a restart. At most resumeParallel agents are resumed at
+// once, each holding its place until Resume returns; all of a restart's
+// share one deadline, resumeTimeout, after which an agent not yet admitted
+// is sent nothing. reportDrain bounds the old instance's wait for reports.
 const (
 	resumeParallel = 4
 	resumeTimeout  = 3 * time.Minute
+	reportDrain    = 5 * time.Second
 )
 
 // resume claims what the last restart recorded, once, and lets the agents
@@ -159,6 +194,7 @@ func (r *restarts) resume(resume resumer) {
 	} else {
 		res.ID, res.Kind, res.RestartedAt, res.FromVersion, res.ToVersion = in.ID, in.Kind, in.CreatedAt, in.FromVersion, in.ToVersion
 		res.Agents = make([]restart.Outcome, len(in.Agents))
+		ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 		// Leads first: a worker that goes on reports to its lead, which
 		// would then seem to have been talked to and miss its own note.
 		for _, leads := range []bool{true, false} {
@@ -173,7 +209,9 @@ func (r *restarts) resume(resume resumer) {
 					defer func() { <-sem }()
 					o := restart.Outcome{Yesman: a.Yesman, Name: a.Name, Role: a.Role, Reason: a.Reason}
 					var err error
-					o.Outcome, err = r.resumeOne(resume, a, restartNote(in, running, a.Reason))
+					// Resume stops waiting when ctx ends and sends nothing
+					// after; its place is held until it has returned.
+					o.Outcome, err = resume(ctx, a, restartNote(in, running, a.Reason))
 					if err != nil {
 						o.Error = err.Error()
 						log.Printf("restart: %s/%s: %s: %v", a.Yesman, a.Name, o.Outcome, err)
@@ -183,6 +221,7 @@ func (r *restarts) resume(resume resumer) {
 			}
 			wg.Wait()
 		}
+		cancel()
 	}
 	if err := r.dir.Finish(claim, res); err != nil {
 		log.Print("restart: ", err)
@@ -192,29 +231,6 @@ func (r *restarts) resume(resume resumer) {
 	v := r.viewLocked()
 	r.mu.Unlock()
 	r.changed(v)
-}
-
-// resumeOne resumes one agent within resumeTimeout. A start that takes
-// longer is not waited for: the agent is then left without its note
-// (Resume checks its context before sending) and reported failed.
-func (r *restarts) resumeOne(resume resumer, a restart.Agent, note string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
-	defer cancel()
-	type answer struct {
-		outcome string
-		err     error
-	}
-	done := make(chan answer, 1)
-	go func() {
-		outcome, err := resume(ctx, a, note)
-		done <- answer{outcome, err}
-	}()
-	select {
-	case got := <-done:
-		return got.outcome, got.err
-	case <-ctx.Done():
-		return restart.Failed, fmt.Errorf("it did not start within %s; it waits for a message", r.timeout)
-	}
 }
 
 // view is where restarting stands.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,35 +178,60 @@ func TestRejectedRecordWakesNobody(t *testing.T) {
 }
 
 // Leads go on before workers, whose reports would otherwise reach a lead
-// first and make it seem talked to; an agent that does not start in time
-// is reported failed without holding the rest up.
+// first and make it seem talked to. All share one deadline; a resume keeps
+// its place until it has returned, so no more than resumeParallel run at
+// once, and the result is written only after every one has returned.
 func TestResumeLeadsFirstAndBounded(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "restart")
 	a, _ := testRestarts(t, dir, "0.1.47")
 	_ = a.begin(restart.KindRestart, UpdateView{})
-	stuck := working("stuck")
-	a.beforeStop(func() []restart.Agent { return []restart.Agent{working("fixer"), stuck, working("lead")} })
+	list := []restart.Agent{working("fixer"), working("stuck"), working("lead")}
+	for i := range 6 {
+		list = append(list, working(fmt.Sprintf("w%d", i)))
+	}
+	a.beforeStop(func() []restart.Agent { return list })
 
 	b, _ := testRestarts(t, dir, "0.1.47")
-	b.timeout = 200 * time.Millisecond
+	b.timeout = 300 * time.Millisecond
 	var mu sync.Mutex
 	var order []string
-	release := make(chan struct{})
-	defer close(release)
+	var running, most int
+	returned := map[string]bool{}
+	start := time.Now()
 	b.resume(func(ctx context.Context, ag restart.Agent, _ string) (string, error) {
 		mu.Lock()
 		order = append(order, ag.Name)
+		running++
+		most = max(most, running)
 		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			running--
+			returned[ag.Name] = true
+			mu.Unlock()
+		}()
 		if ag.Name == "stuck" {
-			<-release // a start that never ends in time
+			<-ctx.Done() // a start that does not end in time; Resume gives up with ctx
+			return restart.Failed, ctx.Err()
+		}
+		if ctx.Err() != nil {
+			return restart.Failed, ctx.Err()
 		}
 		return restart.Resumed, nil
 	})
 	mu.Lock()
-	first := append([]string(nil), order...)
-	mu.Unlock()
-	if len(first) == 0 || first[0] != "lead" {
-		t.Fatalf("order %v: the lead must go first", first)
+	defer mu.Unlock()
+	if len(order) == 0 || order[0] != "lead" {
+		t.Fatalf("order %v: the lead must go first", order)
+	}
+	if most > resumeParallel {
+		t.Fatalf("%d resumes ran at once", most)
+	}
+	if len(returned) != len(list) || running != 0 {
+		t.Fatalf("the result was written before every resume returned: %v", returned)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("one deadline for all took %s", d)
 	}
 	got := map[string]string{}
 	for _, o := range b.view().Last.Agents {
@@ -213,5 +239,38 @@ func TestResumeLeadsFirstAndBounded(t *testing.T) {
 	}
 	if got["lead"] != restart.Resumed || got["fixer"] != restart.Resumed || got["stuck"] != restart.Failed {
 		t.Fatalf("outcomes %v", got)
+	}
+}
+
+// Once the agents have stopped, where the reports got is recorded over the
+// intent; nothing changes when nothing settled, and a plain Quit records
+// nothing at all.
+func TestAfterStopRecordsWhereReportsGot(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "restart")
+	q, _ := testRestarts(t, dir, "0.1.47")
+	q.afterStop(func(context.Context, []restart.Agent) []restart.Agent {
+		t.Fatal("a plain quit reconciled")
+		return nil
+	})
+
+	a, _ := testRestarts(t, dir, "0.1.47")
+	_ = a.begin(restart.KindRestart, UpdateView{})
+	a.beforeStop(func() []restart.Agent { return []restart.Agent{working("lead"), working("fixer")} })
+	a.afterStop(func(ctx context.Context, in []restart.Agent) []restart.Agent {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("the drain is not bounded")
+		}
+		out := append([]restart.Agent(nil), in...)
+		out[1].Reason = restart.ReasonReport
+		out[1].Report = &restart.Report{State: restart.ReportNotSent, Digest: strings.Repeat("a", 64)}
+		return out
+	})
+	in, claim, found, rejected, err := restart.Open(dir).Claim()
+	if err != nil || !found || rejected != "" {
+		t.Fatalf("claim: %v %v %q", err, found, rejected)
+	}
+	_ = claim
+	if in.Agents[1].Reason != restart.ReasonReport || in.Agents[1].Report.State != restart.ReportNotSent {
+		t.Fatalf("the reconciled report was not recorded: %+v", in.Agents)
 	}
 }

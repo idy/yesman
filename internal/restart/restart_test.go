@@ -16,7 +16,8 @@ func intent(id string) Intent {
 	return Intent{Version: Version, ID: id, Kind: KindRestart, CreatedAt: t0, FromVersion: "0.1.47",
 		Agents: []Agent{
 			{Yesman: "demo", Name: "lead", Role: "lead", WorkspaceHiredAt: t0.Add(-time.Hour), AgentSince: t0.Add(-time.Hour), Reason: ReasonWorking},
-			{Yesman: "demo", Name: "fixer", Role: "worker", WorkspaceHiredAt: t0.Add(-time.Hour), AgentSince: t0.Add(-time.Minute), Reason: ReasonReport},
+			{Yesman: "demo", Name: "fixer", Role: "worker", WorkspaceHiredAt: t0.Add(-time.Hour), AgentSince: t0.Add(-time.Minute), Reason: ReasonReport,
+				Report: &Report{State: ReportNotSent, Digest: strings.Repeat("ab", 32)}},
 		}}
 }
 
@@ -105,8 +106,8 @@ func TestRejectsAndKeeps(t *testing.T) {
 	raw := func(in Intent) []byte { b, _ := json.Marshal(in); return b }
 	future := intent(NewID())
 	future.CreatedAt = t0.Add(10 * time.Minute)
-	v2 := intent(NewID())
-	v2.Version = 2
+	v1 := intent(NewID())
+	v1.Version = 1 // the first format, which had no report states
 	dup := intent(NewID())
 	dup.Agents = append(dup.Agents, dup.Agents[0])
 	leadReport := intent(NewID())
@@ -115,6 +116,15 @@ func TestRejectsAndKeeps(t *testing.T) {
 	noIdentity.Agents[1].AgentSince = time.Time{}
 	badName := intent(NewID())
 	badName.Agents[0].Yesman = "../x"
+	noReport := intent(NewID())
+	noReport.Agents[1].Report = nil
+	strayReport := intent(NewID())
+	strayReport.Agents[0].Report = &Report{State: ReportNotSent}
+	badState := intent(NewID())
+	badState.Agents[1].Report = &Report{State: "delivered"}
+	badDigest := intent(NewID())
+	badDigest.Agents[1].Report = &Report{State: ReportNotSent, Digest: "abc"}
+	good := string(raw(intent(NewID())))
 	for _, c := range []struct {
 		name string
 		now  time.Time
@@ -123,7 +133,7 @@ func TestRejectsAndKeeps(t *testing.T) {
 	}{
 		{"expired", t0.Add(MaxAge + time.Second), raw(intent(NewID())), "older than"},
 		{"future", t0, raw(future), "future"},
-		{"version", t0, raw(v2), "version 2"},
+		{"version", t0, raw(v1), "version 1"},
 		{"duplicate", t0, raw(dup), "twice"},
 		{"lead report", t0, raw(leadReport), "only a worker"},
 		{"identity", t0, raw(noIdentity), "identity"},
@@ -131,6 +141,16 @@ func TestRejectsAndKeeps(t *testing.T) {
 		{"corrupt", t0, []byte(`{"version":1,`), "malformed"},
 		{"unknown field", t0, []byte(strings.Replace(string(raw(intent(NewID()))), `"version"`, `"token":"x","version"`, 1)), "malformed"},
 		{"oversize", t0, make([]byte, maxIntentBytes+1), "larger"},
+		{"no report state", t0, raw(noReport), "belongs to reason"},
+		{"report state on work", t0, raw(strayReport), "belongs to reason"},
+		{"report state", t0, raw(badState), "unknown report state"},
+		{"report digest", t0, raw(badDigest), "digest"},
+		// A complete document, then more: a stray closing brace, which
+		// Decoder.More alone does not see, or a second document.
+		{"trailing brace", t0, []byte(good + "}"), "after the document"},
+		{"trailing document", t0, []byte(good + "\n{}"), "after the document"},
+		{"duplicate key", t0, []byte(strings.Replace(good, `"kind":`, `"kind":"update","kind":`, 1)), `key "kind" twice`},
+		{"nested duplicate key", t0, []byte(strings.Replace(good, `"reason":"working"`, `"reason":"report","reason":"working"`, 1)), `key "reason" twice`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			d := dirAt(t, c.now)

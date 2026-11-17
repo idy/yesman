@@ -1816,25 +1816,35 @@ async function restartApp(method = 'Restart') {
   });
 }
 
-// What the last restart came to, said in one line.
+// What the last restart came to, said in one line: every agent it had
+// recorded is counted under what became of it, skipped ones included.
 const RESTART_OUTCOMES = [
   ['resumed', '{n} continued'],
-  ['reported', '{n} report sent again', '{n} reports sent again'],
+  ['reported', '{n} report handed on', '{n} reports handed on'],
+  ['accepted', '{n} report already with its lead', '{n} reports already with their leads'],
+  ['uncertain', '{n} uncertain, not sent again'],
   ['waiting', '{n} waits for you', '{n} wait for you'],
   ['active', '{n} already busy'],
+  ['stopped', '{n} kept stopped'],
+  ['finished', '{n} already finished'],
+  ['gone', '{n} no longer there'],
   ['failed', '{n} could not continue'],
 ];
 
 const OUTCOME_LABELS = {
-  resumed: 'Continued', reported: 'Report sent again', waiting: 'Waits for you', active: 'Already busy',
-  finished: 'Already finished', gone: 'No longer there', stopped: 'Stopped', failed: 'Could not continue',
+  resumed: 'Continued', reported: 'Report handed on', accepted: 'Report was already with the lead; not sent again',
+  uncertain: 'Uncertain whether it arrived; nothing sent again', waiting: 'Waits for you', active: 'Already busy',
+  finished: 'Already finished', gone: 'No longer there', stopped: 'Kept stopped', failed: 'Could not continue; nothing sent',
 };
 
 function restartSummary(last) {
   if (last.rejected) return t('The record of the last restart could not be used; no agent was woken.');
+  if (!last.agents.length) return t('No agent was working.');
   const count = (o) => last.agents.filter((a) => a.outcome === o).length;
   const parts = RESTART_OUTCOMES.map(([o, one, many]) => (count(o) ? tn(count(o), one, many ?? one) : null)).filter(Boolean);
-  return parts.length ? parts.join(t(', ')) : t('No agent was working.');
+  const other = last.agents.filter((a) => !OUTCOME_LABELS[a.outcome]).length;
+  if (other) parts.push(tn(other, '{n} other'));
+  return parts.join(t(', '));
 }
 
 function onRestart(v) {

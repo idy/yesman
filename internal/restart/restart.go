@@ -41,27 +41,55 @@ const (
 	// restart cancelled.
 	ReasonQuestion = "question"
 	// ReasonReport: a worker had finished a run and its report was on its
-	// way to the lead.
+	// way to the lead. Report says how far it got.
 	ReasonReport = "report"
 	// ReasonNeedsYou: it waited on the user's answer. It is not woken.
 	ReasonNeedsYou = "needs-you"
 )
 
+// How far a worker's report to its lead got before the restart. Only a
+// report known not to have been sent is handed on afterwards.
+const (
+	// ReportNotSent: it never reached the lead's pi; it is handed on once.
+	ReportNotSent = "not-sent"
+	// ReportAccepted: the lead's pi took it, so it is not sent again. Taken
+	// is not read: the lead may not have read it before the restart.
+	ReportAccepted = "accepted"
+	// ReportUncertain: it was sent and no answer came; it may or may not
+	// have reached the lead, so it is not sent again.
+	ReportUncertain = "uncertain"
+)
+
+// Report is how far a worker's report got, and which report it was.
+type Report struct {
+	State string `json:"state"`
+	// Digest is the SHA-256, in hex, of the worker's final message when it
+	// had been read: the next instance hands on that message only. The
+	// message itself is not kept.
+	Digest string `json:"digest,omitempty"`
+}
+
 // Outcomes of an agent after a restart.
 const (
 	Resumed  = "resumed"  // it was asked to continue, and pi took the note
-	Reported = "reported" // its report was handed to the lead again
-	Waiting  = "waiting"  // it waits for the user; not woken
-	Active   = "active"   // someone talked to it first; not woken again
-	Finished = "finished" // it had finished; nothing to continue
-	Gone     = "gone"     // its workspace or worker is gone or was replaced
-	Stopped  = "stopped"  // it was stopped, or the app quit, before it went on
-	Failed   = "failed"   // waking it failed; it waits for a message
+	Reported = "reported" // its report, known not sent before, was handed to the lead
+	Accepted = "accepted" // its report had reached the lead's pi before; not sent again
+	// Uncertain: what was sent may or may not have been taken: a report
+	// sent with no answer before the restart, a note pi had not answered
+	// when time ran out, or a final message that is no longer the one
+	// recorded. Nothing is sent again.
+	Uncertain = "uncertain"
+	Waiting   = "waiting"  // it waits for the user; not woken
+	Active    = "active"   // someone talked to it first; not woken again
+	Finished  = "finished" // it had finished; nothing to continue
+	Gone      = "gone"     // its workspace or worker is gone or was replaced
+	Stopped   = "stopped"  // it was stopped, or the app quit, before it went on
+	Failed    = "failed"   // waking it failed, nothing was sent; it waits for a message
 )
 
 // Version is the format of the intent. A file of another version is
 // refused, and kept.
-const Version = 1
+const Version = 2
 
 const (
 	// MaxAge is how long an intent waits for the next instance.
@@ -92,6 +120,8 @@ type Agent struct {
 	WorkspaceHiredAt time.Time `json:"workspaceHiredAt"`
 	AgentSince       time.Time `json:"agentSince"`
 	Reason           string    `json:"reason"`
+	// Report is set for ReasonReport only.
+	Report *Report `json:"report,omitempty"`
 }
 
 // Intent is what a restart records for the next instance.
@@ -139,9 +169,10 @@ func NewID() string {
 }
 
 var (
-	idRE   = regexp.MustCompile(`^[a-f0-9]{32}$`)
-	nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`) // as yesmen.ValidName
-	verRE  = regexp.MustCompile(`^[0-9A-Za-z.+-]{0,64}$`)
+	idRE     = regexp.MustCompile(`^[a-f0-9]{32}$`)
+	nameRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`) // as yesmen.ValidName
+	verRE    = regexp.MustCompile(`^[0-9A-Za-z.+-]{0,64}$`)
+	digestRE = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
 // Validate checks an intent as the next instance reads it, at now.
@@ -183,6 +214,19 @@ func (in Intent) Validate(now time.Time) error {
 			}
 		default:
 			return fmt.Errorf("%s/%s: unknown reason %q", a.Yesman, a.Name, a.Reason)
+		}
+		if (a.Report != nil) != (a.Reason == ReasonReport) {
+			return fmt.Errorf("%s/%s: a report state belongs to reason %s only", a.Yesman, a.Name, ReasonReport)
+		}
+		if a.Report != nil {
+			switch a.Report.State {
+			case ReportNotSent, ReportAccepted, ReportUncertain:
+			default:
+				return fmt.Errorf("%s/%s: unknown report state %q", a.Yesman, a.Name, a.Report.State)
+			}
+			if a.Report.Digest != "" && !digestRE.MatchString(a.Report.Digest) {
+				return fmt.Errorf("%s/%s: its report digest is malformed", a.Yesman, a.Name)
+			}
 		}
 		if a.WorkspaceHiredAt.IsZero() || a.AgentSince.IsZero() || a.Role == "lead" && !a.AgentSince.Equal(a.WorkspaceHiredAt) {
 			return fmt.Errorf("%s/%s has no identity", a.Yesman, a.Name)
@@ -319,18 +363,78 @@ func (d *Dir) Claim() (in Intent, claim string, found bool, rejected string, err
 	if err != nil {
 		return reject("unreadable: " + err.Error())
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&in); err != nil {
+	if err := decodeStrict(data, &in); err != nil {
 		return reject("malformed: " + err.Error())
-	}
-	if dec.More() {
-		return reject("malformed: trailing data")
 	}
 	if err := in.Validate(now); err != nil {
 		return reject(err.Error())
 	}
 	return in, claim, true, "", nil
+}
+
+// decodeStrict decodes one complete JSON document into v: no field v does
+// not have, no key twice in an object (Go would keep the last silently; the
+// app never writes one, so a duplicate means the file is not its own), and
+// nothing but white space after it, up to the end of the data.
+func decodeStrict(data []byte, v any) error {
+	if err := noDuplicateKeys(data); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("data after the document")
+	}
+	return nil
+}
+
+// noDuplicateKeys refuses a document with a key twice in one object.
+func noDuplicateKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var walk func(depth int) error
+	walk = func(depth int) error {
+		if depth > 16 {
+			return errors.New("nested too deeply")
+		}
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		switch t {
+		case json.Delim('{'):
+			keys := map[string]bool{}
+			for dec.More() {
+				k, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key, _ := k.(string)
+				if keys[key] {
+					return fmt.Errorf("key %q twice in an object", key)
+				}
+				keys[key] = true
+				if err := walk(depth + 1); err != nil {
+					return err
+				}
+			}
+			_, err = dec.Token()
+			return err
+		case json.Delim('['):
+			for dec.More() {
+				if err := walk(depth + 1); err != nil {
+					return err
+				}
+			}
+			_, err = dec.Token()
+			return err
+		}
+		return nil
+	}
+	return walk(0)
 }
 
 // Finish records what an intent came to and removes its claimed file.

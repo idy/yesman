@@ -128,7 +128,10 @@ func TestCloseForRestartListsInterruptedWorkOnly(t *testing.T) {
 	started(t, m, ID("alice", "handed"), func(a *agent) {
 		a.info.Status, a.info.Dialog, a.handedOver = Waiting, json.RawMessage(`{"id":"q2","method":"confirm"}`), "q2"
 	})
-	started(t, m, ID("alice", "reporting"), func(a *agent) { a.reports = 1 })
+	started(t, m, ID("alice", "reporting"), func(a *agent) {
+		a.reports, a.reportRun = 1, 1
+		a.handoff = reportHandoff{run: 1, state: restart.ReportNotSent}
+	})
 	started(t, m, ID("alice", "idle"), func(a *agent) {})                                                // includes a run the user stopped: idle
 	started(t, m, ID("alice", "sleeping"), func(a *agent) { a.info.Status, a.stopping = Working, true }) // being put to sleep
 	started(t, m, ID("alice", "starting"), func(a *agent) { a.starting = make(chan struct{}) })
@@ -238,9 +241,11 @@ func TestResumeAfterRestart(t *testing.T) {
 		t.Fatalf("the lead got %d notes", n)
 	}
 
-	// A worker whose report was on its way hands it to the lead again, once,
-	// and is closed as finished.
-	outcome, err := m.Resume(ctx, entry(reporting, restart.ReasonReport), note)
+	// A worker whose report was known not sent hands it to the lead, once,
+	// with no new run, and is closed as finished.
+	reportEntry := entry(reporting, restart.ReasonReport)
+	reportEntry.Report = &restart.Report{State: restart.ReportNotSent, Digest: digest("done")}
+	outcome, err := m.Resume(ctx, reportEntry, note)
 	if outcome != restart.Reported || err != nil {
 		t.Fatalf("report Resume = %s %v", outcome, err)
 	}
@@ -250,7 +255,7 @@ func TestResumeAfterRestart(t *testing.T) {
 			report = append(report, p)
 		}
 	}
-	if len(report) != 1 || !strings.Contains(report[0], "Sent again") || !strings.Contains(report[0], "done") {
+	if len(report) != 1 || !strings.Contains(report[0], "Handed on after a restart") || !strings.Contains(report[0], "done") {
 		t.Fatalf("report to the lead: %q", report)
 	}
 	if p := got.to(ID("alice", "reporting")); len(p) != 0 {

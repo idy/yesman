@@ -78,10 +78,12 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 const WORDS = {
   en: { button: 'Restart and continue', confirm: 'Restart Yes Man?', ok: 'Restart', hint: 'Working agents continue afterwards from their sessions.',
     ready: 'Starts the installed update. Working agents continue afterwards.', pending: 'Restarting…', pill: 'Restart to update',
-    summary: /Last restart, .+: 1 continued, 1 waits for you, 1 could not continue/, toast: /Yes Man restarted: 1 continued/, palette: 'Restart and continue' },
+    summary: /Last restart, .+: 1 continued, 1 report handed on, 1 report already with its lead, 1 uncertain, not sent again, 1 waits for you, 1 kept stopped, 1 already finished, 1 no longer there, 1 could not continue$/,
+    skipped: /: 1 kept stopped, 1 already finished$/, none: /: No agent was working\.$/, toast: /Yes Man restarted: 1 continued/, palette: 'Restart and continue' },
   'zh-Hans': { button: '重启并继续', confirm: '重启 Yes Man？', ok: '重启', hint: '正在工作的智能体会在重启后从各自的会话继续。',
     ready: '将启动已安装的更新。正在工作的智能体会在重启后继续。', pending: '正在重启…', pill: '重启以更新',
-    summary: /上次重启于 .+：1 个已继续、1 个在等你、1 个未能继续/, toast: /Yes Man 已重启：1 个已继续/, palette: '重启并继续' },
+    summary: /上次重启于 .+：1 个已继续、已转交 1 份汇报、1 份汇报此前已到 lead、1 个不确定是否送达，未重发、1 个在等你、1 个保持停止、1 个已完成、1 个已不存在、1 个未能继续$/,
+    skipped: /：1 个保持停止、1 个已完成$/, none: /：当时没有智能体在工作。$/, toast: /Yes Man 已重启：1 个已继续/, palette: '重启并继续' },
 };
 
 const results = [];
@@ -136,11 +138,35 @@ for (const engine of ENGINES) {
         { yesman: 'alice', name: 'lead', role: 'lead', reason: 'working', outcome: 'resumed' },
         { yesman: 'alice', name: 'fixer', role: 'worker', reason: 'needs-you', outcome: 'waiting' },
         { yesman: 'alice', name: 'other', role: 'worker', reason: 'working', outcome: 'failed', error: 'pi did not start' },
+        { yesman: 'alice', name: 'r1', role: 'worker', reason: 'report', outcome: 'reported' },
+        { yesman: 'alice', name: 'r2', role: 'worker', reason: 'report', outcome: 'accepted' },
+        { yesman: 'alice', name: 'r3', role: 'worker', reason: 'report', outcome: 'uncertain' },
+        { yesman: 'alice', name: 's1', role: 'worker', reason: 'working', outcome: 'stopped' },
+        { yesman: 'alice', name: 's2', role: 'worker', reason: 'working', outcome: 'finished' },
+        { yesman: 'alice', name: 's3', role: 'worker', reason: 'working', outcome: 'gone' },
       ] } }));
       await page.getByText(w.toast).first().waitFor();
-      assert.match(await page.locator('.about-update', { has: page.getByRole('button', { name: w.button }) }).innerText(), w.summary);
+      // The row's first line: the summary, before the button.
+      const summary = async () => (await page.locator('.about-update', { has: page.getByRole('button', { name: w.button }) }).innerText()).split('\n')[0];
+      assert.match((await summary()).trim(), w.summary);
       assert.equal(await page.getByRole('button', { name: w.button }).isDisabled(), false);
       await shot(page, 'result');
+      // Agents it recorded and then skipped are counted, not called idle;
+      // only a restart that recorded none says no agent was working.
+      await page.evaluate(() => emit('restart', { last: { id: 'y', kind: 'restart', resumedAt: new Date().toISOString(), version: '0.1.47', agents: [
+        { yesman: 'alice', name: 's1', role: 'worker', reason: 'working', outcome: 'stopped' },
+        { yesman: 'alice', name: 's2', role: 'worker', reason: 'working', outcome: 'finished' },
+      ] } }));
+      const waitSummary = async (re) => {
+        for (const end = Date.now() + 5000; !re.test((await summary()).trim()); await page.waitForTimeout(50)) {
+          assert.ok(Date.now() < end, `summary ${JSON.stringify(await summary())} never matched ${re}`);
+        }
+      };
+      await waitSummary(w.skipped);
+      assert.doesNotMatch(await summary(), w.none);
+      await page.evaluate(() => emit('restart', { last: { id: 'z', kind: 'restart', resumedAt: new Date().toISOString(), version: '0.1.47', agents: [] } }));
+      await waitSummary(w.none);
+      await shot(page, 'skipped');
 
       // An installed update: the row says it starts; the pill restarts by
       // keyboard, through the same path.
