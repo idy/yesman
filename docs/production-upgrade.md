@@ -72,8 +72,22 @@ only. The producer removes the key from its environment before any subprocess:
 never receive it. Each MyGo build signs through a fresh owner-only key file named
 by the temporary QA `mygo.json` and removed after that build; the precompiled
 helper alone gets the key in its execution environment. A missing, mismatched
-or unused key fails the step rather than leaving an unsigned successor. This is
-environment isolation, not a same-user filesystem sandbox. They preserve both official
+or unused key fails the step rather than leaving an unsigned successor. The
+producer compiles the helper only if the candidate's helper blob equals its own
+checked-out helper as cleaned by that checkout's Git rules (`git hash-object
+--path`), so a CRLF checkout of the same file passes and any content change fails.
+Every producer subprocess runs in one owned process group (Linux/macOS, joined
+before exec) or job object (Windows). After each subprocess, and before any key
+file, QA source/config or helper is removed, the producer confirms the group or
+job has no other live member; on failure or TERM/INT/HUP (Windows Ctrl-C/Break)
+it stops and confirms all members first. Removal is bound to the created
+file/directory identity: a replaced pathname is left alone and reported, and the
+key file is cleared through its held handle. If members cannot be confirmed
+stopped, those resources are kept, listed in `qa-producer-retained-*.json` in
+`RUNNER_TEMP`, and the step fails. A process that deliberately leaves the POSIX
+group, or a SIGKILL of the producer, is outside this guarantee (Windows still
+terminates the job when its handle closes). This is environment isolation, not a
+same-user filesystem sandbox. They preserve both official
 manifests byte-for-byte and make two private QA successor packages from exact
 candidate source to test another update and real failed-install recovery.
 Neither runtime jobs nor their artifacts receive the private key.
