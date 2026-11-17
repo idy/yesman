@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +33,22 @@ func working(name string) restart.Agent {
 		role, since = "lead", hired
 	}
 	return restart.Agent{Yesman: "alice", Name: name, Role: role, WorkspaceHiredAt: hired, AgentSince: since, Reason: restart.ReasonWorking}
+}
+
+// unchanged is a reconciliation in which nothing settled meanwhile.
+func unchanged(_ context.Context, in []restart.Agent) []restart.Agent { return in }
+
+// counting is a resumer that only counts what it was asked, by reason.
+func counting(mu *sync.Mutex, by map[string]int) resumer {
+	return func(_ context.Context, a restart.Agent, _ string) (string, error) {
+		mu.Lock()
+		by[a.Reason]++
+		mu.Unlock()
+		if a.Reason == restart.ReasonReport {
+			return restart.Reported, nil
+		}
+		return restart.Resumed, nil
+	}
 }
 
 func TestRestartAsksOnce(t *testing.T) {
@@ -102,6 +119,7 @@ func TestRestartContinuesOnceInTheNextInstance(t *testing.T) {
 	waiting := working("asker")
 	waiting.Reason = restart.ReasonNeedsYou
 	a.beforeStop(func() []restart.Agent { return []restart.Agent{working("lead"), working("fixer"), waiting} })
+	a.afterStop(unchanged)
 
 	b, _ := testRestarts(t, dir, "0.1.48")
 	var mu sync.Mutex
@@ -190,6 +208,7 @@ func TestResumeLeadsFirstAndBounded(t *testing.T) {
 		list = append(list, working(fmt.Sprintf("w%d", i)))
 	}
 	a.beforeStop(func() []restart.Agent { return list })
+	a.afterStop(unchanged)
 
 	b, _ := testRestarts(t, dir, "0.1.47")
 	b.timeout = 300 * time.Millisecond
@@ -270,7 +289,149 @@ func TestAfterStopRecordsWhereReportsGot(t *testing.T) {
 		t.Fatalf("claim: %v %v %q", err, found, rejected)
 	}
 	_ = claim
+	if in.Phase != restart.PhaseFinal {
+		t.Fatalf("phase %q", in.Phase)
+	}
 	if in.Agents[1].Reason != restart.ReasonReport || in.Agents[1].Report.State != restart.ReportNotSent {
 		t.Fatalf("the reconciled report was not recorded: %+v", in.Agents)
+	}
+}
+
+// many is an ordinary restart of a lead and n workers at work.
+func many(n int) []restart.Agent {
+	out := []restart.Agent{working("lead")}
+	for i := range n {
+		w := working(fmt.Sprintf("worker-%03d", i))
+		w.Yesman = "alice"
+		out = append(out, w)
+	}
+	return out
+}
+
+// toReports is a reconciliation in which every worker's run settled while
+// the record was written: each is listed for its report, not sent.
+func toReports(_ context.Context, in []restart.Agent) []restart.Agent {
+	out := append([]restart.Agent(nil), in...)
+	for i := range out {
+		if out[i].Role == "worker" {
+			out[i].Reason = restart.ReasonReport
+			out[i].Report = &restart.Report{State: restart.ReportNotSent, Digest: strings.Repeat("a", 64)}
+		}
+	}
+	return out
+}
+
+// The record grows as reports are recorded, and is finished: the next
+// instance hands each report on and starts no run for any of them.
+func TestOrdinaryGrowthHandsOnReports(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "restart")
+	a, _ := testRestarts(t, dir, "0.1.47")
+	_ = a.begin(restart.KindRestart, UpdateView{})
+	a.beforeStop(func() []restart.Agent { return many(200) })
+	a.afterStop(toReports)
+	b, _ := testRestarts(t, dir, "0.1.47")
+	var mu sync.Mutex
+	by := map[string]int{}
+	b.resume(counting(&mu, by))
+	if by[restart.ReasonReport] != 200 || by[restart.ReasonWorking] != 1 {
+		t.Fatalf("asked %v; want 200 reports and the lead working", by)
+	}
+	if last := b.view().Last; last.Unfinished || len(last.Agents) != 201 {
+		t.Fatalf("result: unfinished=%v agents=%d", last.Unfinished, len(last.Agents))
+	}
+}
+
+// expectUnfinished starts the next instance and checks it woke nobody and
+// says so, listing every agent recorded as not continued.
+func expectUnfinished(t *testing.T, dir string, n int) {
+	t.Helper()
+	b, _ := testRestarts(t, dir, "0.1.47")
+	var mu sync.Mutex
+	by := map[string]int{}
+	b.resume(counting(&mu, by))
+	if len(by) != 0 {
+		t.Fatalf("an unfinished record woke agents: %v", by)
+	}
+	last := b.view().Last
+	if last == nil || !last.Unfinished || len(last.Agents) != n {
+		t.Fatalf("result: %+v", last)
+	}
+	for _, o := range last.Agents {
+		if o.Outcome != restart.NotContinued {
+			t.Fatalf("outcome %+v", o)
+		}
+	}
+}
+
+// The app ends between the two writes: the provisional record wakes nobody.
+func TestInterruptedBeforeFinalWakesNobody(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "restart")
+	a, _ := testRestarts(t, dir, "0.1.47")
+	_ = a.begin(restart.KindRestart, UpdateView{})
+	a.beforeStop(func() []restart.Agent { return many(3) })
+	// no afterStop: the old instance was killed while its agents stopped
+	expectUnfinished(t, dir, 4)
+}
+
+// The final record is larger than a record may be: it is refused whole,
+// and the provisional one wakes nobody. Nothing is cut short to fit.
+func TestFinalTooLargeWakesNobody(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "restart")
+	a, _ := testRestarts(t, dir, "0.1.47")
+	_ = a.begin(restart.KindRestart, UpdateView{})
+	list := many(0)
+	for i := range 255 {
+		w := working(fmt.Sprintf("%s%04d", strings.Repeat("w", 28), i))
+		w.Yesman = "alice"
+		list = append(list, w)
+	}
+	a.beforeStop(func() []restart.Agent { return list })
+	if _, err := os.Stat(filepath.Join(dir, "intent.json")); err != nil {
+		t.Fatalf("the provisional record was not written: %v", err)
+	}
+	a.afterStop(toReports)
+	expectUnfinished(t, dir, 256)
+}
+
+// Writing the final record fails: the provisional one wakes nobody.
+func TestFinalWriteErrorWakesNobody(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a read-only directory still takes new files on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "restart")
+	a, _ := testRestarts(t, dir, "0.1.47")
+	_ = a.begin(restart.KindRestart, UpdateView{})
+	a.beforeStop(func() []restart.Agent { return many(2) })
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	a.afterStop(toReports)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expectUnfinished(t, dir, 3)
+}
+
+// A record too large to write at all leaves nothing: nothing to finish,
+// and the next instance neither wakes nor reports anything.
+func TestInitialRefusalLeavesNothing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "restart")
+	a, _ := testRestarts(t, dir, "0.1.47")
+	_ = a.begin(restart.KindRestart, UpdateView{})
+	a.beforeStop(func() []restart.Agent { return many(256) }) // 257: more than a record holds
+	a.afterStop(func(context.Context, []restart.Agent) []restart.Agent {
+		t.Fatal("reconciled a record that was never written")
+		return nil
+	})
+	if _, err := os.Lstat(filepath.Join(dir, "intent.json")); !os.IsNotExist(err) {
+		t.Fatalf("a refused record was written: %v", err)
+	}
+	b, _ := testRestarts(t, dir, "0.1.47")
+	b.resume(func(context.Context, restart.Agent, string) (string, error) {
+		t.Fatal("woke an agent")
+		return "", nil
+	})
+	if b.view().Last != nil {
+		t.Fatal("a result without a record")
 	}
 }

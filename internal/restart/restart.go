@@ -85,11 +85,24 @@ const (
 	Gone      = "gone"     // its workspace or worker is gone or was replaced
 	Stopped   = "stopped"  // it was stopped, or the app quit, before it went on
 	Failed    = "failed"   // waking it failed, nothing was sent; it waits for a message
+	// NotContinued: the restart's record was not finished before the old
+	// instance quit, so nothing was sent; it waits for a message.
+	NotContinued = "not-continued"
 )
 
 // Version is the format of the intent. A file of another version is
-// refused, and kept.
-const Version = 2
+// refused, and kept. Version 3 added Phase; a reader of version 2 refuses
+// it, so it never takes a provisional record for one it may act on.
+const Version = 3
+
+// Phases of an intent. The old instance writes it provisional before its
+// agents stop, and final, in place, once they have and it knows where
+// their reports got. Only a final intent lets agents go on: a provisional
+// one, which a failed or interrupted final write leaves, wakes nobody.
+const (
+	PhaseProvisional = "provisional"
+	PhaseFinal       = "final"
+)
 
 const (
 	// MaxAge is how long an intent waits for the next instance.
@@ -126,11 +139,13 @@ type Agent struct {
 
 // Intent is what a restart records for the next instance.
 type Intent struct {
-	Version     int       `json:"version"`
-	ID          string    `json:"id"`
-	Kind        string    `json:"kind"`
-	CreatedAt   time.Time `json:"createdAt"`
-	FromVersion string    `json:"fromVersion,omitempty"`
+	Version   int       `json:"version"`
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
+	CreatedAt time.Time `json:"createdAt"`
+	// Phase is PhaseProvisional or PhaseFinal.
+	Phase       string `json:"phase"`
+	FromVersion string `json:"fromVersion,omitempty"`
 	// ToVersion is the update a restart to update starts.
 	ToVersion string  `json:"toVersion,omitempty"`
 	Agents    []Agent `json:"agents"`
@@ -159,6 +174,9 @@ type Result struct {
 	Agents  []Outcome `json:"agents"`
 	// Rejected says why a recorded intent was not used; it was kept aside.
 	Rejected string `json:"rejected,omitempty"`
+	// Unfinished: the intent was still provisional, so no agent was let go
+	// on; its agents are listed NotContinued.
+	Unfinished bool `json:"unfinished,omitempty"`
 }
 
 // NewID returns a new intent ID.
@@ -184,6 +202,8 @@ func (in Intent) Validate(now time.Time) error {
 		return errors.New("its ID is malformed")
 	case in.Kind != KindRestart && in.Kind != KindUpdate:
 		return fmt.Errorf("unknown kind %q", in.Kind)
+	case in.Phase != PhaseProvisional && in.Phase != PhaseFinal:
+		return fmt.Errorf("unknown phase %q", in.Phase)
 	case !verRE.MatchString(in.FromVersion) || !verRE.MatchString(in.ToVersion):
 		return errors.New("a version is malformed")
 	case in.CreatedAt.IsZero():
@@ -284,7 +304,7 @@ func (d *Dir) Write(in Intent) error {
 	if err := in.Validate(in.CreatedAt); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(in, "", "  ")
+	data, err := json.Marshal(in) // compact: room for what a restart records
 	if err != nil {
 		return err
 	}

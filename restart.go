@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -94,8 +93,9 @@ func (r *restarts) begin(kind string, update UpdateView) error {
 
 // beforeStop runs as the app quits, before its agents stop. For a restart
 // it closes the agents to new starts, records those whose work it cuts
-// short, and keeps the record on disk before they stop. A record that
-// cannot be written is logged, and the restart goes on without resuming.
+// short, and keeps the record on disk before they stop, provisional: it
+// lets no agent go on until afterStop makes it final. A record that cannot
+// be written is logged, and the restart goes on without resuming.
 func (r *restarts) beforeStop(closeAgents func() []restart.Agent) {
 	r.mu.Lock()
 	p := r.pending
@@ -104,7 +104,7 @@ func (r *restarts) beforeStop(closeAgents func() []restart.Agent) {
 		return // a plain Quit: nothing resumes
 	}
 	in := restart.Intent{
-		Version: restart.Version, ID: p.id, Kind: p.kind, CreatedAt: r.now().UTC(),
+		Version: restart.Version, ID: p.id, Kind: p.kind, CreatedAt: r.now().UTC(), Phase: restart.PhaseProvisional,
 		FromVersion: r.version(), ToVersion: p.to, Agents: closeAgents(),
 	}
 	if in.Agents == nil {
@@ -121,11 +121,12 @@ func (r *restarts) beforeStop(closeAgents func() []restart.Agent) {
 
 // afterStop runs once the agents have stopped, for a restart whose intent
 // was written: reconcile waits, at most drain, for the reports the
-// shutdown cut short, and says where each got. A change is recorded over
-// the intent, so that a report that settled meanwhile is handed on rather
-// than redone, and one that reached the lead is not sent again. If it
-// cannot be recorded, the first record stands: a report then shown as on
-// its way stays uncertain, and is not sent again.
+// shutdown cut short, and says where each got. The intent is then written
+// over, final, so that a report that settled meanwhile is handed on rather
+// than redone, and one that reached the lead is not sent again. Only a
+// final intent lets agents go on. If it cannot be written (too large, a
+// write error) or the app ends first, the provisional one stays: the next
+// instance wakes nobody and says why.
 func (r *restarts) afterStop(reconcile func(context.Context, []restart.Agent) []restart.Agent) {
 	r.mu.Lock()
 	w := r.written
@@ -135,15 +136,17 @@ func (r *restarts) afterStop(reconcile func(context.Context, []restart.Agent) []
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), r.drain)
 	defer cancel()
-	agents := reconcile(ctx, w.Agents)
-	if reflect.DeepEqual(agents, w.Agents) {
+	in := *w
+	in.Agents, in.Phase = reconcile(ctx, w.Agents), restart.PhaseFinal
+	if err := r.dir.Write(in); err != nil {
+		log.Print("restart: the record could not be finished; no agent will continue by itself: ", err)
 		return
 	}
-	in := *w
-	in.Agents = agents
-	if err := r.dir.Write(in); err != nil {
-		log.Print("restart: where reports got could not be recorded; the first record stands: ", err)
+	r.mu.Lock()
+	if r.written == w {
+		r.written = &in
 	}
+	r.mu.Unlock()
 }
 
 // canceled runs when a quit was canceled: the restart did not happen, and
@@ -194,6 +197,16 @@ func (r *restarts) resume(resume resumer) {
 	} else {
 		res.ID, res.Kind, res.RestartedAt, res.FromVersion, res.ToVersion = in.ID, in.Kind, in.CreatedAt, in.FromVersion, in.ToVersion
 		res.Agents = make([]restart.Outcome, len(in.Agents))
+	}
+	if rejected == "" && in.Phase != restart.PhaseFinal {
+		// The old instance quit before it knew where every report got:
+		// letting a working entry go on could redo a run that had finished.
+		log.Print("restart: the record of the last restart was not finished; no agent was continued")
+		res.Unfinished = true
+		for i, a := range in.Agents {
+			res.Agents[i] = restart.Outcome{Yesman: a.Yesman, Name: a.Name, Role: a.Role, Reason: a.Reason, Outcome: restart.NotContinued}
+		}
+	} else if rejected == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 		// Leads first: a worker that goes on reports to its lead, which
 		// would then seem to have been talked to and miss its own note.

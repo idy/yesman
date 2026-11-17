@@ -177,7 +177,7 @@ func TestLateSettleHandedOnWithoutNewRun(t *testing.T) {
 	if n := len(gotOld.reports(lead, "worker")); n != 0 {
 		t.Fatalf("the old instance sent the report %d times after closing", n)
 	}
-	in := restart.Intent{Version: restart.Version, ID: restart.NewID(), Kind: restart.KindRestart, CreatedAt: time.Now(), Agents: entries}
+	in := restart.Intent{Version: restart.Version, ID: restart.NewID(), Kind: restart.KindRestart, CreatedAt: time.Now(), Phase: restart.PhaseFinal, Agents: entries}
 	if err := in.Validate(time.Now()); err != nil {
 		t.Fatal(err)
 	}

@@ -154,7 +154,7 @@ func TestCloseForRestartListsInterruptedWorkOnly(t *testing.T) {
 			t.Errorf("the lead's identity is not its hiring: %+v", g)
 		}
 	}
-	in := restart.Intent{Version: restart.Version, ID: restart.NewID(), Kind: restart.KindRestart, CreatedAt: time.Now(), Agents: got}
+	in := restart.Intent{Version: restart.Version, ID: restart.NewID(), Kind: restart.KindRestart, CreatedAt: time.Now(), Phase: restart.PhaseFinal, Agents: got}
 	if err := in.Validate(time.Now()); err != nil {
 		t.Fatalf("the snapshot is not a valid intent: %v", err)
 	}

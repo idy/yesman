@@ -79,11 +79,11 @@ const WORDS = {
   en: { button: 'Restart and continue', confirm: 'Restart Yes Man?', ok: 'Restart', hint: 'Working agents continue afterwards from their sessions.',
     ready: 'Starts the installed update. Working agents continue afterwards.', pending: 'Restarting…', pill: 'Restart to update',
     summary: /Last restart, .+: 1 continued, 1 report handed on, 1 report already with its lead, 1 uncertain, not sent again, 1 waits for you, 1 kept stopped, 1 already finished, 1 no longer there, 1 could not continue$/,
-    skipped: /: 1 kept stopped, 1 already finished$/, none: /: No agent was working\.$/, toast: /Yes Man restarted: 1 continued/, palette: 'Restart and continue' },
+    skipped: /: 1 kept stopped, 1 already finished$/, none: /: No agent was working\.$/, unfinished: /: Its record was not finished, so no agent was continued: 2 interrupted agents wait for a message\.$/, toast: /Yes Man restarted: 1 continued/, palette: 'Restart and continue' },
   'zh-Hans': { button: '重启并继续', confirm: '重启 Yes Man？', ok: '重启', hint: '正在工作的智能体会在重启后从各自的会话继续。',
     ready: '将启动已安装的更新。正在工作的智能体会在重启后继续。', pending: '正在重启…', pill: '重启以更新',
     summary: /上次重启于 .+：1 个已继续、已转交 1 份汇报、1 份汇报此前已到 lead、1 个不确定是否送达，未重发、1 个在等你、1 个保持停止、1 个已完成、1 个已不存在、1 个未能继续$/,
-    skipped: /：1 个保持停止、1 个已完成$/, none: /：当时没有智能体在工作。$/, toast: /Yes Man 已重启：1 个已继续/, palette: '重启并继续' },
+    skipped: /：1 个保持停止、1 个已完成$/, none: /：当时没有智能体在工作。$/, unfinished: /：重启记录未完成，因此没有继续任何智能体：2 个被中断的智能体在等待消息。$/, toast: /Yes Man 已重启：1 个已继续/, palette: '重启并继续' },
 };
 
 const results = [];
@@ -167,6 +167,13 @@ for (const engine of ENGINES) {
       await page.evaluate(() => emit('restart', { last: { id: 'z', kind: 'restart', resumedAt: new Date().toISOString(), version: '0.1.47', agents: [] } }));
       await waitSummary(w.none);
       await shot(page, 'skipped');
+      // A record the old instance did not finish: nobody went on, and it says so.
+      await page.evaluate(() => emit('restart', { last: { id: 'u', kind: 'update', resumedAt: new Date().toISOString(), version: '0.1.48', unfinished: true, agents: [
+        { yesman: 'alice', name: 'lead', role: 'lead', reason: 'working', outcome: 'not-continued' },
+        { yesman: 'alice', name: 'fixer', role: 'worker', reason: 'working', outcome: 'not-continued' },
+      ] } }));
+      await waitSummary(w.unfinished);
+      await shot(page, 'unfinished');
 
       // An installed update: the row says it starts; the pill restarts by
       // keyboard, through the same path.

@@ -1362,6 +1362,8 @@ export default {
   "Report was already with the lead; not sent again": "汇报此前已到 lead，未重发",
   "Uncertain whether it arrived; nothing sent again": "不确定是否送达，未重发任何内容",
   "Kept stopped": "保持停止",
+  "Not continued; waits for a message": "未继续，等待消息",
+  "Its record was not finished, so no agent was continued: {n} interrupted agents wait for a message.": "重启记录未完成，因此没有继续任何智能体：{n} 个被中断的智能体在等待消息。",
   "Could not continue; nothing sent": "未能继续，未发送任何内容",
   "Waits for you": "在等你",
   "Already busy": "已在忙",

@@ -2,6 +2,7 @@ package restart
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,7 +14,7 @@ import (
 var t0 = time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 
 func intent(id string) Intent {
-	return Intent{Version: Version, ID: id, Kind: KindRestart, CreatedAt: t0, FromVersion: "0.1.47",
+	return Intent{Version: Version, ID: id, Kind: KindRestart, CreatedAt: t0, Phase: PhaseFinal, FromVersion: "0.1.47",
 		Agents: []Agent{
 			{Yesman: "demo", Name: "lead", Role: "lead", WorkspaceHiredAt: t0.Add(-time.Hour), AgentSince: t0.Add(-time.Hour), Reason: ReasonWorking},
 			{Yesman: "demo", Name: "fixer", Role: "worker", WorkspaceHiredAt: t0.Add(-time.Hour), AgentSince: t0.Add(-time.Minute), Reason: ReasonReport,
@@ -106,8 +107,10 @@ func TestRejectsAndKeeps(t *testing.T) {
 	raw := func(in Intent) []byte { b, _ := json.Marshal(in); return b }
 	future := intent(NewID())
 	future.CreatedAt = t0.Add(10 * time.Minute)
-	v1 := intent(NewID())
-	v1.Version = 1 // the first format, which had no report states
+	v2 := intent(NewID())
+	v2.Version = 2 // the format before phases: a v2 reader acted on every record
+	noPhase := intent(NewID())
+	noPhase.Phase = ""
 	dup := intent(NewID())
 	dup.Agents = append(dup.Agents, dup.Agents[0])
 	leadReport := intent(NewID())
@@ -133,7 +136,8 @@ func TestRejectsAndKeeps(t *testing.T) {
 	}{
 		{"expired", t0.Add(MaxAge + time.Second), raw(intent(NewID())), "older than"},
 		{"future", t0, raw(future), "future"},
-		{"version", t0, raw(v1), "version 1"},
+		{"version", t0, raw(v2), "version 2"},
+		{"no phase", t0, raw(noPhase), "unknown phase"},
 		{"duplicate", t0, raw(dup), "twice"},
 		{"lead report", t0, raw(leadReport), "only a worker"},
 		{"identity", t0, raw(noIdentity), "identity"},
@@ -191,7 +195,7 @@ func TestWriteKeepsNoSecretsAndValidates(t *testing.T) {
 	}
 	for k := range fields {
 		switch k {
-		case "version", "id", "kind", "createdAt", "fromVersion", "toVersion", "agents":
+		case "version", "id", "kind", "createdAt", "phase", "fromVersion", "toVersion", "agents":
 		default:
 			t.Errorf("unexpected field %q", k)
 		}
@@ -199,5 +203,73 @@ func TestWriteKeepsNoSecretsAndValidates(t *testing.T) {
 	entries, _ := os.ReadDir(d.Path)
 	if len(entries) != 1 {
 		t.Fatalf("left behind: %v", entries)
+	}
+}
+
+// A provisional intent is claimed like any other; the caller decides it
+// lets nobody go on. A reader of the previous format refuses it: its
+// version differs.
+func TestProvisionalClaimed(t *testing.T) {
+	d := dirAt(t, t0.Add(time.Minute))
+	in := intent(NewID())
+	in.Phase = PhaseProvisional
+	if err := d.Write(in); err != nil {
+		t.Fatal(err)
+	}
+	got, _, found, rejected, err := d.Claim()
+	if err != nil || !found || rejected != "" || got.Phase != PhaseProvisional {
+		t.Fatalf("Claim = %+v %v %q %v", got, found, rejected, err)
+	}
+	raw, _ := json.Marshal(in)
+	var old struct {
+		Version int `json:"version"`
+	}
+	if json.Unmarshal(raw, &old); old.Version == 2 {
+		t.Fatal("a provisional record carries the version a v2 reader acts on")
+	}
+}
+
+// What a restart of many agents records fits the unchanged bound in both
+// phases: 200 workers working when provisional, then each with a report and
+// its digest when final, with ordinary names and times to the nanosecond.
+// Whatever does not fit is refused whole, never cut short.
+func TestEncodedGrowthFits(t *testing.T) {
+	hired := time.Date(2026, 11, 17, 8, 0, 0, 123456789, time.UTC)
+	in := Intent{Version: Version, ID: NewID(), Kind: KindUpdate, CreatedAt: t0, Phase: PhaseProvisional, FromVersion: "0.1.47", ToVersion: "0.1.48"}
+	in.Agents = append(in.Agents, Agent{Yesman: "project-alpha", Name: "lead", Role: "lead", WorkspaceHiredAt: hired, AgentSince: hired, Reason: ReasonWorking})
+	for i := range 200 {
+		in.Agents = append(in.Agents, Agent{Yesman: "project-alpha", Name: fmt.Sprintf("worker-%03d", i), Role: "worker",
+			WorkspaceHiredAt: hired, AgentSince: hired.Add(time.Duration(i) * time.Second), Reason: ReasonWorking})
+	}
+	size := func(in Intent) int { b, _ := json.Marshal(in); return len(b) + 1 }
+	d := dirAt(t, t0)
+	if err := d.Write(in); err != nil {
+		t.Fatalf("provisional, %d bytes: %v", size(in), err)
+	}
+	final := in
+	final.Phase = PhaseFinal
+	final.Agents = append([]Agent(nil), in.Agents...)
+	for i := 1; i < len(final.Agents); i++ {
+		final.Agents[i].Reason = ReasonReport
+		final.Agents[i].Report = &Report{State: ReportUncertain, Digest: strings.Repeat("f", 64)}
+	}
+	if err := d.Write(final); err != nil {
+		t.Fatalf("final, %d bytes: %v", size(final), err)
+	}
+	t.Logf("provisional %d bytes, final %d bytes, bound %d", size(in), size(final), maxIntentBytes)
+	if _, _, found, rejected, err := d.Claim(); !found || rejected != "" || err != nil {
+		t.Fatalf("Claim: %v %q %v", found, rejected, err)
+	}
+
+	// The most a record may hold, with the longest names: refused whole.
+	big := final
+	big.Agents = nil
+	long := strings.Repeat("y", 32)
+	for i := range maxAgents {
+		big.Agents = append(big.Agents, Agent{Yesman: long, Name: fmt.Sprintf("%s%04d", strings.Repeat("w", 28), i), Role: "worker",
+			WorkspaceHiredAt: hired, AgentSince: hired, Reason: ReasonReport, Report: &Report{State: ReportUncertain, Digest: strings.Repeat("f", 64)}})
+	}
+	if err := d.Write(big); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("a %d-byte record was not refused: %v", size(big), err)
 	}
 }

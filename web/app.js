@@ -1835,10 +1835,16 @@ const OUTCOME_LABELS = {
   resumed: 'Continued', reported: 'Report handed on', accepted: 'Report was already with the lead; not sent again',
   uncertain: 'Uncertain whether it arrived; nothing sent again', waiting: 'Waits for you', active: 'Already busy',
   finished: 'Already finished', gone: 'No longer there', stopped: 'Kept stopped', failed: 'Could not continue; nothing sent',
+  'not-continued': 'Not continued; waits for a message',
 };
 
 function restartSummary(last) {
   if (last.rejected) return t('The record of the last restart could not be used; no agent was woken.');
+  // The old instance quit before it finished its record: nobody went on.
+  if (last.unfinished) {
+    return tn(last.agents.length, 'Its record was not finished, so no agent was continued: {n} interrupted agent waits for a message.',
+      'Its record was not finished, so no agent was continued: {n} interrupted agents wait for a message.');
+  }
   if (!last.agents.length) return t('No agent was working.');
   const count = (o) => last.agents.filter((a) => a.outcome === o).length;
   const parts = RESTART_OUTCOMES.map(([o, one, many]) => (count(o) ? tn(count(o), one, many ?? one) : null)).filter(Boolean);
