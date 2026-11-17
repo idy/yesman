@@ -622,6 +622,23 @@ async function resizePart(page, engine) {
   if (engine === 'chromium') await shot(page, `${engine}-kept-info-1000-focus`);
   await page.keyboard.press('Enter');
   assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'topic-tp1', 'Back still returns to the row');
+  // Wider, Info focused again, then narrow: the browser may drop focus to the
+  // page as Info hides, before the resize; it still lands in the navigation.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await frames(page);
+  await page.locator('#yesman-info [data-info-entry="topics"]').focus();
+  await page.setViewportSize({ width: 1000, height: 780 });
+  await frames(page);
+  f = await focus();
+  assert.deepEqual(f, { key: 'search', inTopics: true, visible: true }, `Info focused again: the search ${JSON.stringify(f)}`);
+  // Info let go of (blur) while it shows: hiding it moves nothing.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await frames(page);
+  await page.locator('#yesman-info [data-info-entry="topics"]').focus();
+  await page.evaluate(() => document.activeElement.blur());
+  await page.setViewportSize({ width: 1000, height: 780 });
+  await frames(page);
+  assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'focus let go of is not taken back');
   // Navigation shown: the same move lands on the search.
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.locator('#topics [aria-label="Close the topics"]').click();
@@ -651,6 +668,38 @@ async function resizePart(page, engine) {
   await page.setViewportSize({ width: 1280, height: 800 });
   await frames(page);
   assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', 'focus outside Info stays');
+  // Needs You: the request shown, Back, wider, Info focused again, narrow.
+  const needs = () => page.evaluate(() => ({ key: document.activeElement?.dataset.key ?? document.activeElement?.className, inNeeds: !!document.activeElement?.closest('#needs-you'), visible: !!document.activeElement?.getClientRects().length }));
+  const entry = page.locator('#yesman-info [data-info-entry="needs-you"]');
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.locator('#topics [aria-label="Close the topics"]').click();
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await entry.click();
+  await page.getByRole('button', { name: 'Show the info', exact: true }).click();
+  await page.locator('#needs-you .needs-you-open').first().click();
+  await entry.focus();
+  await page.setViewportSize({ width: 1000, height: 780 });
+  await frames(page);
+  f = await needs();
+  assert.deepEqual(f, { key: 'list', inNeeds: true, visible: true }, `request shown: focus on the way back ${JSON.stringify(f)}`);
+  await page.keyboard.press('Enter');
+  f = await needs();
+  assert.ok(f.inNeeds && f.visible && f.key.includes('needs-you-open'), `Back returns to the request ${JSON.stringify(f)}`);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await frames(page);
+  await entry.focus();
+  await page.setViewportSize({ width: 1000, height: 780 });
+  await frames(page);
+  f = await needs();
+  assert.ok(f.inNeeds && f.visible && f.key.includes('needs-you-open'), `Info focused again: the request row ${JSON.stringify(f)}`);
+  if (engine === 'chromium') await shot(page, `${engine}-needs-refocus-1000`);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await frames(page);
+  await entry.focus();
+  await page.evaluate(() => document.activeElement.blur());
+  await page.setViewportSize({ width: 1000, height: 780 });
+  await frames(page);
+  assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'focus let go of is not taken back');
 }
 
 const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart };

@@ -75,6 +75,7 @@ const statusTone = (a) => (asking(a) ? 'asking' : runFailed(a) ? 'error' : a.sta
 // it makes way for it (infoYields, below).
 let infoKept = false;
 let infoYielded = false;
+let infoFocus = null; // see the resize listener
 
 const state = {
   snap: { yesmen: [], agents: [] },
@@ -3634,11 +3635,26 @@ function togglePanel() {
 
 // As the window changes, the info panel makes way, or shows again; focus it
 // hid goes into the pane, to a control of the column it shows (paneFocus).
+// A browser may drop that focus to the page as the panel hides, before this
+// runs, so the panel having focus is remembered for the pane and yesman it
+// was beside (infoFocus): focus moved elsewhere, or let go of while the
+// panel still shows, forgets it, as does any change of pane, yesman, or
+// whether the panel makes way.
+const infoScope = () => `${state.pane}\n${yesmanOf(selectedAgent()?.id)?.name ?? ''}`;
+document.addEventListener('focusin', (e) => {
+  infoFocus = $('#yesman-info')?.contains(e.target) ? infoScope() : null;
+});
+document.addEventListener('focusout', (e) => {
+  if (!e.relatedTarget && e.target.isConnected && e.target.getClientRects().length > 0) infoFocus = null;
+});
 window.addEventListener('resize', () => {
   const now = infoYields();
   if (now === infoYielded) return;
   infoYielded = now;
-  const lost = now && $('#yesman-info')?.contains(document.activeElement);
+  const active = document.activeElement;
+  const dropped = (!active || active === document.body) && infoFocus === infoScope();
+  const lost = now && ($('#yesman-info')?.contains(active) || dropped);
+  infoFocus = null;
   info.render();
   renderBarActions();
   if (lost) paneFocus(state.pane)?.focus({ preventScroll: true });
@@ -3778,7 +3794,7 @@ function setPane(pane) {
   const visible = had && had !== document.body && shown(had);
   const inPane = !!had?.closest?.('#board, #needs-you, #topics, #files');
   const entry = had?.closest?.('#yesman-info [data-info-entry]')?.dataset.infoEntry;
-  if (state.pane !== pane) infoKept = false;
+  if (state.pane !== pane) { infoKept = false; infoFocus = null; }
   state.pane = pane;
   infoYielded = infoYields();
   renderInfo();
