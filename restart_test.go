@@ -175,3 +175,43 @@ func TestRejectedRecordWakesNobody(t *testing.T) {
 		t.Fatalf("the rejected record was not kept: %v", m)
 	}
 }
+
+// Leads go on before workers, whose reports would otherwise reach a lead
+// first and make it seem talked to; an agent that does not start in time
+// is reported failed without holding the rest up.
+func TestResumeLeadsFirstAndBounded(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "restart")
+	a, _ := testRestarts(t, dir, "0.1.47")
+	_ = a.begin(restart.KindRestart, UpdateView{})
+	stuck := working("stuck")
+	a.beforeStop(func() []restart.Agent { return []restart.Agent{working("fixer"), stuck, working("lead")} })
+
+	b, _ := testRestarts(t, dir, "0.1.47")
+	b.timeout = 200 * time.Millisecond
+	var mu sync.Mutex
+	var order []string
+	release := make(chan struct{})
+	defer close(release)
+	b.resume(func(ctx context.Context, ag restart.Agent, _ string) (string, error) {
+		mu.Lock()
+		order = append(order, ag.Name)
+		mu.Unlock()
+		if ag.Name == "stuck" {
+			<-release // a start that never ends in time
+		}
+		return restart.Resumed, nil
+	})
+	mu.Lock()
+	first := append([]string(nil), order...)
+	mu.Unlock()
+	if len(first) == 0 || first[0] != "lead" {
+		t.Fatalf("order %v: the lead must go first", first)
+	}
+	got := map[string]string{}
+	for _, o := range b.view().Last.Agents {
+		got[o.Name] = o.Outcome
+	}
+	if got["lead"] != restart.Resumed || got["fixer"] != restart.Resumed || got["stuck"] != restart.Failed {
+		t.Fatalf("outcomes %v", got)
+	}
+}

@@ -39,6 +39,7 @@ type restarts struct {
 	version  func() string
 	now      func() time.Time
 	changed  func(RestartView)
+	timeout  time.Duration // for each agent to go on
 
 	mu      sync.Mutex
 	pending *pendingRestart
@@ -58,6 +59,7 @@ func newRestarts(dir *restart.Dir) *restarts {
 		version:  mygo.App.Version,
 		now:      time.Now,
 		changed:  func(v RestartView) { _ = restartEvent.Broadcast(v) },
+		timeout:  resumeTimeout,
 	}
 }
 
@@ -157,24 +159,30 @@ func (r *restarts) resume(resume resumer) {
 	} else {
 		res.ID, res.Kind, res.RestartedAt, res.FromVersion, res.ToVersion = in.ID, in.Kind, in.CreatedAt, in.FromVersion, in.ToVersion
 		res.Agents = make([]restart.Outcome, len(in.Agents))
-		sem := make(chan struct{}, resumeParallel)
-		var wg sync.WaitGroup
-		for i, a := range in.Agents {
-			wg.Go(func() {
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				ctx, cancel := context.WithTimeout(context.Background(), resumeTimeout)
-				defer cancel()
-				outcome, err := resume(ctx, a, restartNote(in, running, a.Reason))
-				o := restart.Outcome{Yesman: a.Yesman, Name: a.Name, Role: a.Role, Reason: a.Reason, Outcome: outcome}
-				if err != nil {
-					o.Error = err.Error()
-					log.Printf("restart: %s/%s: %s: %v", a.Yesman, a.Name, outcome, err)
+		// Leads first: a worker that goes on reports to its lead, which
+		// would then seem to have been talked to and miss its own note.
+		for _, leads := range []bool{true, false} {
+			sem := make(chan struct{}, resumeParallel)
+			var wg sync.WaitGroup
+			for i, a := range in.Agents {
+				if (a.Role == "lead") != leads {
+					continue
 				}
-				res.Agents[i] = o
-			})
+				wg.Go(func() {
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					o := restart.Outcome{Yesman: a.Yesman, Name: a.Name, Role: a.Role, Reason: a.Reason}
+					var err error
+					o.Outcome, err = r.resumeOne(resume, a, restartNote(in, running, a.Reason))
+					if err != nil {
+						o.Error = err.Error()
+						log.Printf("restart: %s/%s: %s: %v", a.Yesman, a.Name, o.Outcome, err)
+					}
+					res.Agents[i] = o
+				})
+			}
+			wg.Wait()
 		}
-		wg.Wait()
 	}
 	if err := r.dir.Finish(claim, res); err != nil {
 		log.Print("restart: ", err)
@@ -184,6 +192,29 @@ func (r *restarts) resume(resume resumer) {
 	v := r.viewLocked()
 	r.mu.Unlock()
 	r.changed(v)
+}
+
+// resumeOne resumes one agent within resumeTimeout. A start that takes
+// longer is not waited for: the agent is then left without its note
+// (Resume checks its context before sending) and reported failed.
+func (r *restarts) resumeOne(resume resumer, a restart.Agent, note string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
+	defer cancel()
+	type answer struct {
+		outcome string
+		err     error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		outcome, err := resume(ctx, a, note)
+		done <- answer{outcome, err}
+	}()
+	select {
+	case got := <-done:
+		return got.outcome, got.err
+	case <-ctx.Done():
+		return restart.Failed, fmt.Errorf("it did not start within %s; it waits for a message", r.timeout)
+	}
 }
 
 // view is where restarting stands.

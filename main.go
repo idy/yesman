@@ -195,13 +195,15 @@ func main() {
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
-		// A restart records the agents it cuts short before they stop.
-		a.restarts.beforeStop(a.agents.CloseForRestart)
 		a.stopGitHubAppSetup()
 		a.githubApp.Close()
 		if managedRuntime != nil {
 			managedRuntime.Close()
 		}
+		// A restart records the agents it cuts short right before they
+		// stop. A worker whose run ends in between is recorded working: it
+		// goes on afterwards and reports again.
+		a.restarts.beforeStop(a.agents.CloseForRestart)
 		a.agents.StopAll()
 	})
 	mygo.App.OnQuitCanceled(a.restarts.canceled)

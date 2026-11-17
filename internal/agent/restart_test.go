@@ -307,3 +307,43 @@ func TestResumeStoppedWhileStarting(t *testing.T) {
 		t.Fatalf("a stopped agent was sent %q", p)
 	}
 }
+
+// Put to sleep in the new instance before its turn came: it stays asleep.
+func TestResumeKeepsASleepFromThisInstance(t *testing.T) {
+	store, tmp, y := restartStore(t)
+	m, got := restartInstance(t, store, tmp)
+	id := ID("alice", "lead")
+	if _, _, err := m.ensure(id); err != nil { // a message started it
+		t.Fatal(err)
+	}
+	m.Stop(id) // the user puts it to sleep
+	lead := restart.Agent{Yesman: "alice", Name: "lead", Role: RoleLead, WorkspaceHiredAt: y.HiredAt, AgentSince: y.HiredAt, Reason: restart.ReasonWorking}
+	if outcome, _ := m.Resume(context.Background(), lead, "note"); outcome != restart.Stopped {
+		t.Fatalf("Resume = %s", outcome)
+	}
+	if m.running(id) != nil || got.notes(id, "note") != 0 {
+		t.Fatal("a slept agent was started again and noted")
+	}
+}
+
+// A start that outlasts the resume's time leaves the agent without a note.
+func TestResumeTooLateSendsNothing(t *testing.T) {
+	store, tmp, y := restartStore(t)
+	exe, _ := os.Executable()
+	r := &received{}
+	m := New(Config{Pi: exe, Extension: filepath.Join(tmp, "none.ts"),
+		Env: []string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=600ms"}, Yesmen: store, OnEvent: r.on})
+	t.Cleanup(m.StopAll)
+	lead := restart.Agent{Yesman: "alice", Name: "lead", Role: RoleLead, WorkspaceHiredAt: y.HiredAt, AgentSince: y.HiredAt, Reason: restart.ReasonWorking}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if outcome, err := m.Resume(ctx, lead, "note"); outcome != restart.Failed || err == nil {
+		t.Fatalf("Resume = %s %v", outcome, err)
+	}
+	// A prompt sent anyway would reach pi a moment later: watch for it.
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if n := r.notes(ID("alice", "lead"), "note"); n != 0 {
+			t.Fatalf("a late start was noted %d times", n)
+		}
+	}
+}

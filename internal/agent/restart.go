@@ -113,13 +113,16 @@ func (m *Manager) Resume(ctx context.Context, r restart.Agent, note string) (str
 		}
 		m.mu.Lock()
 		closed := m.closed
-		var running bool
+		var running, slept bool
 		if cur := m.agents[id]; cur != nil {
 			running = cur.proc != nil || cur.starting != nil
+			// Put to sleep in this instance before its turn came, as by
+			// the user: it stays asleep. ensureIn would clear the mark.
+			slept = !running && cur.stopping
 		}
 		m.mu.Unlock()
 		switch {
-		case closed:
+		case closed || slept:
 			outcome = restart.Stopped
 			return nil
 		case running:
@@ -139,6 +142,11 @@ func (m *Manager) Resume(ctx context.Context, r restart.Agent, note string) (str
 		return restart.Failed, err
 	case outcome != "":
 		return outcome, nil
+	}
+	// Started after its time ran out: it waits for a message, unnoted, so
+	// that a start that took too long does not wake it later.
+	if err := ctx.Err(); err != nil {
+		return restart.Failed, err
 	}
 
 	if r.Reason == restart.ReasonReport {
