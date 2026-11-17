@@ -9,7 +9,7 @@ Every subprocess runs in one owned process group (POSIX) or job (Windows);
 nothing handed to a consumer is removed before that owner is confirmed empty.
 The native/runtime jobs receive only the resulting public artifacts/plan.
 """
-import base64,contextlib,hashlib,io,json,os,pathlib,shutil,signal,stat,subprocess,sys,tarfile,tempfile,time
+import base64,contextlib,hashlib,io,json,os,pathlib,shutil,signal,stat,subprocess,sys,tarfile,tempfile,threading,time
 
 KEY='MYGO_UPDATER_PRIVATE_KEY'
 PRODUCER=pathlib.Path(__file__).resolve().parents[1]
@@ -79,7 +79,7 @@ class OwnedGroup:
     QUIET=2.0
 
     def __init__(self):
-        self.closed=False;self.failed=None;self.retained=[]
+        self.closed=False;self.failed=None;self.retained=[];self.timer=None;self.waiting=[]
         if WINDOWS:
             self.job=_k32.CreateJobObjectW(None,None)
             if not self.job:raise ctypes.WinError(ctypes.get_last_error())
@@ -127,9 +127,22 @@ class OwnedGroup:
         except PermissionError:pass  # macOS: a group left with only an exited (zombie) member
 
     def signal_stop(self,escalate):
+        """From a signal handler: TERM now and KILL after GRACE (a further signal: KILL now)."""
         if self.closed:return
-        if WINDOWS:_k32.TerminateJobObject(self.job,1)
-        else:self._kill(signal.SIGKILL if escalate else signal.SIGTERM)
+        if WINDOWS:_k32.TerminateJobObject(self.job,1);return
+        self._kill(signal.SIGKILL if escalate else signal.SIGTERM)
+        if self.timer is None:
+            # A consumer that ignores TERM must not keep the blocked wait (and
+            # so the drain and cleanup) from ever happening.
+            self.timer=threading.Timer(self.GRACE,self._escalate);self.timer.daemon=True;self.timer.start()
+
+    def _escalate(self):
+        if not self.closed:self._kill(signal.SIGKILL)
+
+    def _release(self):
+        """Marks the owner closed; afterwards no timer can signal the group ID."""
+        self.closed=True
+        if self.timer is not None:self.timer.cancel();self.timer.join()
 
     # -- running -----------------------------------------------------------
     def run(self,args,*,cwd=None,env=None,stdout=None,stderr=None,capture=False,timeout=None):
@@ -156,6 +169,7 @@ class OwnedGroup:
             _k32.TerminateProcess(int(p._handle),1);p.wait()
             if p.stdout:p.stdout.close()
             raise
+        self.waiting.append(p)
         # Short waits let the console-control handler run (a Windows wait is not
         # interrupted by it); communicate may be retried after TimeoutExpired.
         deadline=None if timeout is None else time.monotonic()+timeout
@@ -163,6 +177,7 @@ class OwnedGroup:
             try:output,_=p.communicate(timeout=0.2);break
             except subprocess.TimeoutExpired:
                 if deadline is not None and time.monotonic()>=deadline:raise subprocess.TimeoutExpired(args,timeout)
+        self.waiting.remove(p)
         if p.returncode:raise subprocess.CalledProcessError(p.returncode,args,output)
         return output
 
@@ -193,7 +208,9 @@ class OwnedGroup:
             while True:
                 live=self.live()
                 if live==[]:
-                    self.closed=True;_k32.CloseHandle(self.job);return
+                    self._release();_k32.CloseHandle(self.job)
+                    for p in self.waiting:p.wait(timeout=10)
+                    self.waiting=[];return
                 if time.monotonic()>=end:break
                 time.sleep(0.05)
         else:
@@ -204,7 +221,7 @@ class OwnedGroup:
                     live=self.live()
                     if live==[]:
                         # The anchor was kept unreaped until now, so the group ID stayed ours.
-                        self.closed=True;self.anchor.wait(timeout=10);self.anchor.stdin.close();return
+                        self._release();self.anchor.wait(timeout=10);self.anchor.stdin.close();return
                     if time.monotonic()>=end:break
                     time.sleep(0.05)
         self.failed='%s: %s not confirmed stopped'%(self.ident,'members unknown' if live is None else 'live members %s'%live)
@@ -225,12 +242,17 @@ def _write_receipt(group,reason):
         path=pathlib.Path(os.environ['RUNNER_TEMP'])/('qa-producer-retained-%d.json'%os.getpid())
         path.write_text(text+'\n',encoding='utf-8')
 
-def _settled(group,aborting,resource):
-    """Settles group before resource removal; on Undrained records the resource as retained."""
+def _settled(group,aborting,resource,*fds):
+    """Settles group before resource removal. On Undrained the resource is kept as it
+    is (bytes included), recorded as retained, and only this process's handles closed."""
     if group is None:return
     try:group.settle(aborting)
     except Undrained:
-        group.retained.append(resource);raise
+        group.retained.append(resource)
+        for fd in fds:
+            if fd is not None:
+                with contextlib.suppress(OSError):os.close(fd)
+        raise
 
 def _empty_fd(dfd):
     for entry in os.scandir(dfd):
@@ -292,7 +314,8 @@ def owned_dir(prefix,group=None):
     try:yield d.path
     except BaseException:failed=True;raise
     finally:
-        _settled(group,failed,d.describe())
+        try:_settled(group,failed,d.describe(),d.dfd)
+        except Undrained:d.dfd=None;raise
         problems=[];d.remove_top(problems)
         if problems:raise CleanupIncomplete('; '.join(problems))
 
@@ -310,7 +333,8 @@ def key_file(key,group=None):
         yield path
     except BaseException:failed=True;raise
     finally:
-        _settled(group,failed,{**d.describe(),'file':name})
+        try:_settled(group,failed,{**d.describe(),'file':name},fd,d.dfd)
+        except Undrained:d.dfd=None;raise
         problems=[]
         # Removes the key bytes from the created file wherever it now is.
         try:os.ftruncate(fd,0)

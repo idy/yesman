@@ -230,6 +230,7 @@ class Producer(unittest.TestCase):
         self.assertTrue(any(name.startswith('private-qa-successor-') for name in retained))
         receipt = json.loads(next(self.temp.glob('qa-producer-retained-*.json')).read_text())
         self.assertEqual({r['path'] for r in receipt['retained']} >= {str(signer.parent)}, True)
+        # The producer closed its handles on the retained files; nothing is held open.
         for p in list(self.temp.iterdir()):
             shutil.rmtree(p) if p.is_dir() else p.unlink()
 
@@ -326,6 +327,16 @@ if mode == 'hold':
 '''
 SLEEP = 'import time\ntime.sleep(60)'
 IGNORE_TERM = 'import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)'
+# The direct consumer itself ignores TERM and keeps its stdout pipe; so does its child.
+STUBBORN = r'''import os, signal, subprocess, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+grand = subprocess.Popen([sys.executable, '-I', '-S', '-c', 'import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)'])
+with open(sys.argv[1] + '.tmp', 'w') as f:
+    f.write('%d %d' % (os.getpid(), grand.pid))
+os.replace(sys.argv[1] + '.tmp', sys.argv[1])
+print('started', flush=True)
+time.sleep(60)
+'''
 RECORD_TERM = r'''import os, signal, sys, time
 key = sys.argv[1]
 def term(n, f):
@@ -443,6 +454,31 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(gone(pids))
         self.assertIsInstance(box.get('error'), subprocess.CalledProcessError)
 
+    @unittest.skipIf(WINDOWS, 'POSIX signal escalation; Windows jobs terminate unconditionally')
+    def test_one_term_escalates_against_a_term_ignoring_consumer(self):
+        previous = qa._install_handlers()
+        qa.STOP.group = self.group
+        pidfile = str(self.dir / 'stubborn-pids')
+        try:
+            with patch.object(qa.OwnedGroup, 'GRACE', 1.0):
+                start = time.monotonic()
+                with self.assertRaises(subprocess.CalledProcessError):
+                    with qa.key_file(PRIVATE, self.group) as path:
+                        def stop():
+                            self.pids(pidfile)
+                            time.sleep(0.3)
+                            os.kill(os.getpid(), signal.SIGTERM)  # exactly one signal
+                        threading.Thread(target=stop).start()
+                        self.group.run(PY + [STUBBORN, pidfile], capture=True)
+                elapsed = time.monotonic() - start
+            self.assertLess(elapsed, 20)
+            self.assertTrue(gone(self.pids(pidfile)))
+            self.assertFalse(os.path.exists(path))
+            self.assertTrue(self.group.closed)
+        finally:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
+
     def test_launch_failure_leaves_the_owner_usable(self):
         with self.assertRaises(OSError):
             self.group.run(['qa-definitely-missing-program-%s' % secrets.token_hex(4)])
@@ -480,7 +516,7 @@ class Lifecycle(unittest.TestCase):
     def test_unconfirmed_drain_keeps_the_key_and_reports(self):
         pidfile, args = self.start('wait', SLEEP)
         thread, box = self.run_in_thread(args, timeout=60)
-        real_live = self.group.live
+        real_live, pids = self.group.live, []
         try:
             with self.assertRaises(qa.Undrained):
                 with qa.key_file(PRIVATE, self.group) as path:
@@ -488,6 +524,8 @@ class Lifecycle(unittest.TestCase):
                     with patch.object(self.group, 'live', lambda: None), patch.object(qa.OwnedGroup, 'GRACE', 0.3):
                         self.group.settle(aborting=True)
             self.assertEqual(pathlib.Path(path).read_text().strip(), PRIVATE)
+            os.unlink(path)  # retained handles were closed (Windows would refuse otherwise)
+            os.rmdir(os.path.dirname(path))
             self.assertEqual(self.group.retained[0]['path'], os.path.dirname(path))
         finally:
             # The test, not the producer, now stops its own members and files.
