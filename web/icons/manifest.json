@@ -251,6 +251,22 @@
       "name": "pencil-simple",
       "codepoint": "e3b4"
     },
+    "topics": {
+      "name": "chats-circle",
+      "codepoint": "e17e"
+    },
+    "archive": {
+      "name": "archive",
+      "codepoint": "e00c"
+    },
+    "undo": {
+      "name": "arrow-counter-clockwise",
+      "codepoint": "e038"
+    },
+    "question": {
+      "name": "question",
+      "codepoint": "e3e8"
+    },
     "keyboard": {
       "name": "keyboard",
       "codepoint": "e2d8"

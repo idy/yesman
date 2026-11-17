@@ -16,6 +16,8 @@ function inline(text) {
     .replace(/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)/g, '<a href="$2" data-external>$1</a>')
     .replace(/\[([^\]\n]+)\]\((?:file:\/\/)?((?:\/|~\/|[A-Za-z]:[\\/])[^\s)]*)\)/g, '<a href="#" data-path="$2" title="$2">$1</a>')
     .replace(/(^|[\s(])((?:https?:\/\/)[^\s<)]+[^\s<).,;:!?])/g, '$1<a href="$2" data-external>$2</a>')
+    // A document's own anchor; escaped text still never becomes raw HTML.
+    .replace(/\[([^\]\n]+)\]\((#[^\s)]*)\)/g, (m, label, href) => relativeLinks ? `<a href="${href}">${label}</a>` : m)
     // In a document, a link to another file of it, relative to it.
     .replace(/\[([^\]\n]+)\]\(((?![a-z][a-z0-9+.-]*:|[\/~#])[^\s)]+)\)/gi, (m, label, href) => (relativeLinks ? `<a href="${href}">${label}</a>` : m))
     .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')

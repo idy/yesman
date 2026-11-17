@@ -40,6 +40,8 @@ type Server struct {
 	// NeedsYouChanged is told when what waits on a yesman's user changes,
 	// with the handoff a lead added, if it added one.
 	NeedsYouChanged func(yesman string, added *yesmen.Handoff)
+	// TopicsChanged is told when the lead changes a yesman's topics.
+	TopicsChanged func(yesman string)
 	// AddRepo, when set, clones a GitHub repository into the pool in place
 	// of resolving and cloning it here, so the app can show it cloning.
 	AddRepo func(ctx context.Context, repo string) (pool.Repo, error)
@@ -61,6 +63,9 @@ type Server struct {
 	// beforeBoardChange, set only by tests, runs once a board change was
 	// admitted, just before it is written.
 	beforeBoardChange func()
+	// beforeTopicChange, set only by tests, runs as beforeBoardChange does,
+	// once a topic change from an agent was admitted.
+	beforeTopicChange func()
 }
 
 // Start listens on a loopback port and serves in the background.
@@ -100,6 +105,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
 	mux.HandleFunc("GET /v1/needs-you", s.handle(s.needsYou))
 	mux.HandleFunc("POST /v1/needs-you", s.handle(s.changeNeedsYou))
+	mux.HandleFunc("GET /v1/topics", s.handle(s.topics))
+	mux.HandleFunc("POST /v1/topics", s.handle(s.changeTopics))
 	return mux
 }
 
@@ -535,6 +542,10 @@ func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, e
 	if s.GitHubApp != nil {
 		text += s.GitHubApp.Context(c.yesman.Name, c.yesman.HiredAt.UTC().Format(time.RFC3339Nano))
 	}
+	if c.agent.Role == agent.RoleLead {
+		topics, err := s.Yesmen.Topics(c.yesman.Name, c.yesman.HiredAt)
+		text += TopicsContext(topics, err)
+	}
 	if c.agent.Role == agent.RoleLead && s.Crew != nil {
 		text += CrewContext(s.Crew(ctx), c.agent)
 	}
@@ -615,8 +626,8 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
 
 	if me.Role == agent.RoleLead {
-		w("You are the lead of the yesman named %q. You talk with the user, plan, keep the board, Knowledge and task log, and get the work delivered by workers.\n\n", y.Label())
-		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are Knowledge notes under .yesman/knowledge/ and the task log at .yesman/task-log.md. Read files only to answer a quick question or maintain these shared documents from worker reports, not to investigate. ")
+		w("You are the lead of the yesman named %q. You talk with the user, plan, keep the board, Knowledge and Working log, and get the work delivered by workers.\n\n", y.Label())
+		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are Knowledge notes under .yesman/knowledge/ and the Working log TOC .yesman/task-log.md and flat Markdown records .yesman/task-log/<name>.md. Read files only to answer a quick question or maintain these shared documents from worker reports, not to investigate. ")
 		w("Hand everything else to workers with yesman_worker_start (changes, commands, tests, research across many files, reviews, releases), each with a title naming its subject, then end your run. Each worker is its own pi agent in this workspace; several can run at once. ")
 		w("Keep every run short: answer, delegate, end.\n")
 		w("Your text is what the user reads. The window folds your thinking, tool calls, board changes, worker reports and yesman's notices into a collapsed work log, so write text for the user: answers, results, questions and decisions for them, and progress that tells them something new. Do not narrate routine steps such as reading files, checking the board or starting a worker, and do not restate a worker's report: say what it means for the user.\n")
@@ -680,7 +691,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 
 	rel := ".yesman/knowledge"
 	w("\n## Knowledge\n\n")
-	w("Every agent of this yesman shares %s/. Read a note when it bears on your work. Knowledge holds reusable development conventions, user preferences, architecture decisions and known pitfalls. Good: 'Use the project's Phosphor icon helper and local font assets'; 'Keep stable internal IDs when display names change.' Bad: 'PR #42 at head abc123 passed CI'; a release timeline or temporary blocker. Those belong in the task log or board. Finishing a task alone is not a reason to add Knowledge. Keep one note per topic, update rather than duplicate it, and keep %s/INDEX.md a concise catalog of durable notes. Keep secrets out of both stores.\n", rel, rel)
+	w("Every agent of this yesman shares %s/. Read a note when it bears on your work. Knowledge holds reusable development conventions, user preferences, architecture decisions and known pitfalls. Good: 'Use the project's Phosphor icon helper and local font assets'; 'Keep stable internal IDs when display names change.' Bad: 'PR #42 at head abc123 passed CI'; a release timeline or temporary blocker. Those belong in the working log or board. Finishing a task alone is not a reason to add Knowledge. Keep one note per topic, update rather than duplicate it, and keep %s/INDEX.md a concise catalog of durable notes. Keep secrets out of both stores.\n", rel, rel)
 	if me.Role == agent.RoleLead {
 		w("Maintain Knowledge from reusable discoveries in worker reports; do not turn handoffs into notes.\n")
 	} else {
@@ -694,12 +705,12 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 		w("\n%s/INDEX.md:\n\n%s\n", rel, text)
 	}
 
-	w("\n## Task log\n\n")
-	w("The task log is .yesman/task-log.md. It records dated historical facts, not current instructions: task/PR links, changes and reasons, commit/head hashes, CI and validation results, release timelines, outcomes and follow-up work or temporary blockers at the time. Use the board for current status. Read relevant entries on demand; the full history is not included in this context or the Knowledge index. Keep reusable rules such as the icon policy in Knowledge instead of repeating them in every log entry.\n")
+	w("\n## Working log\n\n")
+	w("The Working log starts at .yesman/task-log.md, a short TOC linking to flat Markdown records in .yesman/task-log/. The display name is Working log (工作日志); these compatibility paths and existing API names stay stable. Legacy single-file logs remain readable; never silently rewrite or migrate them. It records dated historical facts, not current instructions: task/PR links, changes and reasons, commit/head hashes, CI and validation results, release timelines, outcomes and follow-up work or temporary blockers at the time. Use the board for current status. Read the TOC and only relevant detail files on demand; neither is included in this context or the Knowledge index. Keep reusable rules such as the icon policy in Knowledge instead of repeating them in every log entry.\n")
 	if me.Role == agent.RoleLead {
-		w("You coordinate and append task-log entries from worker reports. Preserve existing history; do not have multiple workers rewrite this shared file. Use a date/task heading, then Changes, PR, Validation, Outcome and Follow-up. This document maintenance does not permit doing code work yourself.\n")
+		w("You coordinate and append Working log entries from worker reports, as the sole shared-history writer. For a TOC workspace, create YYYY-MM-DD-tNN-topic.md per task/PR/release (16–32 KiB target; before 48 KiB continue in -02.md, -03.md). Add only date, task/version, title/link and one result sentence to the TOC. Keep the TOC below 16 KiB; group older links into flat YYYY-topic-index.md catalogs below 16 KiB, preserving detail paths. Full Changes, PR, Validation, Outcome, Follow-up and recovery refs belong in that detail file, with a ../task-log.md link back. New tasks get new files even on the same day; edit old records only for factual corrections. Utility-generated legacy snapshots, slices and catalogs are immutable; put their corrections in a new linked record. Preserve all legacy history; coordinate any explicit offline migration separately after stopping old writers. Never have concurrent workers rewrite shared history. This document maintenance does not permit doing code work yourself.\n")
 	} else {
-		w("Report task results, PR/commit links, validation, outcomes and follow-up work to your lead, which appends the task log. Keep your board task current; do not rewrite the shared task log alongside other workers.\n")
+		w("Report task results, PR/commit links, validation, outcomes and follow-up work to your lead, which maintains the Working log TOC and detail records. Keep your board task current; do not rewrite shared history alongside other workers.\n")
 	}
 
 	w("\n## Board\n\n")

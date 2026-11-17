@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -28,11 +27,14 @@ func TestHireInitializesSharedDocuments(t *testing.T) {
 	if got := y.TaskLogPath(); got != filepath.Join(y.MetaDir(), "task-log.md") {
 		t.Fatalf("task log path = %q", got)
 	}
-	if got := readDocument(t, y.TaskLogPath()); got != taskLogTemplate || !strings.HasPrefix(got, "# Task log\n") {
+	if got := readDocument(t, y.TaskLogPath()); got != taskLogTemplate || !strings.HasPrefix(got, "# Working log\n") {
 		t.Fatalf("new task log = %q", got)
 	}
+	if st, err := os.Lstat(filepath.Join(y.MetaDir(), "task-log")); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("record directory not initialized: %v", err)
+	}
 	index := readDocument(t, filepath.Join(y.KnowledgeDir(), "INDEX.md"))
-	for _, want := range []string{"Durable guidance", "Phosphor", "Finishing a task alone", "task log or board"} {
+	for _, want := range []string{"Durable guidance", "Phosphor", "Finishing a task alone", "working log or board"} {
 		if !strings.Contains(index, want) {
 			t.Errorf("new index lacks %q", want)
 		}
@@ -177,58 +179,6 @@ func TestEnsureTaskLogsNeverOverwritesExistingPaths(t *testing.T) {
 	}
 }
 
-func TestTaskLogPathOccupiedOnlyNormalizesCreateCollisions(t *testing.T) {
-	root := t.TempDir()
-	dir, file, missing := filepath.Join(root, "directory"), filepath.Join(root, "file"), filepath.Join(root, "missing")
-	if err := os.Mkdir(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(file, []byte("user file"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name string
-		path string
-		err  error
-		want bool
-	}{
-		{"exclusive collision", file, os.ErrExist, true},
-		{"Windows directory collision", dir, syscall.EISDIR, true},
-		{"directory disappeared", missing, syscall.EISDIR, false},
-		{"unexpected directory error on file", file, syscall.EISDIR, false},
-		{"permission denied on directory", dir, os.ErrPermission, false},
-		{"I/O error on directory", dir, syscall.EIO, false},
-		{"disk full on directory", dir, syscall.ENOSPC, false},
-		{"missing path error", missing, os.ErrNotExist, false},
-		{"successful open", file, nil, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.err
-			if err != nil {
-				err = &os.PathError{Op: "open", Path: tc.path, Err: err}
-			}
-			if got := taskLogPathOccupied(tc.path, err); got != tc.want {
-				t.Fatalf("occupied(%q, %v) = %v, want %v", tc.path, err, got, tc.want)
-			}
-		})
-	}
-	for _, target := range []string{dir, missing} {
-		t.Run("directory error on symlink to "+filepath.Base(target), func(t *testing.T) {
-			link := filepath.Join(root, filepath.Base(target)+"-link")
-			if err := os.Symlink(target, link); err != nil {
-				t.Skipf("symlinks unavailable: %v", err)
-			}
-			err := &os.PathError{Op: "open", Path: link, Err: syscall.EISDIR}
-			if !taskLogPathOccupied(link, err) {
-				t.Fatal("directory error did not preserve symlink path")
-			}
-			if taskLogPathOccupied(link, &os.PathError{Op: "open", Path: link, Err: os.ErrPermission}) {
-				t.Fatal("permission error on symlink was swallowed")
-			}
-		})
-	}
-}
-
 func TestEnsureTaskLogReturnsFilesystemErrors(t *testing.T) {
 	for _, kind := range []string{"missing parent", "parent is a file"} {
 		t.Run(kind, func(t *testing.T) {
@@ -244,8 +194,9 @@ func TestEnsureTaskLogReturnsFilesystemErrors(t *testing.T) {
 				t.Fatalf("fixture did not produce a filesystem error: %v", openErr)
 			}
 			for range 2 {
-				if err := ensureTaskLog(y); !errors.Is(err, pathErr.Err) {
-					t.Fatalf("filesystem error lost: got %v, want %v", err, pathErr.Err)
+				err := ensureTaskLog(y)
+				if err == nil || kind == "missing parent" && !errors.Is(err, pathErr.Err) {
+					t.Fatalf("filesystem failure lost: got %v, original open error %v", err, pathErr.Err)
 				}
 			}
 			if kind == "parent is a file" {
@@ -254,6 +205,57 @@ func TestEnsureTaskLogReturnsFilesystemErrors(t *testing.T) {
 				}
 			} else if _, err := os.Lstat(y.MetaDir()); !os.IsNotExist(err) {
 				t.Fatalf("created missing parent after failed open: %v", err)
+			}
+		})
+	}
+}
+
+func TestEnsureTaskLogPreservesOccupiedRecordRoots(t *testing.T) {
+	for _, kind := range []string{"file", "directory", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			tmp := t.TempDir()
+			store := New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
+			y, e := store.Hire("alice")
+			if e != nil {
+				t.Fatal(e)
+			}
+			_ = os.Remove(y.TaskLogPath())
+			dir := filepath.Join(y.MetaDir(), "task-log")
+			_ = os.Remove(dir)
+			external := filepath.Join(tmp, "user-vault")
+			_ = os.Mkdir(external, 0o755)
+			_ = os.WriteFile(filepath.Join(external, "keep.md"), []byte("vault sentinel"), 0o600)
+			switch kind {
+			case "file":
+				_ = os.WriteFile(dir, []byte("user placeholder"), 0o600)
+			case "directory":
+				_ = os.Mkdir(dir, 0o755)
+				_ = os.WriteFile(filepath.Join(dir, "custom.md"), []byte("custom record"), 0o600)
+			case "symlink":
+				if e = os.Symlink(external, dir); e != nil {
+					t.Skip(e)
+				}
+			}
+			before, _ := os.Lstat(dir)
+			for range 2 {
+				if e = store.EnsureTaskLogs(); e != nil {
+					t.Fatal(e)
+				}
+			}
+			after, _ := os.Lstat(dir)
+			if !os.SameFile(before, after) {
+				t.Fatal("record root replaced")
+			}
+			if kind == "directory" && readDocument(t, filepath.Join(dir, "custom.md")) != "custom record" {
+				t.Fatal("custom record changed")
+			}
+			if readDocument(t, filepath.Join(external, "keep.md")) != "vault sentinel" {
+				t.Fatal("vault changed")
+			}
+			if kind != "directory" {
+				if _, e = os.Lstat(y.TaskLogPath()); !errors.Is(e, os.ErrNotExist) {
+					t.Fatal("created TOC over unsafe root")
+				}
 			}
 		})
 	}

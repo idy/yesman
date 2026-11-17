@@ -12,6 +12,7 @@ import { renderMarkdown } from './markdown.js';
 import { project, originOf, FINISHED } from './conversation.js';
 import { $, h, icon, openModal } from './dom.js';
 import { createFiles } from './files.js';
+import { logRoute } from './task-log.js';
 import { createInfo } from './info.js';
 import { createBoard } from './board.js';
 import { createContextViewer } from './context.js';
@@ -24,6 +25,8 @@ import { createEnvPage } from './env.js';
 import { createGitHubAppPage } from './github-app.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
+import { DELIVERY_LABELS, deliveryLabel, newSubmissionID, sameSubmissionImages, withoutLine } from './submission.js';
+import { createTopics } from './topics.js';
 import { detectPlatform } from './keys.js';
 import { createShortcuts } from './shortcuts.js';
 import { createContextMenu } from './contextmenu.js';
@@ -74,7 +77,7 @@ const state = {
   drafts: new Map(),
   attachments: new Map(),
   modelOptions: new Map(),
-  pane: null, // the pane beside the conversation: 'files', 'board', 'needs-you' or null
+  pane: null, // the pane beside the conversation: 'files', 'board', 'needs-you', 'topics' or null
   hideDone: new Set(JSON.parse(localStorage.getItem('yesman.hideDone') ?? '[]')), // yesmen whose done workers are hidden
   // The info panel between the conversation and the files, open unless
   // closed, as it was last.
@@ -160,13 +163,6 @@ function pruneCaches() {
 // progress keeps streaming and none shows twice.
 const messageKey = (m) => originOf(m)?.submission ? `submission:${originOf(m).submission}` : `${m?.role}:${m?.timestamp}`;
 
-const DELIVERY_LABELS = {
-  sending: 'Sending…', accepted: 'Accepted · delivery unconfirmed',
-  steering: 'Accepted for steering · delivery unconfirmed', queued: 'Accepted for follow-up · delivery unconfirmed',
-  unconfirmed: 'Delivery unconfirmed', failed: 'Not sent', interrupted: 'Delivery interrupted',
-  handled: 'Handled by an extension', dispatched: 'Taken by pi', cancelled: 'Recalled',
-};
-const deliveryLabel = (d) => d.nativePending ? (d.state === 'queued' ? 'Waiting · follow-up' : 'Steering · waiting for input checkpoint') : DELIVERY_LABELS[d.state];
 
 // Only an explicit recorded submission identity can bind a receipt.
 const BOUND_DELIVERY = 'Taken by pi';
@@ -305,15 +301,24 @@ function deliveryStatus(d, bound) {
 // it is one light line.
 const receiptForm = (d, sent, line) => `${line ? 'line' : sent ? 'sent' : 'kept'}:${d.text ?? ''}:${d.imageCount ?? 0}`;
 
+// A receipt the app recorded as sent from a topic names the topic, as its
+// message will once pi takes it; its form changes when that becomes known.
+const receiptVariant = (c, d, sent, line) => `${receiptForm(d, sent, line)}:${line ? '' : topicKey(topicOfSubmission(c, d.id))}`;
+
+// What copying a topic's message copies: the person's text, without the line
+// the app sent before it.
+const ownText = (text, topic) => (topic && typeof text === 'string' ? withoutLine(text, topic.context) : text);
+
 function receiptEl(c, d, { sent, line = false } = {}) {
-  const el = line ? receiptLine(d) : receiptBody(d, sent);
+  const topic = line ? null : topicOfSubmission(c, d.id);
+  const el = line ? receiptLine(d) : receiptBody(d, sent, topic);
   if (!line) {
     const status = el.querySelector('.delivery-status');
     status.remove();
-    el.append(h('div', { class: 'message-footer' }, status, copyActions(sent?.text ?? receiptText(d), c, d)));
+    el.append(h('div', { class: 'message-footer' }, status, copyActions(ownText(sent?.text ?? receiptText(d), topic), c, d)));
     if (!sent && d.originalPayload) hydrateReceipt(c, el, d);
   }
-  el._variant = receiptForm(d, sent, line);
+  el._variant = receiptVariant(c, d, sent, line);
   return el;
 }
 
@@ -326,23 +331,26 @@ async function hydrateReceipt(c, el, d) {
     const current = c.deliveries.get(d.id);
     if (!el.isConnected || state.convos.get(c.key) !== c || keyOf(selectedAgent() ?? {}) !== c.key || !current?.originalPayload || typeof payload?.text !== 'string' || !Array.isArray(payload.images)) return;
     el._payload = payload;
-    el.querySelector('.msg-user').replaceWith(userBubble({ content: [{ type: 'text', text: payload.text }, ...payload.images] }));
+    const topic = topicOfSubmission(c, d.id);
+    el.querySelector('.msg-user').replaceWith(userBubble({ content: [{ type: 'text', text: payload.text }, ...payload.images] }, topic));
     el.querySelector('.delivery-image-count')?.remove();
-    el.querySelector('.message-actions')?.replaceWith(copyActions(payload.text, c, current));
+    el.querySelector('.message-actions')?.replaceWith(copyActions(ownText(payload.text, topic), c, current));
     el.dataset.original = 'true';
   } catch { /* Missing after intake/retirement stays an honest bounded preview. */ }
 }
 
 const imageNote = (n) => h('div', { class: 'delivery-image-count' }, tn(n, '{n} image submitted', '{n} images submitted'));
 
-function receiptBody(d, sent) {
+function receiptBody(d, sent, topic = null) {
   const imageCount = d.imageCount ?? d.images?.length ?? 0;
   const text = sent ? sent.text : d.text ? (d.preview ? `${d.text}…` : d.text) : '';
   const images = (sent ? sent.images : d.images ?? []).filter((image) => imageURL(image));
+  const bubble = topic
+    ? userBubble({ role: 'user', content: [{ type: 'text', text }, ...images] }, topic)
+    : h('div', { class: 'msg-user' }, text || (imageCount && !images.length ? t('Attached images') : ''),
+      images.length ? h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
   return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(d.state === 'sending') },
-    h('div', { class: 'msg-user' }, text || (imageCount && !images.length ? t('Attached images') : ''),
-      images.length ? h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null),
-    !images.length && imageCount ? imageNote(imageCount) : null, deliveryStatus(d, false));
+    bubble, !images.length && imageCount ? imageNote(imageCount) : null, deliveryStatus(d, false));
 }
 
 // Historical receipts keep their recorded state without announcing it as a
@@ -370,11 +378,11 @@ function receiptLine(d) {
 // receiptEl brought up to date: a receipt changing state keeps its element
 // (and what is selected in it) unless it changes form.
 function updateReceipt(c, el, d, options = {}) {
-  if (el._variant === receiptForm(d, options.sent, options.line) && !d.images?.length) {
+  if (el._variant === receiptVariant(c, d, options.sent, options.line) && !d.images?.length) {
     el.dataset.sending = String(!options.line && d.state === 'sending');
     el.querySelector('.delivery-status').replaceWith(options.line ? historicalDeliveryStatus(d) : deliveryStatus(d, false));
     if (!options.line) {
-      el.querySelector('.message-actions')?.replaceWith(copyActions(el._payload?.text ?? options.sent?.text ?? receiptText(d), c, d));
+      el.querySelector('.message-actions')?.replaceWith(copyActions(ownText(el._payload?.text ?? options.sent?.text ?? receiptText(d), topicOfSubmission(c, d.id)), c, d));
       if (!options.sent && d.originalPayload && !el._hydration) hydrateReceipt(c, el, d);
     }
     return el;
@@ -483,6 +491,17 @@ async function loadConvo(c) {
   c.queue = null;
   const a = selectedAgent();
   if (a && keyOf(a) === c.key) renderThread();
+  // The topics pane lists the lead's messages about the topic shown, live or
+  // read with the history.
+  topicsFollow(c);
+}
+
+// topicsFollow redraws the topics pane when it shows the yesman whose
+// current lead conversation c is.
+function topicsFollow(c) {
+  const a = c && agentById(c.id);
+  if (state.pane !== 'topics' || a?.role !== 'lead' || keyOf(a) !== c.key) return;
+  topics.refresh(yesmanOf(a.id));
 }
 
 const textOf = messageText;
@@ -589,8 +608,37 @@ function legacyNoteEl(text) {
   return null;
 }
 
-function userBubble(m) {
+// topicOfSubmission is the topic the app recorded a submission of
+// conversation c as sent from: { id, title, context }, or null. Only a lead's
+// conversation has them, and only the app's own record says so: what a
+// message's text says is never evidence of where it came from.
+const topicSends = new Map(); // `${yesman}@${hiredAt}/${submission}` -> topic, before the topic's record is read
+function topicOfSubmission(c, id) {
+  const a = c && agentById(c.id);
+  if (!id || a?.role !== 'lead' || `${c.id}@${a.since ?? ''}` !== c.key) return null;
+  const y = yesmanOf(a.id);
+  if (!y) return null;
+  return topics.bySubmission(y, id) ?? topicSends.get(`${y.name}@${y.hiredAt ?? ''}/${id}`) ?? null;
+}
+const topicKey = (topic) => (topic ? `${topic.id}:${topic.title}:${topic.context}` : '');
+
+function userBubble(m, topic = null) {
   const images = Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image' && imageURL(b)) : [];
+  // A message the app recorded as sent from a topic is drawn with a chip that
+  // opens the topic, and without the line it was sent with. A message whose
+  // text only looks like one is shown as it is.
+  if (topic) {
+    const a = selectedAgent();
+    const y = a && yesmanOf(a.id);
+    const text = withoutLine(textOf(m.content), topic.context);
+    const title = (y && topics.title(y, topic.id)) || topic.title;
+    return h('div', { class: 'msg-user msg-user--topic' },
+      h('button', { class: 'topic-chip', type: 'button', title: t('Open topic {id}', { id: topic.id }),
+        onclick: () => y && topics.open(y, topic.id) }, icon('topics', 'mds-icon topic-chip-mark'), h('span', null, t('Topic {id}', { id: topic.id })), h('span', { class: 'topic-chip-title' }, title)),
+      text ? h('div', { class: 'msg-user-text' }, text) : null,
+      images.length ? h('div', { class: 'message-images' }, images.map((image) =>
+        h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
+  }
   return h('div', { class: 'msg-user' }, textOf(m.content),
     images.length ? h('div', { class: 'message-images' }, images.map((image) =>
       h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
@@ -602,10 +650,14 @@ function userRowEl(row, c) {
   const images = Array.isArray(row.message.content) && row.message.content.some((b) => b?.type === 'image');
   const legacy = !row.origin && !images && legacyNoteEl(textOf(row.message.content));
   if (legacy) return legacy;
-  const bubble = userBubble(row.message);
-  if (!row.delivery) { bubble.append(copyActions(textOf(row.message.content))); return bubble; }
+  // A message the app recorded as sent from a topic (its native origin
+  // names one of the topic's submissions) shows the topic's chip.
+  const topic = row.origin?.source === 'user' ? topicOfSubmission(c, row.origin.submission) : null;
+  const bubble = userBubble(row.message, topic);
+  const text = ownText(textOf(row.message.content), topic);
+  if (!row.delivery) { bubble.append(copyActions(text)); return bubble; }
   return h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble,
-    h('div', { class: 'message-footer' }, deliveryStatus(row.delivery, true), copyActions(textOf(row.message.content))));
+    h('div', { class: 'message-footer' }, deliveryStatus(row.delivery, true), copyActions(text)));
 }
 
 function leadRowEl(row) {
@@ -857,11 +909,11 @@ function rowEl(c, row) {
   }
 }
 
-function rowSig(row) {
+function rowSig(c, row) {
   switch (row.type) {
-    case 'user': return row.delivery ? `bound:${row.delivery.id}:${row.delivery.revision}` : '';
+    case 'user': return `${row.delivery ? `bound:${row.delivery.id}:${row.delivery.revision}` : ''}|${row.origin?.source === 'user' ? topicKey(topicOfSubmission(c, row.origin.submission)) : ''}`;
     case 'text': return row.live ? `l:${row.text}` : 'f';
-    case 'receipt': return receiptSig(row.delivery, row.sent);
+    case 'receipt': return `${receiptSig(row.delivery, row.sent)}|${topicKey(topicOfSubmission(c, row.delivery.id))}`;
     default: return 'f';
   }
 }
@@ -887,7 +939,7 @@ function patchThread(c) {
   if (rows.length) thread.querySelector('.thread-empty')?.remove();
   patchChildren(thread, 'data-row', rows, {
     make: (row) => rowEl(c, row),
-    sig: (row) => `${rowSig(row)}:${c.actions.has(row.delivery?.id)}`,
+    sig: (row) => `${rowSig(c, row)}:${c.actions.has(row.delivery?.id)}`,
     update: (el, row) => {
       if (row.type === 'work') return updateWork(c, el, row);
       if (row.type === 'failures') return updateFailures(c, el, row);
@@ -1039,10 +1091,13 @@ function onAgentEvent(ev) {
   }
   if (e.type === 'delivery_update' || e.type === 'delivery_retained') {
     applyDeliveryReceipt(c,e,ev.seq);
+    topicsFollow(c);
     schedulePatch(c);
     return;
   }
   applyEvent(c, e, false);
+  // The topics pane lists the lead's messages about the topic shown.
+  if (e.type === 'message_end' && e.message?.role === 'user') topicsFollow(c);
 }
 
 // applyEvent updates a conversation with one record, and the thread when it
@@ -1714,6 +1769,7 @@ function renderBarActions() {
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
     a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }, 'pane.info') : null,
     a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }, 'pane.board') : null,
+    a ? button('topics', state.pane === 'topics' ? t('Hide the topics') : t('Show the topics'), () => togglePane('topics'), { 'aria-pressed': String(state.pane === 'topics') }, 'pane.topics') : null,
     a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }, 'pane.files') : null,
   ].filter(Boolean));
 }
@@ -2122,9 +2178,6 @@ function letGo(c) {
   for (const id of [...c.sent.keys()]) if (id !== c.lastSent && canReleaseSent(c.deliveries.get(id))) c.sent.delete(id);
 }
 
-const sameSubmissionImages = (left, right) => left.length === right.length && left.every((image, i) =>
-  image.type === right[i].type && image.mimeType === right[i].mimeType && image.data === right[i].data);
-
 async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
@@ -2141,7 +2194,7 @@ async function sendMessage(a, textarea, submitter = null) {
       attachments.submission = null;
     }
   }
-  const messageID = attachments.submissionID ?? Date.now().toString(16).padStart(12, '0') + [...crypto.getRandomValues(new Uint8Array(18))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const messageID = attachments.submissionID ?? newSubmissionID();
   {
     attachments.submissionID = messageID;
     attachments.submission ??= { text, images };
@@ -3306,6 +3359,7 @@ const files = createFiles({
     return a ? yesmanOf(a.id) : null;
   },
   isOpen: () => state.pane === 'files',
+  selectWorkspace: (name) => { if (agentById(`${name}/lead`)) selectAgent(`${name}/lead`); },
   setOpen: (on) => setPane(on ? 'files' : state.pane === 'files' ? null : state.pane),
   checkout: (y) => openCheckout(y),
   dismiss: (name) => dismiss(name),
@@ -3342,6 +3396,8 @@ const info = createInfo({
     };
   },
   openNeedsYou: () => showNeedsYou(),
+  pane: () => state.pane,
+  openTopics: () => setPane('topics'),
   openWorktree: (dir, show) => files.openWorktree(dir, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
@@ -3369,6 +3425,98 @@ const board = createBoard({
   openAgent: (id) => selectAgent(id),
 });
 
+// ---------- Topics pane ----------
+
+// The topics share the place beside the conversation with the board and the
+// files. A topic's messages go to its yesman's lead, into its conversation.
+const leadOf = (y) => y && agentById(`${y.name}/lead`);
+const topics = createTopics({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.pane === 'topics',
+  setOpen: (on) => setPane(on ? 'topics' : state.pane === 'topics' ? null : state.pane),
+  lead: (y) => leadOf(y),
+  leadConvo: (y) => {
+    const lead = leadOf(y);
+    const c = lead && state.convos.get(keyOf(lead));
+    return c?.loaded ? c : null;
+  },
+  openLead: (y) => { const lead = leadOf(y); if (lead) selectAgent(lead.id); },
+  showMessage: (y, source) => showMessage(y, source),
+  agent: (id) => agentById(id),
+  openAgent: (id) => selectAgent(id),
+  openBoard: () => setPane('board'),
+  openKnowledge: (path) => {
+    const y = selectedAgent() && yesmanOf(selectedAgent().id);
+    if (path && y && files.openPath(`${y.path}/.yesman/knowledge/${path}`)) return;
+    files.openKnowledge();
+  },
+  openURL: (url) => call('OpenURL', url).catch(fail),
+  track: (y, id, text, imageCount, topic) => {
+    const lead = leadOf(y);
+    if (!lead) return;
+    // The app ties the submission to its topic before sending it, so its
+    // receipt names the topic before the topic's record is read again.
+    if (topic) {
+      topicSends.set(`${y.name}@${y.hiredAt ?? ''}/${id}`, topic);
+      if (topicSends.size > 256) topicSends.delete(topicSends.keys().next().value);
+    }
+    const c = convo(lead);
+    if (!c.deliveries.has(id)) {
+      // Keep the whole topic line, so the receipt shows its chip, and clip
+      // only the user's text after it, as the composer's receipts do.
+      const head = topic?.context && text.startsWith(topic.context) ? topic.context : '';
+      const preview = head + Array.from(text.slice(head.length)).slice(0, 128).join('');
+      c.deliveries.set(id, { id, revision: 0, state: 'sending', text: preview, imageCount, preview: preview !== text });
+    }
+    if (c.loaded) schedulePatch(c);
+  },
+  // Topics read again can tie more of the conversation's messages to them.
+  changed: (y) => {
+    const lead = leadOf(y);
+    const now = lead && yesmanOf(lead.id);
+    if (!now || (now.hiredAt ?? '') !== (y.hiredAt ?? '')) return;
+    const c = state.convos.get(keyOf(lead));
+    if (c?.loaded) schedulePatch(c);
+  },
+  receipt: (y, d, id) => {
+    const lead = leadOf(y);
+    if (!lead) return;
+    const c = convo(lead);
+    if (d) updateDelivery(c, d);
+    else if (id && c.deliveries.get(id)?.revision === 0) c.deliveries.get(id).state = 'unconfirmed';
+    if (c.loaded) schedulePatch(c);
+  },
+});
+
+// showMessage shows one message of a yesman's lead conversation, found by
+// its exact role and pi timestamp, and says whether it did.
+async function showMessage(y, source) {
+  const lead = leadOf(y);
+  if (!lead || (source.agent && source.agent !== 'lead')) return 'other';
+  if (source.since && lead.since && source.since !== lead.since) return 'other';
+  selectAgent(lead.id);
+  const c = convo(lead);
+  await c.loading;
+  // A source names a message by its role and pi timestamp; its row is keyed
+  // by its submission when it has one (conversation.js).
+  const matches = c.messages.filter((m) => m?.role === source.role && m?.timestamp === source.timestamp);
+  if (matches.length !== 1) return matches.length ? 'ambiguous' : 'missing';
+  const key = messageKey(matches[0]);
+  // A person's message is one row; a reply is a row per text block.
+  const el = $(`#thread [data-row="${CSS.escape(key)}"]`) ?? $(`#thread [data-row^="${CSS.escape(`${key}:`)}"]`);
+  if (!el) return 'missing';
+  $('#scroll') && ($('#scroll').dataset.stick = 'false');
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('msg-found');
+  setTimeout(() => el.classList.remove('msg-found'), 2400);
+  return 'shown';
+}
+
 // Where focus was when opening a pane hid it (an info panel row, in a
 // narrow window), to go back to when the pane closes.
 let paneFocusFrom = null;
@@ -3377,7 +3525,7 @@ function setPane(pane) {
   const had = document.activeElement;
   const shown = (el) => !!el?.isConnected && el.getClientRects().length > 0;
   const visible = had && had !== document.body && shown(had);
-  const inPane = !!had?.closest?.('#board, #needs-you, #files');
+  const inPane = !!had?.closest?.('#board, #needs-you, #topics, #files');
   const entry = had?.closest?.('#yesman-info [data-info-entry]')?.dataset.infoEntry;
   state.pane = pane;
   renderInfo();
@@ -3392,7 +3540,8 @@ function setPane(pane) {
   }
   let target = null;
   if (pane) {
-    target = pane === 'needs-you' ? $('#needs-you .needs-you-heading') : pane === 'board' ? $('#board .files-head-actions button') : null;
+    target = pane === 'needs-you' ? $('#needs-you .needs-you-heading') : pane === 'board' ? $('#board .files-head-actions button')
+      : pane === 'topics' ? $('#topics .topics-search') ?? $('#topics .files-head-actions button') : null;
     if (target && !inPane) paneFocusFrom = entry ? { entry } : had;
   } else {
     const from = paneFocusFrom;
@@ -3411,6 +3560,8 @@ function renderInfo() {
   files.render();
   board.render();
   renderNeedsYouPane();
+  topics.render();
+  info.render();
 }
 
 async function openCheckout(y) {
@@ -3663,7 +3814,9 @@ async function refreshState() {
   pruneCaches();
   if (state.view.kind === 'agent' && !agentById(state.view.id)) state.view = { kind: 'none' };
   if (state.view.kind === 'none' && state.snap.yesmen.length) {
-    state.view = { kind: 'agent', id: `${state.snap.yesmen[0].name}/lead` };
+    const route = logRoute();
+    const name = state.snap.yesmen.some((y) => y.name === route?.name) ? route.name : state.snap.yesmen[0].name;
+    state.view = { kind: 'agent', id: `${name}/lead` };
     selectAgent(state.view.id);
     return;
   }
@@ -3758,6 +3911,7 @@ async function start() {
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
   mygo.on('board', (yesman) => board.onChange(yesman));
+  mygo.on('topics', (yesman) => { topics.onChange(yesman); info.onTopics(yesman); });
   document.addEventListener('keydown', (e) => files.onKey(e));
   // After the files pane's ⌘S, which keeps its key.
   shortcuts.listen();

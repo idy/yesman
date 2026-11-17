@@ -84,6 +84,10 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 -B scripts/test_published_upgrade.py
 
+      # Real Git conversion, process groups (Linux/macOS) and job objects (Windows).
+      - name: Check the private QA producer's updater-key boundaries offline
+        run: python3 -B scripts/test_upgrade_qa.py
+
       - name: Check the page's scripts
         run: |
           for f in web/*.js; do

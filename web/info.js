@@ -11,6 +11,7 @@
 import { $, h, icon } from './dom.js';
 import { counts, formatSize } from './diff.js';
 import { t, tn, formatNumber } from './i18n.js';
+import { isTaskLog } from './task-log.js';
 
 // How long each part is kept before the panel asks again by itself.
 const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
@@ -24,6 +25,8 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   needsYou(y)            what waits on the user from y: { count, error,
 //                          refused, open (the Needs you pane shows) }
 //   openNeedsYou(y)        open the Needs you pane, of y, beside its conversation
+//   pane()                 the pane beside the conversation, as state.pane
+//   openTopics()           open the Topics pane beside the conversation
 //   openURL(url)
 export function createInfo(host) {
   const data = new Map(); // yesman name -> what was read of it
@@ -140,10 +143,10 @@ export function createInfo(host) {
   // ---------- Entries ----------
 
   // One card lists what of the yesman opens elsewhere, a row each, in this
-  // order: what it keeps, what it did, what waits on the user. A new part
-  // adds its row to entries.
+  // order: what it keeps, what it did, what waits on the user, and what the
+  // user discussed with it. A new part adds its row to entries.
   function entries(y, d) {
-    return [knowledgeEntry(y, d), workingLogsEntry(y), needsYouEntry(y)];
+    return [knowledgeEntry(y, d), workingLogsEntry(y), needsYouEntry(y), topicsEntry(y, d)];
   }
 
   function entriesCard(y, d) {
@@ -172,7 +175,7 @@ export function createInfo(host) {
     const shown = host.files();
     return {
       key: 'working-logs', label: t('Working Logs'), title: t('Read task and PR history in the files pane'),
-      current: shown?.yesman === y.name && shown.path === '.yesman/task-log.md',
+      current: shown?.yesman === y.name && isTaskLog(shown.path),
       open: () => host.openTaskLog(),
     };
   }
@@ -192,6 +195,25 @@ export function createInfo(host) {
       tone: error || refused ? 'error' : count ? 'waiting' : null,
       open: () => host.openNeedsYou(y),
     };
+  }
+
+  // The topics worth finding again, counted from what the Info read of the
+  // topics file; it opens the Topics pane.
+  function topicsEntry(y, d) {
+    const c = d.info?.topics;
+    return {
+      key: 'topics', label: t('Topics'), title: c?.error || t('Questions and discussions worth keeping: conclusions and open questions, beside the conversation'),
+      current: host.pane() === 'topics',
+      // A file that cannot be read is said, not counted as nothing.
+      aside: !c ? '' : c.error ? t('Cannot be read') : c.open ? t('{n} open', { n: formatNumber(c.open) }) : c.resolved + c.archived ? t('Nothing open') : t('Empty'),
+      tone: c?.error ? 'error' : null,
+      open: () => host.openTopics(),
+    };
+  }
+
+  // The topics changed: their count is read again.
+  function onTopics(name) {
+    if (data.has(name)) soon(name, ['info'], 1500);
   }
 
   // ---------- Worktrees ----------
@@ -373,5 +395,5 @@ export function createInfo(host) {
     return (y.worktrees ?? []).map((w) => ({ ...w, dir: (w.dir ?? '').replace(/\\/g, '/') }));
   }
 
-  return { render, onChanged, onFiles, onAgentEvent, worktrees: listWorktrees };
+  return { render, onChanged, onFiles, onAgentEvent, onTopics, worktrees: listWorktrees };
 }

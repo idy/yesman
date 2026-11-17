@@ -87,7 +87,7 @@ func main() {
 
 	a := &app{home: h, storage: storage, pool: pool.New(h.Repos()), yesmen: yesmen.New(h.Yesmen(), h.Archive())}
 	if err := a.yesmen.EnsureTaskLogs(); err != nil {
-		log.Print("workspace task logs: ", err)
+		log.Print("workspace working logs: ", err)
 	}
 	a.pi, a.piErr = findPi()
 	var piCommand func(context.Context) (string, []string, error)
@@ -154,6 +154,7 @@ func main() {
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
 		BoardChanged:    func(yesman string) { _ = boardEvent.Broadcast(yesman) },
 		NeedsYouChanged: func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
+		TopicsChanged:   a.topicsChanged,
 		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew, GitHubApp: a.githubApp}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
