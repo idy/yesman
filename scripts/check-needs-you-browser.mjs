@@ -198,6 +198,8 @@ async function scenario(engineName, page) {
   // opens the pane again. (WebKit, as macOS by default, tabs to buttons with
   // Option.)
   await page.keyboard.press(engineName === 'webkit' ? 'Alt+Tab' : 'Tab');
+  assert.equal(await focused(), 'pane-refresh');
+  await page.keyboard.press(engineName === 'webkit' ? 'Alt+Tab' : 'Tab');
   assert.equal(await focused(), 'pane-close');
   await page.keyboard.press('Enter');
   await until('the pane closed', () => pane.isHidden());
@@ -268,9 +270,15 @@ async function scenario(engineName, page) {
   assert.equal(await composer.inputValue(), 'unsent alice draft');
   assert.equal(await page.locator('.composer-image').count(), 1);
 
-  // Opening a handoff lands in its lead's conversation, on it; opening it
-  // answers nothing, and the pane stays, marking it.
+  // Choosing a request shows it in full beside the list (one column in this
+  // narrow pane); Open in the conversation lands in its lead's conversation,
+  // on it. Neither answers it, and the pane stays, marking it.
   await pane.locator('.needs-you-item[data-type="login"] [data-request]').click();
+  await pane.locator('.needs-you-detail-title', { hasText: 'Log in to the npm registry' }).waitFor();
+  assert.match(await pane.locator('.needs-you-detail').innerText(), /npm login[\s\S]*Task t1[\s\S]*checks it before relying on it[\s\S]*Mark done[\s\S]*Not needed/);
+  assert.equal(await focused(), 'BUTTON', 'narrow: focus moves to the way back to the list');
+  assert.equal(await called('ResolveHandoff'), 0);
+  await pane.locator('[data-detail-control="open"]').click();
   await until('the handoff focused', async () => (await focused())?.startsWith('dock:h:alice@'));
   assert.equal(await page.locator('#crumbs').innerText(), 'Alice 团队');
   assert.equal(await composer.inputValue(), 'unsent alice draft');
@@ -280,7 +288,7 @@ async function scenario(engineName, page) {
   assert.equal(await pane.locator('.needs-you-item[data-type="login"] [data-request]').getAttribute('aria-current'), 'true');
   assert.equal(await called('ResolveHandoff'), 0);
   assert.equal(await called('Answer'), 0);
-  await page.getByRole('button', { name: 'Show where it was asked' }).click();
+  await page.locator('#dock').getByRole('button', { name: 'Show where it was asked' }).click();
   const tool = page.locator('#thread [data-tool="call-login"].needs-you-target');
   await tool.waitFor();
   assert.ok(await tool.evaluate((el) => { const r = el.getBoundingClientRect(); const s = document.querySelector('#scroll').getBoundingClientRect(); return r.bottom > s.top && r.top < s.bottom; }));
@@ -291,6 +299,9 @@ async function scenario(engineName, page) {
   // A handed-over worker question, by keyboard: it opens on that worker.
   await pane.locator('.needs-you-item[data-type="select"] [data-request]').focus();
   await page.keyboard.press('Enter');
+  await pane.locator('.needs-you-detail-title', { hasText: 'Allow rm -rf build?' }).waitFor();
+  assert.equal(await pane.locator('.needs-you-ask button').count(), 3, 'the dialog\'s own choices, answerable here');
+  await pane.locator('[data-detail-control="open"]').click();
   await until('the question focused', async () => (await focused())?.startsWith('dock:d:alice/w1@'));
   assert.equal((await page.locator('#crumbs').innerText()).split(/\s*\n\s*/).join(''), 'Alice 团队/w1');
   assert.match(await page.locator('.ask').innerText(), /Alice 团队 handed this question to you\./);
@@ -306,6 +317,7 @@ async function scenario(engineName, page) {
   await rowsAre(1);
   await rows.first().focus();
   await page.keyboard.press('Enter');
+  await pane.locator('[data-detail-control="open"]').click();
   await until('the dialog focused', async () => (await focused())?.startsWith('dock:d:bob/lead@'));
   await page.keyboard.press('Enter'); // Yes, the first action
   await agentIs('bob/lead', (i) => i.status !== 'waiting');
@@ -456,7 +468,7 @@ async function scenario(engineName, page) {
     return {
       pane: box('#needs-you'), scroll: box('#scroll'), composer: box('.composer'), viewport: { width: innerWidth, height: innerHeight },
       rows: [...pane.querySelectorAll('.needs-you-item')].map((el) => el.getBoundingClientRect().height),
-      overflow: [pane, document.scrollingElement, pane.querySelector('.board-body')].some((el) => el.scrollWidth > el.clientWidth + 1),
+      overflow: [pane, document.scrollingElement, pane.querySelector('.explorer-nav-scroll'), pane.querySelector('.explorer-content')].some((el) => el.scrollWidth > el.clientWidth + 1),
       requests: document.querySelector('.dock-requests')?.getBoundingClientRect().height ?? 0,
     };
   });

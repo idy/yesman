@@ -13,7 +13,8 @@ import { languageOf } from './code.js';
 import { createEditor } from './editor.js';
 import { createChanges, statusMark, counts } from './diff.js';
 import { t, tn, formatNumber } from './i18n.js';
-import { TASK_LOG, isTaskLog, legacyLog, logBase, documentLink, logRoute, saveLogRoute, saveLogScroll, headingAnchors } from './task-log.js';
+import { dragHandle, treeView, focusNode } from './explorer.js';
+import { TASK_LOG, TASK_LOG_DIR, recordsByDay, isTaskLog, legacyLog, logBase, documentLink, logRoute, saveLogRoute, saveLogScroll, headingAnchors } from './task-log.js';
 
 // A folder's menu shows this many entries.
 const MENU_ROWS = 500;
@@ -40,39 +41,6 @@ function saveWidth(key, px) {
   widths[key] = px;
   if (px) localStorage.setItem(`yesman.files.width.${key}`, String(Math.round(px)));
   else localStorage.removeItem(`yesman.files.width.${key}`);
-}
-
-// dragHandle makes el a vertical separator that sets a width as the
-// pointer moves, or by 16px with the arrow keys; double-clicking resets it.
-function dragHandle(el, { widthAt, current, apply, reset }) {
-  el.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    try {
-      el.setPointerCapture(e.pointerId); // keeps the cursor while dragging
-    } catch {
-      // A pointer the page did not see go down; the window still follows it.
-    }
-    document.documentElement.classList.add('resizing');
-    const move = (ev) => apply(widthAt(ev.clientX), false);
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      window.removeEventListener('pointercancel', up);
-      document.documentElement.classList.remove('resizing');
-      apply(current(), true);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-    window.addEventListener('pointercancel', up);
-  });
-  el.addEventListener('dblclick', reset);
-  el.addEventListener('keydown', (e) => {
-    const step = e.key === 'ArrowLeft' ? 16 : e.key === 'ArrowRight' ? -16 : 0;
-    if (!step) return;
-    e.preventDefault();
-    apply(current() + step, true);
-  });
 }
 
 // createFiles returns the pane. host connects it to the page:
@@ -533,6 +501,7 @@ export function createFiles(host) {
         if (tabOf(p, rel)) refresh(p, rel);
       }
       for (const dir of dirs) if (p.dirs.has(dir)) loadDir(p, dir);
+      if (p.records && paths.some((rel) => rel === '.' || rel === '.yesman' || rel === TASK_LOG || rel === TASK_LOG_DIR || rel.startsWith(`${TASK_LOG_DIR}/`))) loadRecords(p);
     }
     changes.onFiles(yesman, paths, (name, dir) => {
       const p = current();
@@ -571,7 +540,7 @@ export function createFiles(host) {
     const showTree = diff || prefs.tree || !p.active;
     aside.replaceChildren(...[head(p), bar(p), h('div', { class: 'files-body', 'data-tree': String(showTree) },
       hasView ? h('section', { class: 'files-view', id: 'files-view', 'aria-label': diff ? t('Changes') : baseOf(p.active) }) : null,
-      showTree ? (diff ? changes.tree(p) : tree(p)) : null)].filter(Boolean));
+      showTree ? (diff ? changes.tree(p) : isTaskLog(p.active) ? records(p) : tree(p)) : null)].filter(Boolean));
     if (!fixed) aside.append(paneHandle(mode));
     if (hasView && showTree) $('.files-tree', aside).append(listHandle());
     if (diff) {
@@ -579,6 +548,7 @@ export function createFiles(host) {
     } else {
       renderView();
       renderTree();
+      renderRecords();
     }
     keep();
     host.shown?.();
@@ -706,7 +676,7 @@ export function createFiles(host) {
       h('div', { class: 'files-bar-actions' },
         tabs,
         isTaskLog(p.active) && p.active !== TASK_LOG ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: openTaskLog }, t('Contents')) : null,
-        isTaskLog(p.active) ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: () => loadView(p, p.active) }, t('Reload')) : null,
+        isTaskLog(p.active) ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: () => { loadView(p, p.active); loadRecords(p); } }, t('Reload')) : null,
         isMarkdown ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: () => { p.mode.set(p.active, mode === 'preview' ? 'source' : 'preview'); render(); } }, mode === 'preview' ? t('Source') : t('Preview')) : null,
         iconButton('collapse', t('Collapse all folders'), () => { p.expanded.clear(); renderTree(); }, { disabled: !p.expanded.size, 'data-action': 'collapse' }),
         p.active ? iconButton('tree', prefs.tree ? t('Hide the file tree') : t('Show the file tree'), toggleTree, { 'aria-pressed': String(prefs.tree), 'data-action': 'tree' }) : null,
@@ -1064,17 +1034,35 @@ export function createFiles(host) {
     return 'file';
   }
 
+  // A Knowledge note open shows the headings of its own rendered text under
+  // it in the tree: its structure, read from what is shown, nothing more.
+  const outlined = (p, entry) => !entry.dir && p.scope.kind === 'knowledge' && entry.path === p.active && p.outline?.path === entry.path && p.outline.items.length > 0;
+
+  function headingRow(p, entry, o, depth) {
+    return h('button', {
+      class: 'tree-row tree-outline', type: 'button', role: 'treeitem', 'data-path': `${entry.path}#${o.id}`, 'data-heading': o.id,
+      'aria-level': String(depth + 2 + o.depth), 'aria-selected': 'false', style: `--depth: ${depth + 1 + o.depth}`, title: o.text,
+      onclick: () => $(`#files-view article [id="${CSS.escape(o.id)}"]`)?.scrollIntoView({ block: 'start' }),
+    }, h('span', { class: 'tree-chevron', 'aria-hidden': 'true' }), h('span', { class: 'tree-name' }, o.text));
+  }
+
+  function toggleOutline(p) {
+    p.outlineOpen = p.outlineOpen === false;
+    renderTree();
+  }
+
   function row(p, entry, depth) {
     const open = entry.dir && p.expanded.has(entry.path);
+    const outline = outlined(p, entry);
     return h('button', {
-      class: 'tree-row', type: 'button', role: 'treeitem', 'data-path': entry.path, 'data-dir': entry.dir ? 'true' : null,
-      'aria-level': String(depth + 1), 'aria-expanded': entry.dir ? String(open) : null, 'aria-selected': String(entry.path === p.active),
+      class: 'tree-row', type: 'button', role: 'treeitem', 'data-path': entry.path, 'data-dir': entry.dir ? 'true' : null, 'data-outline': outline ? 'true' : null,
+      'aria-level': String(depth + 1), 'aria-expanded': entry.dir ? String(open) : outline ? String(p.outlineOpen !== false) : null, 'aria-selected': String(entry.path === p.active),
       style: `--depth: ${depth}`, title: entry.path,
-      onclick: () => (entry.dir ? toggleDir(p, entry.path) : open_(entry.path)),
+      onclick: () => (entry.dir ? toggleDir(p, entry.path) : outline ? toggleOutline(p) : open_(entry.path)),
       ondblclick: () => { if (!entry.dir) open_(entry.path, true); },
       oncontextmenu: (e) => fileMenu(e, p, entry),
     },
-    entry.dir ? icon('chevron', 'mds-icon tree-chevron') : icon(fileIcon(entry.path), 'mds-icon tree-icon'),
+    entry.dir || outline ? icon('chevron', 'mds-icon tree-chevron') : icon(fileIcon(entry.path), 'mds-icon tree-icon'),
     h('span', { class: 'tree-name' }, entry.name));
   }
 
@@ -1130,9 +1118,12 @@ export function createFiles(host) {
           return;
         }
         if (!entries.length && depth === 0) rows.push(h('p', { class: 'tree-note' }, emptyNote(p)));
-        for (const e of entries.slice(0, MAX_TREE_ROWS)) {
+        // Knowledge's index, which catalogs the notes, comes first.
+        const listed = depth === 0 && p.scope.kind === 'knowledge' ? [...entries].sort((a, b) => (b.path === KNOWLEDGE_INDEX) - (a.path === KNOWLEDGE_INDEX)) : entries;
+        for (const e of listed.slice(0, MAX_TREE_ROWS)) {
           rows.push(row(p, e, depth));
           if (e.dir && p.expanded.has(e.path)) walk(e.path, depth + 1);
+          if (outlined(p, e) && p.outlineOpen !== false) for (const o of p.outline.items) rows.push(headingRow(p, e, o, depth));
         }
         if (entries.length > MAX_TREE_ROWS) {
           rows.push(h('p', { class: 'tree-note', style: `--depth: ${depth}` }, t('{n} more. Go to a file to find them.', { n: formatNumber(entries.length - MAX_TREE_ROWS) })));
@@ -1156,6 +1147,18 @@ export function createFiles(host) {
     const at = rows.indexOf(rowEl);
     const rel = rowEl.dataset.path;
     const dir = rowEl.dataset.dir === 'true';
+    const outline = rowEl.dataset.outline === 'true';
+    if (outline && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && (e.key === 'ArrowRight') !== (p.outlineOpen !== false)) {
+      e.preventDefault();
+      toggleOutline(p);
+      $(`#files-tree-list [data-path="${CSS.escape(rel)}"]`)?.focus({ preventScroll: true });
+      return;
+    }
+    if (rowEl.dataset.heading && e.key === 'ArrowLeft') {
+      e.preventDefault();
+      $(`#files-tree-list [data-path="${CSS.escape(rel.slice(0, rel.length - rowEl.dataset.heading.length - 1))}"]`)?.focus();
+      return;
+    }
     const go = (el) => { if (el) { e.preventDefault(); el.focus(); } };
     switch (e.key) {
       case 'ArrowDown': go(rows[at + 1]); break;
@@ -1169,6 +1172,110 @@ export function createFiles(host) {
         if (dir && p.expanded.has(rel)) { e.preventDefault(); toggleDir(p, rel); } else if (parentOf(rel) !== '.') go($(`#files-tree-list [data-path="${CSS.escape(parentOf(rel))}"]`));
         break;
     }
+  }
+
+  // ---------- Working log records ----------
+
+  // The navigation of the Working log: its records by day, from the TOC's
+  // links and the names in its record folder (task-log.js). Nothing else is
+  // read: no record's text, no file times. The pane keeps it per workspace,
+  // and a late answer for another workspace or an older read is dropped.
+  function records(p) {
+    if (!p.records && !p.recordsLoading) loadRecords(p);
+    const input = h('input', { class: 'mds-input', id: 'files-records-find', type: 'search', placeholder: t('Filter records'), 'aria-label': t('Filter records'), spellcheck: 'false', autocomplete: 'off', value: p.recordQuery ?? '',
+      oninput: (e) => { p.recordQuery = e.currentTarget.value; renderRecords(); },
+      onkeydown: (e) => {
+        if (e.key === 'ArrowDown') { e.preventDefault(); $('#files-records .explorer-row[tabindex="0"]')?.focus(); }
+        else if (e.key === 'Escape' && p.recordQuery) { e.preventDefault(); p.recordQuery = ''; e.currentTarget.value = ''; renderRecords(); }
+      } });
+    const list = h('div', { class: 'files-records', id: 'files-records-list' });
+    list.addEventListener('scroll', () => { p.recordsScroll = list.scrollTop; });
+    return h('nav', { class: 'files-tree', 'aria-label': t('Working Logs') },
+      h('label', { class: 'search files-search' }, icon('search'), input), list);
+  }
+
+  async function loadRecords(p) {
+    const seq = (p.recordsSeq ?? 0) + 1;
+    p.recordsSeq = seq;
+    p.recordsLoading = true;
+    const read = (method, rel) => host.call(method, p.name, rel).then((v) => ({ v }), (err) => ({ error: err?.message || String(err) }));
+    const [toc, list] = await Promise.all([read('ReadFile', TASK_LOG), read('ListFiles', TASK_LOG_DIR)]);
+    if (p.recordsSeq !== seq) return;
+    p.recordsLoading = false;
+    const absent = (r) => /no such file|not exist|cannot find/i.test(r.error ?? '');
+    p.records = {
+      ...recordsByDay(toc.v?.kind === 'text' ? toc.v.text : null, Array.isArray(list.v) ? list.v : null),
+      errors: [toc, list].filter((r) => r.error && !absent(r)).map((r) => r.error),
+      truncated: Boolean(toc.v?.truncated),
+    };
+    if (current() === p && isTaskLog(p.active)) renderRecords();
+  }
+
+  function renderRecords() {
+    const list = $('#files-records-list');
+    const p = current();
+    if (!list || !p || !isTaskLog(p.active)) return;
+    const focused = list.contains(document.activeElement) ? document.activeElement.closest('.explorer-row')?.dataset.node : null;
+    const r = p.records;
+    if (!r) {
+      list.replaceChildren(h('p', { class: 'tree-note' }, t('Loading…')));
+      return;
+    }
+    p.recordDays ??= new Set();
+    const q = (p.recordQuery ?? '').trim().toLowerCase();
+    const hit = (x) => !q || x.title.toLowerCase().includes(q) || x.path.toLowerCase().includes(q) || (x.day ?? '').includes(q);
+    const node = (x) => ({ id: `r:${x.path}`, kind: 'record', label: x.title, icon: 'fileText', title: x.anchor ? `${x.path}#${x.anchor}` : x.path, record: x });
+    // At first the newest day opens; the day of the record shown opens too.
+    if (!p.recordDaysInit && r.days.length) { p.recordDaysInit = true; p.recordDays.add(`d:${r.days[0].day}`); }
+    if (p.recordDaysFor !== p.active) {
+      p.recordDaysFor = p.active;
+      const day = r.days.find((d) => d.records.some((x) => x.path === p.active))?.day ?? (r.undated.some((x) => x.path === p.active) ? 'none' : null);
+      if (day) p.recordDays.add(`d:${day}`);
+    }
+    const nodes = [{ id: `r:${TASK_LOG}`, kind: 'record', label: t('Contents'), icon: 'listDashes', title: TASK_LOG, record: { path: TASK_LOG, anchor: '' } }];
+    let shown = 0;
+    for (const d of r.days) {
+      const items = d.records.filter(hit);
+      shown += items.length;
+      if (items.length) nodes.push({ id: `d:${d.day}`, kind: 'group', selectable: false, label: d.day, meta: formatNumber(items.length), children: items.map(node) });
+    }
+    const undated = r.undated.filter(hit);
+    shown += undated.length;
+    if (undated.length) {
+      nodes.push({ id: 'd:none', kind: 'group', selectable: false, label: t('No date'), meta: formatNumber(undated.length), children: undated.map(node),
+        title: t('Records with no date in their TOC line or file name, such as legacy originals, slices and catalogs') });
+    }
+    const tree = treeView({
+      id: 'files-records', label: t('Records by day'), nodes, selected: `r:${p.active}`,
+      expanded: q ? new Set(nodes.map((n) => n.id)) : p.recordDays,
+      toggle: (n, on) => {
+        if (on) p.recordDays.add(n.id); else p.recordDays.delete(n.id);
+        renderRecords();
+        focusNode($('#files-records'), n.id);
+      },
+      select: (n) => open(n.record.path, true, n.record.anchor),
+    });
+    const notes = r.errors.map((err) => h('p', { class: 'tree-note danger', role: 'alert' }, err, ' ',
+      h('button', { class: 'mds-link-button', type: 'button', onclick: () => loadRecords(p) }, t('Try again'))));
+    if (r.truncated) notes.push(h('p', { class: 'tree-note' }, t('The contents are too large to list in full; open Contents to read them.')));
+    if (!shown && !r.errors.length) notes.push(h('p', { class: 'tree-note' }, q ? t('No record matches “{query}”.', { query: q }) : t('No records yet.')));
+    list.replaceChildren(tree, ...notes);
+    list.scrollTop = p.recordsScroll ?? 0;
+    if (focused) focusNode(tree, focused);
+  }
+
+  // noteOutline keeps the headings of a Knowledge note just rendered, for
+  // the tree, and draws the tree again when they changed.
+  function noteOutline(p, rel, article) {
+    // The renderer shifts heading levels; depth is relative to the highest
+    // heading of the note, three levels deep at most.
+    const all = [...article.querySelectorAll('h1,h2,h3,h4,h5,h6')].map((el) => ({ id: el.id, text: el.textContent.trim(), level: Number(el.tagName[1]) })).filter((o) => o.id && o.text);
+    const top = Math.min(...all.map((o) => o.level));
+    const found = all.filter((o) => o.level - top < 3).slice(0, 200);
+    const outline = { path: rel, items: found.map(({ id, text, level }) => ({ id, text, depth: level - top })) };
+    if (JSON.stringify(outline) === JSON.stringify(p.outline)) return;
+    p.outline = outline;
+    queueMicrotask(() => { if (current() === p) renderTree(); });
   }
 
   // ---------- Preview ----------
@@ -1225,6 +1332,7 @@ export function createFiles(host) {
     if (rendered) {
       const article = h('article', { class: 'md files-md', html: renderDocument(text) });
       headingAnchors(article);
+      if (p.scope.kind === 'knowledge') noteOutline(p, rel, article);
       article.addEventListener('click', (e) => {
         const link = e.target.closest('a[href]');
         const href = link?.getAttribute('href');

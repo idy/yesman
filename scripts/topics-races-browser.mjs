@@ -126,7 +126,8 @@ async function open(browser) {
 }
 const frame = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 async function pick(page, id) {
-  if (await page.locator('#topics [data-key="back"]').count()) await page.click('#topics [data-key="back"]');
+  // A narrow pane shows the tree after Back; a wide one shows it beside the topic.
+  if (await page.locator('#topics [data-key="back"]').isVisible()) await page.click('#topics [data-key="back"]');
   await page.click(`#topics [data-key="topic-${id}"]`);
 }
 const settle = (page) => page.waitForTimeout(80);

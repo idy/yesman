@@ -287,15 +287,16 @@ async function run(engineName, engine) {
     await page.click('#topics [data-key="archive"]');
     await page.locator('#topics .topic-composer[data-archived]').waitFor();
     await page.click('#topics [data-key="back"]');
-    assert.equal(await page.locator('#topics .topic-row').count(), 1);
-    await page.click('#topics [data-key="filter-archived"]');
-    await page.click('#topics [data-key="topic-tp2"]');
+    // The tree groups topics by their status: the archived topic moved to
+    // Archived, opened to keep it in view; Open keeps the other.
+    assert.equal(await page.locator('#topics [data-node="g:open"] .topic-row').count(), 1);
+    assert.equal(await page.locator('#topics [data-node="g:archived"] .topic-row').count(), 1);
+    await page.click('#topics [data-key="topic-tp2"] > .explorer-line');
     await page.click('#topics [data-key="restore"]');
     await page.locator('#topics [data-key="compose-tp2"]').waitFor();
 
     // Keyboard: Enter on a row opens it and the back button returns focus.
     await page.click('#topics [data-key="back"]');
-    await page.click('#topics [data-key="filter-all"]');
     await page.focus('#topics [data-key="topic-tp1"]');
     await page.keyboard.press('Enter');
     await page.locator('#topics h3.topic-title', { hasText: 'Topics and tasks' }).waitFor();
