@@ -28,6 +28,13 @@ whose state it validates first. The tracked mygo.json is never changed:
 plain `go tool mygo build` stays an ad-hoc build. The files are readable by
 this user while the step runs, as anything on the runner is; they are removed
 when it ends.
+
+MyGo runs as the leader of a process group of its own. When it fails, or a
+TERM/INT/HUP reaches the launcher, every process left in that group is
+stopped and waited for before the key, token and configuration are deleted;
+a process that cannot be stopped fails the step by name. Processes that leave
+the group (a new session) and a SIGKILL of the launcher are not covered; the
+files then stay until the disposable runner goes.
 """
 import argparse
 import copy
@@ -37,13 +44,11 @@ import pathlib
 import re
 import shlex
 import shutil
-import signal
-import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from macos_signing import SigningError, clean_environment, prepared, stop  # noqa: E402
+from macos_signing import SigningError, clean_environment, install_signal_handlers, prepared, run_owned, shielded  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Each key of mygo.json that the derived configuration knows how to carry.
@@ -151,13 +156,17 @@ def build(platforms, system, mode, identity, state, upload, root=ROOT):
             (project / 'resources').symlink_to(root / 'resources', target_is_directory=True)
         command = ['go', 'tool', 'mygo', 'build', '-platform', ','.join(targets)] + (['-upload'] if upload else []) + sign + [str(project)]
         print('Building:', ' '.join(shlex.quote(c) for c in command[:-1]), '<derived project>', flush=True)
-        result = subprocess.run(command, cwd=root, env=env, stdin=subprocess.DEVNULL)
-        if result.returncode != 0:
-            raise SigningError('mygo build failed (exit %d)' % result.returncode)
+        # MyGo and everything it starts (go, compilers, codesign, xcrun, gh)
+        # run in one process group of their own; on failure or a signal the
+        # group is stopped and waited for before the files are removed.
+        code, _ = run_owned('mygo build', command, env, capture=False, cwd=root)
+        if code != 0:
+            raise SigningError('mygo build failed (exit %d)' % code)
     finally:
-        shutil.rmtree(private, ignore_errors=True)
-        if project:
-            shutil.rmtree(project, ignore_errors=True)
+        with shielded():
+            shutil.rmtree(private, ignore_errors=True)
+            if project:
+                shutil.rmtree(project, ignore_errors=True)
 
 
 def main():
@@ -168,8 +177,7 @@ def main():
     parser.add_argument('--signing-identity', default='')
     parser.add_argument('--upload', action='store_true')
     args = parser.parse_args()
-    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(number, stop)
+    install_signal_handlers()
     try:
         build(args.platform, args.system, args.signing_mode, args.signing_identity,
               os.environ.get('SIGNING_STATE', '').strip(), args.upload)

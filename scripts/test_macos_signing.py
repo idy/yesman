@@ -33,6 +33,7 @@ import pathlib
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -384,6 +385,121 @@ def ownership_cases(temporary):
     assert process.returncode == 1 and 'did not finish within 2 seconds' in process.stderr, process.stderr
     assert_clean(fixture)
     record('tool-deadline-cleans-up')
+
+
+def alive(pid):
+    r = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)
+    return r.returncode == 0 and r.stdout.strip() != '' and not r.stdout.strip().startswith('Z')
+
+
+def descendant_tool(fixture, tool, trigger, pidfile, parent_sleep=30):
+    """A stand-in tool that, on trigger, starts a long-lived descendant and keeps running."""
+    code = ('#!%s\nimport os, pathlib, subprocess, sys, time\nif %s:\n'
+            '    child = subprocess.Popen([%r, "-c", "import time; time.sleep(20)"])\n'
+            '    pathlib.Path(%r).write_text(str(child.pid))\n    time.sleep(%d)\n') % (sys.executable, trigger, sys.executable, str(pidfile), parent_sleep)
+    if tool != 'go':
+        code += 'os.execv(%r, [%r, %r, %r] + sys.argv[1:])\n' % (sys.executable, sys.executable, str(TOOLS), tool)
+    (fixture.bin / tool).write_text(code)
+    (fixture.bin / tool).chmod(0o755)
+
+
+def lifecycle_cases(temporary):
+    """R2: deletion through the held directory, non-blocking receipts, owned process groups, aliases and outputs."""
+    # A directory setup made, replaced after cleanup's second ownership check: the replacement survives.
+    fixture, state = prepared(temporary, 'replaced-after-check')
+    [folder] = fixture.folders()
+    moved = fixture.dir / 'moved-away'
+    code = ('import os, pathlib, sys\nsys.path.insert(0, %r)\nimport macos_signing as m\noriginal, calls = m.owned, [0]\n'
+            'def owned(folder, state):\n    calls[0] += 1\n    result = original(folder, state)\n'
+            '    if calls[0] == 2 and result:\n        folder.rename(%r)\n        folder.mkdir(mode=0o700)\n'
+            '        (folder / "unrelated").write_text("keep")\n    return result\n'
+            'm.owned = owned\nsys.argv = ["m", "cleanup"]\nm.main()\n') % (str(fixture.source / 'scripts'), str(moved))
+    env = fixture.env()
+    env['SIGNING_STATE'] = state
+    process = subprocess.run([sys.executable, '-c', code], env=env, capture_output=True, text=True, timeout=60)
+    assert process.returncode == 1 and 'replaced during cleanup' in process.stderr, process.stderr
+    assert (folder / 'unrelated').read_text() == 'keep' and moved.is_dir() and list(moved.iterdir()) == []
+    record('replacement-after-check-survives')
+
+    # A FIFO receipt is refused at once, by cleanup and by the build's state check.
+    fixture, state = prepared(temporary, 'fifo-receipt')
+    [folder] = fixture.folders()
+    (folder / 'receipt.json').unlink()
+    os.mkfifo(folder / 'receipt.json', 0o600)
+    started = time.monotonic()
+    process = fixture.signing('cleanup', state=state)
+    assert process.returncode == 1 and 'leaving it alone' in process.stderr and time.monotonic() - started < 10, process.stderr
+    assert stat.S_ISFIFO(os.lstat(folder / 'receipt.json').st_mode)
+    code = 'import sys\nsys.path.insert(0, %r)\nimport macos_signing as m\ntry:\n    m.prepared(%r)\nexcept m.SigningError:\n    print("refused")\n' % (
+        str(fixture.source / 'scripts'), state)
+    process = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=10)
+    assert process.stdout.strip() == 'refused', process.stdout + process.stderr
+    os.unlink(folder / 'receipt.json')
+    shutil.rmtree(folder)
+    record('fifo-receipt-refused-without-waiting')
+
+    # A tool's descendants are stopped on a deadline and on TERM/INT/HUP, before files go.
+    fixture = Fixture(temporary, 'deadline-descendant', good_identity())
+    pidfile = fixture.dir / 'child-pid'
+    descendant_tool(fixture, 'security', 'sys.argv[1] == "import"', pidfile)
+    code = 'import sys; sys.argv = ["macos_signing.py", "setup"]; sys.path.insert(0, %r); import macos_signing as m; m.DEADLINE = 2; m.main()' % str(fixture.source / 'scripts')
+    process = subprocess.run([sys.executable, '-c', code], env=fixture.env(full_inputs()), capture_output=True, text=True, timeout=60)
+    assert process.returncode == 1 and 'did not finish within 2 seconds' in process.stderr, process.stderr
+    assert not alive(int(pidfile.read_text())), 'the descendant must be stopped'
+    assert_clean(fixture)
+    record('deadline-stops-descendants')
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        fixture = Fixture(temporary, 'signal-descendant-%d' % number, good_identity())
+        pidfile = fixture.dir / 'child-pid'
+        descendant_tool(fixture, 'security', 'sys.argv[1] == "import"', pidfile)
+        process = subprocess.Popen([sys.executable, str(fixture.source / 'scripts/macos_signing.py'), 'setup'], env=fixture.env(full_inputs()),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        limit = time.monotonic() + 15
+        while not pidfile.exists() and process.poll() is None and time.monotonic() < limit:
+            time.sleep(0.05)
+        process.send_signal(number)
+        _, stderr = process.communicate(timeout=30)
+        assert process.returncode == 1 and 'Stopped by signal' in stderr, stderr
+        assert not alive(int(pidfile.read_text())) and not list(fixture.dir.rglob('identity.p12'))
+        assert_clean(fixture)
+        record('signal-stops-descendants', signal=int(number))
+
+    # The release launcher: TERM stops MyGo's whole group before the key, token and config go.
+    fixture = Fixture(temporary, 'launch-term-descendant', {})
+    pidfile = fixture.dir / 'child-pid'
+    descendant_tool(fixture, 'go', 'True', pidfile)
+    bystander = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+    env = fixture.env({'MYGO_UPDATER_PRIVATE_KEY': UPDATER_KEY})
+    process = subprocess.Popen([sys.executable, str(fixture.source / 'scripts/release_build.py'), '--platform', 'linux/amd64', '--system', 'Linux'],
+                               env=env, cwd=fixture.source, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    limit = time.monotonic() + 15
+    while not pidfile.exists() and process.poll() is None and time.monotonic() < limit:
+        time.sleep(0.05)
+    process.send_signal(signal.SIGTERM)
+    _, stderr = process.communicate(timeout=30)
+    assert process.returncode == 1 and 'Stopped by signal' in stderr, stderr
+    assert not alive(int(pidfile.read_text())) and alive(bystander.pid), 'only the launcher\'s own group is stopped'
+    assert not list((fixture.source / 'build').iterdir()) and not list(fixture.runner_temp.glob('yesman-release-*'))
+    bystander.kill()
+    bystander.wait()
+    record('launcher-term-stops-own-group-only')
+
+    # An Apple input's value under another name is refused before any tool runs.
+    fixture = Fixture(temporary, 'apple-value-alias', good_identity())
+    process = fixture.signing('setup', inputs=dict(full_inputs(), SOME_ALIAS=SENTINELS['MACOS_NOTARY_PASSWORD']))
+    assert process.returncode == 1 and 'another environment variable' in process.stderr and fixture.calls() == [] and fixture.folders() == []
+    record('apple-value-alias-refused')
+
+    # A failed GITHUB_OUTPUT write, first or last, fails setup and leaves nothing.
+    for ordinal in (1, 2):
+        fixture = Fixture(temporary, 'output-failure-%d' % ordinal, good_identity())
+        code = ('import sys\nsys.path.insert(0, %r)\nimport macos_signing as m\noriginal, n = m.write_output, [0]\n'
+                'def output(values):\n    n[0] += 1\n    if n[0] == %d:\n        raise m.SigningError("injected")\n    return original(values)\n'
+                'm.write_output = output\nsys.argv = ["m", "setup"]\nm.main()\n') % (str(fixture.source / 'scripts'), ordinal)
+        process = subprocess.run([sys.executable, '-c', code], env=fixture.env(full_inputs()), capture_output=True, text=True, timeout=60)
+        assert process.returncode == 1 and fixture.folders() == [], (ordinal, process.stderr)
+        assert_clean(fixture)
+        record('output-failure-cleans-up', write=ordinal)
 
 
 def signatures(**changes):
@@ -885,6 +1001,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='yesman-signing-test-') as temporary:
         setup_cases(temporary)
         ownership_cases(temporary)
+        lifecycle_cases(temporary)
         verify_cases(temporary)
         launcher_cases(temporary)
         workflow_cases(temporary)
