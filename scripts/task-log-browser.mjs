@@ -115,7 +115,7 @@ try {
    await files.getByRole('link',{name:'Picker',exact:true}).click();
    await files.locator('#validation').waitFor();
    assert.equal(await page.locator('[data-info-entry="working-logs"]').getAttribute('aria-current'),'page');
-   assert.deepEqual(await page.locator('[data-info-entry]').evaluateAll(es=>es.map(e=>e.dataset.infoEntry)),['knowledge','working-logs','needs-you']);
+   assert.deepEqual(await page.locator('[data-info-entry]').evaluateAll(es=>es.map(e=>e.dataset.infoEntry)),['knowledge','working-logs','needs-you','topics']);
    await page.locator('[data-info-entry="needs-you"]').focus();await page.keyboard.press('Enter');
    await page.getByRole('button',{name:'Close Needs You',exact:true}).waitFor();
    assert.equal(await page.locator('[data-info-entry="needs-you"]').getAttribute('aria-current'),'page');

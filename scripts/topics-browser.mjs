@@ -15,6 +15,8 @@ const fixtureDir = await mkdtemp(`${tmpdir()}/yesman-topics-browser-`);
 const exe = `${fixtureDir}/topics.test`;
 const shots = process.env.YESMAN_TOPICS_SHOTS;
 if (shots) await mkdir(shots, { recursive: true });
+// With YESMAN_TEST_RUNTIME, the bridge runs the pinned runtime and its native queue.
+const native = !!process.env.YESMAN_TEST_RUNTIME;
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg==', 'base64');
 
 async function fixture() {
@@ -104,21 +106,24 @@ async function run(engineName, engine) {
     const lead = page.locator('.agent-row--yesman').first();
     await lead.waitFor();
     await lead.click();
-    const topicsRow = page.locator('#yesman-info .info-link', { hasText: 'Topics' });
+    const topicsRow = page.locator('#yesman-info [data-info-entry="topics"]');
     await topicsRow.waitFor();
 
-    // The info panel lists Knowledge, Task log, Board and Topics side by side.
-    await page.waitForFunction(() => document.querySelector('#yesman-info')?.innerText.includes('2 open'));
-    const rows = await page.$$eval('#yesman-info .info-section--link .info-link', (els) => els.map((e) => e.innerText.replace(/\s+/g, ' ').trim()));
-    assert.deepEqual(rows.slice(0, 4).map((r) => r.split(' ')[0]), ['Knowledge', 'Task', 'Board', 'Topics'], rows.join(' | '));
-    assert.match(rows[4] ?? '', /^Storage/, 'Storage keeps its row after them');
-    assert.match(rows[0], /1 note/);
-    assert.match(rows[2], /2 open/);
-    assert.match(rows[3], /Empty/);
+    // The info panel's one card lists Knowledge, Working Logs, Needs You and
+    // Topics, a row each, with what each counts; no Board or Tasks row.
+    await page.waitForFunction(() => /Empty/.test(document.querySelector('#yesman-info [data-info-entry="topics"]')?.innerText ?? ''));
+    const entries = await page.$$eval('#yesman-info .info-entries .info-link', (els) => els.map((e) => ({ key: e.dataset.infoEntry, label: e.querySelector('.info-link-label')?.textContent, aside: e.querySelector('.info-aside')?.textContent })));
+    assert.deepEqual(entries.map((e) => e.key), ['knowledge', 'working-logs', 'needs-you', 'topics'], JSON.stringify(entries));
+    assert.deepEqual(entries.map((e) => e.label), ['Knowledge', 'Working Logs', 'Needs You', 'Topics'], JSON.stringify(entries));
+    assert.equal(entries[0].aside, '1 note');
+    assert.equal(entries[3].aside, 'Empty');
+    assert.equal(await page.locator('#yesman-info .info-entries').count(), 1, 'one card');
+    assert.equal(await page.$eval('#yesman-info', (el) => el.firstElementChild?.classList.contains('info-section--entries') && el.children.length > 1), true, 'Storage and worktrees follow the card');
     await shot(page, `${engineName}-info`);
 
-    // Board still opens its own pane; Topics replaces it beside the conversation.
-    await page.locator('#yesman-info .info-link', { hasText: 'Board' }).click();
+    // Board still opens its own pane, from the titlebar; Topics replaces it
+    // beside the conversation.
+    await page.locator('#bar-actions button[aria-label="Show the board"]').click();
     await page.locator('#board .board-task').first().waitFor();
     await topicsRow.click();
     await page.locator('#topics .board-empty', { hasText: 'No topics yet' }).waitFor();
@@ -156,7 +161,7 @@ async function run(engineName, engine) {
 
     // The info panel follows: Topics now counts the two open topics.
     try {
-      await page.waitForFunction(() => /Topics\s*›?\s*2 open/.test(document.querySelector('#yesman-info')?.innerText.replace(/\s+/g, ' ') ?? '') || [...document.querySelectorAll('#yesman-info .info-link')].some((e) => e.innerText.includes('Topics') && e.innerText.includes('2 open')), null, { timeout: 8000 });
+      await page.waitForFunction(() => document.querySelector('#yesman-info [data-info-entry="topics"] .info-aside')?.textContent === '2 open', null, { timeout: 8000 });
     } catch (err) {
       console.log('Info calls:', JSON.stringify(await page.evaluate(() => fixtureCalls.filter((c) => c[0] === 'Info').length)), await page.locator('#yesman-info').innerText());
       throw err;
@@ -222,6 +227,12 @@ async function run(engineName, engine) {
     await page.waitForFunction(() => [...document.querySelectorAll('#thread .topic-chip')].some((c) => c.innerText.includes('tp2')));
     await page.waitForFunction(() => !document.querySelector('#topics .composer-image'));
     assert.equal(await main.inputValue(), 'my unsent main draft', 'the main composer keeps its draft');
+    if (native) {
+      // With the pinned runtime, topic B waits in pi's own steering queue:
+      // its receipt row says so under its chip, with the queue's actions.
+      await page.waitForFunction(() => [...document.querySelectorAll('#thread .msg-delivery')].some((el) => el.querySelector('.topic-chip')?.innerText.includes('tp2') &&
+        /Steering · waiting for input checkpoint/.test(el.querySelector('.delivery-status')?.textContent ?? '')), null, { timeout: 10000 });
+    }
     await shot(page, `${engineName}-sent`);
     // A topic line typed or pasted into the main composer is only text: the
     // app did not send it from a topic, so it names none.
@@ -231,6 +242,11 @@ async function run(engineName, engine) {
     assert.equal(await page.locator('#thread .msg-user--topic', { hasText: 'Pasted into the main line' }).count(), 0, 'pasted text names no topic');
     await post(backend.url, '/fixture/gate?open=1');
     await page.waitForFunction(() => document.querySelectorAll('#thread .msg-assistant').length >= 1, null, { timeout: 30000 });
+    if (native) {
+      // pi took both: each is its native message, tied to its submission.
+      await page.waitForFunction(() => [...document.querySelectorAll('#thread .msg-delivery[data-bound="true"]')].filter((el) => el.querySelector('.topic-chip') &&
+        el.querySelector('.delivery-status')?.textContent === 'Taken by pi').length === 2, null, { timeout: 30000 });
+    }
 
     // After a reload the native history still names each topic; a chip opens it.
     await page.reload();
@@ -292,7 +308,7 @@ async function run(engineName, engine) {
     await page.setViewportSize({ width: 760, height: 820 });
     await page.reload();
     await page.locator('.agent-row--yesman').first().click();
-    await page.locator('#yesman-info .info-link', { hasText: '话题' }).click();
+    await page.locator('#yesman-info [data-info-entry="topics"]', { hasText: '话题' }).click();
     await page.locator('#topics .files-title', { hasText: '话题' }).waitFor();
     await page.click('#topics [data-key="topic-tp1"]');
     await page.locator('#topics .topic-heading', { hasText: '已确认的结论' }).waitFor();
@@ -300,10 +316,12 @@ async function run(engineName, engine) {
     const box = await page.locator('#topics').boundingBox();
     const mainBox = await page.locator('main.main').boundingBox();
     await shot(page, `${engineName}-zh-dark-narrow`);
-    await page.locator('#yesman-info .info-link', { hasText: '任务板' }).click();
+    await page.locator('#bar-actions button[aria-label="显示任务板"]').click();
     const boardBox = await page.locator('#board').boundingBox();
     console.log(`${engineName} narrow: topics ${JSON.stringify(box)} board ${JSON.stringify(boardBox)} main ${JSON.stringify(mainBox)}`);
     assert.ok(box.width <= boardBox.width && box.x >= boardBox.x, `topics pane ${JSON.stringify(box)} vs board ${JSON.stringify(boardBox)}`);
+    // As the board does, it leaves the conversation room (v0.1.37's panes).
+    assert.ok(mainBox.width >= 240, `the conversation beside the topics: ${JSON.stringify(mainBox)}`);
     // WebKit reports the fixture's own event poll cancelled by page.reload().
     assert.deepEqual(errors.filter((e) => !/\/fixture\/events\?after=\d+ due to access control checks/.test(e)), []);
     console.log(`${engineName}: PASS`);

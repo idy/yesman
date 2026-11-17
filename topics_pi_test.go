@@ -26,6 +26,11 @@ import (
 // model, settings, workspace or network is used.
 //
 //	YESMAN_TEST_TOPICS_PI=1 go test -run TestTopicsWithLocalPi -v .
+//
+// With YESMAN_TEST_RUNTIME set to the prepared pinned runtime (go run
+// ./tools/pi-runtime DIR prints its root), it runs that runtime instead, as
+// the app does by default: topic messages then go through pi's native queue,
+// whose input identity ties each to its submission, live and after a restart.
 func TestTopicsWithLocalPi(t *testing.T) {
 	if os.Getenv("YESMAN_TEST_TOPICS_PI") == "" {
 		t.Skip("set YESMAN_TEST_TOPICS_PI=1 to run pi with a local provider")
@@ -33,21 +38,10 @@ func TestTopicsWithLocalPi(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the pi wrapper is a shell script")
 	}
-	piPath := os.Getenv("YESMAN_TEST_PI")
-	if piPath == "" {
-		var err error
-		if piPath, err = exec.LookPath("pi"); err != nil {
-			t.Skip("pi is not installed")
-		}
-	}
 	cwd, _ := os.Getwd()
 	tmp := t.TempDir()
 	audit, gate := filepath.Join(tmp, "audit.jsonl"), filepath.Join(tmp, "gate")
-	cfgDir := filepath.Join(tmp, "pi-config")
-	must(t, os.MkdirAll(cfgDir, 0o755))
-	must(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{"packages":[],"extensions":[],"skills":[],"promptTemplates":[],"themes":[],"compaction":{"enabled":false},"retry":{"enabled":false},"defaultProjectTrust":"no"}`), 0o644))
-	wrapper := filepath.Join(tmp, "pi.sh")
-	must(t, os.WriteFile(wrapper, []byte(fmt.Sprintf("#!/bin/sh\nexec %q \"$@\" -e %q --provider topics-test --model m\n", piPath, filepath.Join(cwd, "scripts", "fixtures", "topics-provider.ts"))), 0o755))
+	wrapper, command, cfgDir, managed := localTopicsPi(t, cwd, tmp)
 
 	store := yesmen.New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
 	y, err := store.Hire("alice")
@@ -59,7 +53,7 @@ func TestTopicsWithLocalPi(t *testing.T) {
 	var events []agent.Event
 	newManager := func() *agent.Manager {
 		return agent.New(agent.Config{
-			Pi: wrapper, Extension: filepath.Join(cwd, "pi", "yesman.ts"), Yesmen: store,
+			Pi: wrapper, Command: command, Extension: filepath.Join(cwd, "pi", "yesman.ts"), Yesmen: store,
 			Env:     []string{"YESMAN_API=" + srv.URL(), "PI_CODING_AGENT_DIR=" + cfgDir, "TOPICS_AUDIT=" + audit, "TOPICS_GATE=" + gate},
 			OnEvent: func(e agent.Event) { mu.Lock(); events = append(events, e); mu.Unlock() },
 		})
@@ -228,7 +222,8 @@ func TestTopicsWithLocalPi(t *testing.T) {
 			images[key] += n
 			// The app's recorded origin ties each topic message to a
 			// submission of that topic, never of another or of the main line.
-			if key != "none" && label == "live" {
+			// The native queue's input identity keeps it across a restart.
+			if key != "none" && (label == "live" || managed) {
 				if msg.Yesman == nil || msg.Yesman.Source != "user" || !sentFrom[key][msg.Yesman.Submission] {
 					t.Fatalf("%s: %s message %q has origin %+v", label, key, text, msg.Yesman)
 				}
@@ -247,6 +242,22 @@ func TestTopicsWithLocalPi(t *testing.T) {
 		}
 		if len(byTopic["none"]) != 4 {
 			t.Fatalf("%s: main line and worker report: %q", label, byTopic["none"])
+		}
+		if managed {
+			// The pinned runtime's native queue took every topic submission:
+			// pi recorded its input under the submission's own ID.
+			if !conv.Queue.RecallSupported {
+				t.Fatalf("%s: the runtime has no native queue: %+v", label, conv.Queue)
+			}
+			states := map[string]string{}
+			for _, d := range conv.Deliveries {
+				states[d.ID] = d.State
+			}
+			for _, id := range []string{idA, idB, idMain} {
+				if states[id] != "dispatched" {
+					t.Fatalf("%s: submission %s is %q, not taken by pi's native queue: %v", label, id, states[id], states)
+				}
+			}
 		}
 	}
 	sentFrom = map[string]map[string]bool{"tp1": {}, "tp2": {}}
@@ -299,6 +310,43 @@ func TestTopicsWithLocalPi(t *testing.T) {
 	agents = newManager()
 	srv.Agents, a.agents = agents, agents
 	checkHistory(agents, "reloaded")
+}
+
+// localTopicsPi is the pi the topics checks run: the installed pi (or
+// YESMAN_TEST_PI) through a wrapper that adds the local deterministic
+// provider, or, with YESMAN_TEST_RUNTIME, the prepared pinned runtime as the
+// app runs it by default, with the provider in its settings. It returns the
+// executable, the Manager's command (nil for the wrapper), pi's own
+// configuration directory and whether the runtime is the pinned one. It
+// skips the test without a pi to run.
+func localTopicsPi(t *testing.T, cwd, tmp string) (string, func(context.Context) (string, []string, error), string, bool) {
+	t.Helper()
+	cfgDir := filepath.Join(tmp, "pi-config")
+	must(t, os.MkdirAll(cfgDir, 0o755))
+	provider := filepath.Join(cwd, "scripts", "fixtures", "topics-provider.ts")
+	if root := os.Getenv("YESMAN_TEST_RUNTIME"); root != "" {
+		node, err := exec.LookPath("node")
+		must(t, err)
+		cli := filepath.Join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js")
+		if _, err := os.Stat(cli); err != nil {
+			t.Fatalf("YESMAN_TEST_RUNTIME is not a prepared runtime: %v", err)
+		}
+		settings, _ := json.Marshal(map[string]any{"packages": []string{}, "extensions": []string{provider}, "skills": []string{}, "promptTemplates": []string{}, "themes": []string{},
+			"compaction": map[string]bool{"enabled": false}, "retry": map[string]bool{"enabled": false}, "defaultProjectTrust": "no", "defaultProvider": "topics-test", "defaultModel": "m"})
+		must(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"), settings, 0o644))
+		return node, func(context.Context) (string, []string, error) { return node, []string{cli}, nil }, cfgDir, true
+	}
+	piPath := os.Getenv("YESMAN_TEST_PI")
+	if piPath == "" {
+		var err error
+		if piPath, err = exec.LookPath("pi"); err != nil {
+			t.Skip("pi is not installed")
+		}
+	}
+	must(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{"packages":[],"extensions":[],"skills":[],"promptTemplates":[],"themes":[],"compaction":{"enabled":false},"retry":{"enabled":false},"defaultProjectTrust":"no"}`), 0o644))
+	wrapper := filepath.Join(tmp, "pi.sh")
+	must(t, os.WriteFile(wrapper, []byte(fmt.Sprintf("#!/bin/sh\nexec %q \"$@\" -e %q --provider topics-test --model m\n", piPath, provider)), 0o755))
+	return wrapper, nil, cfgDir, false
 }
 
 func contentText(raw json.RawMessage) (string, int) {

@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -34,21 +33,10 @@ func TestTopicsBrowserBridge(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the pi wrapper is a shell script")
 	}
-	piPath := os.Getenv("YESMAN_TEST_PI")
-	if piPath == "" {
-		var err error
-		if piPath, err = exec.LookPath("pi"); err != nil {
-			t.Fatal("pi is not installed")
-		}
-	}
 	cwd, _ := os.Getwd()
 	tmp := t.TempDir()
 	gate := filepath.Join(tmp, "gate")
-	cfgDir := filepath.Join(tmp, "pi-config")
-	must(t, os.MkdirAll(cfgDir, 0o755))
-	must(t, os.WriteFile(filepath.Join(cfgDir, "settings.json"), []byte(`{"packages":[],"extensions":[],"skills":[],"promptTemplates":[],"themes":[],"compaction":{"enabled":false},"retry":{"enabled":false},"defaultProjectTrust":"no"}`), 0o644))
-	wrapper := filepath.Join(tmp, "pi.sh")
-	must(t, os.WriteFile(wrapper, []byte(fmt.Sprintf("#!/bin/sh\nexec %q \"$@\" -e %q --provider topics-test --model m\n", piPath, filepath.Join(cwd, "scripts", "fixtures", "topics-provider.ts"))), 0o755))
+	wrapper, command, cfgDir, _ := localTopicsPi(t, cwd, tmp)
 
 	store := yesmen.New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
 	y, err := store.HireNamed("Alpha Lab", "")
@@ -70,7 +58,7 @@ func TestTopicsBrowserBridge(t *testing.T) {
 	srv := &server.Server{Pool: p, Yesmen: store, TopicsChanged: func(n string) { emit("topics", n) }}
 	must(t, srv.Start())
 	agents := agent.New(agent.Config{
-		Pi: wrapper, Extension: filepath.Join(cwd, "pi", "yesman.ts"), Yesmen: store,
+		Pi: wrapper, Command: command, Extension: filepath.Join(cwd, "pi", "yesman.ts"), Yesmen: store,
 		Env:      []string{"YESMAN_API=" + srv.URL(), "PI_CODING_AGENT_DIR=" + cfgDir, "TOPICS_AUDIT=" + filepath.Join(tmp, "audit.jsonl"), "TOPICS_GATE=" + gate},
 		OnEvent:  func(e agent.Event) { emit("agent-event", e) },
 		OnChange: func(list []agent.Info) { emit("agents", list) },
@@ -81,7 +69,8 @@ func TestTopicsBrowserBridge(t *testing.T) {
 	a.home.Root = tmp
 	svc := reflect.ValueOf(&service{app: a})
 	forwarded := map[string]bool{"State": true, "Messages": true, "Submit": true, "Abort": true, "Board": true, "Info": true,
-		"Topics": true, "CreateTopic": true, "UpdateTopic": true, "SubmitTopic": true}
+		"Topics": true, "CreateTopic": true, "UpdateTopic": true, "SubmitTopic": true,
+		"CancelSubmission": true, "PromoteSubmission": true, "SubmissionPayload": true, "SubmissionText": true, "AckRecall": true}
 	errType := reflect.TypeOf((*error)(nil)).Elem()
 	ctxType := reflect.TypeOf((*context.Context)(nil)).Elem()
 

@@ -94,7 +94,7 @@ const bridge = () => {
         }
         case 'Models': return { agent: agents.find((a) => a.id === args[0]), models: [] };
         case 'Board': return { tasks: [] };
-        case 'Info': return { knowledge: { notes: 0 }, board: { open: 0 }, topics: { open: 2 }, worktrees: [] };
+        case 'Info': return { knowledge: { notes: 0 }, topics: { open: 2 }, worktrees: [] };
         case 'Repos': case 'Clones': case 'ListFiles': case 'Pulls': return [];
         case 'TakeFocus': return '';
         default: return {};
