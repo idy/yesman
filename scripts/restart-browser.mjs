@@ -81,7 +81,7 @@ const WORDS = {
     summary: /Last restart, .+: 1 continued, 1 waits for you, 1 could not continue/, toast: /Yes Man restarted: 1 continued/, palette: 'Restart and continue' },
   'zh-Hans': { button: '重启并继续', confirm: '重启 Yes Man？', ok: '重启', hint: '正在工作的智能体会在重启后从各自的会话继续。',
     ready: '将启动已安装的更新。正在工作的智能体会在重启后继续。', pending: '正在重启…', pill: '重启以更新',
-    summary: /上次重启（.+）：1 个已继续、1 个在等你、1 个未能继续/, toast: /Yes Man 已重启：1 个已继续/, palette: '重启并继续' },
+    summary: /上次重启于 .+：1 个已继续、1 个在等你、1 个未能继续/, toast: /Yes Man 已重启：1 个已继续/, palette: '重启并继续' },
 };
 
 const results = [];

@@ -177,6 +177,7 @@ func TestResumeAfterRestart(t *testing.T) {
 	asks := addWorker(t, store, "asks")
 	done := addWorker(t, store, "done")
 	reporting := addWorker(t, store, "reporting")
+	waiter := addWorker(t, store, "waiter") // waits for the user; never resumed
 	if err := store.FinishWorker("alice", "done", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
@@ -198,12 +199,7 @@ func TestResumeAfterRestart(t *testing.T) {
 		{"worker working", entry(busy, restart.ReasonWorking), restart.Resumed},
 		{"worker question", entry(asks, restart.ReasonQuestion), restart.Resumed},
 		{"historical done worker", entry(done, restart.ReasonWorking), restart.Finished},
-		{"needs you", func() restart.Agent {
-			e := entry(busy, restart.ReasonNeedsYou)
-			e.Name = "asks"
-			e.AgentSince = asks.StartedAt
-			return e
-		}(), restart.Waiting},
+		{"needs you", entry(waiter, restart.ReasonNeedsYou), restart.Waiting},
 		{"worker replaced", func() restart.Agent {
 			e := entry(busy, restart.ReasonWorking)
 			e.AgentSince = e.AgentSince.Add(-time.Hour)

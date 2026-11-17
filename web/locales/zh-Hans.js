@@ -1340,7 +1340,7 @@ export default {
   "{n} agents are working. Restarting interrupts their current steps; they continue afterwards from their sessions.": "有 {n} 个智能体正在工作。重启会中断它们当前的步骤；重启后它们会从各自的会话继续。",
   "Restart and continue": "重启并继续",
   "Restarting…": "正在重启…",
-  "Last restart, {when}: {summary}": "上次重启（{when}）：{summary}",
+  "Last restart, {when}: {summary}": "上次重启于 {when}：{summary}",
   "Yes Man restarted: {summary}": "Yes Man 已重启：{summary}",
   "Starts the installed update. Working agents continue afterwards.": "将启动已安装的更新。正在工作的智能体会在重启后继续。",
   "Working agents continue afterwards from their sessions.": "正在工作的智能体会在重启后从各自的会话继续。",
