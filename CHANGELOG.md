@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.41
+
+- Add Topics to keep questions and discussions, with summaries, confirmed conclusions, open questions and linked sources. Search, filter, edit, resolve, archive and restore topics in their own pane.
+- Send text and images from a topic into the yesman's existing lead conversation, preserving the original images and topic association through the supported queue, retry and restart paths. Association follows recorded submission identity; pasted topic labels and messages with missing provenance remain unassociated.
+- Bring Knowledge, Working Logs, Needs You and Topics together as four Info entries with their actual counts and errors. Keep the conversation usable beside Topics in narrow windows, with drafts and keyboard focus preserved.
+- Protect topic edits from conflicting revisions and delayed requests from a retired lead or workspace. Conclusions stay explicitly recorded; Topics does not invent answers or call a model in the background.
+
 ## 0.1.40
 
 - Add a compact Working log contents page and separate records for each task, pull request or release. Open records on demand in a read-only view, then return to Contents or your previous reading position.
