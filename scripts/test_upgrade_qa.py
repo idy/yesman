@@ -619,12 +619,55 @@ class Lifecycle(unittest.TestCase):
                     self.assertTrue(gone(pids or self.pids(pidfile)))
                     for p in group.waiting:
                         p.wait(10)
+                        p.stdout.close()
                     group.anchor.wait(10)
                     group.anchor.stdin.close()
                     group.closed = True
                     if kept:
                         shutil.rmtree(kept['source'], ignore_errors=True)
                         shutil.rmtree(os.path.dirname(kept['path']), ignore_errors=True)
+
+    @unittest.skipUnless(WINDOWS, 'Windows job termination')
+    def test_a_failed_job_termination_retains_inputs_without_waiting(self):
+        # The consumer and its child hold the captured stdout pipe; terminating the job fails.
+        previous = qa._install_handlers()
+        qa.STOP.signum, qa.STOP.group = None, self.group
+        pidfile, args = self.start('hold', SLEEP)
+        kept, pids = {}, []
+        try:
+            with patch.object(qa._k32, 'TerminateJobObject', lambda job, code: 0):
+                start = time.monotonic()
+                with self.assertRaises(qa.Undrained):
+                    with qa.key_file(PRIVATE, self.group) as path:
+                        kept['path'] = path
+
+                        def stop():
+                            self.pids(pidfile)
+                            time.sleep(0.3)
+                            signal.raise_signal(signal.SIGINT)  # exactly one console stop
+                        threading.Thread(target=stop).start()
+                        self.group.run(args, capture=True, timeout=60)
+                elapsed = time.monotonic() - start
+            pids = self.pids(pidfile)
+            self.assertLess(elapsed, 5)
+            self.assertTrue(all(alive(p) for p in pids))  # truthfully not drained
+            self.assertEqual(pathlib.Path(kept['path']).read_text().strip(), PRIVATE)
+            self.assertEqual(self.group.retained[0]['path'], os.path.dirname(kept['path']))
+            self.assertIn('TerminateJobObject failed', self.group.failed)
+        finally:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
+            qa.STOP.signum, qa.STOP.group = None, None
+            # The test, not the producer, stops its own members and files.
+            qa._k32.TerminateJobObject(self.group.job, 1)
+            self.assertTrue(gone(pids or self.pids(pidfile)))
+            for p in self.group.waiting:
+                p.wait(10)
+                p.stdout.close()
+            qa._k32.CloseHandle(self.group.job)
+            self.group.closed = True
+            if kept:
+                shutil.rmtree(os.path.dirname(kept['path']), ignore_errors=True)
 
     def test_unconfirmed_drain_keeps_the_key_and_reports(self):
         pidfile, args = self.start('wait', SLEEP)

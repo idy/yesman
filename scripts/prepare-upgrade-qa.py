@@ -194,22 +194,27 @@ class OwnedGroup:
     def _wait(self,p,args,timeout):
         """Bounded, interruptible wait: short waits (a Windows wait is not interrupted by the
         console-control handler, and a failed stop request must not block forever).
-        The settle/drain that follows decides whether members are gone."""
+        The settle/drain that follows decides whether members are gone. An abandoned
+        wait keeps its pipe open: on Windows a reader thread may still hold it, so it
+        is closed only after the drain confirms the owner is empty."""
         self.waiting.append(p)
         deadline=None if timeout is None else time.monotonic()+timeout
-        try:
-            while True:
-                try:output,_=p.communicate(timeout=self.POLL);break
-                except subprocess.TimeoutExpired:pass
-                reason=self._abandon()
-                if reason:raise Stopped(reason)
-                if deadline is not None and time.monotonic()>=deadline:raise subprocess.TimeoutExpired(args,timeout)
-        except BaseException:
-            if p.stdout:
-                with contextlib.suppress(OSError):p.stdout.close()
-            raise
+        while True:
+            try:output,_=p.communicate(timeout=self.POLL);break
+            except subprocess.TimeoutExpired:pass
+            reason=self._abandon()
+            if reason:raise Stopped(reason)
+            if deadline is not None and time.monotonic()>=deadline:raise subprocess.TimeoutExpired(args,timeout)
         with contextlib.suppress(ValueError):self.waiting.remove(p)
         return output
+
+    def _reap_waiting(self):
+        """After a confirmed drain: reap abandoned consumers and close their pipes."""
+        for p in self.waiting:
+            with contextlib.suppress(subprocess.TimeoutExpired):p.wait(timeout=10)
+            if p.stdout:
+                with contextlib.suppress(OSError):p.stdout.close()
+        self.waiting=[]
 
     def _launch_windows(self,args,cwd,env,stdout,stderr):
         p=subprocess.Popen(args,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,creationflags=0x4)  # CREATE_SUSPENDED
@@ -253,8 +258,10 @@ class OwnedGroup:
                 live=self.live()
                 if live==[]:
                     self._release();_k32.CloseHandle(self.job)
-                    for p in self.waiting:p.wait(timeout=10)
-                    self.waiting=[];return
+                    self._reap_waiting();return
+                if error and live is not None:
+                    self.failed='%s: %d live members not stopped (%s)'%(self.ident,len(live),error)
+                    raise Undrained(self.failed)
                 if time.monotonic()>=end:break
                 time.sleep(0.05)
         else:
@@ -266,9 +273,7 @@ class OwnedGroup:
                     if live==[]:
                         # The anchor was kept unreaped until now, so the group ID stayed ours.
                         self._release();self.anchor.wait(timeout=10);self.anchor.stdin.close()
-                        for p in self.waiting:
-                            with contextlib.suppress(subprocess.TimeoutExpired):p.wait(timeout=10)
-                        self.waiting=[];return
+                        self._reap_waiting();return
                     if error and live is not None:
                         # Live members that cannot be signalled: waiting would not stop them.
                         self.failed='%s: live members %s not stopped (%s)'%(self.ident,live,error)
