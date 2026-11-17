@@ -160,6 +160,9 @@ func (d *Dir) OpenFile(name string, flag int, _ os.FileMode) (*os.File, error) {
 	case flag&os.O_CREATE != 0:
 		disposition = windows.FILE_OPEN_IF
 	}
+	// Reading attributes is needed for the check below and for File.Stat,
+	// and is not part of FILE_GENERIC_WRITE.
+	access |= windows.FILE_READ_ATTRIBUTES
 	h, err := d.open(name, access, disposition, windows.FILE_NON_DIRECTORY_FILE)
 	if err != nil {
 		return nil, err

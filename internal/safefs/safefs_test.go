@@ -134,7 +134,9 @@ func TestSafeFSRefusesLinks(t *testing.T) {
 			} else {
 				t.Logf("directory link refused: %v", err)
 			}
-			if err := d.Mkdir("dirlink", 0o700); err != nil {
+			// Over an existing link, mkdir either reports the name exists
+			// or refuses the link; it never makes anything behind it.
+			if err := d.Mkdir("dirlink", 0o700); err != nil && !errors.Is(err, safefs.ErrLink) {
 				t.Fatalf("mkdir over an existing link: %v", err)
 			}
 			if _, err := safefs.OpenPath(d, []string{"dirlink", "sub"}, nil); err == nil {
