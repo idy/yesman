@@ -36,10 +36,20 @@ var webFS embed.FS
 //go:embed pi/yesman.ts
 var extensionSource []byte
 
-// appName names the app, and with it the lock that keeps one instance.
+// appName is the stable single-instance and profile identity. Its display
+// name is set separately, after taking the lock that old releases use.
 var appName = "yesman"
 
 func main() {
+	// MyGo's binding generator only needs method types. Do not initialize
+	// a user's storage, vault, agents, or profile while inspecting that API.
+	if os.Getenv("MYGO_GENERATE") != "" {
+		mygo.BindAs("Yesman", &service{})
+		if err := mygo.App.Run(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if githubapp.IsShim(os.Args) {
 		args := os.Args[1:]
 		if len(args) > 0 && args[0] == "--yesman-github-app-gh" {
@@ -54,6 +64,9 @@ func main() {
 	mygo.App.SetLanguages(languages...)
 	if !mygo.App.RequestSingleInstanceLock() {
 		return // the running instance shows its window
+	}
+	if err := setAppDisplayName(); err != nil {
+		log.Fatal(err)
 	}
 	importLoginPath()
 

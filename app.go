@@ -142,7 +142,7 @@ func (a *app) showWindow() {
 	// while its window is open.
 	mygo.App.SetActivationPolicy(mygo.ActivationPolicyRegular)
 	w := mygo.NewWindow(mygo.WindowOptions{
-		Title:         "yesman",
+		Title:         appDisplayName,
 		URL:           "/",
 		Width:         1180,
 		Height:        780,
@@ -185,7 +185,7 @@ func (a *app) windowFocused() bool {
 }
 
 func (a *app) setupTray() {
-	t, err := mygo.NewTray(mygo.TrayOptions{Icon: trayIcon, IconIsTemplate: true, ToolTip: "yesman"})
+	t, err := mygo.NewTray(mygo.TrayOptions{Icon: trayIcon, IconIsTemplate: true, ToolTip: appDisplayName})
 	if err != nil {
 		log.Print("tray: ", err)
 		return
@@ -225,9 +225,9 @@ func (a *app) showCounts() {
 // trayMenu is the tray's menu, in the language yesman shows.
 func (a *app) trayMenu() *mygo.Menu {
 	return mygo.NewMenu([]*mygo.MenuItem{
-		{Label: tr("Open yesman"), Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
+		{Label: tr("Open Yes Man"), Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
 		mygo.Separator(),
-		{Label: tr("Quit yesman"), Click: func(*mygo.MenuItem, *mygo.Window) { mygo.App.Quit() }},
+		{Label: tr("Quit Yes Man"), Click: func(*mygo.MenuItem, *mygo.Window) { mygo.App.Quit() }},
 	})
 }
 
@@ -247,7 +247,7 @@ func (a *app) localeChanged() {
 }
 
 func trayToolTip(working, waiting int) string {
-	return tr("yesman: %d working, %d waiting for you", working, waiting)
+	return tr("Yes Man: %d working, %d waiting for you", working, waiting)
 }
 
 func (a *app) notifyChanged() { _ = changedEvent.Broadcast(true) }

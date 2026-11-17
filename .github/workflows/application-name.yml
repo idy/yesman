@@ -1,0 +1,131 @@
+name: Application name contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: application-name-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-name:
+    name: Packaged process (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel, ubuntu-latest, windows-latest]
+    # A fresh whole user profile is required for the real production bundle.
+    # Never change to self-hosted: the scripts also refuse that environment.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      CGO_ENABLED: ${{ startsWith(matrix.os, 'macos-') && '1' || '0' }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      CGO_CFLAGS: '-O2 -g -mmacosx-version-min=13.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # fixed pre-fix source for the actual Windows CLI counterexample
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Confirm disposable hosted environment
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          echo "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/name-evidence"
+          echo "Hosted naming contract for $GITHUB_SHA on $RUNNER_OS" > "$RUNNER_TEMP/name-evidence/admission.txt"
+      - name: Install Linux desktop runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 xvfb dbus-x11 x11-utils desktop-file-utils
+      - name: Build the normal production distribution
+        run: go tool mygo build -platform "$(go env GOOS)/$(go env GOARCH)" -skip-dmg -o "$RUNNER_TEMP/name-package"
+      - name: Verify real updater install, restart, signatures and rollback
+        run: go run ./tools/package -verify-updater > "$RUNNER_TEMP/updater-name.log" 2>&1
+      - name: Verify native macOS process and application
+        if: runner.os == 'macOS'
+        run: python3 scripts/check-process-name.py "$RUNNER_TEMP/name-package/darwin-$(go env GOARCH)" web "$RUNNER_TEMP/name-evidence"
+      - name: Verify actual Windows CLI streams and failure status
+        if: runner.os == 'Windows'
+        run: python scripts/check-windows-cli.py "$RUNNER_TEMP/name-package/windows-amd64" "$RUNNER_TEMP/name-evidence"
+      - name: Verify native Windows installation, process and shortcuts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-windows-install.ps1 "$env:RUNNER_TEMP/name-package/windows-amd64" web "$env:RUNNER_TEMP/name-evidence"
+      - name: Verify native Linux process, CLI and desktop entry
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- xvfb-run -a python3 scripts/check-process-name.py "$RUNNER_TEMP/name-package/linux-amd64" web "$RUNNER_TEMP/name-evidence"
+          dbus-run-session -- xvfb-run -a python3 scripts/check-linux-install.py "$RUNNER_TEMP/name-package/linux-amd64" web "$RUNNER_TEMP/name-evidence"
+      - name: Keep actual process and installer evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: application-name-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/name-evidence
+            ${{ runner.temp }}/updater-name.log
+          if-no-files-found: error
+
+  production-upgrade:
+    name: Production-source upgrade (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Confirm isolated hosted environment
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          echo "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/upgrade-evidence"
+      - name: Install Linux desktop runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 xvfb dbus-x11 x11-utils
+      # Ephemeral key is generated and consumed only by these packaging
+      # subprocesses. It is not a workflow secret, output, file, or app env.
+      - name: Build fixed-source normal production inputs and sign packages
+        run: python3 scripts/prepare-production-upgrade.py "$RUNNER_TEMP/upgrade-inputs"
+      - name: Run real main/helper multi-hop upgrade and rollback
+        if: runner.os != 'Linux'
+        run: python3 scripts/check-production-upgrade.py "$RUNNER_TEMP/upgrade-inputs/plan.json" "$RUNNER_TEMP/upgrade-evidence"
+      - name: Run real main/helper upgrade on Linux desktop
+        if: runner.os == 'Linux'
+        run: xvfb-run -a dbus-run-session -- python3 scripts/check-production-upgrade.py "$RUNNER_TEMP/upgrade-inputs/plan.json" "$RUNNER_TEMP/upgrade-evidence"
+      - name: Keep actual production-source inputs and upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: production-upgrade-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/upgrade-evidence
+            ${{ runner.temp }}/upgrade-inputs/plan.json
+            ${{ runner.temp }}/upgrade-inputs/*.delta
+            ${{ runner.temp }}/upgrade-inputs/build-*.log
+            ${{ runner.temp }}/upgrade-inputs/*/*/*.tar.gz
+            ${{ runner.temp }}/upgrade-inputs/*/*/update-*.json
+          if-no-files-found: error

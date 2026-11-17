@@ -2647,7 +2647,7 @@ function renderAbout(inner) {
     build = [v.version || t('Development build'), detail ? faint(` ${detail}`) : null];
   }
   inner.append(
-    settingsSection('yesman', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
+    settingsSection('Yes Man', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
       row(t('Build'), build),
       row(t('Updates'), updateStatus()),
       row(!v ? 'pi' : v.piManaged ? t('Managed pi') : t('External pi'), v ? (v.pi || (v.piState && v.piState !== 'failed' ? t({ preparing: 'Preparing…', unprepared: 'Not prepared', closed: 'Stopped.' }[v.piState] || 'Version unknown') : h('span', { class: 'danger' }, v.piError || t('Version unknown')))) : checking()),
@@ -3728,7 +3728,7 @@ async function start() {
   setLocale(mygo?.locale ?? navigator.language);
   translatePage();
   if (!mygo) {
-    document.body.replaceChildren(h('div', { class: 'welcome' }, h('h1', { class: 'mds-title' }, 'yesman'), h('p', null, t('Open this page in the yesman app.'))));
+    document.body.replaceChildren(h('div', { class: 'welcome' }, h('h1', { class: 'mds-title' }, 'Yes Man'), h('p', null, t('Open this page in the yesman app.'))));
     return;
   }
   buildSideFoot();
