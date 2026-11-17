@@ -44,7 +44,7 @@ def main():
     args = parser.parse_args()
     app, web, evidence = [pathlib.Path(value).resolve() for value in (args.app, args.web, args.evidence)]
     evidence.mkdir(parents=True, exist_ok=True)
-    bundle = inspect(app, args.release_tag, args.arch, args.source)
+    bundle = inspect(app, args.release_tag, args.arch, args.source, args.expect_team_id)
     (evidence / 'bundle.json').write_text(json.dumps(bundle, indent=2))
     executable = app / 'Contents/MacOS' / bundle['info']['CFBundleExecutable']
     binary = executable.read_bytes()

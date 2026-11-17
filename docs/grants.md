@@ -17,7 +17,7 @@ Settings › **Grant** (授权) reads OS access for the current copy of yesman. 
 
 Windows buttons use Microsoft's documented `ms-settings:` destinations for Bluetooth, notifications, microphone and camera. The installed application is unpackaged Win32; this page does not present packaged/UWP permission checks as this application's access. Linux has no portable application-wide permission status or single settings application, so the page explains desktop, device, session and portal/sandbox limits without spawning guessed commands. Neither platform reports “all access granted.”
 
-The macOS checks require a real `.app` with bundle identifier `dev.idy.yesman` for native status/request operations. Unbundled `go run`, command-line binaries and differently identified development apps show Unavailable, avoiding notification-center exceptions and misleading host-app permissions. Full Disk Access and Automation still provide manual guidance. Ad-hoc signing is unchanged; permission persistence across replacing/updating an ad-hoc app is controlled by macOS, not guaranteed by this page.
+The macOS checks require a real `.app` with bundle identifier `dev.idy.yesman` for native status/request operations. Unbundled `go run`, command-line binaries and differently identified development apps show Unavailable, avoiding notification-center exceptions and misleading host-app permissions. Full Disk Access and Automation still provide manual guidance. Releases are signed ad hoc unless [Developer ID signing](macos-signing.md) is configured; permission persistence across replacing/updating an app is controlled by macOS, not guaranteed by this page.
 
 ## Implementation and build
 
@@ -30,7 +30,7 @@ No protected user file, Safari/Mail directory or TCC database is read for detect
 macOS uses Cgo only in the app-owned module, linking Foundation, AppKit, AVFoundation, CoreBluetooth, UserNotifications and ApplicationServices. `mygo.json` keeps the existing bundle ID and signing identity, adds Bluetooth/camera/microphone purpose strings and device entitlements, and states macOS 13, the actual minimum for Go 1.27. The release workflow enables Cgo only for its macOS job. Explicit C flags keep both the module and Go's C runtime at that deployment target even on a newer SDK:
 
 ```sh
-CGO_ENABLED=1 CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0' MACOSX_DEPLOYMENT_TARGET=13.0 go tool mygo build
+CGO_ENABLED=1 CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0' MACOSX_DEPLOYMENT_TARGET=13.0 go tool mygo build -skip-notarize
 ```
 
 Normal `go build` on macOS with Cgo works too. A `CGO_ENABLED=0` Darwin development build compiles but explicitly reports the native bridge unavailable. Linux and Windows cross builds remain Cgo-free. No dependency is patched or forked.

@@ -128,13 +128,20 @@ jobs:
           evidence.mkdir()
           shutil.copyfile(folder / f'draft-asset-{arch}.json', evidence / 'draft-asset.json')
           PY
+      # With Developer ID signing configured (a public Team ID variable, no
+      # secret), the downloaded app must also be that team's notarized,
+      # stapled, hardened-runtime build that Gatekeeper accepts.
       - name: Verify unchanged final app startup
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           RELEASE_TAG: ${{ needs.download.outputs.tag }}
           RELEASE_SOURCE: ${{ needs.download.outputs.source }}
           TARGET_ARCH: ${{ matrix.arch }}
-        run: python3 scripts/check_macos_startup.py "$RUNNER_TEMP/draft/yesman.app" web "$RUNNER_TEMP/startup-evidence" --release-tag "$RELEASE_TAG" --arch "$TARGET_ARCH" --source "$RELEASE_SOURCE"
+          EXPECTED_TEAM_ID: ${{ vars.MACOS_SIGNING_TEAM_ID }}
+        run: |
+          signing=()
+          if [ -n "$EXPECTED_TEAM_ID" ]; then signing=(--expect-team-id "$EXPECTED_TEAM_ID"); fi
+          python3 scripts/check_macos_startup.py "$RUNNER_TEMP/draft/yesman.app" web "$RUNNER_TEMP/startup-evidence" --release-tag "$RELEASE_TAG" --arch "$TARGET_ARCH" --source "$RELEASE_SOURCE" "${signing[@]}"
       - name: Save the draft gate evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
