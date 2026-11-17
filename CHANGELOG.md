@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.40
+
+- Add a compact Working log contents page and separate records for each task, pull request or release. Open records on demand in a read-only view, then return to Contents or your previous reading position.
+- Keep lasting guidance in Knowledge and detailed task and release history in Working log. Existing log paths and links remain compatible, and legacy single-file logs stay readable.
+- Provide an explicit offline migration utility that preserves the complete original history and links, with verification and recovery support. Existing logs are never migrated automatically.
+
 ## 0.1.39
 
 - Display the desktop application and its main process as Yes Man on macOS, Windows and Linux, including the window, native application metadata and new installer shortcuts.
