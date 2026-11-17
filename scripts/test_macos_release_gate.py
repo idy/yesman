@@ -37,6 +37,9 @@ with tempfile.TemporaryDirectory(prefix='yesman-release-gate-') as temporary:
             # An ad-hoc build must not pass where a Developer ID team is expected.
             ('adhoc-where-developer-id-expected', tag, source, arch, 'Expected a Developer ID signature', ['--expect-team-id', 'ABCDE12345']),
             ('malformed-team-id', tag, source, arch, 'Expected a 10-character Apple Team ID', ['--expect-team-id', 'idy']),
+            # A source without a Team ID expects exactly an ad-hoc build.
+            ('adhoc-expected', tag, source, arch, None, ['--expect-adhoc']),
+            ('both-expectations', tag, source, arch, 'not both', ['--expect-adhoc', '--expect-team-id', 'ABCDE12345']),
         ]:
             target = pathlib.Path(temporary) / (name + '.json')
             process = subprocess.run([sys.executable, str(scripts / 'check_macos_bundle.py'), app, str(target), '--release-tag', requested_tag, '--arch', requested_arch, '--source', requested_source, *extra], capture_output=True)

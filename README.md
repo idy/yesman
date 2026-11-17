@@ -291,9 +291,9 @@ To release a version:
 
 Updates are signed with a key whose secret half is the repository's `MYGO_UPDATER_PRIVATE_KEY` secret, with a copy kept outside the repository. Installed copies accept only updates signed with it, so it must not be lost or replaced.
 
-To build a release locally, without uploading: `go tool mygo build -skip-notarize`, with the key in `MYGO_UPDATER_PRIVATE_KEY` for the update files. On macOS, enable the app-owned native permission bridge with `CGO_ENABLED=1 CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0' MACOSX_DEPLOYMENT_TARGET=13.0 go tool mygo build -skip-notarize`; the release workflow sets these automatically. `-skip-notarize` is needed because `mygo.json` configures notarization for Developer ID builds.
+To build a release locally, without uploading: `go tool mygo build`, with the key in `MYGO_UPDATER_PRIVATE_KEY` for the update files. On macOS, enable the app-owned native permission bridge with `CGO_ENABLED=1 CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0' MACOSX_DEPLOYMENT_TARGET=13.0 go tool mygo build`; the release workflow sets these automatically. These builds are signed ad hoc.
 
-macOS releases can be signed with a Developer ID and notarized once the repository's signing variable and secrets are set; see [macOS signing](docs/macos-signing.md). Without them, macOS apps are signed ad hoc, which Gatekeeper blocks on first open from a download. Windows apps have no signature, so SmartScreen warns.
+Releases are built through `scripts/release_build.py`, which keeps the updater key and the upload token away from compilers and other build tools. macOS releases are signed with a Developer ID and notarized once `packaging/macos/signing.json` names the Team ID and the repository's four signing secrets are set; see [macOS signing](docs/macos-signing.md). Without them, macOS apps are signed ad hoc, which Gatekeeper blocks on first open from a download. Windows apps have no signature, so SmartScreen warns.
 
 ## Key files
 

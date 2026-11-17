@@ -107,7 +107,7 @@ jobs:
           CGO_ENABLED: "1"
           CGO_CFLAGS: "-O2 -g -mmacosx-version-min=13.0"
           MACOSX_DEPLOYMENT_TARGET: "13.0"
-        run: go tool mygo build -skip-dmg -skip-notarize -o "$RUNNER_TEMP/production"
+        run: go tool mygo build -skip-dmg -o "$RUNNER_TEMP/production"
       - name: Check release identity rejection against the built app
         run: |
           version=$(python3 -c 'import json; print(json.load(open("mygo.json"))["version"])')

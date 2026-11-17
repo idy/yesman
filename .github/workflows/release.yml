@@ -67,17 +67,19 @@ jobs:
         if: matrix.name == 'macOS'
         run: xcodebuild -version && xcrun --show-sdk-version && sw_vers
 
-      # Developer ID signing and notarization (docs/macos-signing.md). With
-      # none of these set the macOS build stays ad hoc, as before; with only
-      # some, or a certificate that is not the team's Developer ID
-      # Application one, the job fails instead of signing ad hoc. The secrets
-      # reach this step only: it keeps them in a short-lived keychain that
-      # only codesign and the notary profile use.
+      # Developer ID signing and notarization (docs/macos-signing.md). The
+      # source decides: without a teamId in packaging/macos/signing.json and
+      # without these secrets, the macOS build stays ad hoc, as before; with
+      # only part of them, or a certificate that is not the team's Developer
+      # ID Application one, the job fails instead of signing ad hoc. The
+      # secrets reach this step only, which keeps them in a short-lived
+      # keychain in a directory of its own; `state` names that directory for
+      # the build and the cleanup.
       - name: Prepare macOS signing
         id: signing
         if: matrix.name == 'macOS'
         env:
-          MACOS_SIGNING_TEAM_ID: ${{ vars.MACOS_SIGNING_TEAM_ID }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MACOS_SIGNING_CERTIFICATE_P12: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
           MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
           MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
@@ -86,7 +88,9 @@ jobs:
 
       # MyGo signs each app, signs and notarizes its disk image, and staples
       # both tickets before it writes the update archives, deltas, checksums
-      # and manifests, so updates carry the stapled app.
+      # and manifests, so updates carry the stapled app. The launcher gives
+      # the updater key only to MyGo's archive signing and the token only to
+      # gh: compilers and other build tools get neither.
       - name: Build and upload
         env:
           # The app-owned macOS permission bridge links Apple's frameworks.
@@ -99,29 +103,13 @@ jobs:
           SYSTEM: ${{ matrix.name }}
           SIGNING_MODE: ${{ steps.signing.outputs.mode }}
           SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
-        run: |
-          args=(-platform "$PLATFORMS" -upload)
-          if [ "$SYSTEM" = macOS ]; then
-            case "$SIGNING_MODE" in
-              developer-id)
-                if ! [[ "$SIGNING_IDENTITY" =~ ^[0-9A-F]{40}$ ]]; then
-                  echo "::error::No prepared signing identity"
-                  exit 1
-                fi
-                args+=(-sign "$SIGNING_IDENTITY") ;;
-              adhoc) args+=(-skip-notarize) ;;
-              *)
-                echo "::error::Unknown macOS signing mode: $SIGNING_MODE"
-                exit 1 ;;
-            esac
-          else
-            # mygo.json's macos.notarize needs a Developer ID otherwise.
-            args+=(-skip-notarize)
-          fi
-          go tool mygo build "${args[@]}"
+          SIGNING_STATE: ${{ steps.signing.outputs.state }}
+        run: python3 scripts/release_build.py --platform "$PLATFORMS" --system "$SYSTEM" --signing-mode "$SIGNING_MODE" --signing-identity "$SIGNING_IDENTITY" --upload
 
       - name: Remove the signing keychain
         if: always() && matrix.name == 'macOS'
+        env:
+          SIGNING_STATE: ${{ steps.signing.outputs.state }}
         run: python3 scripts/macos_signing.py cleanup
 
       # MyGo has uploaded by now: a failure here fails the release run, and

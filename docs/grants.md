@@ -30,7 +30,7 @@ No protected user file, Safari/Mail directory or TCC database is read for detect
 macOS uses Cgo only in the app-owned module, linking Foundation, AppKit, AVFoundation, CoreBluetooth, UserNotifications and ApplicationServices. `mygo.json` keeps the existing bundle ID and signing identity, adds Bluetooth/camera/microphone purpose strings and device entitlements, and states macOS 13, the actual minimum for Go 1.27. The release workflow enables Cgo only for its macOS job. Explicit C flags keep both the module and Go's C runtime at that deployment target even on a newer SDK:
 
 ```sh
-CGO_ENABLED=1 CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0' MACOSX_DEPLOYMENT_TARGET=13.0 go tool mygo build -skip-notarize
+CGO_ENABLED=1 CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0' MACOSX_DEPLOYMENT_TARGET=13.0 go tool mygo build
 ```
 
 Normal `go build` on macOS with Cgo works too. A `CGO_ENABLED=0` Darwin development build compiles but explicitly reports the native bridge unavailable. Linux and Windows cross builds remain Cgo-free. No dependency is patched or forked.

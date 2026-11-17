@@ -128,19 +128,24 @@ jobs:
           evidence.mkdir()
           shutil.copyfile(folder / f'draft-asset-{arch}.json', evidence / 'draft-asset.json')
           PY
-      # With Developer ID signing configured (a public Team ID variable, no
-      # secret), the downloaded app must also be that team's notarized,
-      # stapled, hardened-runtime build that Gatekeeper accepts.
+      # The tag's own packaging/macos/signing.json says how the release was
+      # signed: with a Team ID, the downloaded app must be that team's
+      # notarized, stapled, hardened-runtime build that Gatekeeper accepts;
+      # without one, it must be ad hoc. No repository variable or secret.
+      # Tags made before signing support carry neither file and keep the
+      # earlier check.
       - name: Verify unchanged final app startup
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           RELEASE_TAG: ${{ needs.download.outputs.tag }}
           RELEASE_SOURCE: ${{ needs.download.outputs.source }}
           TARGET_ARCH: ${{ matrix.arch }}
-          EXPECTED_TEAM_ID: ${{ vars.MACOS_SIGNING_TEAM_ID }}
         run: |
           signing=()
-          if [ -n "$EXPECTED_TEAM_ID" ]; then signing=(--expect-team-id "$EXPECTED_TEAM_ID"); fi
+          if [ -f scripts/macos_signing.py ]; then
+            team=$(python3 scripts/macos_signing.py team)
+            if [ -n "$team" ]; then signing=(--expect-team-id "$team"); else signing=(--expect-adhoc); fi
+          fi
           python3 scripts/check_macos_startup.py "$RUNNER_TEMP/draft/yesman.app" web "$RUNNER_TEMP/startup-evidence" --release-tag "$RELEASE_TAG" --arch "$TARGET_ARCH" --source "$RELEASE_SOURCE" "${signing[@]}"
       - name: Save the draft gate evidence
         if: always()

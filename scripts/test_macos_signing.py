@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Check Developer ID signing of releases without a real certificate or Apple account.
+"""Check Developer ID signing and the release build launcher without real credentials.
 
-  (default)        scripts/macos_signing.py setup/cleanup/verify against the
-                   stand-in Apple tools of scripts/fixtures/macos-signing, the
-                   release workflow's real build and draft-smoke step scripts,
-                   and where the workflows let the signing inputs go.
-  --mygo           Also runs the real `go tool mygo build` of a copy of this
-                   repository, Apple tools stood in, for both architectures:
-                   signing, notarization and stapling come before the update
-                   archives and checksums, and each failure stops the build.
+  (default)        scripts/macos_signing.py setup/cleanup/verify and
+                   scripts/release_build.py, run from a fixture copy of the
+                   scripts, against the stand-in Apple tools of
+                   scripts/fixtures/macos-signing and a stand-in go; the
+                   release and draft-smoke workflow steps; and where the
+                   workflows let the signing inputs go. Needs macOS (csreq).
+  --mygo           Also runs the real `go tool mygo build` of a committed copy
+                   of this repository through the launcher, Apple tools and gh
+                   stood in: both architectures, signing, notarization and
+                   stapling before the update archives, failures stopping the
+                   build, the same output as the tracked configuration for an
+                   ad-hoc build, a plain `go tool mygo build` with no inputs,
+                   and no credential in any compiler's environment.
                    Needs macOS with Go and Xcode; set GOCACHE/GOMODCACHE.
   --real-keychain  On a disposable GitHub-hosted macOS runner only: real
                    security/codesign reject a synthetic self-signed "Developer
@@ -17,6 +22,7 @@
 
 Nothing here reads a real keychain, signs with a real identity or contacts
 Apple: the stand-ins pass only ad-hoc signing of temporary files to codesign.
+Setup's "hosted runner" condition is simulated only around stand-in tools.
 """
 import argparse
 import base64
@@ -26,15 +32,17 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 SCRIPTS = pathlib.Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
 TOOLS = SCRIPTS / 'fixtures/macos-signing/apple_tools.py'
-SIGNING = SCRIPTS / 'macos_signing.py'
+COPIED = ('macos_signing.py', 'check_macos_bundle.py', 'release_build.py')
 TEAM = 'FXTEAM1234'
 SHA = 'A1B2C3D4E5F60718293A4B5C6D7E8F9012345678'
 NAME = 'Developer ID Application: Fixture Person (%s)' % TEAM
@@ -44,7 +52,11 @@ SENTINELS = {
     'MACOS_NOTARY_APPLE_ID': 'fixture-apple-id@example.invalid',
     'MACOS_NOTARY_PASSWORD': 'abcd-efgh-ijkl-mnop',
 }
+UPDATER_KEY = 'fixture-updater-key-not-real-9c41'
+UPLOAD_TOKEN = 'fixture-upload-token-not-real-5d72'
 UPDATER_PUBLIC_KEY = 'yrQPn0gg1/gASLxIQiUCIiUQ/csWENI0+up1cs3KWO0='  # must never change with signing
+BASE_MYGO_JSON = '5c3c1c4a'  # see identity-and-updater-key-unchanged
+LOGIN = ['/Users/fixture/Library/Keychains/login.keychain-db']
 results = []
 
 
@@ -54,36 +66,48 @@ def record(case, **details):
 
 
 class Fixture:
-    """A temporary state folder, stand-in tools first on PATH and a mygo.json copy."""
+    """A fixture source tree holding the scripts, stand-in tools first on PATH and a simulated hosted runner."""
 
-    def __init__(self, temporary, name, scenario=None):
+    def __init__(self, temporary, name, scenario=None, team=TEAM, mygo=None):
         self.dir = pathlib.Path(temporary) / name
         self.state = self.dir / 'state'
         self.bin = self.dir / 'bin'
-        self.state.mkdir(parents=True)
-        self.bin.mkdir()
+        self.source = self.dir / 'source'
+        self.runner_temp = self.dir / 'runner-temp'
+        for folder in (self.state, self.bin, self.source / 'scripts', self.source / 'packaging/macos', self.runner_temp):
+            folder.mkdir(parents=True)
         (self.state / 'scenario.json').write_text(json.dumps(scenario or {}))
         for tool in ('security', 'codesign', 'xcrun', 'spctl', 'hdiutil', 'diskutil'):
             shim = self.bin / tool
             shim.write_text('#!/bin/sh\nexec "%s" "%s" %s "$@"\n' % (sys.executable, TOOLS, tool))
             shim.chmod(0o755)
-        config = json.loads((ROOT / 'mygo.json').read_text())
-        self.keychain = self.dir / 'tmp/yesman-release-signing/signing.keychain-db'
-        self.keychain.parent.parent.mkdir(parents=True)
-        config['macos']['notarize']['keychain'] = str(self.keychain)
-        self.config = self.dir / 'mygo.json'
-        self.config.write_text(json.dumps(config))
+        for script in COPIED:
+            shutil.copy2(SCRIPTS / script, self.source / 'scripts' / script)
+        self.set_team(team)
+        (self.source / 'mygo.json').write_text(mygo if mygo is not None else (ROOT / 'mygo.json').read_text())
+        (self.source / 'resources').mkdir()
+        (self.source / 'resources/icon.png').write_bytes(b'png')
+        (self.source / 'CHANGELOG.md').write_text('# Changelog\n')
         self.output = self.dir / 'github-output'
         self.output.write_text('')
 
-    def env(self, inputs=None):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(('MACOS_SIGNING_', 'MACOS_NOTARY_'))}
+    def set_team(self, team):
+        (self.source / 'packaging/macos/signing.json').write_text(json.dumps({'teamId': team}) if team is not None else '')
+
+    def env(self, inputs=None, hosted=True):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('MACOS_SIGNING_', 'MACOS_NOTARY_', 'GITHUB_', 'RUNNER_'))}
         env.update(inputs or {})
-        env.update(PATH=str(self.bin) + os.pathsep + env['PATH'], APPLE_TOOLS_STATE=str(self.state), GITHUB_OUTPUT=str(self.output))
+        env.update(PATH=str(self.bin) + os.pathsep + env['PATH'], APPLE_TOOLS_STATE=str(self.state), GITHUB_OUTPUT=str(self.output),
+                   PYTHONDONTWRITEBYTECODE='1')
+        if hosted:
+            env.update(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_TEMP=str(self.runner_temp))
         return env
 
-    def signing(self, *args, inputs=None):
-        return subprocess.run([sys.executable, str(SIGNING), '--config', str(self.config), *args], env=self.env(inputs), capture_output=True, text=True)
+    def signing(self, *args, inputs=None, hosted=True, state=None):
+        env = self.env(inputs, hosted)
+        if state is not None:
+            env['SIGNING_STATE'] = state
+        return subprocess.run([sys.executable, str(self.source / 'scripts/macos_signing.py'), *args], env=env, capture_output=True, text=True, timeout=60)
 
     def calls(self, tool=None):
         log = self.state / 'log.jsonl'
@@ -97,9 +121,12 @@ class Fixture:
     def outputs(self):
         return dict(line.split('=', 1) for line in self.output.read_text().splitlines())
 
+    def folders(self):
+        return sorted(self.runner_temp.glob('yesman-signing-*'))
+
 
 def full_inputs(**changes):
-    inputs = dict(SENTINELS, MACOS_SIGNING_TEAM_ID=TEAM, MACOS_SIGNING_CERTIFICATE_P12=base64.encodebytes(P12).decode())
+    inputs = dict(SENTINELS, MACOS_SIGNING_CERTIFICATE_P12=base64.encodebytes(P12).decode())
     inputs.update(changes)
     return {k: v for k, v in inputs.items() if v is not None}
 
@@ -128,71 +155,118 @@ def assert_no_leak(fixture, process):
             assert value in allowed or value not in joined, ('secret in arguments', call['tool'], call['args'][:2])
 
 
-def assert_clean(fixture, before):
-    assert not os.path.lexists(fixture.keychain.parent), 'signing folder remains'
+def assert_clean(fixture):
+    assert fixture.folders() == [], ('signing folder remains', fixture.folders())
     after = fixture.search()
-    assert after is None or after == before, ('search list not restored', after)
+    assert after is None or after == LOGIN, ('search list not restored', after)
+
+
+def snapshot(folder):
+    """Every path under folder with its kind and bytes, links unfollowed."""
+    found = {}
+    for path in sorted([folder] + list(folder.rglob('*'))):
+        rel = str(path.relative_to(folder.parent))
+        if path.is_symlink():
+            found[rel] = 'link:' + os.readlink(path)
+        elif path.is_dir():
+            found[rel] = 'dir'
+        else:
+            found[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return found
+
+
+def prepared(temporary, name):
+    """A fixture whose setup succeeded, and its state."""
+    fixture = Fixture(temporary, name, good_identity())
+    process = fixture.signing('setup', inputs=full_inputs())
+    assert process.returncode == 0, process.stderr
+    return fixture, fixture.outputs()['state']
 
 
 def setup_cases(temporary):
-    login = ['/Users/fixture/Library/Keychains/login.keychain-db']
-
-    fixture = Fixture(temporary, 'unconfigured')
+    fixture = Fixture(temporary, 'unconfigured', team='')
     process = fixture.signing('setup', inputs={})
     assert process.returncode == 0 and fixture.outputs() == {'mode': 'adhoc'}, process.stderr
-    assert fixture.calls() == [] and not fixture.keychain.parent.exists()
+    assert fixture.calls() == [] and fixture.folders() == []
     record('unconfigured-stays-adhoc')
 
+    fixture = Fixture(temporary, 'no-team-file', team=None)
+    (fixture.source / 'packaging/macos/signing.json').unlink()
+    process = fixture.signing('setup', inputs={})
+    assert process.returncode == 0 and fixture.outputs() == {'mode': 'adhoc'}, process.stderr
+    record('older-source-without-team-file-stays-adhoc')
+
     partial = {
-        'team-only': {'MACOS_SIGNING_TEAM_ID': TEAM},
-        'team-as-secret-not-variable': full_inputs(MACOS_SIGNING_TEAM_ID=None),
-        'no-notary-password': full_inputs(MACOS_NOTARY_PASSWORD=None),
-        'blank-certificate': full_inputs(MACOS_SIGNING_CERTIFICATE_P12='  \n'),
+        'team-only': (TEAM, {}),
+        'secrets-without-team': ('', full_inputs()),
+        'no-notary-password': (TEAM, full_inputs(MACOS_NOTARY_PASSWORD=None)),
+        'no-notary-apple-id': (TEAM, full_inputs(MACOS_NOTARY_APPLE_ID=None)),
+        'no-certificate-password': (TEAM, full_inputs(MACOS_SIGNING_CERTIFICATE_PASSWORD=None)),
+        'blank-certificate': (TEAM, full_inputs(MACOS_SIGNING_CERTIFICATE_P12='  \n')),
     }
-    for name, inputs in partial.items():
-        fixture = Fixture(temporary, 'partial-' + name, good_identity())
+    for name, (team, inputs) in partial.items():
+        fixture = Fixture(temporary, 'partial-' + name, good_identity(), team=team)
         process = fixture.signing('setup', inputs=inputs)
         assert process.returncode == 1 and 'only partly configured' in process.stderr, process.stderr
-        assert fixture.calls() == [] and fixture.outputs() == {} and not fixture.keychain.parent.exists()
+        assert fixture.calls() == [] and fixture.outputs() == {} and fixture.folders() == []
         assert_no_leak(fixture, process)
         record('partial-config-fails', variant=name)
 
-    for name, inputs, message in [
-        ('bad-team-id', full_inputs(MACOS_SIGNING_TEAM_ID='idy'), 'must be the 10-character Team ID'),
-        ('not-base64', full_inputs(MACOS_SIGNING_CERTIFICATE_P12='not base64 !!'), 'not base64'),
+    for name, team_file, message in [
+        ('nickname-not-team-id', json.dumps({'teamId': 'idy'}), 'must be the 10-character Team ID'),
+        ('extra-keys', json.dumps({'teamId': TEAM, 'name': 'x'}), 'must hold exactly'),
+        ('not-json', '{', 'not valid JSON'),
     ]:
         fixture = Fixture(temporary, name, good_identity())
-        process = fixture.signing('setup', inputs=inputs)
+        (fixture.source / 'packaging/macos/signing.json').write_text(team_file)
+        process = fixture.signing('setup', inputs=full_inputs())
         assert process.returncode == 1 and message in process.stderr, process.stderr
-        assert fixture.calls() == [] and fixture.outputs() == {}
-        record('invalid-input-fails', variant=name)
+        assert fixture.calls() == [] and fixture.outputs() == {} and fixture.folders() == []
+        record('invalid-team-file-fails', variant=name)
 
-    # The full path, then cleanup.
+    fixture = Fixture(temporary, 'not-base64', good_identity())
+    process = fixture.signing('setup', inputs=full_inputs(MACOS_SIGNING_CERTIFICATE_P12='not base64 !!'))
+    assert process.returncode == 1 and 'not base64' in process.stderr and fixture.calls() == [] and fixture.folders() == []
+    record('invalid-input-fails', variant='not-base64')
+
+    fixture = Fixture(temporary, 'not-hosted', good_identity())
+    process = fixture.signing('setup', inputs=full_inputs(), hosted=False)
+    assert process.returncode == 1 and 'GitHub-hosted runner' in process.stderr, process.stderr
+    assert fixture.calls() == [] and fixture.outputs() == {}
+    record('local-account-search-list-refused')
+
+    # The full path, then cleanup with the state it wrote.
     fixture = Fixture(temporary, 'configured', good_identity())
     process = fixture.signing('setup', inputs=full_inputs())
     assert process.returncode == 0, process.stderr
-    assert fixture.outputs() == {'mode': 'developer-id', 'identity': SHA, 'team': TEAM, 'name': NAME}
-    assert fixture.keychain.is_file() and fixture.search() == [str(fixture.keychain)] + login
-    folder_mode = oct(fixture.keychain.parent.stat().st_mode & 0o777)
-    assert folder_mode == '0o700', folder_mode
+    outputs = fixture.outputs()
+    state = outputs.pop('state')
+    assert outputs == {'mode': 'developer-id', 'identity': SHA, 'team': TEAM, 'name': NAME}, outputs
+    [folder] = fixture.folders()
+    keychain = folder / 'signing.keychain-db'
+    assert keychain.is_file() and fixture.search() == [str(keychain)] + LOGIN
+    assert oct(folder.stat().st_mode & 0o777) == '0o700' and oct((folder / 'receipt.json').stat().st_mode & 0o777) == '0o600'
     imported = [c for c in fixture.calls('security') if c['args'][0] == 'import'][0]
     assert imported['p12'] == {'mode': '0o600', 'folderMode': '0o700', 'sha256': hashlib.sha256(P12).hexdigest()}
-    assert imported['args'][-2:] == ['-T', '/usr/bin/codesign'], 'the key must be usable only by codesign'
-    assert not (fixture.keychain.parent / 'identity.p12').exists(), 'the .p12 must not outlive its import'
+    assert imported['args'][-2:] == ['-T', '/usr/bin/codesign'], 'the key access list names codesign'
+    partition = [c for c in fixture.calls('security') if c['args'][0] == 'set-key-partition-list'][0]
+    assert partition['args'][1:3] == ['-S', 'apple-tool:,apple:,codesign:'], partition['args'][:3]
+    assert not (folder / 'identity.p12').exists(), 'the .p12 must not outlive its import'
     probe = [c for c in fixture.calls('codesign') if c.get('kind') == 'probe']
     assert probe and probe[0]['args'][:3] == ['--force', '--sign', SHA], probe
     requirement = [c['requirement'] for c in fixture.calls('codesign') if c.get('requirement')][0]
     assert 'certificate leaf[field.1.2.840.113635.100.6.1.13] exists' in requirement and 'leaf[subject.OU] = "%s"' % TEAM in requirement
     store = [c for c in fixture.calls('xcrun') if c['args'][:2] == ['notarytool', 'store-credentials']]
     assert len(store) == 1 and store[0]['args'][2] == 'yesman-release-notary', store
-    assert store[0]['args'][store[0]['args'].index('--keychain') + 1] == str(fixture.keychain)
+    assert store[0]['args'][store[0]['args'].index('--keychain') + 1] == str(keychain)
     assert store[0]['args'][store[0]['args'].index('--team-id') + 1] == TEAM
     assert_no_leak(fixture, process)
-    process = fixture.signing('cleanup')
+    process = fixture.signing('cleanup', state=state)
     assert process.returncode == 0, process.stderr
-    assert_clean(fixture, login)
-    assert fixture.signing('cleanup').returncode == 0, 'cleanup must be repeatable'
-    record('configured-prepares-and-cleans', search=login)
+    assert_clean(fixture)
+    assert fixture.signing('cleanup', state=state).returncode == 0, 'cleanup must be repeatable'
+    assert fixture.signing('cleanup', state='').returncode == 0, 'cleanup without a state does nothing'
+    record('configured-prepares-and-cleans', search=LOGIN)
 
     failures = {
         'wrong-team-certificate': ({'identities': [{'sha1': SHA, 'name': 'Developer ID Application: Fixture Person (OTHERTEAM1)'}]}, 'belongs to team OTHERTEAM1'),
@@ -205,6 +279,9 @@ def setup_cases(temporary):
         'probe-other-team': (dict(good_identity(), probeTeam='OTHERTEAM1'), 'names another team'),
         'wrong-p12-password': (dict(good_identity(), fail=['import']), 'Importing the signing certificate failed'),
         'keychain-not-created': (dict(good_identity(), fail=['create-keychain']), 'Creating the signing keychain failed'),
+        'settings-fail': (dict(good_identity(), fail=['set-keychain-settings']), 'Configuring the signing keychain failed'),
+        'unlock-fails': (dict(good_identity(), fail=['unlock-keychain']), 'Unlocking the signing keychain failed'),
+        'partition-list-fails': (dict(good_identity(), fail=['set-key-partition-list']), 'Allowing codesign to use the key failed'),
         'probe-sign-fails': (dict(good_identity(), fail=['probe-sign']), 'Signing a preflight file failed'),
         'notary-credentials-rejected': (dict(good_identity(), fail=['store-credentials']), 'Storing the notary credentials failed'),
     }
@@ -212,27 +289,101 @@ def setup_cases(temporary):
         fixture = Fixture(temporary, name, scenario)
         process = fixture.signing('setup', inputs=full_inputs())
         assert process.returncode == 1 and message in process.stderr, (name, process.stderr)
-        assert 'mode' not in fixture.outputs(), 'a failed setup must not hand the build a mode'
-        assert_clean(fixture, login)
+        outputs = fixture.outputs()
+        assert 'mode' not in outputs and 'state' in outputs, 'a failed setup hands the build no mode, the cleanup its state'
+        assert_clean(fixture)
         assert_no_leak(fixture, process)
         if name in ('wrong-p12-password', 'notary-credentials-rejected'):
             assert '***' in process.stderr, 'tool output echoing a secret must be redacted'
+        assert fixture.signing('cleanup', state=outputs['state']).returncode == 0
         record('setup-failure-cleans-up', variant=name)
 
-    # A folder setup did not make is refused and left alone.
-    fixture = Fixture(temporary, 'foreign-folder', good_identity())
-    fixture.keychain.parent.mkdir()
-    (fixture.keychain.parent / 'someone-elses').write_text('keep')
-    process = fixture.signing('setup', inputs=full_inputs())
-    assert process.returncode == 1 and 'refusing to reuse' in process.stderr and (fixture.keychain.parent / 'someone-elses').exists()
-    assert fixture.signing('cleanup').returncode == 1 and (fixture.keychain.parent / 'someone-elses').exists()
-    record('foreign-folder-untouched')
 
-    real = Fixture(temporary, 'committed-config')
-    profile = subprocess.run([sys.executable, '-c', 'import sys; sys.path.insert(0, %r); import macos_signing as m; print(m.configured_keychain(%r))' % (str(SCRIPTS), str(ROOT / 'mygo.json'))],
-                             capture_output=True, text=True, env=real.env())
-    assert profile.returncode == 0 and "'yesman-release-notary'" in profile.stdout, profile.stderr
-    record('committed-config-accepted')
+def ownership_cases(temporary):
+    """F2: cleanup removes only the directory this setup made."""
+    # The independent review's case: a foreign directory at the old fixed
+    # path, with a linked marker; setup refuses, the always-run cleanup runs.
+    fixture = Fixture(temporary, 'foreign-linked-marker', good_identity(), team='')
+    old = fixture.dir / 'tmp/yesman-release-signing'
+    old.mkdir(parents=True)
+    unrelated = fixture.dir / 'unrelated-regular-file'
+    unrelated.write_text('not a setup receipt')
+    (old / '.made-by-macos-signing').symlink_to(unrelated)
+    (old / 'receipt.json').symlink_to(unrelated)
+    (old / 'unrelated-important-file').write_text('preserve me')
+    before = snapshot(old)
+    process = fixture.signing('setup', inputs=full_inputs())
+    assert process.returncode == 1 and 'only partly configured' in process.stderr
+    process = fixture.signing('cleanup', state=fixture.outputs().get('state', ''))
+    assert process.returncode == 0 and snapshot(old) == before and unrelated.read_text() == 'not a setup receipt'
+    record('foreign-linked-marker-preserved', setupRefused=True, cleanupExit=process.returncode, foreignPreserved=True)
+
+    def forged(folder, nonce, dev=None, ino=None):
+        info = os.lstat(folder)
+        state = {'dir': str(folder), 'dev': info.st_dev if dev is None else dev, 'ino': info.st_ino if ino is None else ino, 'nonce': nonce}
+        return base64.urlsafe_b64encode(json.dumps(state).encode()).decode()
+
+    nonce = 'a' * 64
+    for name in ('linked-receipt', 'copied-receipt-other-nonce', 'group-readable'):
+        fixture = Fixture(temporary, 'forged-' + name, good_identity())
+        foreign = fixture.runner_temp / 'yesman-signing-foreign'
+        foreign.mkdir(mode=0o700)
+        (foreign / 'unrelated-important-file').write_text('preserve me')
+        if name == 'linked-receipt':
+            target = fixture.dir / 'nonce-file'
+            target.write_text(json.dumps({'nonce': nonce}))
+            (foreign / 'receipt.json').symlink_to(target)
+        elif name == 'copied-receipt-other-nonce':
+            (foreign / 'receipt.json').write_text(json.dumps({'nonce': 'b' * 64}))
+        else:
+            (foreign / 'receipt.json').write_text(json.dumps({'nonce': nonce}))
+            foreign.chmod(0o750)
+        before = snapshot(foreign)
+        process = fixture.signing('cleanup', state=forged(foreign, nonce))
+        assert process.returncode == 1 and 'leaving it alone' in process.stderr and snapshot(foreign) == before, (name, process.stderr)
+        record('forged-state-refused', variant=name)
+
+    # A directory setup really made, then replaced at the same path by one
+    # holding a copy of its receipt.
+    fixture, state = prepared(temporary, 'replaced-directory')
+    [folder] = fixture.folders()
+    moved = fixture.dir / 'moved-away'
+    folder.rename(moved)
+    folder.mkdir(mode=0o700)
+    shutil.copy2(moved / 'receipt.json', folder / 'receipt.json')
+    (folder / 'unrelated-important-file').write_text('preserve me')
+    before = snapshot(folder)
+    process = fixture.signing('cleanup', state=state)
+    assert process.returncode == 1 and 'leaving it alone' in process.stderr and snapshot(folder) == before
+    record('replaced-directory-refused')
+
+    # TERM while importing: setup's own cleanup removes the .p12, keychain and directory.
+    fixture = Fixture(temporary, 'term-during-import', good_identity())
+    ready = fixture.dir / 'ready'
+    (fixture.bin / 'security').write_text('#!%s\nimport os, pathlib, sys, time\nif sys.argv[1] == "import":\n    pathlib.Path(%r).touch()\n    time.sleep(30)\nos.execv(%r, [%r, %r, "security"] + sys.argv[1:])\n'
+                                          % (sys.executable, str(ready), sys.executable, sys.executable, str(TOOLS)))
+    process = subprocess.Popen([sys.executable, str(fixture.source / 'scripts/macos_signing.py'), 'setup'], env=fixture.env(full_inputs()),
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    limit = time.monotonic() + 15
+    while not ready.exists() and process.poll() is None and time.monotonic() < limit:
+        time.sleep(0.05)
+    assert ready.exists()
+    process.send_signal(signal.SIGTERM)
+    _, stderr = process.communicate(timeout=20)
+    assert process.returncode == 1 and 'Stopped by signal' in stderr, (process.returncode, stderr)
+    assert_clean(fixture)
+    assert fixture.signing('cleanup', state=fixture.outputs()['state']).returncode == 0
+    record('term-during-import-cleans-up', exit=process.returncode)
+
+    # A tool that never returns: the deadline fails setup, which cleans up.
+    fixture = Fixture(temporary, 'tool-deadline', good_identity())
+    (fixture.bin / 'security').write_text('#!%s\nimport os, sys, time\nif sys.argv[1] == "set-key-partition-list":\n    time.sleep(30)\nos.execv(%r, [%r, %r, "security"] + sys.argv[1:])\n'
+                                          % (sys.executable, sys.executable, sys.executable, str(TOOLS)))
+    code = 'import sys; sys.argv = ["macos_signing.py", "setup"]; sys.path.insert(0, %r); import macos_signing as m; m.DEADLINE = 2; m.main()' % str(fixture.source / 'scripts')
+    process = subprocess.run([sys.executable, '-c', code], env=fixture.env(full_inputs()), capture_output=True, text=True, timeout=60)
+    assert process.returncode == 1 and 'did not finish within 2 seconds' in process.stderr, process.stderr
+    assert_clean(fixture)
+    record('tool-deadline-cleans-up')
 
 
 def signatures(**changes):
@@ -247,6 +398,7 @@ def signatures(**changes):
 
 
 def verify_cases(temporary):
+    both = lambda change: {'darwin-arm64/yesman.app': change, 'darwin-amd64/yesman.app': change}  # noqa: E731
     for name, changes, message in [
         ('signed-notarized-both', {}, None),
         ('adhoc-app', {'darwin-amd64/yesman.app': {'adhoc': True, 'team': None}}, 'ad-hoc'),
@@ -258,7 +410,13 @@ def verify_cases(temporary):
         ('dmg-not-stapled', {'darwin-amd64/yesman-0.1.0-amd64.dmg': {'stapled': False}}, 'stapled notarization ticket'),
         ('gatekeeper-rejects', {'darwin-amd64/yesman.app': {'gatekeeper': False}}, 'Gatekeeper'),
         ('other-certificate', {'darwin-arm64/yesman-0.1.0-arm64.dmg': {'leaf': 'another leaf'}}, 'another certificate'),
-        ('different-requirements', {'darwin-amd64/yesman.app': {'dr': 'identifier "dev.idy.yesman" and anchor apple generic and certificate leaf = H"00"'}}, 'different designated requirements'),
+        ('nested-invalid', {'darwin-arm64/yesman.app': {'deepValid': False}}, 'Nested signature'),
+        ('wrong-identifier', {'darwin-arm64/yesman.app': {'identifier': 'dev.wrong.app'}}, 'Unexpected signing identifier'),
+        # The independent review's weak-DR case: equal, mutually satisfied and still unsafe.
+        ('weak-dr-always', both({'dr': 'always'}), 'not the Developer ID requirement'),
+        ('dr-without-team', both({'dr': 'identifier "dev.idy.yesman" and anchor apple generic'}), 'not the Developer ID requirement'),
+        ('dr-other-team', both({'dr': signatures()[0]['darwin-arm64/yesman.app']['dr'].replace(TEAM, 'OTHERTEAM1')}), 'not the Developer ID requirement'),
+        ('dr-one-arch-differs', {'darwin-amd64/yesman.app': {'dr': 'identifier "dev.idy.yesman" and anchor apple generic and certificate leaf = H"%s"' % ('0' * 40)}}, 'not the Developer ID requirement'),
         ('requirement-not-mutual', {'darwin-amd64/yesman.app': {'satisfies': []}}, 'does not satisfy the designated requirement of darwin-arm64'),
     ]:
         found, leaf = signatures(**changes)
@@ -283,6 +441,127 @@ def verify_cases(temporary):
         record('verify', variant=name, accepted=message is None)
 
 
+def fake_go(fixture, mode='record'):
+    """A go that records what the launcher hands it, and runs the gh it finds once."""
+    report = fixture.dir / 'go-call.json'
+    real_gh = fixture.dir / 'real-bin/gh'
+    real_gh.parent.mkdir(exist_ok=True)
+    real_gh.write_text('#!%s\nimport json, os, sys\nwith open(%r, "a") as out:\n    out.write(json.dumps({"args": sys.argv[1:], "token": os.environ.get("GH_TOKEN") == %r}) + "\\n")\n'
+                       % (sys.executable, str(fixture.dir / 'gh-calls.jsonl'), UPLOAD_TOKEN))
+    real_gh.chmod(0o755)
+    go = fixture.bin / 'go'
+    go.write_text('''#!%s
+import json, os, pathlib, subprocess, sys
+project = pathlib.Path(sys.argv[-1])
+config = json.loads((project / "mygo.json").read_text())
+key = config.get("updates", {}).get("privateKey")
+values = [os.environ[k] for k in os.environ]
+record = {
+    "args": sys.argv[1:-1], "cwd": os.getcwd(), "project": str(project), "config": config,
+    "names": sorted(k for k in os.environ if k in ("GH_TOKEN", "MYGO_UPDATER_PRIVATE_KEY", "SIGNING_STATE") or k.startswith(("MACOS_SIGNING", "MACOS_NOTARY"))),
+    "secretValue": any(%r in v or %r in v for v in values),
+    "resources": os.readlink(project / "resources") if (project / "resources").is_symlink() else None,
+    "keyFile": {"mode": oct(os.stat(key).st_mode & 0o777), "matches": pathlib.Path(key).read_text().strip() == %r} if key else None,
+}
+gh = subprocess.run(["gh", "release", "view", "v0"], capture_output=True)
+record["ghExit"] = gh.returncode
+pathlib.Path(%r).write_text(json.dumps(record))
+sys.exit(%d)
+''' % (sys.executable, UPDATER_KEY, UPLOAD_TOKEN, UPDATER_KEY, str(report), 3 if mode == 'fail' else 0))
+    go.chmod(0o755)
+    return report, real_gh.parent
+
+
+def launch(fixture, args, state='', inputs=None, real_bin=None):
+    env = fixture.env(dict({'MYGO_UPDATER_PRIVATE_KEY': UPDATER_KEY, 'GH_TOKEN': UPLOAD_TOKEN}, **(inputs or {})))
+    if real_bin:
+        env['PATH'] = str(fixture.bin) + os.pathsep + str(real_bin) + os.pathsep + env['PATH'].split(os.pathsep, 1)[1]
+    env['SIGNING_STATE'] = state
+    return subprocess.run([sys.executable, str(fixture.source / 'scripts/release_build.py'), *args], env=env, capture_output=True, text=True,
+                          cwd=fixture.source, timeout=60)
+
+
+def launcher_cases(temporary):
+    """The release build step and its launcher, with a stand-in go."""
+    text = (ROOT / '.github/workflows/release.yml').read_text()
+    step = text.split('      - name: Build and upload\n', 1)[1].split('\n      - name:', 1)[0]
+    assert 'run: python3 scripts/release_build.py --platform "$PLATFORMS" --system "$SYSTEM" --signing-mode "$SIGNING_MODE" --signing-identity "$SIGNING_IDENTITY" --upload' in step
+    assert 'SIGNING_STATE: ${{ steps.signing.outputs.state }}' in step
+    record('release-build-step-uses-launcher')
+
+    tracked = json.loads((ROOT / 'mygo.json').read_text())
+    for name, system, platform, mode, identity, use_state, expected in [
+        ('macos-adhoc', 'macOS', 'darwin/arm64,darwin/amd64', 'adhoc', '', False, []),
+        ('macos-developer-id', 'macOS', 'darwin/arm64,darwin/amd64', 'developer-id', SHA, True, ['-sign', SHA]),
+        ('windows', 'Windows', 'windows/amd64,windows/arm64', '', '', False, []),
+        ('linux', 'Linux', 'linux/amd64,linux/arm64', '', '', False, []),
+        ('developer-id-no-identity', 'macOS', 'darwin/arm64', 'developer-id', '', True, None),
+        ('developer-id-name-not-sha', 'macOS', 'darwin/arm64', 'developer-id', 'Developer ID Application: x', True, None),
+        ('developer-id-no-state', 'macOS', 'darwin/arm64', 'developer-id', SHA, False, None),
+        ('developer-id-forged-state', 'macOS', 'darwin/arm64', 'developer-id', SHA, 'forged', None),
+        ('no-mode', 'macOS', 'darwin/arm64', '', '', False, None),
+        ('adhoc-with-state', 'macOS', 'darwin/arm64', 'adhoc', '', True, None),
+        ('linux-signing-mode', 'Linux', 'linux/amd64', 'developer-id', SHA, False, None),
+        ('linux-building-darwin', 'Linux', 'darwin/arm64', '', '', False, None),
+    ]:
+        if use_state:
+            fixture, state = prepared(temporary, 'launch-' + name)
+            if use_state == 'forged':
+                state = base64.urlsafe_b64encode(json.dumps({'dir': str(fixture.runner_temp), 'dev': 1, 'ino': 1, 'nonce': 'c' * 64}).encode()).decode()
+        else:
+            fixture, state = Fixture(temporary, 'launch-' + name, {}), ''
+        report, real_bin = fake_go(fixture)
+        process = launch(fixture, ['--platform', platform, '--system', system, '--signing-mode', mode, '--signing-identity', identity, '--upload'],
+                         state, real_bin=real_bin)
+        if expected is None:
+            assert process.returncode == 1 and not report.exists(), (name, process.stderr)
+        else:
+            assert process.returncode == 0, (name, process.stderr)
+            call = json.loads(report.read_text())
+            assert call['args'] == ['tool', 'mygo', 'build', '-platform', platform, '-upload'] + expected, call['args']
+            assert call['cwd'] == str(fixture.source.resolve()) and pathlib.Path(call['project']).parent == (fixture.source / 'build').resolve()
+            assert call['names'] == [] and not call['secretValue'], 'no credential in the build environment'
+            assert call['keyFile'] == {'mode': '0o600', 'matches': True}, call['keyFile']
+            assert call['ghExit'] == 0, 'the gh wrapper reaches the real gh'
+            gh = [json.loads(line) for line in (fixture.dir / 'gh-calls.jsonl').read_text().splitlines()]
+            assert gh == [{'args': ['release', 'view', 'v0'], 'token': True}], gh
+            config = call['config']
+            assert config['updates']['publicKey'] == tracked['updates']['publicKey'] and config['version'] == tracked['version']
+            assert config['identifier'] == tracked['identifier'] and config['main'] == str(fixture.source.resolve())
+            assert config['out'] == str(fixture.source.resolve() / 'build') and config['icon'] == tracked['icon']
+            assert call['resources'] == str(fixture.source.resolve() / 'resources')
+            if mode == 'developer-id':
+                [folder] = fixture.folders()
+                assert config['macos']['notarize'] == {'keychainProfile': 'yesman-release-notary', 'keychain': str(folder / 'signing.keychain-db')}
+            else:
+                assert 'notarize' not in config['macos']
+            assert sorted(p.name for p in (fixture.source / 'build').iterdir()) == [], 'the derived project is removed'
+        record('launcher-arguments', variant=name, refused=expected is None)
+
+    # Credentials and configuration the launcher refuses.
+    for name, change, message in [
+        ('upload-without-key', {'inputs': {'MYGO_UPDATER_PRIVATE_KEY': ''}}, 'needs MYGO_UPDATER_PRIVATE_KEY'),
+        ('key-under-another-name', {'inputs': {'SOME_OTHER_VAR': 'x' + UPDATER_KEY}}, 'appears in another environment variable'),
+        ('unknown-config-key', {'mygo': dict(tracked, frontendDist='web')}, 'does not carry'),
+        ('discovered-package-json', {'file': 'package.json'}, 'would not be visible'),
+    ]:
+        fixture = Fixture(temporary, 'refuse-' + name, {}, mygo=json.dumps(change['mygo']) if 'mygo' in change else None)
+        if 'file' in change:
+            (fixture.source / change['file']).write_text('{}')
+        report, real_bin = fake_go(fixture)
+        process = launch(fixture, ['--platform', 'linux/amd64', '--system', 'Linux', '--upload'], inputs=change.get('inputs'), real_bin=real_bin)
+        assert process.returncode == 1 and message in process.stderr and not report.exists(), (name, process.stderr)
+        assert not (fixture.source / 'build').exists() or list((fixture.source / 'build').iterdir()) == []
+        record('launcher-refuses', variant=name)
+
+    fixture = Fixture(temporary, 'launch-build-fails', {})
+    report, real_bin = fake_go(fixture, 'fail')
+    process = launch(fixture, ['--platform', 'linux/amd64', '--system', 'Linux', '--upload'], real_bin=real_bin)
+    assert process.returncode == 1 and 'mygo build failed (exit 3)' in process.stderr
+    assert list((fixture.source / 'build').iterdir()) == []
+    record('launcher-failure-removes-private-files')
+
+
 def step_script(workflow, step):
     text = (ROOT / '.github/workflows' / workflow).read_text()
     block = text.split('      - name: %s\n' % step, 1)[1]
@@ -293,51 +572,31 @@ def step_script(workflow, step):
 
 
 def workflow_cases(temporary):
-    folder = pathlib.Path(temporary) / 'workflow'
-    folder.mkdir()
-    fake = folder / 'bin'
-    fake.mkdir()
-    called = folder / 'called'
-    for name in ('go', 'python3'):
-        (fake / name).write_text('#!/bin/sh\nprintf "%%s\\n" "%s" "$@" > "%s"\n' % (name, called))
-        (fake / name).chmod(0o755)
-    build = step_script('release.yml', 'Build and upload')
-    for system, platform, mode, identity, expected in [
-        ('macOS', 'darwin/arm64,darwin/amd64', 'adhoc', '', ['-skip-notarize']),
-        ('macOS', 'darwin/arm64,darwin/amd64', 'developer-id', SHA, ['-sign', SHA]),
-        ('macOS', 'darwin/arm64,darwin/amd64', 'developer-id', '', None),
-        ('macOS', 'darwin/arm64,darwin/amd64', 'developer-id', 'Developer ID Application: x', None),
-        ('macOS', 'darwin/arm64,darwin/amd64', '', '', None),
-        ('Windows', 'windows/amd64,windows/arm64', '', '', ['-skip-notarize']),
-        ('Linux', 'linux/amd64,linux/arm64', 'developer-id', SHA, ['-skip-notarize']),
-    ]:
-        if called.exists():
-            called.unlink()
-        env = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ['PATH'], PLATFORMS=platform, SYSTEM=system, SIGNING_MODE=mode, SIGNING_IDENTITY=identity)
-        process = subprocess.run(['bash', '-e', '-c', build], env=env, capture_output=True, text=True)
-        if expected is None:
-            assert process.returncode != 0 and not called.exists(), (system, mode, identity)
+    smoke = step_script('macos-draft-smoke.yml', 'Verify unchanged final app startup')
+    for variant, team, extra in [('adhoc', '', ['--expect-adhoc']), ('team', TEAM, ['--expect-team-id', TEAM]), ('older-tag', None, []), ('bad-team', 'idy', None)]:
+        fixture = Fixture(temporary, 'smoke-' + variant, team=team)
+        if variant == 'older-tag':
+            (fixture.source / 'scripts/macos_signing.py').unlink()
+            (fixture.source / 'packaging/macos/signing.json').unlink()
+        called = fixture.dir / 'called'
+        # The step's own team lookup runs for real; check_macos_startup is recorded.
+        python = fixture.bin / 'python3'
+        python.write_text('#!/bin/sh\ncase "$1" in scripts/macos_signing.py) exec "%s" "$@" ;; esac\nprintf "%%s\\n" "$@" > "%s"\n' % (sys.executable, called))
+        python.chmod(0o755)
+        env = dict(fixture.env(), RUNNER_TEMP='/r', RELEASE_TAG='v0.1.0', TARGET_ARCH='arm64', RELEASE_SOURCE='0' * 40)
+        process = subprocess.run(['bash', '-e', '-c', smoke], env=env, capture_output=True, text=True, cwd=fixture.source)
+        if extra is None:
+            assert process.returncode != 0 and not called.exists() and 'Team ID' in process.stderr, process.stderr
         else:
             assert process.returncode == 0, process.stderr
-            assert called.read_text().splitlines() == ['go', 'tool', 'mygo', 'build', '-platform', platform, '-upload'] + expected
-        record('release-build-arguments', system=system, mode=mode or None, identity=bool(identity), refused=expected is None)
-
-    smoke = step_script('macos-draft-smoke.yml', 'Verify unchanged final app startup')
-    for team, extra in [('', []), (TEAM, ['--expect-team-id', TEAM])]:
-        if called.exists():
-            called.unlink()
-        env = dict(os.environ, PATH=str(fake) + os.pathsep + os.environ['PATH'], RUNNER_TEMP='/r', RELEASE_TAG='v0.1.0', TARGET_ARCH='arm64', RELEASE_SOURCE='0' * 40, EXPECTED_TEAM_ID=team)
-        process = subprocess.run(['bash', '-e', '-c', smoke], env=env, capture_output=True, text=True)
-        assert process.returncode == 0, process.stderr
-        assert called.read_text().splitlines()[1:] == ['scripts/check_macos_startup.py', '/r/draft/yesman.app', 'web', '/r/startup-evidence',
+            assert called.read_text().splitlines() == ['scripts/check_macos_startup.py', '/r/draft/yesman.app', 'web', '/r/startup-evidence',
                                                        '--release-tag', 'v0.1.0', '--arch', 'arm64', '--source', '0' * 40] + extra
-        record('draft-smoke-signature-policy', expectTeam=bool(team))
+        record('draft-smoke-policy-from-tag-source', variant=variant)
 
-    # Where the signing inputs may go: secrets to one release step, the
-    # public Team ID also to the draft gate; nothing to CI, review or pages.
+    # Where the signing inputs may go: the secrets to one release step only;
+    # no repository variable decides the signing of an already built release.
     allowed = {('release.yml', 'Prepare macOS signing'): {'secrets.MACOS_SIGNING_CERTIFICATE_P12', 'secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD',
-                                                          'secrets.MACOS_NOTARY_APPLE_ID', 'secrets.MACOS_NOTARY_PASSWORD', 'vars.MACOS_SIGNING_TEAM_ID'},
-               ('macos-draft-smoke.yml', 'Verify unchanged final app startup'): {'vars.MACOS_SIGNING_TEAM_ID'}}
+                                                          'secrets.MACOS_NOTARY_APPLE_ID', 'secrets.MACOS_NOTARY_PASSWORD'}}
     seen = {}
     for workflow in sorted((ROOT / '.github/workflows').glob('*.yml')):
         step = None
@@ -347,72 +606,138 @@ def workflow_cases(temporary):
             named = re.match(r'\s+- name: (.+)$', line)
             if named:
                 step = named.group(1)
-            for use in re.findall(r'(?:secrets|vars)\.MACOS_[A-Z0-9_]+', line):
+            for use in re.findall(r'(?:secrets|vars)\.(?:MACOS_[A-Z0-9_]+|MYGO_UPDATER_PRIVATE_KEY)', line):
                 seen.setdefault((workflow.name, step), set()).add(use)
+    allowed[('release.yml', 'Build and upload')] = {'secrets.MYGO_UPDATER_PRIVATE_KEY'}
     assert seen == allowed, seen
     record('signing-inputs-confined', steps=sorted('%s: %s' % key for key in seen))
 
-    config = json.loads((ROOT / 'mygo.json').read_text())
+    raw = (ROOT / 'mygo.json').read_bytes()
+    config = json.loads(raw)
     assert config['identifier'] == 'dev.idy.yesman' and config['updates']['publicKey'] == UPDATER_PUBLIC_KEY
-    assert 'signingIdentity' not in config['macos'], 'the identity comes from the prepared keychain, not the repository'
+    assert 'signingIdentity' not in config['macos'] and 'notarize' not in config['macos'], 'the tracked configuration stays ad hoc'
     assert config['macos']['entitlements'] == 'packaging/macos/permissions.entitlements.plist'
-    record('identity-and-updater-key-unchanged')
+    team = json.loads((ROOT / 'packaging/macos/signing.json').read_text())
+    assert set(team) == {'teamId'}
+    record('identity-and-updater-key-unchanged', trackedTeam=team['teamId'] or None)
 
 
-def go_env(temporary):
+def go_env():
     env = dict(os.environ)
     for name in ('GOCACHE', 'GOMODCACHE', 'GOPATH', 'HOME', 'GOTMPDIR', 'TMPDIR'):
         assert env.get(name), name + ' must be set to a private folder for --mygo'
-    env.update(GOENV='off', GOTOOLCHAIN='local', GOFLAGS='-mod=mod', CGO_ENABLED='1', MACOSX_DEPLOYMENT_TARGET='13.0', CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0')
-    for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'MYGO_UPDATER_PRIVATE_KEY'):
+    env.update(GOENV='off', GOTOOLCHAIN='local', GOFLAGS='-mod=readonly', CGO_ENABLED='1', MACOSX_DEPLOYMENT_TARGET='13.0',
+               CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0', PYTHONDONTWRITEBYTECODE='1')
+    for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'MYGO_UPDATER_PRIVATE_KEY', 'SIGNING_STATE'):
         env.pop(name, None)
     return env
 
 
+VERIFIER = '''package main
+
+import (
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+func main() {
+	pub, _ := base64.StdEncoding.DecodeString(os.Args[1])
+	var m struct{ Size int64; Signature string }
+	data, _ := os.ReadFile(os.Args[2])
+	if json.Unmarshal(data, &m) != nil { os.Exit(2) }
+	archive, _ := os.ReadFile(os.Args[3])
+	sum := sha256.Sum256(archive)
+	sig, _ := base64.StdEncoding.DecodeString(m.Signature)
+	if int64(len(archive)) != m.Size || !ed25519.Verify(pub, sum[:], sig) { fmt.Println("bad"); os.Exit(1) }
+	fmt.Println("ok")
+}
+'''
+
+
 def mygo_cases(temporary):
-    """The real MyGo v0.9.0 build of a copy of this repository, Apple tools stood in."""
+    """The real MyGo v0.9.0 build of a committed copy of this repository, through the launcher."""
     assert sys.platform == 'darwin', '--mygo needs macOS'
-    source = pathlib.Path(temporary) / 'source'
+    temporary = pathlib.Path(temporary)
+    source = temporary / 'mygo-source'
     files = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], cwd=ROOT).decode().split('\0')
     for name in filter(None, files):
         target = source / name
         target.parent.mkdir(parents=True, exist_ok=True)
         if (ROOT / name).is_file():
             shutil.copy2(ROOT / name, target)
-    env = go_env(temporary)
-    keys = pathlib.Path(temporary) / 'update-keys'
-    subprocess.run(['go', 'tool', 'mygo', 'keygen', '-o', str(keys)], cwd=source, env=env, check=True, capture_output=True)
+    env = go_env()
+    keys = temporary / 'update-keys'
+    subprocess.run(['go', 'tool', 'mygo', 'keygen', '-o', str(keys)], cwd=source, env=env, check=True, capture_output=True, timeout=300)
+    public = (keys / 'mygo-update.pub').read_text().strip()
     config = json.loads((source / 'mygo.json').read_text())
     committed = json.loads((ROOT / 'mygo.json').read_text())
     # A throwaway update key, and no deltas from published releases: the
     # only differences from the committed configuration.
-    config['updates']['publicKey'] = (keys / 'mygo-update.pub').read_text().strip()
+    config['updates']['publicKey'] = public
     config['updates']['deltas'] = 0
     (source / 'mygo.json').write_text(json.dumps(config, indent=2))
-    del config['updates']['deltas']
-    config['updates']['publicKey'] = committed['updates']['publicKey']
-    assert config == committed
-    env['MYGO_UPDATER_PRIVATE_KEY'] = (keys / 'mygo-update.key').read_text().strip()
-    notarize = committed['macos']['notarize']
+    git = ['git', '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false']
+    subprocess.run(['git', 'init', '-q'], cwd=source, env=env, check=True)
+    subprocess.run(git + ['add', '-A'], cwd=source, env=env, check=True)
+    subprocess.run(git + ['commit', '-q', '-m', 'fixture'], cwd=source, env=env, check=True)
+    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, env=env).decode().strip()
+    key = (keys / 'mygo-update.key').read_text().strip()
+    verifier = temporary / 'verifier'
+    verifier.mkdir()
+    (verifier / 'go.mod').write_text('module verifier\n\ngo 1.21\n')
+    (verifier / 'main.go').write_text(VERIFIER)
+    subprocess.run(['go', 'build', '-o', str(temporary / 'verify-update'), '.'], cwd=verifier, env=env, check=True, timeout=300)
 
-    def build(name, platforms, args, scenario):
+    # F1: the ordinary entry, no inputs, no flags beyond the platform.
+    plain = subprocess.run(['go', 'tool', 'mygo', 'build', '-platform', 'darwin/arm64', '-skip-dmg'], cwd=source, env=env, capture_output=True, text=True, timeout=600)
+    assert plain.returncode == 0, plain.stdout[-2000:] + plain.stderr[-2000:]
+    tracked_app = source / 'build/darwin-arm64/yesman.app'
+    assert 'Signature=adhoc' in subprocess.run(['/usr/bin/codesign', '-dv', str(tracked_app)], capture_output=True, text=True).stderr
+    tracked_tree = tree(tracked_app)
+    shutil.rmtree(source / 'build')
+    record('plain-build-without-inputs-succeeds', exit=plain.returncode)
+
+    def build(name, platforms, mode, identity, scenario, state='', upload=False):
         fixture = Fixture(temporary, 'mygo-' + name, scenario)
-        out = fixture.dir / 'out'
-        run_env = dict(env, PATH=str(fixture.bin) + os.pathsep + env['PATH'], APPLE_TOOLS_STATE=str(fixture.state))
-        process = subprocess.run(['go', 'tool', 'mygo', 'build', '-platform', platforms, '-o', str(out), *args], cwd=source, env=run_env, capture_output=True, text=True)
-        return fixture, out, process
+        trace = fixture.dir / 'children.jsonl'
+        observer = '#!%s\nimport json, os, sys\nwith open(%r, "a") as out:\n    out.write(json.dumps({"tool": %%r, "names": sorted(k for k in os.environ if k in ("GH_TOKEN", "MYGO_UPDATER_PRIVATE_KEY")), "value": any(%r in v or %r in v for v in os.environ.values())}) + "\\n")\nos.execv(%%r, [%%r] + sys.argv[1:])\n' % (
+            sys.executable, str(trace), key, UPLOAD_TOKEN)
+        cc = fixture.bin / 'observed-clang'
+        cc.write_text(observer % ('clang', '/usr/bin/clang', '/usr/bin/clang'))
+        real_go = shutil.which('go', path=env['PATH'])
+        (fixture.bin / 'go').write_text(observer % ('go', real_go, real_go))
+        for path in (cc, fixture.bin / 'go'):
+            path.chmod(0o755)
+        report, real_bin = fake_go(fixture)  # only for its stand-in real gh
+        (fixture.bin / 'go').write_text(observer % ('go', real_go, real_go))
+        run_env = dict(env, PATH=str(fixture.bin) + os.pathsep + str(real_bin) + os.pathsep + env['PATH'], APPLE_TOOLS_STATE=str(fixture.state),
+                       CC=str(cc), MYGO_UPDATER_PRIVATE_KEY=key, SIGNING_STATE=state)
+        if upload:
+            run_env['GH_TOKEN'] = UPLOAD_TOKEN
+        shutil.rmtree(source / 'build', ignore_errors=True)
+        system = 'macOS' if platforms.startswith('darwin') else 'Linux'
+        process = subprocess.run([sys.executable, str(source / 'scripts/release_build.py'), '--platform', platforms, '--system', system,
+                                  '--signing-mode', mode, '--signing-identity', identity] + (['--upload'] if upload else []),
+                                 cwd=source, env=run_env, capture_output=True, text=True, timeout=1200)
+        children = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
+        return fixture, process, children
 
-    def archives(out, arch):
-        return sorted((out / ('darwin-' + arch)).glob('*.tar.gz')) if (out / ('darwin-' + arch)).exists() else []
+    def archives(arch):
+        stage = source / 'build' / ('darwin-' + arch)
+        return sorted(stage.glob('*.tar.gz')) if stage.exists() else []
 
-    # Configured: the release workflow passes -sign <identity>.
-    fixture, out, process = build('signed', 'darwin/arm64,darwin/amd64', ['-sign', SHA], {})
-    assert process.returncode == 0, process.stderr[-3000:]
+    # Signed through the launcher, uploaded to a stand-in gh.
+    signer, state = prepared(temporary, 'mygo-signer')
+    fixture, process, children = build('signed', 'darwin/arm64,darwin/amd64', 'developer-id', SHA, {}, state, upload=True)
+    assert process.returncode == 0, process.stdout[-3000:] + process.stderr[-3000:]
+    keychain = signer.folders()[0] / 'signing.keychain-db'
     order = [(c['tool'], c['args']) for c in fixture.calls() if not c.get('passthrough') and c['tool'] in ('codesign', 'xcrun')]
     for arch in ('arm64', 'amd64'):
-        stage = out / ('darwin-' + arch)
-        # MyGo signs, notarizes and packs in a staging folder that it renames
-        # to darwin-<arch> only once everything there succeeded.
+        stage = source / 'build' / ('darwin-' + arch)
         staging = {pathlib.Path(a).parent for _, args in order for a in args if re.search(r'/\.staging-darwin-%s-\d+/yesman\.app$' % arch, a)}
         assert len(staging) == 1, (arch, staging)
         staging = staging.pop()
@@ -421,7 +746,7 @@ def mygo_cases(temporary):
         expected = [
             ('codesign', ['--force', '--deep', '--sign', SHA, '--options', 'runtime', '--timestamp', '--entitlements']),
             ('codesign', ['--force', '--timestamp', '--sign', SHA, dmg]),
-            ('xcrun', ['notarytool', 'submit', dmg, '--keychain-profile', notarize['keychainProfile'], '--wait', '--output-format', 'json', '--keychain', notarize['keychain']]),
+            ('xcrun', ['notarytool', 'submit', dmg, '--keychain-profile', 'yesman-release-notary', '--wait', '--output-format', 'json', '--keychain', str(keychain)]),
             ('xcrun', ['stapler', 'staple', dmg]),
             ('xcrun', ['stapler', 'staple', app]),
         ]
@@ -430,59 +755,107 @@ def mygo_cases(temporary):
         assert mine[0][1][:8] == expected[0][1] and mine[0][1][-1] == app, mine[0]
         assert pathlib.Path(mine[0][1][8]).read_bytes() == (ROOT / committed['macos']['entitlements']).read_bytes(), 'entitlements changed'
         assert mine[1:] == expected[1:], (arch, mine[1:])
-        [archive] = archives(out, arch)
+        [archive] = archives(arch)
         with tarfile.open(archive) as tar:
             assert 'yesman.app/Contents/.fixture-notarization-ticket' in tar.getnames(), 'the update archive must hold the stapled app'
         assert (stage / dmg_name).read_bytes().endswith(b'fixture-notarization-ticket'), 'the disk image must be stapled'
-        manifest = json.loads((stage / ('update-darwin-%s.json' % arch)).read_text())
-        assert manifest['size'] == archive.stat().st_size and manifest['signature']
-    sums = list(out.rglob('SHA256SUMS'))
-    for line in (sums[0].read_text().splitlines() if sums else []):
+        manifest = stage / ('update-darwin-%s.json' % arch)
+        verified = subprocess.run([str(temporary / 'verify-update'), public, str(manifest), str(archive)], capture_output=True, text=True)
+        assert verified.stdout.strip() == 'ok', 'the archive must carry the updater key\'s signature'
+        binary = subprocess.check_output(['go', 'version', '-m', '-json', str(stage / 'yesman.app/Contents/MacOS/yesman')], env=env)
+        settings = {s['Key']: s['Value'] for s in json.loads(binary)['Settings']}
+        assert settings['vcs.revision'] == revision and settings['vcs.modified'] == 'false', settings
+    sums = (source / 'build/SHA256SUMS').read_text().splitlines()
+    for line in sums:
         digest, name = line.split(None, 1)
-        paths = list(out.rglob(name.lstrip('*')))  # install.sh is one script for both
+        paths = list((source / 'build').rglob(name.lstrip('*')))
         assert paths and all(hashlib.sha256(p.read_bytes()).hexdigest() == digest for p in paths), name
-    record('mygo-signed-notarized-before-archives', architectures=['arm64', 'amd64'], checksums=bool(sums))
+    gh = [json.loads(line) for line in (fixture.dir / 'gh-calls.jsonl').read_text().splitlines()]
+    assert gh and all(call['token'] for call in gh) and any(call['args'][:2] == ['release', 'upload'] for call in gh), gh
+    clang = [c for c in children if c['tool'] == 'clang']
+    assert clang and children and all(c['names'] == [] and not c['value'] for c in children), [c for c in children if c['names'] or c['value']][:3]
+    assert [p.name for p in (source / 'build').iterdir() if p.name.startswith('.release-config-')] == []
+    record('mygo-signed-notarized-before-archives', architectures=['arm64', 'amd64'], compilerChildren=len(clang), goChildren=len(children) - len(clang),
+           credentialInChild=False, ghCalls=len(gh))
 
-    for name, scenario, args, message, reached in [
-        ('codesign-fails', {'fail': ['app-sign']}, ['-sign', SHA], 'errSecInternalComponent', 'no-notarization'),
-        ('notarization-invalid', {'fail': ['notarize']}, ['-sign', SHA], 'notarization failed (Invalid', 'no-staple'),
-        ('staple-fails', {'fail': ['staple']}, ['-sign', SHA], 'Error 65', 'staple'),
-        ('adhoc-without-skip-notarize', {}, [], 'notarization needs a Developer ID signing identity', 'nothing'),
+    # Failures stop before any update file or upload.
+    for name, scenario, message in [
+        ('codesign-fails', {'fail': ['app-sign']}, 'errSecInternalComponent'),
+        ('notarization-invalid', {'fail': ['notarize']}, 'notarization failed (Invalid'),
+        ('staple-fails', {'fail': ['staple']}, 'Error 65'),
     ]:
-        fixture, out, process = build(name, 'darwin/arm64', args, scenario)
-        assert process.returncode != 0 and message in process.stdout + process.stderr, (name, process.stdout[-2000:], process.stderr[-2000:])
-        if out.exists():
-            assert archives(out, 'arm64') == [] and not list(out.rglob('update-*.json')), 'a failed build must not leave update files'
+        fixture, process, _ = build(name, 'darwin/arm64', 'developer-id', SHA, scenario, state, upload=True)
+        assert process.returncode == 1 and message in process.stdout + process.stderr, (name, process.stdout[-2000:], process.stderr[-2000:])
+        assert archives('arm64') == [] and not list((source / 'build').rglob('update-*.json'))
+        gh_log = fixture.dir / 'gh-calls.jsonl'
+        assert not gh_log.exists() or not any(json.loads(line)['args'][:2] == ['release', 'upload'] for line in gh_log.read_text().splitlines())
         calls = [c for c in fixture.calls() if not c.get('passthrough')]
-        if reached == 'nothing':
-            assert not [c for c in calls if c['tool'] in ('codesign', 'xcrun')], calls
-        if reached == 'no-notarization':
+        if name == 'codesign-fails':
             assert not [c for c in calls if c['tool'] == 'xcrun'], calls
-        if reached == 'no-staple':
+        if name == 'notarization-invalid':
             assert not [c for c in calls if c['args'][:2] == ['stapler', 'staple']], calls
         record('mygo-failure-stops-before-archives', variant=name)
+    assert signer.signing('cleanup', state=state).returncode == 0
 
-    # Unconfigured: ad hoc as before, with notarization explicitly skipped.
-    fixture, out, process = build('adhoc', 'darwin/arm64,darwin/amd64', ['-skip-notarize'], {})
-    assert process.returncode == 0, process.stderr[-3000:]
+    # Ad hoc through the launcher: the same app as the tracked configuration
+    # builds, with no notarization, and archives signed with the updater key.
+    fixture, process, children = build('adhoc', 'darwin/arm64,darwin/amd64', 'adhoc', '', {})
+    assert process.returncode == 0, process.stdout[-3000:] + process.stderr[-3000:]
     assert not [c for c in fixture.calls('xcrun') if not c.get('passthrough')], 'ad-hoc builds must not notarize'
     signed = [c for c in fixture.calls('codesign') if '--sign' in c['args']]
     assert signed and all(c['args'][c['args'].index('--sign') + 1] == '-' and '--options' not in c['args'] for c in signed), signed
-    assert not [c for c in signed if c['args'][-1].endswith('.dmg')], 'ad-hoc disk images stay unsigned'
+    assert tree(source / 'build/darwin-arm64/yesman.app', skip_signature=True) == {k: v for k, v in tracked_tree.items() if '_CodeSignature' not in k}, \
+        'the derived configuration builds the tracked configuration\'s app'
     for arch in ('arm64', 'amd64'):
-        assert len(archives(out, arch)) == 1
-        app = out / ('darwin-' + arch) / 'yesman.app'
-        assert 'Signature=adhoc' in subprocess.run(['/usr/bin/codesign', '-dv', str(app)], capture_output=True, text=True).stderr
-    record('mygo-unconfigured-adhoc-unchanged', architectures=['arm64', 'amd64'])
+        [archive] = archives(arch)
+        verified = subprocess.run([str(temporary / 'verify-update'), public, str(source / 'build/darwin-{0}/update-darwin-{0}.json'.format(arch)), str(archive)],
+                                  capture_output=True, text=True)
+        assert verified.stdout.strip() == 'ok'
+    assert children and all(c['names'] == [] and not c['value'] for c in children)
+    record('mygo-adhoc-launcher-matches-tracked', architectures=['arm64', 'amd64'])
+
+    # Linux and Windows rows: no signing, archives signed, nothing else changes.
+    for platforms, system in [('linux/amd64', 'Linux'), ('windows/amd64', 'Windows')]:
+        shutil.rmtree(source / 'build', ignore_errors=True)
+        direct = subprocess.run(['go', 'tool', 'mygo', 'build', '-platform', platforms], cwd=source, env=dict(env, CGO_ENABLED='0', MYGO_UPDATER_PRIVATE_KEY=key),
+                                capture_output=True, text=True, timeout=600)
+        assert direct.returncode == 0, direct.stderr[-2000:]
+        stage = source / 'build' / platforms.replace('/', '-')
+        expected = {p.name for p in stage.iterdir()}
+        tracked_manifest = json.loads((stage / ('update-%s.json' % platforms.replace('/', '-'))).read_text())
+        fixture = Fixture(temporary, 'mygo-' + system, {})
+        shutil.rmtree(source / 'build')
+        process = subprocess.run([sys.executable, str(source / 'scripts/release_build.py'), '--platform', platforms, '--system', system],
+                                 cwd=source, env=dict(env, CGO_ENABLED='0', MYGO_UPDATER_PRIVATE_KEY=key), capture_output=True, text=True, timeout=600)
+        assert process.returncode == 0, process.stderr[-2000:]
+        assert {p.name for p in stage.iterdir()} == expected
+        manifest = json.loads((stage / ('update-%s.json' % platforms.replace('/', '-'))).read_text())
+        assert {k: manifest[k] for k in ('version', 'url', 'notes')} == {k: tracked_manifest[k] for k in ('version', 'url', 'notes')}
+        [archive] = [p for p in stage.iterdir() if p.name.endswith('.tar.gz') or p.name.endswith('.zip')] or [None]
+        if archive:
+            verified = subprocess.run([str(temporary / 'verify-update'), public, str(stage / ('update-%s.json' % platforms.replace('/', '-'))), str(archive)],
+                                      capture_output=True, text=True)
+            assert verified.stdout.strip() == 'ok'
+        record('mygo-launcher-matches-tracked', platform=platforms, files=len(expected))
+    subprocess.run(['git', 'status', '--porcelain'], cwd=source, env=env, check=True)
+
+
+def tree(app, skip_signature=False):
+    """Every file of an app bundle and its digest."""
+    app = pathlib.Path(app)
+    return {str(p.relative_to(app)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(app.rglob('*'))
+            if p.is_file() and not (skip_signature and '_CodeSignature' in p.parts)}
 
 
 def real_keychain_cases(temporary):
     """Real security/codesign: a synthetic self-signed identity is refused, nothing remains."""
     assert sys.platform == 'darwin' and os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted', \
         'Refusing to touch a keychain outside a disposable GitHub-hosted runner'
-    folder = pathlib.Path(temporary) / 'real'
-    folder.mkdir()
     team = 'SYNTHTEAM1'
+    fixture = Fixture(temporary, 'real', team=team)
+    shutil.rmtree(fixture.bin)
+    fixture.bin.mkdir()  # no stand-ins: the real tools
+    folder = fixture.dir
     passphrase = base64.b32encode(os.urandom(15)).decode()
     openssl = '/usr/bin/openssl'
     subprocess.run([openssl, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-keyout', str(folder / 'key.pem'), '-out', str(folder / 'cert.pem'),
@@ -490,21 +863,16 @@ def real_keychain_cases(temporary):
                     '-addext', 'extendedKeyUsage=codeSigning', '-addext', 'keyUsage=critical,digitalSignature'], check=True, capture_output=True)
     subprocess.run([openssl, 'pkcs12', '-export', '-inkey', str(folder / 'key.pem'), '-in', str(folder / 'cert.pem'), '-out', str(folder / 'identity.p12'),
                     '-passout', 'pass:' + passphrase], check=True, capture_output=True)
-    config = json.loads((ROOT / 'mygo.json').read_text())
-    keychain = folder / 'yesman-release-signing/signing.keychain-db'
-    config['macos']['notarize']['keychain'] = str(keychain)
-    (folder / 'mygo.json').write_text(json.dumps(config))
     listed = subprocess.check_output(['security', 'list-keychains', '-d', 'user']).decode()
-    env = {k: v for k, v in os.environ.items() if not k.startswith(('MACOS_SIGNING_', 'MACOS_NOTARY_'))}
-    env.update(MACOS_SIGNING_TEAM_ID=team, MACOS_SIGNING_CERTIFICATE_P12=base64.b64encode((folder / 'identity.p12').read_bytes()).decode(),
-               MACOS_SIGNING_CERTIFICATE_PASSWORD=passphrase, MACOS_NOTARY_APPLE_ID='synthetic@example.invalid', MACOS_NOTARY_PASSWORD='synthetic-not-a-password',
-               GITHUB_OUTPUT=str(folder / 'output'))
-    process = subprocess.run([sys.executable, str(SIGNING), '--config', str(folder / 'mygo.json'), 'setup'], env=env, capture_output=True, text=True)
-    assert process.returncode == 1 and 'not valid on the runner' in process.stderr, process.stdout + process.stderr
+    inputs = dict(MACOS_SIGNING_CERTIFICATE_P12=base64.b64encode((folder / 'identity.p12').read_bytes()).decode(),
+                  MACOS_SIGNING_CERTIFICATE_PASSWORD=passphrase, MACOS_NOTARY_APPLE_ID='synthetic@example.invalid', MACOS_NOTARY_PASSWORD='synthetic-not-a-password')
+    process = fixture.signing('setup', inputs=inputs)
+    assert process.returncode == 1 and 'not valid on the runner' in process.stdout + process.stderr, process.stdout + process.stderr
     assert passphrase not in process.stdout + process.stderr
-    assert not os.path.lexists(keychain.parent), 'keychain folder remains'
+    assert fixture.folders() == [], 'keychain folder remains'
     assert subprocess.check_output(['security', 'list-keychains', '-d', 'user']).decode() == listed, 'search list changed'
-    assert not (folder / 'output').exists() or 'mode=' not in (folder / 'output').read_text()
+    outputs = fixture.outputs()
+    assert 'mode' not in outputs and fixture.signing('cleanup', state=outputs['state']).returncode == 0
     record('real-keychain-refuses-self-signed', team=team)
 
 
@@ -516,7 +884,9 @@ def main():
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='yesman-signing-test-') as temporary:
         setup_cases(temporary)
+        ownership_cases(temporary)
         verify_cases(temporary)
+        launcher_cases(temporary)
         workflow_cases(temporary)
         if args.real_keychain:
             real_keychain_cases(temporary)

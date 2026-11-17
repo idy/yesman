@@ -26,6 +26,20 @@ def developer_id_requirement(team, identifier=None):
     return requirement + (' and identifier "%s"' % identifier if identifier else '')
 
 
+def canonical_requirement(text):
+    """The requirement as /usr/bin/csreq compiles and prints it: quoting and spacing normalized."""
+    compiled = subprocess.run(['/usr/bin/csreq', '-r=' + text, '-t'], capture_output=True, timeout=30)
+    assert compiled.returncode == 0, 'Not a valid code requirement: ' + text
+    return compiled.stdout.decode().strip()
+
+
+def expected_designated_requirement(team, identifier=IDENTIFIER):
+    """The designated requirement codesign synthesizes for a Developer ID Application signature."""
+    assert TEAM_ID.fullmatch(team or ''), 'Expected a 10-character Apple Team ID'
+    return ('identifier "%s" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */'
+            ' and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = %s' % (identifier, team))
+
+
 def signature(path):
     """Describe the signature of path as codesign reports it, without judging it."""
     details = subprocess.run(['codesign', '-d', '--verbose=4', str(path)], capture_output=True)
@@ -80,7 +94,12 @@ def check_developer_id(path, team, kind='app', identity=None, work=None):
         assert found['identifier'] == IDENTIFIER, 'Unexpected signing identifier: ' + path.name
         assert 'runtime' in found['flags'], 'Hardened runtime is not enabled: ' + path.name
         assert found['secureTimestamp'], 'Signature has no secure timestamp: ' + path.name
-        assert found['designatedRequirement'], 'No designated requirement: ' + path.name
+        assert found['designatedRequirement'] and not found['implicitRequirement'], 'No designated requirement: ' + path.name
+        # A weaker or broader requirement (as "always", or one without the team)
+        # would let other signers replace the app: require exactly the
+        # Developer ID form, compared as csreq compiles both.
+        assert canonical_requirement(found['designatedRequirement']) == canonical_requirement(expected_designated_requirement(team)), \
+            'Designated requirement is not the Developer ID requirement of this team and identifier: ' + path.name
     if identity:
         assert work, 'A scratch folder is needed to read the certificate'
         assert leaf_sha1(path, work) == identity.upper(), 'Signed with another certificate than the prepared identity: ' + path.name
@@ -115,9 +134,10 @@ def release_arguments(parser):
     parser.add_argument('--arch')
     parser.add_argument('--source')
     parser.add_argument('--expect-team-id', help='require a notarized Developer ID signature of this team')
+    parser.add_argument('--expect-adhoc', action='store_true', help='require an ad-hoc signature, as the source declares no Team ID')
 
 
-def inspect(app, tag=None, arch=None, source=None, expect_team=None):
+def inspect(app, tag=None, arch=None, source=None, expect_team=None, expect_adhoc=False):
     app = pathlib.Path(app).resolve()
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     binary = app / 'Contents/MacOS' / info['CFBundleExecutable']
@@ -152,8 +172,11 @@ def inspect(app, tag=None, arch=None, source=None, expect_team=None):
         'inspectionOS': output('sw_vers'),
         'signature': signature(app),
     }
+    assert not (expect_team and expect_adhoc), 'Expect a Developer ID team or ad hoc, not both'
     if expect_team:
         bundle['signature'] = check_developer_id(app, expect_team)
+    if expect_adhoc:
+        assert bundle['signature']['adhoc'], 'The source declares no Team ID, but the app is not signed ad hoc'
     if any(value is not None for value in (tag, arch, source)):
         assert all(value is not None for value in (tag, arch, source)), 'Tag, architecture and source must be supplied together'
         check_release(bundle, tag, arch, source)
@@ -166,6 +189,6 @@ if __name__ == '__main__':
     parser.add_argument('output')
     release_arguments(parser)
     args = parser.parse_args()
-    result = inspect(args.app, args.release_tag, args.arch, args.source, args.expect_team_id)
+    result = inspect(args.app, args.release_tag, args.arch, args.source, args.expect_team_id, args.expect_adhoc)
     pathlib.Path(args.output).write_text(json.dumps(result, indent=2))
     print('Verified production bundle:', result['binarySHA256'], 'minOS', result['machOMinOS'], 'SDK', result['machOSDK'])
