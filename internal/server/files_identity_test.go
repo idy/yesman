@@ -144,6 +144,7 @@ func TestSameRootNeedsAUsableCreationTime(t *testing.T) {
 		t.Fatalf("matching identity: %v", err)
 	}
 	zero := yesmen.WorktreeRoot{Ino: 0xF00, Birth: 0}
+	convertedMissing := yesmen.WorktreeRoot{Ino: 0xF00, Birth: 6802270473709551616}
 	for name, c := range map[string]struct {
 		have safefs.Identity
 		rec  *yesmen.WorktreeRoot
@@ -158,6 +159,9 @@ func TestSameRootNeedsAUsableCreationTime(t *testing.T) {
 		"other file system":          {safefs.Identity{Dev: 4, Ino: 0xF00, Birth: 0xF00, HasBirth: true}, &fooIdentity, "not the directory"},
 		"other inode":                {safefs.Identity{Dev: 3, Ino: 0xBA4, Birth: 0xF00, HasBirth: true}, &fooIdentity, "not the directory"},
 		"other creation time":        {safefs.Identity{Dev: 3, Ino: 0xF00, Birth: 0xF01, HasBirth: true}, &fooIdentity, "not the directory"},
+		// Windows' missing creation time (an all-zero FILETIME) once
+		// converted to this; the current handle now reports none.
+		"converted missing Windows time recorded, none now": {safefs.Identity{Dev: 3, Ino: 0xF00}, &convertedMissing, "no usable creation time"},
 	} {
 		err := sameRoot(c.have, ws, c.rec)
 		if err == nil || !strings.Contains(err.Error(), c.why) {

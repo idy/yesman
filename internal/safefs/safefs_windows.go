@@ -175,17 +175,19 @@ func (d *Dir) OpenFile(name string, flag int, _ os.FileMode) (*os.File, error) {
 }
 
 // Identity identifies the directory d is open on: its volume, its NTFS file
-// index (which carries a sequence number) and its creation time.
+// index (which carries a sequence number) and its creation time, if the
+// file system keeps one.
 func (d *Dir) Identity() (Identity, error) {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(d.h, &info); err != nil {
 		return Identity{}, err
 	}
+	birth, ok := birthFromFiletime(info.CreationTime.LowDateTime, info.CreationTime.HighDateTime)
 	return Identity{
 		Dev:      uint64(info.VolumeSerialNumber),
 		Ino:      uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow),
-		Birth:    info.CreationTime.Nanoseconds(),
-		HasBirth: true,
+		Birth:    birth,
+		HasBirth: ok,
 	}, nil
 }
 

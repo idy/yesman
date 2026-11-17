@@ -60,3 +60,36 @@ func TestIdentityOfAnOrdinaryDirectoryIsUsable(t *testing.T) {
 		t.Fatalf("an ordinary directory's creation time is zero: %+v", id)
 	}
 }
+
+// Raw Windows FILETIME values (100-nanosecond ticks since 1601) as
+// GetFileInformationByHandle reports ftCreationTime. It is zero where the
+// file system keeps no creation time: that is none, not the year 1601.
+// Supplied values only: no volume without creation times is needed.
+func TestSafeFSFiletimeCreationTime(t *testing.T) {
+	const epoch = 116444736000000000 // 1970-01-01 in ticks since 1601
+	split := func(ticks uint64) (uint32, uint32) { return uint32(ticks), uint32(ticks >> 32) }
+	for _, c := range []struct {
+		name   string
+		ticks  uint64
+		want   int64
+		ok     bool
+		usable bool
+	}{
+		{"no creation time", 0, 0, false, false},
+		{"2026-11-17T00:00:00Z", epoch + 1794873600*1e7, 1794873600 * 1e9, true, true},
+		{"1900-01-01T00:00:00Z", epoch - 2208988800*1e7, -2208988800 * 1e9, true, true},
+		{"one tick after the epoch", epoch + 1, 100, true, true},
+		// The Unix epoch itself converts to 0, which Usable refuses like
+		// every other zero creation time.
+		{"the Unix epoch", epoch, 0, true, false},
+	} {
+		low, high := split(c.ticks)
+		got, ok := birthFromFiletime(low, high)
+		if got != c.want || ok != c.ok {
+			t.Errorf("%s: %d %v, want %d %v", c.name, got, ok, c.want, c.ok)
+		}
+		if u := (Identity{Ino: 7, Birth: got, HasBirth: ok}).Usable(); u != c.usable {
+			t.Errorf("%s: usable %v, want %v", c.name, u, c.usable)
+		}
+	}
+}
