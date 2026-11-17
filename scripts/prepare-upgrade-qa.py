@@ -137,9 +137,10 @@ class OwnedGroup:
         if self.closed:raise RuntimeError('owned process group already closed')
         check_stop()
         env=dict(os.environ) if env is None else env
+        place={} if cwd is None else {'cwd':cwd}
         if WINDOWS:result=self._run_windows(args,cwd,env,stdout,stderr,capture,timeout)
-        elif capture:result=subprocess.check_output(args,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stderr=stderr,timeout=timeout,process_group=self.pgid)
-        else:subprocess.run(args,cwd=cwd,env=env,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,timeout=timeout,check=True,process_group=self.pgid);result=None
+        elif capture:result=subprocess.check_output(args,**place,env=env,stdin=subprocess.DEVNULL,stderr=stderr,timeout=timeout,process_group=self.pgid)
+        else:subprocess.run(args,**place,env=env,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,timeout=timeout,check=True,process_group=self.pgid);result=None
         self.settle(aborting=False)
         check_stop()
         return result
