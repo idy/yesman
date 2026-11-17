@@ -51,6 +51,7 @@ the directory until the disposable runner goes, or its group is found empty.
 import argparse
 import base64
 import binascii
+import errno
 import hmac
 import json
 import os
@@ -408,6 +409,13 @@ def run_owned(label, args, env, timeout=None, capture=True, cwd=None, participan
     waited for; only then is the leader reaped and the records withdrawn.
     Survivors, or a group whose members cannot be listed, make this fail
     rather than report the tool done, and leave the records in place.
+
+    From the moment the tool may have been let through the gate (just before
+    the go-ahead byte is written) its group is listed in UNDRAINED, and it
+    leaves the list only once the group is confirmed empty and the leader
+    reaped. Any error on the way (writing or closing the gate, watching,
+    stopping) therefore leaves drained() false: callers delete files only on
+    that positive confirmation, never because the stop was not reached.
     """
     pipe = subprocess.PIPE if capture else None
     _signals['shield'] += 1  # a signal during the start is held, then raised below
@@ -421,56 +429,77 @@ def run_owned(label, args, env, timeout=None, capture=True, cwd=None, participan
             raise
         finally:
             os.close(gate)
-        recorded = []
+        # From here on the child is this function's: every path below either
+        # reaps it after a confirmed stop or keeps it listed as undrained.
+        entry = {'label': label, 'group': child.pid}
+        recorded, admitted = [], False
         try:
-            for participant in participants:
-                record_use(participant, child.pid)
-                recorded.append(participant)
-        except BaseException as error:
-            # The gate is still closed: nothing but the waiting first process ran.
-            os.close(release)
-            os.kill(child.pid, signal.SIGKILL)
-            child.wait()
-            for stream in (child.stdout, child.stderr):
-                if stream:
-                    stream.close()
-            for participant in recorded:
-                withdraw_use(participant, child.pid)
-            raise SigningError('%s was not started: its use of %s could not be recorded (%s)'
-                               % (label, participant.label, error.strerror if isinstance(error, OSError) else error)) from error
-        try:
-            os.write(release, b'1')
+            try:
+                for participant in participants:
+                    record_use(participant, child.pid)
+                    recorded.append(participant)
+            except BaseException as error:
+                refused = error
+            else:
+                refused = None
+                # Listed before the go-ahead byte can reach the gate.
+                _UNREAPED.append(child)
+                UNDRAINED.append(entry)
+                admitted = True
+                held, release = release, None  # never closed twice: a retried close could hit a reused descriptor
+                try:
+                    if os.write(held, b'1') != 1:
+                        raise OSError(errno.EIO, 'the go-ahead byte was not written')
+                finally:
+                    os.close(held)
         finally:
-            os.close(release)
+            if release is not None:
+                # Not admitted: no go-ahead byte was written, so the gate ends
+                # without running the tool once its pipe closes.
+                held, release = release, None
+                try:
+                    os.close(held)
+                except OSError:
+                    pass
+        if refused is not None:
+            _refuse(child, entry, recorded, label, participant, refused)
+    except BaseException as error:
+        if not admitted:
+            raise
+        interrupted = error  # the tool may run: it is stopped below like any other
+    else:
+        interrupted = None
     finally:
         _signals['shield'] -= 1
-    tails, interrupted, exited, problem = [], None, False, None
+    tails, exited, problem, survivors, code = [], False, None, None, None
     try:
-        tails = [_Tail(child.stdout), _Tail(child.stderr)] if capture else []
-        raise_held()
-        watch = _ExitWatch(child.pid)
-        try:
-            exited = watch.wait(timeout)
-        finally:
-            watch.close()
-    except BaseException as error:  # a signal, or watching failed
-        interrupted = error
-    code = None
-    with shielded():
-        survivors = stop_group(child.pid)
-        if survivors == []:  # only then is the leader reaped
+        if interrupted is None:
             try:
-                code = child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                survivors = [child.pid]
-        if survivors != []:
-            _UNREAPED.append(child)
-            UNDRAINED.append({'label': label, 'group': child.pid})
-        else:
-            for participant in participants:
-                withdraw_use(participant, child.pid)
-        for tail in tails:
-            tail.join(2)
+                tails = [_Tail(child.stdout), _Tail(child.stderr)] if capture else []
+                raise_held()
+                watch = _ExitWatch(child.pid)
+                try:
+                    exited = watch.wait(timeout)
+                finally:
+                    watch.close()
+            except BaseException as error:  # a signal, or watching failed
+                interrupted = error
+    finally:
+        with shielded():
+            survivors = stop_group(child.pid)
+            if survivors == []:  # only then is the leader reaped
+                try:
+                    code = child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    survivors = [child.pid]
+            if survivors == []:
+                # Confirmed: the only way off the undrained list.
+                UNDRAINED.remove(entry)
+                _UNREAPED.remove(child)
+                for participant in participants:
+                    withdraw_use(participant, child.pid)
+            for tail in tails:
+                tail.join(2)
     if survivors is None:
         problem = 'could not tell whether the processes it started (group %d) have stopped' % child.pid
     elif survivors:
@@ -483,6 +512,8 @@ def run_owned(label, args, env, timeout=None, capture=True, cwd=None, participan
         else:
             cause = 'finished'
         raise Undrained('%s %s, but %s; files they may use are kept' % (label, cause, problem)) from interrupted
+    if isinstance(interrupted, OSError):
+        raise SigningError('%s stopped: supervising it failed (%s)' % (label, interrupted.strerror or type(interrupted).__name__)) from interrupted
     if interrupted is not None:
         raise interrupted
     if not exited:
@@ -491,12 +522,33 @@ def run_owned(label, args, env, timeout=None, capture=True, cwd=None, participan
     return code, output.decode(errors='replace')
 
 
+def _refuse(child, entry, recorded, label, participant, error):
+    """Ends a child whose gate was never opened, withdraws its records and raises 'was not started'."""
+    # No go-ahead byte was written: nothing but the waiting first process ran.
+    _UNREAPED.append(child)
+    UNDRAINED.append(entry)
+    try:
+        os.kill(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    child.wait()
+    UNDRAINED.remove(entry)
+    _UNREAPED.remove(child)
+    for stream in (child.stdout, child.stderr):
+        if stream:
+            stream.close()
+    for done in recorded:
+        withdraw_use(done, child.pid)
+    raise SigningError('%s was not started: its use of %s could not be recorded (%s)'
+                       % (label, participant.label, error.strerror if isinstance(error, OSError) else error)) from error
+
+
 def run(label, args, redact=(), check=True, timeout=None):
     """Run a tool; on failure report label and its redacted output, never args."""
     timeout = timeout or DEADLINE
     code, out = run_owned(label, args, clean_environment(os.environ, KNOWN_VALUES), timeout=timeout, participants=list(USING))
     for value in redact:
-        if value:
+        if value.strip():  # whitespace alone reveals nothing, and replacing it would garble the output
             out = out.replace(value, '***')
     if check and code != 0:
         tail = '\n'.join(out.strip().splitlines()[-6:])
@@ -864,10 +916,30 @@ def unlist(keychain):
     return []
 
 
+def inputs(environ):
+    """Whether any signing input is set at all, and the values setup uses.
+
+    Any variable that exists and is not empty counts as configuring signing,
+    so a value that turns out unusable fails setup instead of building ad hoc.
+    The passwords are opaque and kept byte for byte, spaces included (a
+    certificate exported with a password that begins or ends with a space
+    imports only with exactly that password); one is missing only when
+    unset or empty. Only formats that define their own whitespace are
+    normalized: the .p12's base64 ignores all whitespace, and an Apple ID (an
+    email address) cannot begin or end with whitespace, so a pasted newline
+    there is dropped. Either one is missing when nothing else is left.
+    """
+    raw = {name: environ.get(name, '') for name in SECRETS}
+    values = dict(raw)
+    values['MACOS_SIGNING_CERTIFICATE_P12'] = ''.join(raw['MACOS_SIGNING_CERTIFICATE_P12'].split())
+    values['MACOS_NOTARY_APPLE_ID'] = raw['MACOS_NOTARY_APPLE_ID'].strip()
+    return any(raw.values()), values
+
+
 def setup(root=ROOT):
-    values = {name: os.environ.get(name, '').strip() for name in SECRETS}
+    configured, values = inputs(os.environ)
     team = declared_team(root)
-    if not team and not any(values.values()):
+    if not team and not configured:
         print('macOS signing is not configured: building ad hoc, as before.')
         write_output({'mode': 'adhoc'})
         return
@@ -877,9 +949,9 @@ def setup(root=ROOT):
                            % (', '.join(missing), ', '.join(SECRETS)))
     require_hosted_runner()
     # Every tool's environment is refused if one of these values sits under another name.
-    KNOWN_VALUES[:] = [values[name] for name in SECRETS] + [''.join(values['MACOS_SIGNING_CERTIFICATE_P12'].split())]
+    KNOWN_VALUES[:] = [os.environ[name] for name in SECRETS] + [values[name] for name in SECRETS]
     try:
-        p12 = base64.b64decode(''.join(values['MACOS_SIGNING_CERTIFICATE_P12'].split()), validate=True)
+        p12 = base64.b64decode(values['MACOS_SIGNING_CERTIFICATE_P12'], validate=True)
     except (binascii.Error, ValueError):
         raise SigningError('MACOS_SIGNING_CERTIFICATE_P12 is not base64 of a .p12 file')
     if not p12:

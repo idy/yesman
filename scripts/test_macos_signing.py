@@ -208,6 +208,9 @@ def setup_cases(temporary):
         'no-notary-apple-id': (TEAM, full_inputs(MACOS_NOTARY_APPLE_ID=None)),
         'no-certificate-password': (TEAM, full_inputs(MACOS_SIGNING_CERTIFICATE_PASSWORD=None)),
         'blank-certificate': (TEAM, full_inputs(MACOS_SIGNING_CERTIFICATE_P12='  \n')),
+        'blank-apple-id': (TEAM, full_inputs(MACOS_NOTARY_APPLE_ID=' \n')),
+        # A set variable configures signing, even one holding only whitespace: never a silent ad-hoc build.
+        'whitespace-password-only': ('', {'MACOS_NOTARY_PASSWORD': '  '}),
     }
     for name, (team, inputs) in partial.items():
         fixture = Fixture(temporary, 'partial-' + name, good_identity(), team=team)
@@ -746,6 +749,132 @@ def use_record_cases(temporary):
     record('borrowed-directory-changed-build-not-started')
 
 
+def admitted_tool(fixture, effect, seconds):
+    """A stand-in go that reports its PID and config once running, then stays for seconds."""
+    (fixture.bin / 'go').write_text(
+        '#!%s\nimport json, os, pathlib, sys, time\nconfig = json.loads((pathlib.Path(sys.argv[-1]) / "mygo.json").read_text())\n'
+        'pathlib.Path(%r).write_text(json.dumps({"pid": os.getpid(), "key": config["updates"]["privateKey"]}))\ntime.sleep(%s)\n'
+        % (sys.executable, str(effect), seconds))
+    (fixture.bin / 'go').chmod(0o755)
+
+
+# Raises once from os.close of the gate's release end, after the real close and once the tool runs.
+CLOSE_INTERRUPTED = (
+    'import errno, pathlib, time\n'
+    'written, closing, released = m.os.write, m.os.close, []\n'
+    'def write(fd, data):\n'
+    '    count = written(fd, data)\n'
+    '    if data == b"1":\n'
+    '        released.append(fd)\n'
+    '    return count\n'
+    'def close(fd):\n'
+    '    closing(fd)\n'
+    '    if released and fd == released[0]:\n'
+    '        released.clear()\n'
+    '        end = time.monotonic() + 5\n'
+    '        while not pathlib.Path(EFFECT).exists() and time.monotonic() < end:\n'
+    '            time.sleep(0.01)\n'
+    '        raise InterruptedError(errno.EINTR, "injected close failure after the gate opened")\n'
+    'm.os.write, m.os.close = write, close\n')
+
+
+def admission_cases(temporary):
+    """R5 review: once the gate may have let a tool through, any error stops it, or keeps its files as undrained."""
+    for case, injected, seconds in (
+        ('gate-close-interrupted', CLOSE_INTERRUPTED, 30),
+        ('gate-close-interrupted-unconfirmed', CLOSE_INTERRUPTED + UNKNOWN + DENIED, 30),
+        ('stop-fails', 'def failing(pgid):\n    raise RuntimeError("injected stop failure")\nm.stop_group = failing\n', 0),
+    ):
+        fixture, state = prepared(temporary, 'admitted-' + case)
+        [folder] = fixture.folders()
+        effect = fixture.dir / 'effect'
+        admitted_tool(fixture, effect, seconds)
+        code = ('import sys; sys.argv = ["b", "--platform", "darwin/arm64", "--system", "macOS", "--signing-mode", "developer-id", '
+                '"--signing-identity", %r]; sys.path.insert(0, %r)\nimport macos_signing as m, release_build as b\nEFFECT = %r\n%s%sb.main()\n') % (
+            SHA, str(fixture.source / 'scripts'), str(effect), SHORT, injected)
+        env = fixture.env({'MYGO_UPDATER_PRIVATE_KEY': UPDATER_KEY})
+        env['SIGNING_STATE'] = state
+        with open(fixture.dir / 'launcher.log', 'w+') as log:  # not a pipe: a kept tool holds it
+            process = subprocess.run([sys.executable, '-c', code], env=env, cwd=fixture.source, stdout=log, stderr=log, timeout=60)
+            log.seek(0)
+            output = log.read()
+        observed = json.loads(effect.read_text())
+        pid, key = observed['pid'], pathlib.Path(observed['key'])
+        kept = sorted(fixture.runner_temp.glob('yesman-release-*')) + sorted((fixture.source / 'build').glob('.release-config-*'))
+        assert process.returncode == 1, output
+        if case == 'gate-close-interrupted':
+            # Stopped and reaped like any interrupted tool; only then are its files removed.
+            assert 'supervising it failed' in output and gone(pid, 1), output
+            assert kept == [] and not use_records(folder), (kept, output)
+            assert fixture.signing('cleanup', state=state).returncode == 0
+            assert_clean(fixture)
+        else:
+            # Not confirmed stopped: the key, config and borrowed keychain stay, recorded, until it is.
+            assert '--remove-retained' in output and key.read_text().strip() == UPDATER_KEY and len(kept) == 2, output
+            assert use_records(folder) and all(use_records(k) for k in kept)
+            if case != 'stop-fails':
+                assert alive(pid)
+                before = snapshot(folder)
+                cleanup = fixture.signing('cleanup', state=state)
+                assert cleanup.returncode == 1 and 'still running' in cleanup.stderr and snapshot(folder) == before, cleanup.stderr
+                assert alive(pid), 'cleanup signals nothing'
+                os.killpg(pid, signal.SIGKILL)  # the fixture's own group
+            assert gone(pid)
+            assert fixture.signing('cleanup', state=state).returncode == 0
+            process = subprocess.run([sys.executable, str(fixture.source / 'scripts/release_build.py'), '--remove-retained', *map(str, kept)],
+                                     env=fixture.env(), capture_output=True, text=True, timeout=60)
+            assert process.returncode == 0 and not any(os.path.lexists(k) for k in kept), process.stderr
+            assert_clean(fixture)
+        record('admitted-tool-error-stops-or-keeps', variant=case)
+
+
+def password_cases(temporary):
+    """R5 review: passwords reach security and notarytool byte for byte; only base64 and the Apple ID are normalized."""
+    for case, certificate, notary in (
+        ('leading-space', ' fixture certificate password', ' fixture notary password'),
+        ('trailing-space', 'fixture certificate password ', 'fixture notary password\n'),
+        ('tabs', '\tfixture\tcertificate\t', '\tfixture-notary\t'),
+        ('all-whitespace', '   ', ' \t '),
+        ('unicode', 'f\u00efxture c\u00e9rtificate\u00a0', '\u3000fixture notary'),
+    ):
+        fixture = Fixture(temporary, 'password-' + case, good_identity())
+        inputs = full_inputs(MACOS_SIGNING_CERTIFICATE_PASSWORD=certificate, MACOS_NOTARY_PASSWORD=notary,
+                             MACOS_NOTARY_APPLE_ID='\n%s\n' % SENTINELS['MACOS_NOTARY_APPLE_ID'])
+        process = fixture.signing('setup', inputs=inputs)
+        assert process.returncode == 0, process.stderr
+        [imported] = [c['args'] for c in fixture.calls('security') if c['args'][:1] == ['import']]
+        [stored] = [c['args'] for c in fixture.calls('xcrun') if c['args'][:2] == ['notarytool', 'store-credentials']]
+        assert imported[imported.index('-P') + 1] == certificate, 'certificate password changed'
+        assert stored[stored.index('--password') + 1] == notary, 'notary password changed'
+        assert stored[stored.index('--apple-id') + 1] == SENTINELS['MACOS_NOTARY_APPLE_ID'], 'the Apple ID is trimmed'
+        for value in (certificate, notary):
+            assert not value.strip() or value not in process.stdout + process.stderr + fixture.output.read_text(), 'password printed'
+        assert fixture.signing('cleanup', state=fixture.outputs()['state']).returncode == 0
+        assert_clean(fixture)
+        record('passwords-kept-exactly', variant=case)
+
+
+def replacement_cases(temporary):
+    """R5 review: the launcher removes only the directories it made, through their held descriptors."""
+    for target in ('private', 'project'):
+        fixture = Fixture(temporary, 'replaced-' + target, {})
+        moved, unknown = fixture.dir / 'moved-away', b'not this run\'s'
+        (fixture.bin / 'go').write_text(
+            '#!%s\nimport json, pathlib, sys\nproject = pathlib.Path(sys.argv[-1])\n'
+            'config = json.loads((project / "mygo.json").read_text())\nprivate = pathlib.Path(config["updates"]["privateKey"]).parent\n'
+            'victim = %s\nvictim.rename(%r)\nvictim.mkdir(mode=0o700)\n(victim / "unknown").write_bytes(%r)\nprint(victim)\n'
+            % (sys.executable, target, str(moved), unknown))
+        (fixture.bin / 'go').chmod(0o755)
+        process = launch(fixture, ['--platform', 'linux/amd64', '--system', 'Linux'])
+        victim = pathlib.Path(process.stdout.splitlines()[-1])
+        assert process.returncode == 1 and 'was replaced while the build ran' in process.stderr, process.stderr
+        assert (victim / 'unknown').read_bytes() == unknown and sorted(p.name for p in victim.iterdir()) == ['unknown']
+        assert moved.is_dir() and list(moved.iterdir()) == [], 'this run\'s directory, key included, is emptied where it went'
+        others = [p for p in list(fixture.runner_temp.iterdir()) + list((fixture.source / 'build').iterdir()) if p.resolve() != victim.resolve()]
+        assert others == [], others
+        record('launcher-removes-only-its-directories', variant=target)
+
+
 def signatures(**changes):
     """Stand-in signatures of a correct two-architecture build, with per-key changes."""
     dr = 'identifier "dev.idy.yesman" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = %s' % TEAM
@@ -982,9 +1111,10 @@ def workflow_cases(temporary):
             for use in re.findall(r'(?:secrets|vars)\.(?:MACOS_[A-Z0-9_]+|MYGO_UPDATER_PRIVATE_KEY)', line):
                 seen.setdefault((workflow.name, step), set()).add(use)
     allowed[('release.yml', 'Build and upload')] = {'secrets.MYGO_UPDATER_PRIVATE_KEY'}
-    # v0.1.39's dispatch-only naming upgrade gate signs private QA successors
-    # with the existing key (scripts/prepare-upgrade-qa.py); it never
-    # publishes and gets no Apple secret. It is that gate's design, unchanged here.
+    # Inherited from v0.1.39, not confined: its dispatch-only upgrade gate signs
+    # private QA successors with the existing key (scripts/prepare-upgrade-qa.py),
+    # whose own build still passes the key to its compilers. That gap is tracked
+    # and fixed separately; this only records where the key is placed today.
     allowed[('application-upgrade-draft.yml', 'Package and sign private QA successors')] = {'secrets.MYGO_UPDATER_PRIVATE_KEY'}
     assert seen == allowed, seen
     record('signing-inputs-confined', steps=sorted('%s: %s' % key for key in seen))
@@ -1334,6 +1464,9 @@ def main():
         ownership_cases(temporary)
         lifecycle_cases(temporary)
         retention_cases(temporary)
+        admission_cases(temporary)
+        password_cases(temporary)
+        replacement_cases(temporary)
         verify_cases(temporary)
         launcher_cases(temporary)
         workflow_cases(temporary)
