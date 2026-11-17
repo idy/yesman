@@ -127,26 +127,49 @@ func (s *Server) changeTopics(_ context.Context, c caller, r *http.Request) (any
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
-	var (
-		t   yesmen.Topic
-		err error
-	)
 	if req.Create != nil && hasSubmissionSource(req.Create.Sources) || req.Patch != nil && hasSubmissionSource(req.Patch.AddSources) {
 		return nil, errTopicSubmissionSource
 	}
+	var commit func(y yesmen.Yesman) (yesmen.Topic, error)
 	switch {
 	case req.Create != nil && req.Patch == nil && req.ID == "":
 		in := *req.Create
 		in.Sources = s.resolveSources(c, in.Sources)
-		t, err = s.Yesmen.CreateTopic(c.yesman.Name, c.yesman.HiredAt, yesmen.TopicByLead, in)
+		commit = func(y yesmen.Yesman) (yesmen.Topic, error) {
+			t, _, err := s.Yesmen.CreateTopicIn(y, yesmen.TopicByLead, in)
+			return t, err
+		}
 	case req.Patch != nil && req.Create == nil && req.ID != "":
 		p := *req.Patch
 		p.AddSources = s.resolveSources(c, p.AddSources)
-		t, err = s.Yesmen.PatchTopic(c.yesman.Name, c.yesman.HiredAt, yesmen.TopicByLead, req.ID, p)
+		commit = func(y yesmen.Yesman) (yesmen.Topic, error) {
+			t, _, err := s.Yesmen.PatchTopicIn(y, yesmen.TopicByLead, req.ID, p)
+			return t, err
+		}
 	default:
 		return nil, errors.New("give create, or id with patch")
 	}
-	if err != nil {
+	// As a board change: the lead of a dismissed yesman cannot write into a
+	// new one of the same name, nor can a lead stopped or restarted after its
+	// request arrived. The change is written within the workspace's Use and
+	// the caller's process's admission, so it lands before that process
+	// finishes stopping, or not at all.
+	var t yesmen.Topic
+	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+		if !y.HiredAt.Equal(c.yesman.HiredAt) {
+			return agent.ErrRetired
+		}
+		release, err := s.Agents.BeginChange(c.token, y)
+		if err != nil {
+			return err
+		}
+		defer release()
+		if s.beforeTopicChange != nil {
+			s.beforeTopicChange()
+		}
+		t, err = commit(y)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	if s.TopicsChanged != nil {

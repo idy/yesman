@@ -63,6 +63,9 @@ type Server struct {
 	// beforeBoardChange, set only by tests, runs once a board change was
 	// admitted, just before it is written.
 	beforeBoardChange func()
+	// beforeTopicChange, set only by tests, runs as beforeBoardChange does,
+	// once a topic change from an agent was admitted.
+	beforeTopicChange func()
 }
 
 // Start listens on a loopback port and serves in the background.

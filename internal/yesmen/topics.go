@@ -362,7 +362,12 @@ func (s *Store) useTopics(name string, since time.Time, fn func(Yesman, *topicsF
 	if !since.IsZero() && !y.HiredAt.Equal(since) {
 		return fmt.Errorf("%s was replaced by a new yesman of the same name; reopen it", name)
 	}
-	unlock := s.lockTopics(name)
+	return s.inTopics(y, fn)
+}
+
+// inTopics runs fn with the topics of y, a workspace its caller holds in Use.
+func (s *Store) inTopics(y Yesman, fn func(Yesman, *topicsFile) (bool, error)) error {
+	unlock := s.lockTopics(y.Name)
 	defer unlock()
 	meta, err := s.openTopicsDir(y, false)
 	if err != nil {
@@ -682,12 +687,24 @@ func (s *Store) CreateTopic(name string, since time.Time, by string, in TopicInp
 // CreateTopicSources is CreateTopic that also says which source each of
 // in.Sources became: its new ID, or the ID of the equal source it repeats.
 func (s *Store) CreateTopicSources(name string, since time.Time, by string, in TopicInput) (Topic, []string, error) {
+	return s.createTopic(func(fn func(Yesman, *topicsFile) (bool, error)) error { return s.useTopics(name, since, fn) }, by, in)
+}
+
+// CreateTopicIn is CreateTopicSources for y, a workspace the caller already
+// holds in Use (Store.Use), so that it can admit the change within it: the
+// lead's API commits a change only while the process that asked for it
+// still holds its credential.
+func (s *Store) CreateTopicIn(y Yesman, by string, in TopicInput) (Topic, []string, error) {
+	return s.createTopic(func(fn func(Yesman, *topicsFile) (bool, error)) error { return s.inTopics(y, fn) }, by, in)
+}
+
+func (s *Store) createTopic(use func(func(Yesman, *topicsFile) (bool, error)) error, by string, in TopicInput) (Topic, []string, error) {
 	if err := validActor(by); err != nil {
 		return Topic{}, nil, err
 	}
 	var out Topic
 	var added []string
-	err := s.useTopics(name, since, func(_ Yesman, f *topicsFile) (bool, error) {
+	err := use(func(_ Yesman, f *topicsFile) (bool, error) {
 		if len(f.Topics) >= maxTopics {
 			return false, fmt.Errorf("a yesman keeps at most %d topics", maxTopics)
 		}
@@ -746,6 +763,16 @@ func (s *Store) PatchTopic(name string, since time.Time, by, id string, p TopicP
 // PatchTopicSources is PatchTopic that also says which source each of
 // p.AddSources became: its new ID, or the ID of the equal source it repeats.
 func (s *Store) PatchTopicSources(name string, since time.Time, by, id string, p TopicPatch) (Topic, []string, error) {
+	return s.patchTopic(func(fn func(Yesman, *topicsFile) (bool, error)) error { return s.useTopics(name, since, fn) }, by, id, p)
+}
+
+// PatchTopicIn is PatchTopicSources for y, a workspace the caller already
+// holds in Use; see CreateTopicIn.
+func (s *Store) PatchTopicIn(y Yesman, by, id string, p TopicPatch) (Topic, []string, error) {
+	return s.patchTopic(func(fn func(Yesman, *topicsFile) (bool, error)) error { return s.inTopics(y, fn) }, by, id, p)
+}
+
+func (s *Store) patchTopic(use func(func(Yesman, *topicsFile) (bool, error)) error, by, id string, p TopicPatch) (Topic, []string, error) {
 	if err := validActor(by); err != nil {
 		return Topic{}, nil, err
 	}
@@ -755,7 +782,7 @@ func (s *Store) PatchTopicSources(name string, since time.Time, by, id string, p
 	}
 	var out Topic
 	var added []string
-	err := s.useTopics(name, since, func(_ Yesman, f *topicsFile) (bool, error) {
+	err := use(func(_ Yesman, f *topicsFile) (bool, error) {
 		i := f.index(id)
 		if i < 0 {
 			return false, fmt.Errorf("no topic %s", id)

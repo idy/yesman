@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ type topicFixture struct {
 	alice   yesmen.Yesman
 	bob     yesmen.Yesman
 	changed []string
+	traces  string
 }
 
 func newTopicFixture(t *testing.T) *topicFixture {
@@ -37,20 +39,51 @@ func newTopicFixture(t *testing.T) *topicFixture {
 	if err := store.AddWorker("alice", yesmen.Worker{Name: "helper", StartedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	m := agent.New(agent.Config{Yesmen: store})
+	// A lead's change is admitted only while its process holds its
+	// credential, so leads run as the scripted pi of rpcChild.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	traces := filepath.Join(dir, "traces")
+	if err := os.Mkdir(traces, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := agent.New(agent.Config{Pi: exe, Extension: filepath.Join(dir, "none.ts"), Yesmen: store,
+		Env: []string{"YESMAN_TEST_RPC_CHILD=" + traces, "GORACE=atexit_sleep_ms=0"}})
 	t.Cleanup(m.StopAll)
-	f := &topicFixture{alice: alice, bob: bob}
+	f := &topicFixture{alice: alice, bob: bob, traces: traces}
 	f.s = &Server{Yesmen: store, Agents: m, TopicsChanged: func(y string) { f.changed = append(f.changed, y) }}
 	return f
 }
 
+// caller is an agent of y as the API sees it; a lead's process is started
+// and the caller carries its credential.
 func (f *topicFixture) caller(t *testing.T, y yesmen.Yesman, name string) caller {
 	t.Helper()
-	i, err := f.s.Agents.Get(agent.ID(y.Name, name))
+	id := agent.ID(y.Name, name)
+	token := ""
+	if name == yesmen.LeadName {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := f.s.Agents.Prompt(ctx, id, "hello"); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(filepath.Join(f.traces, strings.ReplaceAll(id, "/", "_")+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var tr childTrace
+		if err := json.Unmarshal(raw, &tr); err != nil || tr.Token == "" {
+			t.Fatalf("no credential: %v %s", err, raw)
+		}
+		token = tr.Token
+	}
+	i, err := f.s.Agents.Get(id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return caller{agent: i, yesman: y}
+	return caller{agent: i, yesman: y, token: token}
 }
 
 func (f *topicFixture) post(t *testing.T, c caller, body string) (any, error) {
