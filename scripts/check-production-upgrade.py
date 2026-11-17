@@ -5,6 +5,7 @@ Controlled plans explicitly describe production-source rebuilds, not releases.
 No recorder or updater implementation is loaded into an application. Drive only
 existing public Yesman CheckForUpdates/Update/RestartToUpdate APIs and WEB_DIR.
 """
+import collections
 import contextlib
 import ctypes
 import hashlib
@@ -36,6 +37,25 @@ def wait(fn,message,timeout=90):
         time.sleep(.15)
     raise AssertionError(message)
 
+# Diagnostics only (t205): what a failing hop leaves behind. A bounded journal
+# of commands, reports and update requests, small sanitized fields only: no
+# headers, full URLs, page contents, settings or process memory.
+JOURNAL=400
+def clip(value,n=300):
+    return value if value is None or isinstance(value,(bool,int,float)) else str(value)[:n]
+def summary(report):
+    """The part of a page report that says how an update went."""
+    if not isinstance(report,dict):return {'invalid':clip(report)}
+    update=report.get('update') if isinstance(report.get('update'),dict) else {}
+    about=report.get('about') if isinstance(report.get('about'),dict) else {}
+    errors=report.get('errors') if isinstance(report.get('errors'),list) else []
+    out={'page':clip(report.get('page'),40),'version':clip(about.get('version'),40),
+         'update':{k:clip(update.get(k)) for k in ('state','version','error','checkError','checkedAt','progress') if k in update},
+         'errors':len(errors),'firstErrors':[clip(e) for e in errors[:3]]}
+    for k in ('error','method'):
+        if k in report:out[k]=clip(report[k])
+    return out
+
 def find(exe):
     if sys.platform=='win32':return naming.windows_pids(exe)
     if sys.platform=='linux':
@@ -64,6 +84,7 @@ class Existing:
 class Feed:
     def __init__(self,plan,mode):
         self.plan,self.mode=plan,mode;self.target=0;self.command=None;self.serial=0;self.latest=None;self.lock=threading.Lock();self.requests=[]
+        self.journal=collections.deque(maxlen=JOURNAL);self.started=time.monotonic();self.served=set();self.reports=0;self.last=None
         self.files={}
         for s in plan['Stages']:
             m=json.loads(pathlib.Path(s['Manifest']).read_text(encoding='utf-8'))
@@ -72,9 +93,12 @@ class Feed:
         # Deltas are written beside plan.json, not under each build directory.
         base=pathlib.Path(plan['_path']).parent
         for p in base.glob('*.delta'):self.files[p.name]=p
+    def note(self,kind,**fields):
+        self.journal.append({'t':round(time.monotonic()-self.started,3),'utc':time.strftime('%H:%M:%S',time.gmtime())+'.%03dZ'%(time.time()%1*1000),'kind':kind,**fields})
     def send(self,op):
         with self.lock:
             self.serial+=1;self.command={'id':self.serial,'op':op,'page':self.latest['page'] if self.latest else None}
+            self.note('command-published',id=self.serial,op=op,target=self.target,page=clip(self.command['page'],40))
     def serve(self,host,port,tls_context=None):
         feed=self
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -83,7 +107,8 @@ class Feed:
                 host,separator,port=self.path.partition(':')
                 allowed={'github.com','api.github.com','objects.githubusercontent.com','release-assets.githubusercontent.com'}
                 if tls_context is None or not separator or port!='443' or host not in allowed:
-                    self.send_error(403,'Network outside upgrade inputs disabled');return
+                    feed.note('connect-refused',host=clip(host,80));self.send_error(403,'Network outside upgrade inputs disabled');return
+                feed.note('connect',host=host)
                 self.send_response(200);self.end_headers()
                 connection=tls_context.wrap_socket(self.connection,server_side=True)
                 try:Handler(connection,self.client_address,self.server)
@@ -95,28 +120,46 @@ class Feed:
             def do_OPTIONS(self):
                 self.send_response(204);self.send_header('Access-Control-Allow-Origin','*');self.send_header('Access-Control-Allow-Methods','GET,POST,OPTIONS');self.send_header('Access-Control-Allow-Headers','Content-Type');self.send_header('Access-Control-Allow-Private-Network','true');self.end_headers()
             def do_POST(self):
+                if self.path=='/awaiting':
+                    # The page has waited a while on one call: which one.
+                    size=int(self.headers.get('Content-Length','0'));assert size<4096
+                    value=json.loads(self.rfile.read(size))
+                    feed.note('page-awaiting',page=clip(value.get('page'),40),method=clip(value.get('method'),40),ms=clip(value.get('ms')))
+                    self.respond(200,length=2);self.wfile.write(b'{}');return
                 if self.path!='/report':self.send_error(404);return
                 size=int(self.headers.get('Content-Length','0'));assert size<131072
                 value=json.loads(self.rfile.read(size))
-                with feed.lock:feed.latest=value
+                with feed.lock:
+                    feed.latest=value;feed.reports+=1;seen=summary(value)
+                    if seen!=feed.last:feed.note('report',seq=feed.reports,**seen);feed.last=seen
                 self.respond(200,length=2);self.wfile.write(b'{}')
             def do_GET(self):
                 path=urllib.parse.urlparse(self.path).path
                 if path=='/command':
-                    with feed.lock:value=feed.command
+                    with feed.lock:
+                        value=feed.command
+                        if value and value['id'] not in feed.served:
+                            feed.served.add(value['id']);feed.note('command-served',id=value['id'],op=value['op'])
                     body=json.dumps(value).encode();self.respond(200,length=len(body));self.wfile.write(body);return
                 name=urllib.parse.unquote(path.rsplit('/',1)[-1])
                 with feed.lock:
                     target=feed.target
                     feed.requests.append({'stage':target,'file':name})
-                if name=='update-'+feed.plan['Target']+'.json':
-                    m=json.loads(pathlib.Path(feed.plan['Stages'][target]['Manifest']).read_text(encoding='utf-8'))
-                    if feed.mode=='archive':m['deltas']=[]
-                    body=json.dumps(m).encode();self.respond(200,length=len(body));self.wfile.write(body);return
-                file=feed.files.get(name)
-                if file is None:self.send_error(404);return
-                self.respond(200,'application/octet-stream',file.stat().st_size)
-                with file.open('rb') as body:shutil.copyfileobj(body,self.wfile)
+                feed.note('request',stage=target,file=clip(name,120))
+                try:
+                    if name=='update-'+feed.plan['Target']+'.json':
+                        m=json.loads(pathlib.Path(feed.plan['Stages'][target]['Manifest']).read_text(encoding='utf-8'))
+                        if feed.mode=='archive':m['deltas']=[]
+                        body=json.dumps(m).encode();self.respond(200,length=len(body));self.wfile.write(body)
+                        feed.note('request-end',stage=target,file=clip(name,120),status=200,bytes=len(body),version=clip(m.get('version'),40));return
+                    file=feed.files.get(name)
+                    if file is None:feed.note('request-end',stage=target,file=clip(name,120),status=404);self.send_error(404);return
+                    self.respond(200,'application/octet-stream',file.stat().st_size)
+                    with file.open('rb') as body:shutil.copyfileobj(body,self.wfile)
+                    feed.note('request-end',stage=target,file=clip(name,120),status=200,bytes=file.stat().st_size)
+                except Exception as e:
+                    feed.note('request-error',stage=target,file=clip(name,120),error=clip(type(e).__name__+': '+str(e)))
+                    raise
         server=http.server.ThreadingHTTPServer((host,port),Handler)
         threading.Thread(target=server.serve_forever,daemon=True).start();return server
 
@@ -124,7 +167,13 @@ DRIVER=r'''<script>
 window.addEventListener('DOMContentLoaded',async()=>{
  const id=String(Math.random()),seen=new Set(),errors=[];
  window.addEventListener('error',e=>errors.push(e.message));
- const call=(method,...args)=>window.mygo.call('Yesman.'+method,...args);
+ let awaiting=null;
+ const call=(method,...args)=>{
+  awaiting=method;const at=Date.now();
+  const slow=setTimeout(()=>fetch(ENDPOINT+'/awaiting',{method:'POST',body:JSON.stringify({page:id,method,ms:Date.now()-at})}).catch(()=>{}),2000);
+  // A rejected call stays named for the catch below.
+  return window.mygo.call('Yesman.'+method,...args).then(v=>{clearTimeout(slow);awaiting=null;return v},e=>{clearTimeout(slow);throw e});
+ };
  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
  try {
   const end=Date.now()+45000;while(!document.querySelector('#settings-button')){if(Date.now()>end)throw Error('page not ready');await sleep(50)}
@@ -139,8 +188,51 @@ window.addEventListener('DOMContentLoaded',async()=>{
    const value={page:id,about:await call('About'),state:await call('State'),settings:await call('Settings'),update:await call('Update'),localStorage:localStorage.getItem('yesman.upgrade-sentinel'),visibility:document.visibilityState,errors};
    await fetch(ENDPOINT+'/report',{method:'POST',body:JSON.stringify(value)});await sleep(250);
   }
- }catch(e){await fetch(ENDPOINT+'/report',{method:'POST',body:JSON.stringify({error:String(e),errors})})}
+ }catch(e){await fetch(ENDPOINT+'/report',{method:'POST',body:JSON.stringify({error:String(e),errors,method:awaiting})})}
 });</script>'''
+
+class OnFailure:
+    """Calls fn when its block raises; never replaces that exception."""
+    def __init__(self,fn):self.fn=fn
+    def __enter__(self):return self
+    def __exit__(self,typ,value,tb):
+        if typ is not None:
+            try:self.fn()
+            except Exception as e:print('failure snapshot failed: '+clip(type(e).__name__+': '+str(e)),flush=True)
+        return False
+
+def failure_snapshot(target,feed,proof,process,guard,install,executable,plan):
+    """Writes, bounded, what a failed mode leaves, never raising: the journal,
+    the last report and command, the tracked process, the guard and the
+    installation's top-level names, sizes and main image hashes."""
+    out={'progress':proof.get('progress'),'completed':proof.get('completed',[])}
+    try:
+        with feed.lock:
+            out['command']=feed.command;out['target']=feed.target;out['reports']=feed.reports
+            out['latest']=summary(feed.latest) if feed.latest is not None else None
+            out['requests']=list(feed.requests)[-50:];out['journal']=list(feed.journal)
+        out['guardHeld']=guard is not None
+        if process is not None:
+            out['process']={'pid':getattr(process,'pid',None),'exit':process.poll()}
+        if install is not None and install.exists():
+            entries=[]
+            for p in sorted(install.iterdir(),key=lambda p:p.name)[:200]:
+                e={'name':p.name,'dir':p.is_dir()}
+                if p.is_file():e['size']=p.stat().st_size
+                if p.is_dir() and ('.update-' in p.name or '.old-' in p.name):
+                    e['children']=sorted(c.name for c in list(p.iterdir())[:50])
+                entries.append(e)
+            out['install']=entries
+            images={}
+            if executable is not None:
+                for index in range(len(plan['Stages'])):
+                    exe=executable(index)
+                    if exe.is_file():images[str(index)]={'name':exe.name,'size':exe.stat().st_size,'sha256':sha(exe),'running':find(exe)}
+            out['images']=images
+    except Exception as e:
+        out['snapshotError']=clip(type(e).__name__+': '+str(e))
+    try:target.write_text(json.dumps(out,indent=2))
+    except Exception as e:print('could not write '+str(target)+': '+clip(str(e)),flush=True)
 
 def main():
     with contextlib.ExitStack() as stack:
@@ -171,9 +263,13 @@ def run(stack):
         proof['controlledTransportCAFingerprint']=fingerprint
     for mode in ('archive','delta'):
         feed=Feed(plan,mode);url=urllib.parse.urlparse(plan['Feed']);server=feed.serve(url.hostname,url.port,tls_context)
-        process=None;guard=None
+        process=None;guard=None;install=None;executable=None
         try:
-            with tempfile.TemporaryDirectory(prefix='Real upgrade '+mode+' ',dir=os.environ['RUNNER_TEMP'],ignore_cleanup_errors=True) as directory:
+            # A failure is recorded on its way out of the directory, before its
+            # removal and before the finally below releases the guard or stops
+            # the app.
+            failed=lambda:failure_snapshot(evidence/(mode+'-failure.json'),feed,proof,process,guard,install,executable,plan)
+            with tempfile.TemporaryDirectory(prefix='Real upgrade '+mode+' ',dir=os.environ['RUNNER_TEMP'],ignore_cleanup_errors=True) as directory,OnFailure(failed):
                 root=pathlib.Path(directory);install=root/'Application install with spaces';install.mkdir()
                 data=root/'user data';data.mkdir();active=root/'active web';active.mkdir();token=uuid.uuid4().hex
                 sentinels={data/'retained/workspace/.yesman/sessions/lead/session.jsonl':b'synthetic session sentinel',data/'secrets/vault-sentinel.keep':b'synthetic vault sentinel',data/'retained/workspace/source.txt':b'synthetic workspace sentinel'}
@@ -212,6 +308,9 @@ def run(stack):
                     else:assert '"'+plan['Stages'][index]['mainName']+'"' in info['windows'],info
                     assert sha(executable(index))==plan['Stages'][index]['binarySHA256']
                     for p,b in sentinels.items():assert p.read_bytes()==b,p
+                    # Kept at once: a later hop's failure does not lose it.
+                    proof.setdefault('completed',[]).append({'mode':mode,'stage':index,'version':value['about']['version'],'pid':ids[0],'binarySHA256':sha(executable(index))})
+                    (evidence/'production-upgrade.json').write_text(json.dumps(proof,indent=2))
                     return {'stage':index,'version':value['about']['version'],'pid':ids[0],'native':info,'bridge':value,'binarySHA256':sha(executable(index))}
                 def update(index):
                     progress('requesting update '+str(index))
@@ -288,7 +387,7 @@ def run(stack):
                 process.terminate()
                 try:process.wait(timeout=10)
                 except subprocess.TimeoutExpired:process.kill();process.wait(timeout=10)
-            if 'install' in locals() and install.exists():install.chmod(0o755)
+            if install is not None and install.exists():install.chmod(0o755)
             if 'root' in locals():shutil.rmtree(root,ignore_errors=True)
             server.shutdown();server.server_close()
             (evidence/'production-upgrade.json').write_text(json.dumps(proof,indent=2))

@@ -42,6 +42,24 @@ initial direct child and the final real legacy bindings CLI have observable exit
 codes. The separate packaged naming jobs verify direct normal exits. Windows
 uses process handles for actual child exit status.
 
+A failing mode leaves diagnostics only; they change no assertion, timeout,
+failure point or success condition. `production-upgrade.json` keeps each
+completed stage as soon as it is verified (`completed`), and the progress label
+is not an acknowledgement. A bounded journal records, with monotonic and UTC
+times, each published command and its first serving to the page, report
+changes (page, version, update state/version/error fields and error counts,
+not settings or contents), which bridge call a page waited on for two seconds
+or failed in, and each manifest/archive request with its stage, file name,
+status and bytes (host names only for CONNECT; no headers or URLs). On failure,
+`<mode>-failure.json` is written on the way out of the test directory, before
+the guard is released, the app stopped or the directory removed: the journal,
+last report summary, command, the last requests, the tracked process's PID and
+exit status, whether the guard is held, the installation's top-level names and
+sizes (with names inside its update/old directories) and the stage images' sizes,
+hashes and running PIDs. The snapshot never raises over the failure. Fixtures:
+`scripts/test-production-upgrade-diagnostics.py` and
+`scripts/production-upgrade-driver.test.mjs`.
+
 ## Final `.38 → .39` hard gate
 
 After `.38` is public and all six ordinary latest/download manifests serve `.38`,
