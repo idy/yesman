@@ -24,7 +24,7 @@ import (
 // asked or discussed with the lead, distilled into a short summary, the
 // conclusions the user confirmed and the questions still open. They live in
 // .yesman/topics.json, beside the board. Task status stays on the board,
-// task history in the task log and durable rules in Knowledge; a topic links
+// task history in Working Logs and durable rules in Knowledge; a topic links
 // to those instead of copying them.
 //
 // The file is bounded, read and written whole under the workspace's use lease

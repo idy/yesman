@@ -221,7 +221,7 @@ func TopicsContext(topics []yesmen.Topic, err error) string {
 	w("- Record a topic only for a reusable explanation, an important conclusion of a discussion, or an open question the user will come back to. Process notifications, worker reports, tool results and routine progress are not topics.\n")
 	w("- A conclusion is what the user agreed or decided. A suggestion they have not agreed to goes under open questions or the summary, never under conclusions.\n")
 	w("- Worker reports can be cited as sources (kind worker); they are not the user's questions.\n")
-	w("- Task status stays on the board, task history in the task log and durable rules in Knowledge: cite them (kind task, knowledge) instead of copying them into a topic.\n")
+	w("- Task status stays on the board, task history in Working Logs and durable rules in Knowledge: cite a task or a note (kind task, knowledge), or name the Working log record, instead of copying them into a topic.\n")
 	w("- A user message beginning with a line like \"[Topic tp3: title]\" was sent from that topic's page. Answer it in the conversation as usual; when the exchange settles something or raises a question worth keeping, update that topic.\n")
 	w("- Every change needs the topic's current revision. If it changed meanwhile (the user may be editing it), read it again and apply your change to the new version; never restore an older version over it.\n")
 	w("- Do not reconstruct topics from old conversations in bulk: add them as discussions happen.\n")

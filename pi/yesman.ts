@@ -565,7 +565,7 @@ export default function yesman(pi: ExtensionAPI) {
 		name: "yesman_topics",
 		label: "yesman: topics",
 		description:
-			"Read or keep this yesman's topics: the user's questions and discussions worth finding again, each with a summary, the conclusions the user confirmed, the questions still open and its sources. action list (default) lists them, read shows one, create adds one, update changes one at its current revision (only the fields given change; archive or restore it). A conclusion is only what the user agreed; put unconfirmed suggestions under questions or the summary. Not for task status (board), history (task log) or rules (Knowledge), and not for every notification or report.",
+			"Read or keep this yesman's topics: the user's questions and discussions worth finding again, each with a summary, the conclusions the user confirmed, the questions still open and its sources. action list (default) lists them, read shows one, create adds one, update changes one at its current revision (only the fields given change; archive or restore it). A conclusion is only what the user agreed; put unconfirmed suggestions under questions or the summary. Not for task status (board), history (Working Logs) or rules (Knowledge), and not for every notification or report.",
 		parameters: Type.Object({
 			action: Type.Optional(Type.String({ description: "list, read, create or update" })),
 			id: Type.Optional(Type.String({ description: "The topic's ID, such as tp3, for read and update" })),
