@@ -25,6 +25,7 @@ import (
 	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/restart"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/server"
 	"github.com/idy/yesman/internal/yesmen"
@@ -112,6 +113,7 @@ func main() {
 	a.setTheme = mygo.Theme.SetSource
 	a.chosenLocale, a.setLocale = mygo.App.ChosenLocale, mygo.App.SetLocale
 	a.updates = newUpdates()
+	a.restarts = newRestarts(restart.Open(restart.Path(h.Root)))
 	if a.settings.Appearance != "" {
 		mygo.Theme.SetSource(a.settings.Appearance) // before Run, so the window opens in it
 	}
@@ -193,6 +195,8 @@ func main() {
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		// A restart records the agents it cuts short before they stop.
+		a.restarts.beforeStop(a.agents.CloseForRestart)
 		a.stopGitHubAppSetup()
 		a.githubApp.Close()
 		if managedRuntime != nil {
@@ -200,12 +204,19 @@ func main() {
 		}
 		a.agents.StopAll()
 	})
+	mygo.App.OnQuitCanceled(a.restarts.canceled)
 	mygo.App.WhenReady(func() {
 		if err := mygo.App.Dock.SetIcon(appIcon); err != nil {
 			log.Print("dock icon: ", err)
 		}
 		a.setupTray()
 		a.updates.start()
+		if e2eReady != nil {
+			e2eReady(a) // builds tagged e2e only
+		}
+		// Only a restart of the app's own leaves a record: a plain start
+		// wakes no agent.
+		go a.restarts.resume(a.agents.Resume)
 		if os.Getenv("YESMAN_HIDDEN") == "" {
 			a.showWindow()
 		}
@@ -214,6 +225,9 @@ func main() {
 		log.Fatal(err)
 	}
 }
+
+// e2eReady drives end-to-end checks in builds tagged e2e; nil otherwise.
+var e2eReady func(*app)
 
 // findPi locates the pi executable: $YESMAN_PI, else pi on the PATH.
 func findPi() (string, error) {

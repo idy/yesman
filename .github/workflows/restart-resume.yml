@@ -1,0 +1,76 @@
+name: Restart and continue
+
+# Real app processes restart through MyGo's native Relaunch and the next one
+# resumes the interrupted agent once (scripts/check-restart-resume.py). It
+# runs the PR's code with a local fake pi, so it has no secrets.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restart-resume-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native restart (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    # A fresh hosted profile; the app runs under an identity of its own.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      CGO_ENABLED: ${{ startsWith(matrix.os, 'macos-') && '1' || '0' }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      CGO_CFLAGS: '-O2 -g -mmacosx-version-min=13.0'
+      RESTART_E2E_WAIT: '60'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Confirm a hosted runner
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: test "$RUNNER_ENVIRONMENT" = github-hosted
+      - name: Install Linux desktop runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 xvfb dbus-x11
+      - name: Build the e2e app and the fake pi
+        run: |
+          exe=""; [ "$RUNNER_OS" = Windows ] && exe=.exe
+          mkdir -p "$RUNNER_TEMP/bin"
+          go build -tags e2e -o "$RUNNER_TEMP/bin/yesman-e2e$exe" .
+          go build -o "$RUNNER_TEMP/bin/fakepi$exe" ./tools/restart-e2e/fakepi
+          echo "EXE=$exe" >> "$GITHUB_ENV"
+      - name: Restart resumes the interrupted lead once
+        run: |
+          run="python3 scripts/check-restart-resume.py"
+          [ "$RUNNER_OS" = Windows ] && run="python scripts/check-restart-resume.py"
+          [ "$RUNNER_OS" = Linux ] && run="xvfb-run -a dbus-run-session -- $run"
+          $run restart "$RUNNER_TEMP/bin/yesman-e2e$EXE" "$RUNNER_TEMP/bin/fakepi$EXE" "$RUNNER_TEMP/restart-evidence/restart"
+      - name: A plain Quit resumes nothing
+        run: |
+          run="python3 scripts/check-restart-resume.py"
+          [ "$RUNNER_OS" = Windows ] && run="python scripts/check-restart-resume.py"
+          [ "$RUNNER_OS" = Linux ] && run="xvfb-run -a dbus-run-session -- $run"
+          $run quit "$RUNNER_TEMP/bin/yesman-e2e$EXE" "$RUNNER_TEMP/bin/fakepi$EXE" "$RUNNER_TEMP/restart-evidence/quit"
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: restart-resume-${{ matrix.os }}
+          path: ${{ runner.temp }}/restart-evidence
+          if-no-files-found: error

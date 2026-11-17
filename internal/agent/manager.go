@@ -4,7 +4,8 @@
 // works in its yesman's workspace and keeps its session log under
 // .yesman/sessions/<name>. An agent's ID is "<yesman>/<name>"; the lead is
 // named "lead". Agents start when someone talks to them and resume their
-// latest session, so restarting the app loses at most a turn in progress.
+// latest session, so restarting the app loses at most a turn in progress;
+// after a restart from the app, Resume lets that turn's agent go on.
 package agent
 
 import (
@@ -1341,6 +1342,14 @@ func (m *Manager) handoffDone(a *agent) {
 func (m *Manager) reportToLead(a *agent, p *proc) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	report := m.finalMessage(ctx, p)
+	if m.tellLeadWithin(ctx, a, "report", reportText(a.info.Name, report, false)) == nil {
+		m.closeIfFinished(a, p, time.Now().UTC())
+	}
+}
+
+// finalMessage reads the last thing a worker said, for its report.
+func (m *Manager) finalMessage(ctx context.Context, p *proc) string {
 	report := "(no final message)"
 	if r, err := p.call(ctx, map[string]any{"type": "get_last_assistant_text"}); err != nil {
 		report = "(its final message could not be read: " + err.Error() + ")"
@@ -1353,9 +1362,16 @@ func (m *Manager) reportToLead(a *agent, p *proc) {
 			report = *data.Text
 		}
 	}
-	if m.tellLeadWithin(ctx, a, "report", fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report)) == nil {
-		m.closeIfFinished(a, p, time.Now().UTC())
+	return report
+}
+
+// reportText is a worker's report to its lead; again marks one sent again
+// after a restart cut its first delivery short.
+func reportText(name, report string, again bool) string {
+	if again {
+		report = "(Sent again: Yes Man restarted while this report was on its way to you, so you may already have it.)\n\n" + report
 	}
+	return fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", name, report)
 }
 
 // closeIfFinished ends a finished worker's process while it is idle with no
