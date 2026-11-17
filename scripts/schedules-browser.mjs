@@ -113,10 +113,10 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
     const T = (en, cn) => (zh ? cn : en);
     const shot = async (name) => { if (shots) await page.screenshot({ path: `${shots}/${engineName}-${lang}${dark ? '-dark' : ''}-${width}-${name}.png` }); };
 
-    // The info panel lists Tasks beside Knowledge and the task log.
+    // The info panel lists Tasks beside Knowledge, the working logs, Needs You and Topics.
     const info = page.locator('#yesman-info');
     await info.getByRole('button', { name: new RegExp(T('^Tasks', '^定时任务')) }).waitFor();
-    for (const name of [T('Knowledge', '知识'), T('Task log', '任务日志')]) await info.getByRole('button', { name: new RegExp(`^${name}`) }).waitFor();
+    for (const name of [T('Knowledge', '知识库'), T('Working Logs', '工作日志'), T('Needs You', '需要你'), T('Topics', '话题')]) await info.getByRole('button', { name: new RegExp(`^${name}`) }).waitFor();
     assert.match(await info.getByRole('button', { name: new RegExp(T('^Tasks', '^定时任务')) }).innerText(), new RegExp(T('None', '无')));
     // Keyboard: the Tasks entry opens with Enter.
     await info.getByRole('button', { name: new RegExp(T('^Tasks', '^定时任务')) }).focus();
