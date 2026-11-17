@@ -502,6 +502,125 @@ def lifecycle_cases(temporary):
         record('output-failure-cleans-up', write=ordinal)
 
 
+def stubborn_tool(fixture, tool, trigger, pidfile, parent_exits=False):
+    """A stand-in tool that, on trigger, starts a descendant ignoring TERM; it then sleeps, or exits at once."""
+    child = 'import os, pathlib, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(%r).write_text(str(os.getpid())); time.sleep(40)' % str(pidfile)
+    code = ('#!%s\nimport os, pathlib, subprocess, sys, time\nif %s:\n'
+            '    subprocess.Popen([%r, "-c", %r], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n'
+            '    while not pathlib.Path(%r).exists():\n        time.sleep(0.01)\n'
+            '    %s\n') % (sys.executable, trigger, sys.executable, child, str(pidfile), 'sys.exit(0)' if parent_exits else 'time.sleep(40)')
+    if tool != 'go':
+        code += 'os.execv(%r, [%r, %r, %r] + sys.argv[1:])\n' % (sys.executable, sys.executable, str(TOOLS), tool)
+    (fixture.bin / tool).write_text(code)
+    (fixture.bin / tool).chmod(0o755)
+
+
+def gone(pid, seconds=5):
+    end = time.monotonic() + seconds
+    while alive(pid) and time.monotonic() < end:
+        time.sleep(0.05)
+    return not alive(pid)
+
+
+# Run inside the process under test only: its group listing fails, and/or it may not signal groups.
+UNKNOWN = 'm.group_members = lambda pgid: None\n'
+DENIED = 'def denied(pgid, number):\n    raise PermissionError(1, "injected killpg failure")\nm.os.killpg = denied\n'
+SHORT = 'import signal\nm.GRACE = ((signal.SIGTERM, 0.3), (signal.SIGKILL, 0.3))\n'
+
+
+def retention_cases(temporary):
+    """R3: no path-reopening deletion; files kept while a process group is not confirmed stopped, removed once it is."""
+    # A keychain swapped in at the path after the last check is never deleted: no tool deletes by path.
+    for hook in ('names', 'set_search_list'):
+        fixture, state = prepared(temporary, 'keychain-swap-%s' % hook)
+        [folder] = fixture.folders()
+        moved = fixture.dir / 'moved-away'
+        code = ('import os, pathlib, sys\nsys.path.insert(0, %r)\nimport macos_signing as m\noriginal, calls = m.%s, [0]\n'
+                'def hooked(*args):\n    result = original(*args)\n    calls[0] += 1\n    if calls[0] == 1:\n'
+                '        folder = pathlib.Path(%r)\n        folder.rename(%r)\n        folder.mkdir(mode=0o700)\n'
+                '        (folder / m.KEYCHAIN).write_text("someone else\'s keychain")\n        (folder / "other").write_text("keep")\n    return result\n'
+                'm.%s = hooked\nsys.argv = ["m", "cleanup"]\nm.main()\n') % (str(fixture.source / 'scripts'), hook, str(folder), str(moved), hook)
+        env = fixture.env()
+        env['SIGNING_STATE'] = state
+        process = subprocess.run([sys.executable, '-c', code], env=env, capture_output=True, text=True, timeout=60)
+        assert process.returncode == 1, process.stderr
+        assert (folder / 'signing.keychain-db').read_text() == "someone else's keychain" and (folder / 'other').read_text() == 'keep'
+        assert moved.is_dir() and list(moved.iterdir()) == [], 'setup\'s own directory is emptied where it went'
+        assert not [c for c in fixture.calls('security') if c['args'][:1] == ['delete-keychain']]
+        assert fixture.search() == LOGIN
+        record('swapped-keychain-survives', hook=hook)
+
+    # Setup: a tool's descendant ignores TERM and its group cannot be signalled. The p12, keychain and
+    # directory stay, marked; the always-run cleanup refuses while the group lives and removes once it is empty.
+    fixture = Fixture(temporary, 'setup-undrained', good_identity())
+    pidfile = fixture.dir / 'child-pid'
+    stubborn_tool(fixture, 'security', 'sys.argv[1] == "import"', pidfile)
+    code = 'import sys; sys.argv = ["m", "setup"]; sys.path.insert(0, %r); import macos_signing as m\nm.DEADLINE = 2\n%s%sm.main()\n' % (
+        str(fixture.source / 'scripts'), SHORT, DENIED)
+    process = subprocess.run([sys.executable, '-c', code], env=fixture.env(full_inputs()), capture_output=True, text=True, timeout=60)
+    assert process.returncode == 1 and 'files they may use are kept' in process.stderr and 'Kept ' in process.stderr, process.stderr
+    [folder] = fixture.folders()
+    groups = json.loads((folder / 'retained.json').read_text())['groups']
+    assert alive(int(pidfile.read_text())) and (folder / 'identity.p12').is_file() and (folder / 'signing.keychain-db').is_file()
+    before = snapshot(folder)
+    state = fixture.outputs()['state']
+    process = fixture.signing('cleanup', state=state)
+    assert process.returncode == 1 and 'still running' in process.stderr and snapshot(folder) == before, process.stderr
+    for group in groups:
+        os.killpg(group, signal.SIGKILL)  # the fixture's own processes
+    assert gone(int(pidfile.read_text()))
+    process = fixture.signing('cleanup', state=state)
+    assert process.returncode == 0, process.stderr
+    assert_clean(fixture)
+    record('setup-undrained-kept-then-cleaned', groups=len(groups))
+
+    # The launcher: MyGo exits, leaving a descendant that ignores TERM. With the group unknown (and,
+    # in one case, not signallable) the key, token and config stay, marked; --remove-retained removes
+    # them only once the group is confirmed empty, signalling nothing.
+    for case, injected in (('unknown-and-denied', UNKNOWN + DENIED), ('unknown', UNKNOWN)):
+        fixture = Fixture(temporary, 'launch-undrained-' + case, {})
+        pidfile = fixture.dir / 'child-pid'
+        stubborn_tool(fixture, 'go', 'True', pidfile, parent_exits=True)
+        bystander = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+        code = ('import sys; sys.argv = ["b", "--platform", "linux/amd64", "--system", "Linux"]; sys.path.insert(0, %r)\n'
+                'import macos_signing as m, release_build as b\n%s%sb.main()\n') % (str(fixture.source / 'scripts'), SHORT, injected)
+        env = fixture.env({'MYGO_UPDATER_PRIVATE_KEY': UPDATER_KEY})
+        with open(fixture.dir / 'launcher.log', 'w+') as log:  # not a pipe: the descendant holds it
+            process = subprocess.run([sys.executable, '-c', code], env=env, cwd=fixture.source, stdout=log, stderr=log, timeout=60)
+            log.seek(0)
+            output = log.read()
+        kept = sorted(fixture.runner_temp.glob('yesman-release-*')) + sorted((fixture.source / 'build').glob('.release-config-*'))
+        assert process.returncode == 1 and 'could not tell' in output and '--remove-retained' in output, output
+        assert len(kept) == 2 and (kept[0] / 'updater.key').read_text().strip() == UPDATER_KEY and (kept[1] / 'mygo.json').is_file()
+        assert all((k / 'retained.json').is_file() for k in kept)
+        pid = int(pidfile.read_text())
+        if case == 'unknown-and-denied':
+            assert alive(pid)
+            process = subprocess.run([sys.executable, str(fixture.source / 'scripts/release_build.py'), '--remove-retained', *map(str, kept)],
+                                     env=fixture.env(), capture_output=True, text=True, timeout=60)
+            assert process.returncode == 1 and 'still running' in process.stderr and all(k.is_dir() for k in kept), process.stderr
+            assert alive(pid), 'removing kept files signals nothing'
+            os.kill(pid, signal.SIGKILL)  # the fixture's own process
+        assert gone(pid), 'with signals allowed the group was stopped; only its listing failed'
+        process = subprocess.run([sys.executable, str(fixture.source / 'scripts/release_build.py'), '--remove-retained', *map(str, kept)],
+                                 env=fixture.env(), capture_output=True, text=True, timeout=60)
+        assert process.returncode == 0 and not any(os.path.lexists(k) for k in kept), process.stderr
+        assert alive(bystander.pid), 'an unrelated group is never signalled'
+        bystander.kill()
+        bystander.wait()
+        record('launcher-undrained-kept-then-removed', injected=case)
+
+    # --remove-retained leaves alone a directory that no failed run kept.
+    fixture = Fixture(temporary, 'remove-retained-refuses', {})
+    other = fixture.runner_temp / 'yesman-release-other'
+    other.mkdir(mode=0o700)
+    (other / 'updater.key').write_text('not ours to remove')
+    process = subprocess.run([sys.executable, str(fixture.source / 'scripts/release_build.py'), '--remove-retained', str(other)],
+                             env=fixture.env(), capture_output=True, text=True, timeout=60)
+    assert process.returncode == 1 and (other / 'updater.key').is_file(), process.stderr
+    record('remove-retained-needs-marker')
+
+
 def signatures(**changes):
     """Stand-in signatures of a correct two-architecture build, with per-key changes."""
     dr = 'identifier "dev.idy.yesman" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = %s' % TEAM
@@ -1002,6 +1121,7 @@ def main():
         setup_cases(temporary)
         ownership_cases(temporary)
         lifecycle_cases(temporary)
+        retention_cases(temporary)
         verify_cases(temporary)
         launcher_cases(temporary)
         workflow_cases(temporary)

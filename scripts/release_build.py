@@ -29,12 +29,16 @@ plain `go tool mygo build` stays an ad-hoc build. The files are readable by
 this user while the step runs, as anything on the runner is; they are removed
 when it ends.
 
-MyGo runs as the leader of a process group of its own. When it fails, or a
-TERM/INT/HUP reaches the launcher, every process left in that group is
-stopped and waited for before the key, token and configuration are deleted;
-a process that cannot be stopped fails the step by name. Processes that leave
-the group (a new session) and a SIGKILL of the launcher are not covered; the
-files then stay until the disposable runner goes.
+MyGo runs as the leader of a process group of its own. When it ends, fails,
+or a TERM/INT/HUP reaches the launcher, every process left in that group is
+stopped and waited for before the key, token and configuration are deleted.
+When that cannot be confirmed (a survivor, or members that cannot be listed)
+the step fails and both directories are kept, each with a retained.json naming
+the group, rather than taken from processes that may still read them;
+`release_build.py --remove-retained DIR...` removes them once that group is
+confirmed empty, and the disposable runner goes with them otherwise. Processes
+that leave the group (a new session) and a SIGKILL of the launcher are not
+covered; the files then stay until the disposable runner goes.
 """
 import argparse
 import copy
@@ -48,7 +52,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from macos_signing import SigningError, clean_environment, install_signal_handlers, prepared, run_owned, shielded  # noqa: E402
+from macos_signing import (DIRECTORY, SigningError, clean_environment, drained, empty, install_signal_handlers, keep, names,  # noqa: E402
+                           prepared, retained_groups, run_owned, shielded, still_running)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Each key of mygo.json that the derived configuration knows how to carry.
@@ -164,21 +169,80 @@ def build(platforms, system, mode, identity, state, upload, root=ROOT):
             raise SigningError('mygo build failed (exit %d)' % code)
     finally:
         with shielded():
-            shutil.rmtree(private, ignore_errors=True)
-            if project:
-                shutil.rmtree(project, ignore_errors=True)
+            if drained():
+                shutil.rmtree(private, ignore_errors=True)
+                if project:
+                    shutil.rmtree(project, ignore_errors=True)
+            else:
+                kept = []
+                for folder in (private, project):
+                    if folder:
+                        try:
+                            fd = os.open(folder, DIRECTORY)
+                            try:
+                                keep(fd)
+                            finally:
+                                os.close(fd)
+                        except (OSError, SigningError) as error:  # kept all the same, only unmarked
+                            print('::error::Could not mark %s as kept: %s' % (folder, error), file=sys.stderr)
+                        kept.append(str(folder))
+                print('::error::Kept %s: processes MyGo started might still read them. Once they have stopped: '
+                      'python3 scripts/release_build.py --remove-retained %s' % (', '.join(kept), ' '.join(shlex.quote(k) for k in kept)),
+                      file=sys.stderr)
+
+
+def remove_retained(path):
+    """Removes a directory this launcher kept, once every process group its retained.json names is confirmed empty."""
+    path = pathlib.Path(os.path.abspath(path))
+    try:
+        parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK)
+    except OSError:
+        raise SigningError('%s is not a directory this launcher kept' % path)
+    try:
+        try:
+            held = os.open(path.name, DIRECTORY, dir_fd=parent)
+        except OSError:
+            raise SigningError('%s is not a directory this launcher kept' % path)
+        try:
+            info = os.fstat(held)
+            groups = retained_groups(held) if info.st_uid == os.getuid() and not info.st_mode & 0o077 else None
+            if not groups:
+                raise SigningError('%s is not a directory this launcher kept: leaving it alone' % path)
+            busy = still_running(groups)
+            if busy:
+                raise SigningError('Kept %s: %s' % (path, busy))
+            problems = empty(held)
+            if not problems and names(parent, path.name, held):
+                os.rmdir(path.name, dir_fd=parent)
+            elif not problems:
+                problems.append('it was replaced meanwhile; what replaced it was left alone')
+        finally:
+            os.close(held)
+    finally:
+        os.close(parent)
+    if problems:
+        raise SigningError('%s not fully removed: %s' % (path, '; '.join(problems)))
+    print('Removed', path)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--platform', required=True)
-    parser.add_argument('--system', required=True, choices=('macOS', 'Windows', 'Linux'))
+    parser.add_argument('--platform')
+    parser.add_argument('--system', choices=('macOS', 'Windows', 'Linux'))
     parser.add_argument('--signing-mode', default='')
     parser.add_argument('--signing-identity', default='')
     parser.add_argument('--upload', action='store_true')
+    parser.add_argument('--remove-retained', nargs='+', metavar='DIR', help='remove directories a failed run kept, once their processes have stopped')
     args = parser.parse_args()
+    if not args.remove_retained and not (args.platform and args.system):
+        parser.error('--platform and --system are required')
     install_signal_handlers()
     try:
+        if args.remove_retained:
+            with shielded():
+                for path in args.remove_retained:
+                    remove_retained(path)
+            return
         build(args.platform, args.system, args.signing_mode, args.signing_identity,
               os.environ.get('SIGNING_STATE', '').strip(), args.upload)
     except SigningError as error:

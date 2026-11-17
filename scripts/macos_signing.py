@@ -14,11 +14,14 @@ docs/macos-signing.md. Commands:
            profile, proves the identity, and writes a receipt of the
            directory as the step output `state`. Anything partial, invalid
            or failing fails: it never falls back to ad-hoc signing.
-  cleanup  Given that `state` (SIGNING_STATE), removes exactly that keychain,
-           its search-list entry and its directory, after checking that the
-           directory is still the one setup made (device, inode, owner and
-           the receipt's random nonce), through a descriptor of that
-           directory held until it is deleted. Without a state it does
+  cleanup  Given that `state` (SIGNING_STATE), removes that keychain's
+           search-list entry, then the keychain and its directory, after
+           checking that the directory is still the one setup made (device,
+           inode, owner and the receipt's random nonce), through a
+           descriptor of that directory held until it is deleted. No tool
+           that takes the keychain's path deletes anything. A directory
+           kept because processes might still use it (retained.json) is
+           removed only once they have all stopped. Without a state it does
            nothing.
   verify   After the build, requires both apps and disk images to carry the
            prepared identity's notarized, stapled signature, and both apps
@@ -33,9 +36,12 @@ tools take them without a terminal; error messages never include arguments.
 
 Every tool runs as the leader of a process group of its own (run_owned). On
 a timeout, a TERM/INT/HUP or any failure, the processes of that group are
-stopped and waited for before files are removed. Processes that leave the
-group (a new session or process group) and a SIGKILL of this script are
-outside that guarantee.
+stopped and waited for before files are removed. When that cannot be
+confirmed (a survivor, or members that cannot be listed), nothing those
+processes may use is deleted: the directory keeps a retained.json naming the
+group, the step fails, and a later cleanup removes it only after the group
+is confirmed empty. Processes that leave the group (a new session or process
+group) and a SIGKILL of this script are outside that guarantee.
 """
 import argparse
 import base64
@@ -47,6 +53,7 @@ import pathlib
 import re
 import secrets
 import select
+import shutil
 import signal
 import stat
 import subprocess
@@ -70,6 +77,7 @@ CODESIGN = '/usr/bin/codesign'
 PROFILE = 'yesman-release-notary'
 KEYCHAIN = 'signing.keychain-db'
 RECEIPT = 'receipt.json'
+RETAINED = 'retained.json'  # kept because processes of these groups might still use the directory
 RECEIPT_LIMIT = 4096  # bytes; the receipt holds one 64-hex nonce
 DEADLINE = 300  # seconds for any one tool; notarytool validates credentials online
 GRACE = ((signal.SIGTERM, 5.0), (signal.SIGKILL, 3.0))  # stopping a tool's process group
@@ -77,10 +85,24 @@ CAPTURE = 65536  # bytes kept of each captured stream: its end
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
 # Values setup must not let reach a child under another name (the four Apple inputs).
 KNOWN_VALUES = []
+# Process groups this process started and could not confirm stopped, and
+# their unreaped leaders: kept referenced so that nothing reaps them and the
+# group IDs stay this process's while it lives.
+UNDRAINED = []
+_UNREAPED = []
 
 
 class SigningError(Exception):
     """A failure whose message is safe to print: no secret, no argument list."""
+
+
+class Undrained(SigningError):
+    """A tool's process group could not be confirmed stopped: files it may use must stay."""
+
+
+def drained():
+    """Whether every process group this process started is confirmed stopped."""
+    return not UNDRAINED
 
 
 def clean_environment(environ, secret_values=()):
@@ -270,26 +292,35 @@ def run_owned(label, args, env, timeout=None, capture=True, cwd=None):
             watch.close()
     except BaseException as error:  # a signal, or watching failed
         interrupted = error
+    code = None
     with shielded():
         survivors = stop_group(child.pid)
-        try:
-            code = child.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            code, survivors = None, (survivors or []) + [child.pid]
+        if survivors == []:  # only then is the leader reaped
+            try:
+                code = child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                survivors = [child.pid]
+        if survivors != []:
+            _UNREAPED.append(child)
+            UNDRAINED.append({'label': label, 'group': child.pid})
         for tail in tails:
             tail.join(2)
     if survivors is None:
-        problem = 'could not tell whether the processes it started have stopped'
+        problem = 'could not tell whether the processes it started (group %d) have stopped' % child.pid
     elif survivors:
-        problem = 'processes it started are still running (%s)' % ', '.join(str(p) for p in sorted(set(survivors)))
+        problem = 'processes it started are still running (group %d: %s)' % (child.pid, ', '.join(str(p) for p in sorted(set(survivors))))
+    if problem:
+        if interrupted is not None:
+            cause = str(interrupted) if isinstance(interrupted, SigningError) else type(interrupted).__name__
+        elif not exited:
+            cause = 'did not finish within %d seconds' % timeout
+        else:
+            cause = 'finished'
+        raise Undrained('%s %s, but %s; files they may use are kept' % (label, cause, problem)) from interrupted
     if interrupted is not None:
-        if problem:
-            raise SigningError('%s; %s: %s' % (interrupted if isinstance(interrupted, SigningError) else type(interrupted).__name__, label, problem)) from interrupted
         raise interrupted
     if not exited:
-        raise SigningError('%s did not finish within %d seconds%s' % (label, timeout, ('; ' + problem) if problem else ''))
-    if problem:
-        raise SigningError('%s: %s' % (label, problem))
+        raise SigningError('%s did not finish within %d seconds' % (label, timeout))
     output = b''.join(bytes(tail.data) for tail in tails)
     return code, output.decode(errors='replace')
 
@@ -401,22 +432,24 @@ def parse_state(text):
     return folder, state
 
 
-def read_receipt(fd):
-    """The nonce in the receipt of the open directory fd, or None.
+def read_small(fd, name):
+    """The bytes of the small file name in the open directory fd, or None.
 
     Opened without blocking and without following links, then the open
-    descriptor itself must be a small regular file of ours with one link
-    (the 0700 directory already keeps others out),
-    read with an explicit bound: a FIFO, device, link, growing or replaced
-    receipt is refused at once and left as it is.
+    descriptor itself must be a regular file of ours, closed to others, with
+    one link and at most RECEIPT_LIMIT bytes, read with an explicit bound: a
+    FIFO, device, link, oversized or growing file is refused at once and
+    left as it is. What is read is the file that descriptor opened; a later
+    rename at that path does not change it.
     """
     try:
-        receipt = os.open(RECEIPT, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        receipt = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     except OSError:
         return None
     try:
         info = os.fstat(receipt)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_size > RECEIPT_LIMIT:
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1
+                or info.st_size > RECEIPT_LIMIT):
             return None
         data = b''
         while len(data) <= RECEIPT_LIMIT:
@@ -427,12 +460,67 @@ def read_receipt(fd):
         after = os.fstat(receipt)
         if len(data) != info.st_size or (after.st_size, after.st_mtime_ns) != (info.st_size, info.st_mtime_ns):
             return None
-        nonce = json.loads(data).get('nonce', '')
-        return nonce if isinstance(nonce, str) else None
-    except (OSError, ValueError, AttributeError):
+        return data
+    except OSError:
         return None
     finally:
         os.close(receipt)
+
+
+def read_receipt(fd):
+    """The nonce in the receipt of the open directory fd, or None."""
+    data = read_small(fd, RECEIPT)
+    try:
+        nonce = json.loads(data).get('nonce', '') if data is not None else None
+    except (ValueError, AttributeError):
+        return None
+    return nonce if isinstance(nonce, str) else None
+
+
+def retained_groups(fd):
+    """The process groups the retained.json of the open directory fd names; None without one."""
+    try:
+        os.stat(RETAINED, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise SigningError('Its %s cannot be read: leaving it alone' % RETAINED)
+    data = read_small(fd, RETAINED)
+    try:
+        groups = json.loads(data)['groups']
+        assert isinstance(groups, list) and groups and all(isinstance(g, int) and not isinstance(g, bool) and g > 1 for g in groups)
+    except Exception:
+        raise SigningError('Its %s cannot be read: leaving it alone' % RETAINED)
+    return groups
+
+
+def keep(fd):
+    """Records in the open directory fd the groups that might still use it (merged with any already named)."""
+    groups = sorted(set(retained_groups(fd) or []) | {entry['group'] for entry in UNDRAINED})
+    new = RETAINED + '.new'
+    try:
+        os.unlink(new, dir_fd=fd)
+    except FileNotFoundError:
+        pass
+    out = os.open(new, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+    with os.fdopen(out, 'w') as handle:
+        handle.write(json.dumps({'groups': groups}))
+    os.replace(new, RETAINED, src_dir_fd=fd, dst_dir_fd=fd)
+    return groups
+
+
+def still_running(groups):
+    """Why the processes of groups may still run, or None once every group is confirmed empty.
+
+    Never signals: these groups are no longer this process's to stop.
+    """
+    for group in groups:
+        members = group_members(group)
+        if members is None:
+            return 'could not tell whether the processes of group %d have stopped' % group
+        if members:
+            return 'processes of group %d are still running (%s)' % (group, ', '.join(str(p) for p in members))
+    return None
 
 
 def validate(fd, state):
@@ -518,13 +606,19 @@ def prepared(text):
 
 
 def remove(folder, state):
-    """Removes the keychain of folder, its search-list entry and folder, if setup made it.
+    """Removes the search-list entry of folder's keychain, then the keychain and folder, if setup made it.
 
     The directory is opened once, relative to its parent, and that
-    descriptor is what gets checked and emptied. Its entry is removed only
-    while the parent still names that descriptor's directory, with rmdir,
-    which cannot remove a directory holding anything. A directory moved
-    away is emptied where it is; whatever replaced it is left alone.
+    descriptor is what gets checked and emptied: the keychain file is
+    unlinked through it, never deleted by a tool that reopens its path
+    (security delete-keychain would delete whatever keychain the path then
+    names). Its entry is removed only while the parent still names that
+    descriptor's directory, with rmdir, which cannot remove a directory
+    holding anything. A directory moved away is emptied where it is;
+    whatever replaced it is left alone.
+
+    While processes this process started may still run, or those a
+    retained.json names are not confirmed stopped, nothing is deleted.
     """
     keychain = folder / KEYCHAIN
     problems = []
@@ -545,26 +639,35 @@ def remove(folder, state):
             if held is not None:
                 if not owned(folder, state) or not validate(held, state):
                     raise SigningError('%s is not the directory this setup made: leaving it alone' % folder)
-                try:
-                    present = stat.S_ISREG(os.stat(KEYCHAIN, dir_fd=held, follow_symlinks=False).st_mode)
-                except OSError:
-                    present = False
-                # security takes a path: only while the path still leads to the held directory.
-                if present and names(parent, folder.name, held):
-                    run('Deleting the signing keychain', ['security', 'delete-keychain', str(keychain)], check=False)
+                retain(held, folder)
+                groups = retained_groups(held)
+                busy = groups and still_running(groups)
+                if busy:
+                    raise SigningError('Kept %s: %s. Run the cleanup again once they have stopped' % (folder, busy))
+            elif not drained():
+                raise SigningError('Processes this step started may still run: nothing removed')
             try:
+                # Only the list of paths changes here; no keychain file is opened or deleted.
                 listed = search_list()
                 if any(same_file(p, keychain) for p in listed):
                     set_search_list([p for p in listed if not same_file(p, keychain)])
                     if any(same_file(p, keychain) for p in search_list()):
                         problems.append('the keychain is still in the search list')
+            except Undrained:
+                if held is not None:
+                    retain(held, folder)
+                raise
             except SigningError as error:
                 problems.append(str(error))
             if held is not None:
-                if not owned(folder, state) or not validate(held, state):  # checked again just before deleting
+                if not validate(held, state):  # checked again just before deleting
                     raise SigningError('%s changed during cleanup: leaving it alone' % folder)
+                retain(held, folder)
+                # The held directory is setup's wherever it now is; the path is
+                # only removed while it still leads there.
+                moved = not owned(folder, state)
                 problems += empty(held)
-                if names(parent, folder.name, held):
+                if not moved and names(parent, folder.name, held):
                     try:
                         os.rmdir(folder.name, dir_fd=parent)
                     except OSError as error:
@@ -578,6 +681,15 @@ def remove(folder, state):
                     os.close(fd)
     if problems:
         raise SigningError('Signing cleanup incomplete: ' + '; '.join(problems))
+
+
+def retain(fd, folder):
+    """When this process has a process group not confirmed stopped, marks the open directory fd kept and fails."""
+    if drained():
+        return
+    groups = keep(fd)
+    raise SigningError('Kept %s (%s names process groups %s that might still use it); run the cleanup again once they have stopped'
+                       % (folder, RETAINED, ', '.join(str(g) for g in groups)))
 
 
 def setup(root=ROOT):
@@ -628,7 +740,8 @@ def setup(root=ROOT):
                                                       '-P', values['MACOS_SIGNING_CERTIFICATE_PASSWORD'], '-T', CODESIGN], redact)
         finally:
             with shielded():
-                certificate.unlink()
+                if drained():  # else security import may still be reading it
+                    certificate.unlink()
         run('Allowing codesign to use the key', ['security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', password, str(keychain)], redact)
         # codesign, as MyGo runs it, finds identities through the search list.
         set_search_list([str(keychain)] + [p for p in previous if not same_file(p, keychain)])
@@ -649,14 +762,16 @@ def setup(root=ROOT):
         # Sign a scratch file as MyGo will sign the app, through the search
         # list, and let codesign evaluate Apple's Developer ID policy for
         # this team.
-        with tempfile.TemporaryDirectory(dir=folder) as scratch:
-            probe = pathlib.Path(scratch) / 'probe.txt'
-            probe.write_text('yesman signing preflight\n')
-            run('Signing a preflight file', ['codesign', '--force', '--sign', sha1, '--timestamp=none', str(probe)], redact)
-            run('Checking the Developer ID requirement', ['codesign', '--verify', '--strict', '-R=' + developer_id_requirement(team), str(probe)], redact)
-            _, described = run('Describing the preflight signature', ['codesign', '-d', '--verbose=2', str(probe)], redact)
-            if 'TeamIdentifier=%s\n' % team not in described + '\n':
-                raise SigningError('The preflight signature names another team')
+        # On a failure the scratch directory goes with the rest (remove).
+        scratch = pathlib.Path(tempfile.mkdtemp(dir=folder))
+        probe = scratch / 'probe.txt'
+        probe.write_text('yesman signing preflight\n')
+        run('Signing a preflight file', ['codesign', '--force', '--sign', sha1, '--timestamp=none', str(probe)], redact)
+        run('Checking the Developer ID requirement', ['codesign', '--verify', '--strict', '-R=' + developer_id_requirement(team), str(probe)], redact)
+        _, described = run('Describing the preflight signature', ['codesign', '-d', '--verbose=2', str(probe)], redact)
+        if 'TeamIdentifier=%s\n' % team not in described + '\n':
+            raise SigningError('The preflight signature names another team')
+        shutil.rmtree(scratch)
 
         run('Storing the notary credentials', ['xcrun', 'notarytool', 'store-credentials', PROFILE, '--apple-id', values['MACOS_NOTARY_APPLE_ID'],
                                                '--team-id', team, '--password', values['MACOS_NOTARY_PASSWORD'], '--keychain', str(keychain)], redact)
