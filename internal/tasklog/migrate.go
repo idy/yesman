@@ -284,14 +284,18 @@ func loadMarker(root *os.Root) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
+	return decodeMarker(b)
+}
+
+func decodeMarker(b []byte) (Manifest, error) {
 	var m Manifest
-	if err = json.Unmarshal(b, &m); err != nil {
+	if err := json.Unmarshal(b, &m); err != nil {
 		return m, err
 	}
 	if m.Version != 2 || !m.SourceIdentity.valid() || len(m.MigrationID) < 16 || len(m.SHA256) != 64 {
 		return m, errors.New("migration metadata cannot prove the prepared source generation; preserve original/recovery files and recover explicitly with its reviewed utility")
 	}
-	if _, err = hex.DecodeString(m.SHA256); err != nil {
+	if _, err := hex.DecodeString(m.SHA256); err != nil {
 		return m, err
 	}
 	// Derive destinations; metadata never supplies arbitrary paths.
@@ -366,6 +370,9 @@ func Run(workspace string, o Options) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("another migration holds the lock: %w", err)
 		}
 		defer unlock()
+		if err = admitInstallRecovery(root, o.Expect); err != nil {
+			return Manifest{}, err
+		}
 		if err = recoverInstall(root, o.Expect); err != nil {
 			return Manifest{}, err
 		}

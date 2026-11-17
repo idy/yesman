@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"regexp"
@@ -73,49 +72,86 @@ func saveIntent(root *os.Root, i installIntent) error {
 // validating a matching installation intent. All ordinary reads still reject
 // aliases. Parent/file types, identity, exact count and bytes are checked.
 func installedFile(root *os.Root, name string, i installIntent) (os.FileInfo, uint64, error) {
-	parent := path.Dir(name)
-	parts := strings.Split(parent, "/")
-	for n := range parts {
-		p := strings.Join(parts[:n+1], "/")
-		st, e := root.Lstat(p)
-		if e != nil {
-			return nil, 0, e
-		}
-		if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-			return nil, 0, fmt.Errorf("linked install parent: %s", p)
-		}
+	_, st, n, err := installedContents(root, name, i)
+	return st, n, err
+}
+
+// Consume the same verified descriptor, including held-parent validation and a
+// bounded read. Marker admission also uses these exact bytes before recovery.
+func installedContents(root *os.Root, name string, i installIntent) ([]byte, os.FileInfo, uint64, error) {
+	if i.Target == Marker && i.Bytes > 1<<20 {
+		return nil, nil, 0, errors.New("installation marker exceeds metadata byte limit")
 	}
-	st, err := root.Lstat(name)
+	f, err := openChecked(root, name, 2)
 	if err != nil {
-		return nil, 0, err
-	}
-	if !st.Mode().IsRegular() || st.Mode()&os.ModeSymlink != 0 {
-		return nil, 0, fmt.Errorf("invalid install file: %s", name)
-	}
-	f, err := root.Open(name)
-	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	defer f.Close()
-	actual, err := f.Stat()
+	st, err := f.Stat()
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
-	n, err := links(f)
+	if st.Size() != int64(i.Bytes) {
+		return nil, nil, 0, fmt.Errorf("changed install size: %s", name)
+	}
+	b, err := readOpened(f, int64(i.Bytes))
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
-	if !os.SameFile(st, actual) || n < 1 || n > 2 || actual.Size() != int64(i.Bytes) {
-		return nil, 0, fmt.Errorf("aliased or changed install file: %s", name)
-	}
-	b, err := io.ReadAll(io.LimitReader(f, int64(i.Bytes)+1))
+	n, err := links(f.File)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
 	if len(b) != i.Bytes || digest(b) != i.SHA256 {
-		return nil, 0, fmt.Errorf("install content mismatch: %s", name)
+		return nil, nil, 0, fmt.Errorf("install content mismatch: %s", name)
 	}
-	return actual, n, nil
+	return b, st, n, nil
+}
+
+// admitInstallRecovery is read-only. Never publish an output or consume its
+// intent before the persisted source generation and expected hash are admitted.
+// A marker may itself be pending installation: strict single-link loadMarker
+// cannot read that state, so admit only the exact registered pair and its bytes.
+func admitInstallRecovery(root *os.Root, expected string) error {
+	raw, err := read(root, installIntentPath, 4096)
+	pending := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	var i installIntent
+	if pending {
+		if err = json.Unmarshal(raw, &i); err != nil || !validInstall(i, expected) {
+			return errors.New("invalid or unrelated installation intent; preserve it and inspect recovery before retry (no file was removed)")
+		}
+	}
+	var m Manifest
+	if pending && i.Target == Marker {
+		tb, target, tn, te := installedContents(root, i.Target, i)
+		pb, temp, pn, pe := installedContents(root, i.Temporary, i)
+		switch {
+		case errors.Is(te, os.ErrNotExist) && pe == nil && pn == 1:
+			raw = pb
+		case te == nil && pe == nil && tn == 2 && pn == 2 && os.SameFile(target, temp):
+			raw = tb
+		case te == nil && tn == 1 && errors.Is(pe, os.ErrNotExist):
+			raw = tb
+		default:
+			return fmt.Errorf("marker installation conflicts with files; preserve both paths: target=%v temporary=%v", te, pe)
+		}
+		m, err = decodeMarker(raw)
+	} else {
+		m, err = loadMarker(root)
+		if !pending && errors.Is(err, os.ErrNotExist) {
+			return nil // Fresh migration, with no output installation to recover.
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if m.SHA256 != expected {
+		return errors.New("prepared source SHA256 differs from expected snapshot; no installation or retention recovery performed")
+	}
+	return nil
 }
 
 func recoverInstall(root *os.Root, expected string) error {
