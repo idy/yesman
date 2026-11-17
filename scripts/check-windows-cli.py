@@ -17,8 +17,67 @@ import tempfile
 import time
 
 OLD = '3d44faf7a547e5fb562312461da096f0dab73085'
+OLD_TREE = '23616a61be3cfef5219d0806f1e4b88acd81b3ff'
+OLD_FILES = {
+    'main.go': ('e556d9cb99c345e39f191e80efd43be94be55953', 578),
+    'launch_windows.go': ('c738f40539ba328f1276f47b02b5465e3d537b6d', 355),
+}
+OLD_REPOSITORY = 'https://github.com/idy/yesman.git'
 PAYLOAD = b'stdin\x00raw\r\nUnicode \xe4\xb8\xad\xe6\x96\x87; quotes " \\ $(not-a-shell)\n'
 STDERR = 'stderr: Unicode 中文; quotes "; slash \\\n'.encode()
+
+
+def historical_launcher(directory, repository=OLD_REPOSITORY, revision=OLD, tree=OLD_TREE, files=OLD_FILES):
+    """Fetch the pinned counterexample independently of checkout reachability.
+
+    Optional identities are for self-owned synthetic Git tests; the hosted CLI
+    path below always uses the literal historical defaults, never env/CLI refs.
+    Nothing is read from or fetched into the application checkout's Git store.
+    """
+    def require(ok, message):
+        if not ok:
+            raise RuntimeError(message)
+
+    require(not directory.exists(), 'Historical Git directory must be new')
+    require(re.fullmatch('[0-9a-f]{40}', revision) and re.fullmatch('[0-9a-f]{40}', tree), 'Historical identity must use full object IDs')
+    env = {k: v for k, v in os.environ.items() if k in (
+        'PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP')}
+    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_TERMINAL_PROMPT='0', GIT_NO_REPLACE_OBJECTS='1')
+
+    def git(*args):
+        return subprocess.check_output([
+            'git', '-c', 'credential.helper=', '-c', 'core.askPass=',
+            '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always',
+            '-c', 'protocol.file.allow=always', '-c', 'fetch.fsckObjects=true',
+            '--git-dir=' + str(directory), *args,
+        ], env=env, stderr=subprocess.PIPE, timeout=60)
+
+    git('init', '--bare', str(directory))
+    git('fetch', '--no-tags', '--depth=1', '--', repository, revision)
+    require(git('rev-parse', '--verify', 'FETCH_HEAD^{commit}').decode().strip() == revision, 'Historical fetch returned the wrong commit')
+
+    def object_bytes(oid, kind, maximum):
+        require(git('cat-file', '-t', oid).decode().strip() == kind, 'Historical object has the wrong type')
+        size = int(git('cat-file', '-s', oid))
+        require(0 < size <= maximum, 'Historical object exceeds its byte bound')
+        data = git('cat-file', kind, oid)
+        require(len(data) == size and hashlib.sha1(kind.encode() + b' ' + str(size).encode() + b'\x00' + data).hexdigest() == oid, 'Historical object hash differs')
+        return data
+
+    commit = object_bytes(revision, 'commit', 16384)
+    require(commit.split(b'\n', 1)[0] == b'tree ' + tree.encode(), 'Historical root tree differs')
+    object_bytes(tree, 'tree', 65536)
+    result = {}
+    for name, (oid, size) in files.items():
+        require(name in ('main.go', 'launch_windows.go') and re.fullmatch('[0-9a-f]{40}', oid) and 0 < size <= 16384, 'Invalid historical file identity')
+        path = 'tools/launcher/' + name
+        expected = '100644 blob ' + oid + '\t' + path + '\n'
+        require(git('ls-tree', '-r', tree, '--', path).decode() == expected, 'Historical file path/mode/blob differs: ' + name)
+        data = object_bytes(oid, 'blob', size)
+        require(len(data) == size, 'Historical file size differs: ' + name)
+        result[name] = data
+    return result
 
 
 def run(exe, env, cwd, args=()):
@@ -51,8 +110,10 @@ def main():
         old, new = temp/'old', temp/'new'
         old.mkdir();new.mkdir()
         hashes={}
+        sources=historical_launcher(temp/'historical.git')
+        proof['historicalSource']={'commit':OLD,'tree':OLD_TREE,'files':OLD_FILES}
         for name in ('main.go','launch_windows.go'):
-            data=subprocess.check_output(['git','show',OLD+':tools/launcher/'+name])
+            data=sources[name]
             (old/name).write_bytes(data);hashes[name]=hashlib.sha256(data).hexdigest()
         subprocess.run(['go','build','-ldflags','-H=windowsgui','-o',str(old/'yesman.exe'),str(old/'main.go'),str(old/'launch_windows.go')],check=True)
         subprocess.run(['go','build','-o',str(new/'Yes Man.exe'),'./tools/launcher/testdata/stdio'],check=True)
