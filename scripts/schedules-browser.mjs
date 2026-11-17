@@ -52,6 +52,14 @@ async function fixture() {
   };
 }
 
+// tasksCall makes a Tasks call as another window would, for the generation
+// of the yesman that is current: like the page, it names when it was hired.
+async function tasksCall(fx, method, name, ...rest) {
+  const state = await fx.post('/fixture/call', { method: 'State', args: [] });
+  const y = state.yesmen.find((x) => x.name === name);
+  return fx.post('/fixture/call', { method, args: [name, y.hiredAt, ...rest] });
+}
+
 // The bridge: Tasks, the board, the info panel and conversations go to the
 // actual Go service; the rest of the app answers with empty values.
 function bridge() {
@@ -191,7 +199,7 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
     await expand(plan);
     await plan.locator('.sched-run').first().getByText(/t1/).waitFor();
     const runCalls = await page.evaluate(() => window.calls.filter((c) => c[0] === 'RunSchedule'));
-    assert.equal(new Set(runCalls.map((c) => c[3])).size, 1, `one click, one request ID: ${JSON.stringify(runCalls)}`);
+    assert.equal(new Set(runCalls.map((c) => c[4])).size, 1, `one click, one request ID: ${JSON.stringify(runCalls)}`);
     let prompts = await fx.get('/fixture/prompts');
     assert.equal(prompts.length, 1, JSON.stringify(prompts));
     assert.equal(prompts[0].behavior, 'followUp');
@@ -277,9 +285,9 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
     // Save conflict keeps the input.
     await pane.locator('.sched-plan').first().getByRole('button', { name: T('Edit…', '编辑…') }).click();
     await dialog.locator('input[name="title"]').fill(T('Edited title', '改过的标题'));
-    const view = await fx.post('/fixture/call', { method: 'Schedules', args: ['alice'] });
+    const view = await tasksCall(fx, 'Schedules', 'alice');
     const p = view.plans[0];
-    await fx.post('/fixture/call', { method: 'SetScheduleEnabled', args: ['alice', p.id, !p.enabled, p.revision] });
+    await tasksCall(fx, 'SetScheduleEnabled', 'alice', p.id, !p.enabled, p.revision);
     await dialog.getByRole('button', { name: T('Save', '保存') }).click();
     await dialog.getByText(T(/changed since you opened it/, /已被修改/)).waitFor();
     assert.equal(await dialog.locator('input[name="title"]').inputValue(), T('Edited title', '改过的标题'));
@@ -291,7 +299,7 @@ async function run(engineName, engine, { lang = 'en', dark = false, width = 1280
 
     // Another yesman: a late answer for the first one does not show here.
     await page.evaluate(() => { window.hold.Schedules = new Promise((r) => { window.releaseSchedules = r; }); });
-    await fx.post('/fixture/call', { method: 'SaveSchedule', args: ['alice', { title: 'Late', instructions: 'x', schedule: { kind: 'daily', time: '10:00' }, timezone: 'UTC', enabled: false }] });
+    await tasksCall(fx, 'SaveSchedule', 'alice', { title: 'Late', instructions: 'x', schedule: { kind: 'daily', time: '10:00' }, timezone: 'UTC', enabled: false });
     await page.locator('#yesmen').getByText('鲍勃 Bob').click();
     await page.evaluate(() => { delete window.hold.Schedules; window.releaseSchedules(); });
     await pane.getByText(T('No scheduled tasks yet', '还没有定时任务')).waitFor();
@@ -370,7 +378,7 @@ async function focused(engineName, engine) {
     await page.goto(fx.url);
     return { context, page, pane: page.locator('#schedules'), dialog: page.locator('#schedule-dialog') };
   };
-  const plans = async () => (await fx.post('/fixture/call', { method: 'Schedules', args: ['alice'] })).plans;
+  const plans = async () => (await tasksCall(fx, 'Schedules', 'alice')).plans;
   const plan = async (id) => (await plans()).find((p) => p.id === id);
   // hold keeps the page's next call of method waiting until release().
   const hold = (page, method) => page.evaluate((m) => {
@@ -451,7 +459,7 @@ async function focused(engineName, engine) {
       await dialog.locator('.sched-saved').waitFor();
       p = await plan('s1');
       assert.equal(p.revision, 5);
-      await fx.post('/fixture/call', { method: 'SetScheduleEnabled', args: ['alice', 's1', true, p.revision] });
+      await tasksCall(fx, 'SetScheduleEnabled', 'alice', 's1', true, p.revision);
       await dialog.getByRole('button', { name: 'Save', exact: true }).click();
       await dialog.getByText(/changed since you opened it/).waitFor();
       assert.equal(await box.inputValue(), 'Third draft');
@@ -504,11 +512,11 @@ async function focused(engineName, engine) {
       // An archived plan, from its run's board task and from the
       // conversation: Archived opens on it, by its ID, and it stays
       // archived and off.
-      const made = await fx.post('/fixture/call', { method: 'SaveSchedule', args: ['alice', { title: 'Archived plan', instructions: 'Synthetic archived', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false }] });
+      const made = await tasksCall(fx, 'SaveSchedule', 'alice', { title: 'Archived plan', instructions: 'Synthetic archived', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false });
       const id = made.plan.id;
       // A click as the page makes it: its time, then random.
       const click = Date.now().toString(16).padStart(12, '0').slice(-12) + 'abababababab';
-      await fx.post('/fixture/call', { method: 'RunSchedule', args: ['alice', id, click, ''] });
+      await tasksCall(fx, 'RunSchedule', 'alice', id, click, '');
       let run;
       for (let n = 0; n < 100; n++) {
         run = (await plan(id)).runs[0];
@@ -516,7 +524,7 @@ async function focused(engineName, engine) {
         await new Promise((r) => setTimeout(r, 20));
       }
       assert.ok(run?.board, 'the run has a board task');
-      await fx.post('/fixture/call', { method: 'ArchiveSchedule', args: ['alice', id, made.plan.revision] });
+      await tasksCall(fx, 'ArchiveSchedule', 'alice', id, made.plan.revision);
       const archived = await plan(id);
       assert.equal(archived.state, 'archived');
 
@@ -602,7 +610,7 @@ async function focused(engineName, engine) {
       // set back since, is refused before anything is recorded; the next
       // click is a new one, not that click again. Once the clock is right,
       // a click runs.
-      const made = await fx.post('/fixture/call', { method: 'SaveSchedule', args: ['alice', { title: 'Clock check', instructions: 'Synthetic clock', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false }] });
+      const made = await tasksCall(fx, 'SaveSchedule', 'alice', { title: 'Clock check', instructions: 'Synthetic clock', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false });
       const id = made.plan.id;
       const before = (await fx.get('/fixture/prompts')).length;
       await fx.post('/fixture/clock', { add: '-48h' });
@@ -611,10 +619,10 @@ async function focused(engineName, engine) {
         await tasksEntry(page).click();
         const row = pane.locator(`[data-plan="alice/${id}"]`);
         const runButton = row.getByRole('button', { name: /^Run .* now$/ });
-        const calls = () => page.evaluate((p) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[2] === p).map((c) => c[3]), id);
+        const calls = () => page.evaluate((p) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[3] === p).map((c) => c[4]), id);
         for (const n of [1, 2]) {
           await runButton.click();
-          await page.waitForFunction(([p, k]) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[2] === p).length === k, [id, n]);
+          await page.waitForFunction(([p, k]) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[3] === p).length === k, [id, n]);
           await row.locator('[aria-busy="true"]').waitFor({ state: 'detached' });
         }
         const ids = await calls();
@@ -640,15 +648,15 @@ async function focused(engineName, engine) {
       // cancel sends nothing, a confirmation sends the missed run once
       // under its own name, and clicks meanwhile send nothing more. With
       // no run open, it runs at once.
-      const made = await fx.post('/fixture/call', { method: 'SaveSchedule', args: ['alice', { title: 'Overlap check', instructions: 'Synthetic overlap', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false }] });
+      const made = await tasksCall(fx, 'SaveSchedule', 'alice', { title: 'Overlap check', instructions: 'Synthetic overlap', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false });
       const id = made.plan.id;
       const click = Date.now().toString(16).padStart(12, '0').slice(-12) + 'cdcdcdcdcdcd';
-      await fx.post('/fixture/call', { method: 'RunSchedule', args: ['alice', id, click, ''] });
+      await tasksCall(fx, 'RunSchedule', 'alice', id, click, '');
       // Sent, and its board task still to do: the plan's last run is open.
       for (let n = 0; n < 200 && !(await plan(id)).open; n++) await new Promise((r) => setTimeout(r, 20));
       let p = await plan(id);
       assert.ok(p.open, `the manual run is open: ${JSON.stringify(p.runs.map((r) => [r.id, r.state, r.status]))}`);
-      await fx.post('/fixture/call', { method: 'SaveSchedule', args: ['alice', { ...p, schedule: { kind: 'interval', every: 15 }, enabled: true }] });
+      await tasksCall(fx, 'SaveSchedule', 'alice', { ...p, schedule: { kind: 'interval', every: 15 }, enabled: true });
       await fx.post('/fixture/clock', { add: '70m' });
       await fx.post('/fixture/tick');
       p = await plan(id);
@@ -665,7 +673,7 @@ async function focused(engineName, engine) {
       const catchUpButton = row.locator(`[data-key="alice/${missedRun.id}:catchup"]`);
       const runButton = row.locator(`[data-key="alice/${id}:run"]`);
       const dialog = page.locator('#confirm-dialog');
-      const calls = () => page.evaluate((plan) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[2] === plan).length, id);
+      const calls = () => page.evaluate((plan) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[3] === plan).length, id);
       const frames = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       // Run now asks, as before; so does the missed run's Run it now.
       for (const button of [runButton, catchUpButton]) {
@@ -689,13 +697,13 @@ async function focused(engineName, engine) {
       await catchUpButton.click();
       await page.locator('#confirm-dialog[open]').waitFor();
       await page.locator('#confirm-ok').click();
-      await page.waitForFunction((plan) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[2] === plan).length === 1, id);
+      await page.waitForFunction((plan) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[3] === plan).length === 1, id);
       for (const button of [catchUpButton, catchUpButton, runButton]) await button.evaluate((el) => el.click());
       await frames();
       assert.equal(await calls(), 1);
       assert.equal(await page.locator('#confirm-dialog[open]').count(), 0);
-      const sent = await page.evaluate((plan) => window.calls.find((c) => c[0] === 'RunSchedule' && c[2] === plan), id);
-      assert.equal(sent[4], missedRun.id, 'the missed run is the one caught up');
+      const sent = await page.evaluate((plan) => window.calls.find((c) => c[0] === 'RunSchedule' && c[3] === plan), id);
+      assert.equal(sent[5], missedRun.id, 'the missed run is the one caught up');
       await page.evaluate(() => { delete window.hold.RunSchedule; window.releaseRun(); });
       for (let n = 0; n < 200 && !(await plan(id)).runs.some((r) => r.id === `${missedRun.id}-c` && r.board); n++) await new Promise((r) => setTimeout(r, 20));
       p = await plan(id);
@@ -723,12 +731,66 @@ async function focused(engineName, engine) {
       await tasksEntry(page).click();
       await expand(row);
       await row.locator(`[data-key="alice/${next.id}:catchup"]`).click();
-      await page.waitForFunction((plan) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[2] === plan).length === 1, id);
+      await page.waitForFunction((plan) => window.calls.filter((c) => c[0] === 'RunSchedule' && c[3] === plan).length === 1, id);
       assert.equal(await page.locator('#confirm-dialog[open]').count(), 0, 'asked with no run open');
       for (let n = 0; n < 200 && (await sentFor()) < sentBefore + 1; n++) await new Promise((r) => setTimeout(r, 20));
       assert.equal(await sentFor(), sentBefore + 1);
       step('with no run open, a missed run is caught up at once');
       await context.close();
+    }
+
+    {
+      // R5-F4: a yesman dismissed and hired again under its name is another
+      // one. A window still showing the old one's plan changes and runs
+      // nothing of the new one's, though its plan has the same ID and
+      // revision; once the window hears of it, the old plan is gone, and an
+      // answer for the old one arriving late shows nowhere.
+      await fx.post('/fixture/rehire', { notify: true });
+      const old = await tasksCall(fx, 'SaveSchedule', 'alice', { title: 'Old generation plan', instructions: 'Synthetic old', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false });
+      const { context, page, pane } = await open();
+      try {
+        // The new alice's lead has not run: choose it, whatever the list
+        // shows first.
+        await page.locator('[data-agent="alice/lead"]').first().click();
+        await tasksEntry(page).click();
+        const row = pane.locator('.sched-plan', { hasText: 'Old generation plan' });
+        await row.waitFor();
+        const prompts = (await fx.get('/fixture/prompts')).length;
+        // Answers to Tasks reads wait from here: the old one's, and the
+        // new one's once the window has it.
+        await hold(page, 'Schedules');
+        // The archive names a dismissed workspace by the second it left.
+        await new Promise((r) => setTimeout(r, 1100));
+        await fx.post('/fixture/rehire', { notify: false });
+        const made = await tasksCall(fx, 'SaveSchedule', 'alice', { title: 'NEW GENERATION PLAN', instructions: 'Synthetic new', schedule: { kind: 'daily', time: '09:00' }, timezone: 'UTC', enabled: false });
+        assert.equal(made.plan.id, old.plan.id);
+        assert.equal(made.plan.revision, old.plan.revision);
+        await row.locator('.mds-switch-track').click();
+        await row.getByRole('button', { name: /^Run .* now$/ }).click();
+        await page.waitForFunction(() => ['SetScheduleEnabled', 'RunSchedule'].every((m) => window.calls.some((c) => c[0] === m)));
+        // Both refused: each said so to the user.
+        await page.getByText(/dismissed, maybe hired again/).first().waitFor();
+        let now = await plan(made.plan.id);
+        assert.equal(now.title, 'NEW GENERATION PLAN');
+        assert.equal(now.state, 'off', 'the old window turned the new plan on');
+        assert.equal(now.revision, made.plan.revision);
+        assert.equal(now.runs.length, 0, 'the old window ran the new plan');
+        assert.equal((await fx.get('/fixture/prompts')).length, prompts);
+        const since = (await fx.post('/fixture/call', { method: 'State', args: [] })).yesmen.find((y) => y.name === 'alice').hiredAt;
+        await fx.post('/fixture/changed');
+        await page.waitForFunction((at) => window.calls.some((c) => c[0] === 'Schedules' && c[2] === at), since);
+        await page.evaluate(() => window.release());
+        await pane.locator('.sched-plan', { hasText: 'NEW GENERATION PLAN' }).waitFor();
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+        assert.equal(await pane.locator('.sched-plan', { hasText: 'Old generation plan' }).count(), 0);
+        assert.equal(await pane.locator('.sched-notice[data-tone="error"]').count(), 0);
+        now = await plan(made.plan.id);
+        assert.equal(now.state, 'off');
+        assert.equal(now.revision, made.plan.revision);
+        step('a window of a yesman hired again under its name changes nothing of the new one');
+      } finally {
+        await context.close();
+      }
     }
     assert.deepEqual(errors, []);
   } finally {

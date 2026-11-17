@@ -30,8 +30,14 @@ func TestSchedulesAreTheLeadsAndDraftsStayOff(t *testing.T) {
 	svc := schedule.New(schedule.Config{Yesmen: store, Agents: m})
 	defer svc.Close()
 	s := &Server{Pool: pool.New(filepath.Join(tmp, "repos")), Yesmen: store, Agents: m, Schedules: svc}
-	// No agent runs here: the lead's credential is one this test says holds.
-	s.credentialCurrent = func(token, id string) bool { return token == "lead-credential" && id == "alice/lead" }
+	// No agent runs here: the lead's credential is one this test says is
+	// admitted. schedules_lifetime_test.go admits real processes.
+	s.beginChange = func(token string, y yesmen.Yesman) (func(), error) {
+		if token != "lead-credential" || y.Name != "alice" {
+			return nil, agent.ErrRetired
+		}
+		return func() {}, nil
+	}
 	lead := caller{agent: agent.Info{ID: "alice/lead", Yesman: "alice", Name: "lead", Role: agent.RoleLead}, yesman: y, token: "lead-credential"}
 	worker := caller{agent: agent.Info{ID: "alice/w1", Yesman: "alice", Name: "w1", Role: agent.RoleWorker}, yesman: y}
 	ctx := context.Background()

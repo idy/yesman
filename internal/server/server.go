@@ -64,15 +64,17 @@ type Server struct {
 	worktreeLocks map[string]*sync.Mutex // serialize lifecycle operations per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
-	// credentialCurrent replaces Agents.CredentialCurrent in tests that run
-	// no agent.
-	credentialCurrent func(token, id string) bool
+	// beginChange replaces Agents.BeginChange in tests that run no agent.
+	beginChange func(token string, y yesmen.Yesman) (func(), error)
 	// beforeBoardChange, set only by tests, runs once a board change was
 	// admitted, just before it is written.
 	beforeBoardChange func()
 	// beforeTopicChange, set only by tests, runs as beforeBoardChange does,
 	// once a topic change from an agent was admitted.
 	beforeTopicChange func()
+	// beforeScheduleChange, set only by tests, runs once a lead's draft was
+	// admitted, before the plan is saved.
+	beforeScheduleChange func()
 }
 
 // Start listens on a loopback port and serves in the background.
@@ -125,9 +127,10 @@ type Schedules interface {
 	LeadContext(yesman string) string
 	ListText(yesman string) (string, error)
 	// Draft saves a draft for the lead of the workspace generation since,
-	// while current still holds: it is asked with the workspace held, just
-	// before the plan is saved.
-	Draft(yesman string, since time.Time, current func() bool, in schedule.PlanInput) (schedule.Plan, error)
+	// once admit admitted it: admit is asked with the workspace held, before
+	// anything is changed, and what it admitted is held until the plan is
+	// saved.
+	Draft(yesman string, since time.Time, admit schedule.Admit, in schedule.PlanInput) (schedule.Plan, error)
 }
 
 // caller is the agent a request comes from, as it was when the request
@@ -143,11 +146,17 @@ type caller struct {
 
 // current reports whether the caller is still the running agent it
 // authenticated as.
-func (s *Server) current(c caller) bool {
-	if s.credentialCurrent != nil {
-		return s.credentialCurrent(c.token, c.agent.ID)
+// admit admits a change by caller c to its workspace, held as y: y must be
+// the generation c's request came from, and c's process must still run
+// there. Until release, that process cannot finish stopping.
+func (s *Server) admit(c caller, y yesmen.Yesman) (func(), error) {
+	if !y.HiredAt.Equal(c.yesman.HiredAt) {
+		return nil, agent.ErrRetired
 	}
-	return s.Agents.CredentialCurrent(c.token, c.agent.ID)
+	if s.beginChange != nil {
+		return s.beginChange(c.token, y)
+	}
+	return s.Agents.BeginChange(c.token, y)
 }
 
 type handlerFunc func(ctx context.Context, c caller, r *http.Request) (any, error)
@@ -665,8 +674,16 @@ func (s *Server) draftSchedule(_ context.Context, c caller, r *http.Request) (an
 		return nil, err
 	}
 	// The body arrived after authentication: the plan is saved only if the
-	// caller is still the lead of the same workspace generation.
-	p, err := s.Schedules.Draft(c.yesman.Name, c.yesman.HiredAt, func() bool { return s.current(c) }, schedule.PlanInput{
+	// caller is still the lead of the same workspace generation, and its
+	// process cannot finish stopping until the plan was saved.
+	admit := func(y yesmen.Yesman) (func(), error) {
+		release, err := s.admit(c, y)
+		if err == nil && s.beforeScheduleChange != nil {
+			s.beforeScheduleChange()
+		}
+		return release, err
+	}
+	p, err := s.Schedules.Draft(c.yesman.Name, c.yesman.HiredAt, admit, schedule.PlanInput{
 		Title: req.Title, Instructions: req.Instructions, Timezone: req.Timezone,
 		Schedule: schedule.Spec{Kind: req.Kind, Date: req.Date, Time: req.Time, Days: req.Days, Every: req.Every},
 	})

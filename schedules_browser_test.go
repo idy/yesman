@@ -201,6 +201,27 @@ func TestSchedulesBrowserBridge(t *testing.T) {
 		}
 		reply(w, b, err)
 	})
+	// The user dismisses alice and hires a yesman under the same name, as
+	// the app does. The window hears of it (changed) only when asked, so a
+	// test can act from a window that still shows the dismissed one.
+	mux.HandleFunc("POST /fixture/rehire", func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Notify bool }
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err == nil {
+			_, err = s.Dismiss("alice")
+		}
+		if err == nil {
+			_, err = a.yesmen.HireNamed("Alice", "")
+		}
+		if err == nil && req.Notify {
+			events.send("changed", true)
+		}
+		reply(w, nil, err)
+	})
+	mux.HandleFunc("POST /fixture/changed", func(w http.ResponseWriter, r *http.Request) {
+		events.send("changed", true)
+		reply(w, nil, nil)
+	})
 	mux.HandleFunc("POST /fixture/corrupt", func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ Yesman string }
 		err := json.NewDecoder(r.Body).Decode(&req)
@@ -256,25 +277,28 @@ func browserCall(ctx context.Context, s *service, method string, args []json.Raw
 		return json.Unmarshal(args[i], v)
 	}
 	var name, id, other, from string
+	var since time.Time
 	var revision int
 	var on bool
 	switch method {
 	case "State":
 		return s.State(ctx)
-	case "Board", "Schedules", "ScheduleSummary", "Info":
+	case "Board", "Info":
 		if err := arg(0, &name); err != nil {
 			return nil, err
 		}
-		switch method {
-		case "Board":
+		if method == "Board" {
 			return s.Board(name)
-		case "Schedules":
-			return s.Schedules(name)
-		case "ScheduleSummary":
-			return s.ScheduleSummary(name)
-		default:
-			return s.Info(ctx, name)
 		}
+		return s.Info(ctx, name)
+	case "Schedules", "ScheduleSummary":
+		if err := firstErr(arg(0, &name), arg(1, &since)); err != nil {
+			return nil, err
+		}
+		if method == "Schedules" {
+			return s.Schedules(name, since)
+		}
+		return s.ScheduleSummary(name, since)
 	case "Messages":
 		if err := arg(0, &id); err != nil {
 			return nil, err
@@ -285,33 +309,33 @@ func browserCall(ctx context.Context, s *service, method string, args []json.Raw
 		if err := arg(0, &name); err != nil {
 			return nil, err
 		}
-		if err := arg(1, &in); err != nil {
+		if err := firstErr(arg(1, &since), arg(2, &in)); err != nil {
 			return nil, err
 		}
-		return s.SaveSchedule(name, in)
+		return s.SaveSchedule(name, since, in)
 	case "SetScheduleEnabled":
-		if err := firstErr(arg(0, &name), arg(1, &id), arg(2, &on), arg(3, &revision)); err != nil {
+		if err := firstErr(arg(0, &name), arg(1, &since), arg(2, &id), arg(3, &on), arg(4, &revision)); err != nil {
 			return nil, err
 		}
-		return s.SetScheduleEnabled(name, id, on, revision)
+		return s.SetScheduleEnabled(name, since, id, on, revision)
 	case "ArchiveSchedule":
-		if err := firstErr(arg(0, &name), arg(1, &id), arg(2, &revision)); err != nil {
+		if err := firstErr(arg(0, &name), arg(1, &since), arg(2, &id), arg(3, &revision)); err != nil {
 			return nil, err
 		}
-		return nil, s.ArchiveSchedule(name, id, revision)
+		return nil, s.ArchiveSchedule(name, since, id, revision)
 	case "RunSchedule":
-		if err := firstErr(arg(0, &name), arg(1, &id), arg(2, &other), arg(3, &from)); err != nil {
+		if err := firstErr(arg(0, &name), arg(1, &since), arg(2, &id), arg(3, &other), arg(4, &from)); err != nil {
 			return nil, err
 		}
-		return s.RunSchedule(name, id, other, from)
+		return s.RunSchedule(name, since, id, other, from)
 	case "RetryScheduleRun", "CheckScheduleRun":
-		if err := firstErr(arg(0, &name), arg(1, &id)); err != nil {
+		if err := firstErr(arg(0, &name), arg(1, &since), arg(2, &id)); err != nil {
 			return nil, err
 		}
 		if method == "RetryScheduleRun" {
-			return s.RetryScheduleRun(name, id)
+			return s.RetryScheduleRun(name, since, id)
 		}
-		return s.CheckScheduleRun(name, id)
+		return s.CheckScheduleRun(name, since, id)
 	}
 	return nil, fmt.Errorf("unsupported fixture method %s", method)
 }

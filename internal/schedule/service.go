@@ -88,6 +88,10 @@ var (
 	// ErrStaleCaller: the lead that asked was stopped, restarted or
 	// dismissed, or the workspace replaced, before the change was made.
 	ErrStaleCaller = errors.New("the lead that asked is no longer running in this yesman, so nothing was saved")
+	// ErrReplaced: the yesman a request was made for was dismissed, and
+	// maybe hired again under its name, since its tasks were shown. Nothing
+	// was read, changed or sent.
+	ErrReplaced = errors.New("this yesman was dismissed, maybe hired again under the same name, since its tasks were shown: nothing was changed")
 )
 
 // Service runs the scheduled tasks of every workspace while the app runs.
@@ -394,7 +398,7 @@ func (s *Service) loadLocked(sp *space, y yesmen.Yesman) {
 		defer dir.Close()
 	}
 	st := stampIn(dir, "plans.json")
-	if sp.loaded && !sp.reread && st == sp.stamp && sp.err == nil && err == nil {
+	if sp.loaded && !sp.reread && st == sp.stamp && sp.err == nil && err == nil && sp.prunedErr == nil {
 		return
 	}
 	sp.reread = false
@@ -422,7 +426,8 @@ func (s *Service) loadLocked(sp *space, y yesmen.Yesman) {
 	}
 	// The runs are read once, and again while they could not be: until
 	// then nothing is claimed, saved or sent for the workspace.
-	if !sp.loaded || sp.runs == nil || sp.runsErr != nil {
+	readRuns := !sp.loaded || sp.runs == nil || sp.runsErr != nil
+	if readRuns {
 		runs, rerr := readRunsIn(dir)
 		if dirErr != nil {
 			rerr = dirErr
@@ -434,6 +439,11 @@ func (s *Service) loadLocked(sp *space, y yesmen.Yesman) {
 		}
 		sp.runs = runs
 		clear(sp.checked)
+	}
+	// What pruning removed is read with the runs, and again, alone, while
+	// it could not be: a file repaired since is used without a restart.
+	// Until then nothing is pruned and no manual run is admitted.
+	if readRuns || sp.prunedErr != nil {
 		var data []byte
 		perr := dirErr
 		if dir != nil && perr == nil {
@@ -756,11 +766,14 @@ func (s *Service) tickSpace(listed yesmen.Yesman) time.Time {
 	if sp.retired.Load() {
 		return time.Time{}
 	}
-	board, boardErr := s.cfg.Yesmen.Board(y.Name)
-	tasks := boardTasks(board, boardErr)
 	now := s.now()
 
 	sp.mu.Lock()
+	// The board is read with the runs held: a run records its task only
+	// after adding it, so a board read before a run changed never misses
+	// the task of a run seen here, and never counts it removed or closed.
+	board, boardErr := s.cfg.Yesmen.Board(y.Name)
+	tasks := boardTasks(board, boardErr)
 	s.loadLocked(sp, y)
 	if sp.err == nil && s.syncBoardsLocked(sp, y) {
 		board, boardErr = s.cfg.Yesmen.Board(y.Name)
@@ -1048,7 +1061,9 @@ func (s *Service) followBoardLocked(sp *space, y yesmen.Yesman, tasks map[string
 	changed := false
 	for _, id := range sortedIDs(sp.runs) {
 		r := sp.runs[id]
-		if !r.fired() || r.Board == "" || r.Outcome != nil && r.Outcome.Removed {
+		// A run recorded removed is followed again if its task is back on
+		// the board, restored there: its task is open again.
+		if !r.fired() || r.Board == "" {
 			continue
 		}
 		var outcome Outcome
@@ -1494,6 +1509,11 @@ func applyReceipt(r *Run, attemptID string, d *agent.Delivery, reason string) bo
 	before, state, reason := *a, r.State, r.Reason
 	a.State, a.Error, a.Rev = d.State, clip(d.Error, 300), d.Revision
 	unsettled := r.State == StateSending || r.State == StateUnknown
+	queued := r.State == StateQueued
+	// pi's own queue identifies the submission (its native receipt states)
+	// as well as pi's answer to the command does (Ack), and may do so first,
+	// or alone in a receipt kept from before. Either is acceptance; neither
+	// says the work was done: the board task does.
 	switch {
 	case d.State == "sending":
 		// Still being registered: a later update says how it went.
@@ -1503,17 +1523,28 @@ func applyReceipt(r *Run, attemptID string, d *agent.Delivery, reason string) bo
 			a.Definite = true
 			r.State, r.Reason = StateFailed, "Not sent: "+clip(firstNonEmpty(d.Error, "pi refused it"), 300)
 		}
-	case d.Ack == "queued" && d.State == "interrupted":
+	case d.State == "dispatched" || d.State == "handled":
+		// pi took it from its queue for the lead, or handled it.
+		if unsettled || queued {
+			r.State, r.Reason = StateSent, ""
+		}
+	case d.State == "cancelled":
+		// Taken out of pi's queue before the lead read it.
+		if unsettled || queued {
+			a.Definite = true
+			r.State, r.Reason = StateFailed, "Not sent: it was taken out of the lead's queue before the lead read it"
+		}
+	case d.State == "interrupted" && (d.Ack == "queued" || queued):
 		// Accepted into pi's queue, then its process ended before the queue
 		// was read: it may never have reached the lead.
-		if unsettled || r.State == StateQueued {
+		if unsettled || queued {
 			r.State, r.Reason = StateUnknown, "The lead stopped while it was queued, so it may not have reached the lead; it was not sent again"
 		}
-	case d.Ack == "queued":
+	case d.State == "queued" || d.Ack == "queued":
 		if unsettled {
 			r.State, r.Reason = StateQueued, ""
 		}
-	case d.Ack != "":
+	case d.State == "steering" || d.Ack != "":
 		if unsettled {
 			r.State, r.Reason = StateSent, ""
 		}
@@ -1642,8 +1673,8 @@ func (s *Service) begin(owned bool) (done func(), err error) {
 }
 
 // edit runs a change of a workspace's plans with it held and loaded.
-func (s *Service) edit(name string, fn func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) error) error {
-	return s.editThen(name, nil, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error) {
+func (s *Service) edit(name string, guard Admit, fn func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) error) error {
+	return s.editThen(name, guard, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error) {
 		return nil, fn(sp, y, f, now)
 	})
 }
@@ -1651,8 +1682,9 @@ func (s *Service) edit(name string, fn func(sp *space, y yesmen.Yesman, f *plans
 // editThen is edit with a step to take, still held, once the plans file
 // was written: what must not happen unless the change was saved.
 // guard, when given, is asked with the workspace held before anything is
-// changed: an error leaves everything as it was.
-func (s *Service) editThen(name string, guard func(yesmen.Yesman) error, fn func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error)) error {
+// changed: an error leaves everything as it was; what it admitted is held
+// until the change was written or refused.
+func (s *Service) editThen(name string, guard Admit, fn func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) (func(), error)) error {
 	done, err := s.begin(true)
 	if err != nil {
 		return err
@@ -1664,8 +1696,12 @@ func (s *Service) editThen(name string, guard func(yesmen.Yesman) error, fn func
 	}
 	defer release()
 	if guard != nil {
-		if err := guard(y); err != nil {
+		admitted, err := guard(y)
+		if err != nil {
 			return err
+		}
+		if admitted != nil {
+			defer admitted()
 		}
 	}
 	sp := s.spaceFor(y)
@@ -1729,27 +1765,42 @@ func (s *Service) Save(name string, in PlanInput) (Plan, error) {
 	return s.save(name, in, "user")
 }
 
+// Admit admits a change asked for by an agent to the workspace generation
+// y, held: it fails if the agent no longer runs there as it did when it
+// asked. Until release, the agent cannot finish stopping, so the change
+// that follows lands before its stop returns, or not at all. Draft calls it
+// once, and holds it until the plan was saved or refused.
+type Admit func(y yesmen.Yesman) (release func(), err error)
+
 // Draft saves a plan for the lead, at the user's request; it is always off
 // until the user turns it on in Tasks. since is the workspace generation the
-// lead belongs to, and current reports whether the lead that asked still
-// runs (nil: not checked); both are checked with the workspace held, just
-// before the plan is saved, so a lead stopped, restarted or dismissed while
-// its request was on its way, or a same-name workspace hired since, gets
-// nothing saved.
-func (s *Service) Draft(name string, since time.Time, current func() bool, in PlanInput) (Plan, error) {
+// lead belongs to, and admit admits the lead that asked (nil: not checked);
+// both are checked with the workspace held, before anything is changed, and
+// the admission is held until the plan is saved. So a lead stopped,
+// restarted or dismissed while its request was on its way, or a same-name
+// workspace hired since, gets nothing saved, and a stop that returned saw
+// every draft its lead's process made already saved.
+func (s *Service) Draft(name string, since time.Time, admit Admit, in PlanInput) (Plan, error) {
 	in.ID, in.Revision, in.Enabled = "", 0, false
-	guard := func(y yesmen.Yesman) error {
-		if since.IsZero() || !y.HiredAt.Equal(since) || current != nil && !current() {
-			return ErrStaleCaller
+	guard := func(y yesmen.Yesman) (func(), error) {
+		if since.IsZero() || !y.HiredAt.Equal(since) {
+			return nil, ErrStaleCaller
 		}
-		return nil
+		if admit == nil {
+			return nil, nil
+		}
+		release, err := admit(y)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrStaleCaller, err)
+		}
+		return release, nil
 	}
 	return s.save(name, in, "lead", guard)
 }
 
-func (s *Service) save(name string, in PlanInput, by string, guard ...func(yesmen.Yesman) error) (Plan, error) {
+func (s *Service) save(name string, in PlanInput, by string, guard ...Admit) (Plan, error) {
 	var saved Plan
-	var check func(yesmen.Yesman) error
+	var check Admit
 	if len(guard) > 0 {
 		check = guard[0]
 	}
@@ -1896,8 +1947,12 @@ func (s *Service) dropRunsLocked(sp *space, y yesmen.Yesman, plans []string) {
 // SetEnabled turns a plan on or off. Off stops its future runs; a run
 // already on its way goes on, and nothing in the lead's queue is touched.
 func (s *Service) SetEnabled(name, id string, enabled bool, revision int) (Plan, error) {
+	return s.setEnabled(name, nil, id, enabled, revision)
+}
+
+func (s *Service) setEnabled(name string, guard Admit, id string, enabled bool, revision int) (Plan, error) {
 	var saved Plan
-	err := s.edit(name, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) error {
+	err := s.edit(name, guard, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) error {
 		i, err := findPlan(f, id)
 		if err != nil {
 			return err
@@ -1942,7 +1997,11 @@ func (s *Service) SetEnabled(name, id string, enabled bool, revision int) (Plan,
 
 // Archive puts a plan away: it never runs again, and its history stays.
 func (s *Service) Archive(name, id string, revision int) error {
-	err := s.edit(name, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) error {
+	return s.archive(name, nil, id, revision)
+}
+
+func (s *Service) archive(name string, guard Admit, id string, revision int) error {
+	err := s.edit(name, guard, func(sp *space, y yesmen.Yesman, f *plansFile, now time.Time) error {
 		i, err := findPlan(f, id)
 		if err != nil {
 			return err
@@ -1971,6 +2030,10 @@ var requestRE = regexp.MustCompile(`^[a-f0-9]{16,32}$`)
 // from a missed record, catching that up. requestID names the click, so
 // that the same request repeated returns the same run.
 func (s *Service) RunNow(name, id, requestID, from string) (Run, error) {
+	return s.runNow(name, time.Time{}, id, requestID, from)
+}
+
+func (s *Service) runNow(name string, since time.Time, id, requestID, from string) (Run, error) {
 	if !requestRE.MatchString(requestID) {
 		return Run{}, errors.New("invalid request ID")
 	}
@@ -1984,6 +2047,9 @@ func (s *Service) RunNow(name, id, requestID, from string) (Run, error) {
 		return Run{}, err
 	}
 	defer release()
+	if err := hiredAt(y, since); err != nil {
+		return Run{}, err
+	}
 	board, boardErr := s.cfg.Yesmen.Board(y.Name)
 	tasks := boardTasks(board, boardErr)
 	sp := s.spaceFor(y)
@@ -2092,6 +2158,10 @@ func (s *Service) RunNow(name, id, requestID, from string) (Run, error) {
 // Retry sends a run that was definitely not sent again, under a new
 // submission ID, keeping its board task.
 func (s *Service) Retry(name, runID string) (Run, error) {
+	return s.retry(name, time.Time{}, runID)
+}
+
+func (s *Service) retry(name string, since time.Time, runID string) (Run, error) {
 	done, err := s.begin(true)
 	if err != nil {
 		return Run{}, err
@@ -2102,6 +2172,9 @@ func (s *Service) Retry(name, runID string) (Run, error) {
 		return Run{}, err
 	}
 	defer release()
+	if err := hiredAt(y, since); err != nil {
+		return Run{}, err
+	}
 	sp := s.spaceFor(y)
 	sp.mu.Lock()
 	s.loadLocked(sp, y)
@@ -2141,6 +2214,10 @@ func (s *Service) Retry(name, runID string) (Run, error) {
 
 // Check reads a run's receipt again, without sending anything.
 func (s *Service) Check(name, runID string) (Run, error) {
+	return s.check(name, time.Time{}, runID)
+}
+
+func (s *Service) check(name string, since time.Time, runID string) (Run, error) {
 	// Counted until its record is written: Close keeps the lock until then,
 	// so no other app writes the run meanwhile.
 	done, err := s.begin(true)
@@ -2150,6 +2227,9 @@ func (s *Service) Check(name, runID string) (Run, error) {
 	defer done()
 	y, err := s.cfg.Yesmen.Get(name)
 	if err != nil {
+		return Run{}, err
+	}
+	if err := hiredAt(y, since); err != nil {
 		return Run{}, err
 	}
 	sp := s.spaceFor(y)

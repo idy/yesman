@@ -118,6 +118,9 @@ export function describe(s) {
   }
 }
 
+// gen names a yesman's generation: its name and when it was hired.
+const gen = (y) => `${y.name}@${y.hiredAt ?? ''}`;
+
 // createSchedules returns the pane. host connects it to the page:
 //   call(method, ...args), fail(err)
 //   yesman()               the yesman whose agent is shown, or null
@@ -128,58 +131,89 @@ export function describe(s) {
 //   confirm(title, body, ok)
 //   changed()              the summary changed (the info panel shows it)
 export function createSchedules(host) {
-  const views = new Map(); // yesman name -> { view, error }
-  const loading = new Map(); // yesman name -> { again }
-  const expanded = new Set(); // `${yesman}/${plan}`
-  const running = new Map(); // `${yesman}/${plan}` -> request ID of a Run now (or 'catchup') in flight
-  // `${yesman}/${plan}` whose Run now or catch-up is being confirmed or
-  // sent: one at a time per plan, whichever control asked.
+  // What is kept and asked for is a yesman generation's (gen): a yesman
+  // dismissed and hired again under its name is another one. What was shown
+  // or asked for the earlier one is dropped once the later one shows, and
+  // its late answers are ignored; Go refuses its requests too
+  // (schedule.ErrReplaced), so it never changes the new one's tasks. The
+  // page shows one generation of a yesman at a time, so the controls' keys
+  // in the page (data-key, data-plan) keep its name only.
+  const views = new Map(); // gen -> { view, error }
+  const loading = new Map(); // gen -> { again }
+  const expanded = new Set(); // `${gen}/${plan}`
+  const running = new Map(); // `${gen}/${plan}` -> request ID of a Run now (or 'catchup') in flight
+  // `${gen}/${plan}` whose Run now or catch-up is being confirmed or sent:
+  // one at a time per plan, whichever control asked.
   const claiming = new Set();
-  const retryIDs = new Map(); // `${yesman}/${plan}` -> request ID to reuse after an uncertain failure
-  const busy = new Set(); // keys of actions under way, such as `${yesman}/${run}:retry`
-  const loaded = new Map(); // yesman name -> how many of its loads were shown
+  const retryIDs = new Map(); // `${gen}/${plan}` -> request ID to reuse after an uncertain failure
+  const busy = new Set(); // keys of actions under way, such as `${gen}/${run}:retry`
+  const loaded = new Map(); // gen -> how many of its loads were shown
+  const shown = new Map(); // yesman name -> the yesman, of the generation seen last
   let archivedOpen = false;
-  let pendingFocus = null; // { key, fallback } of the control an action under way started from
-  // The plan to bring into view and focus once it shows: { name, plan, key,
-  // after }, after being how many loads of name were shown when it was asked
+  let pendingFocus = null; // { gen, key, fallback } of the control an action under way started from
+  // The plan to bring into view and focus once it shows: { gen, plan, key,
+  // after }, after being how many loads of gen were shown when it was asked
   // for. A plan the next load does not have is said to be gone (missing),
   // never guessed at.
   let reveal = null;
-  let missing = null; // { name, plan }
+  let missing = null; // { gen, plan }
 
   const current = () => (host.isOpen() && host.yesman()) || null;
 
-  function revealPlan(name, plan) {
-    reveal = { name, plan, key: `${name}/${plan}`, after: loaded.get(name) ?? 0 };
+  // adopt makes y the generation of its name: what was kept or asked for an
+  // earlier one is dropped.
+  function adopt(y) {
+    const g = gen(y);
+    if (shown.has(y.name) && gen(shown.get(y.name)) === g) return;
+    shown.set(y.name, y);
+    const old = (k) => k.startsWith(`${y.name}@`) && k !== g && !k.startsWith(`${g}/`);
+    for (const m of [views, loading, loaded, running, retryIDs]) for (const k of [...m.keys()]) if (old(k)) m.delete(k);
+    for (const m of [expanded, claiming, busy]) for (const k of [...m]) if (old(k)) m.delete(k);
+    if (pendingFocus && old(pendingFocus.gen)) pendingFocus = null;
+    if (reveal && old(reveal.gen)) reveal = null;
+    if (missing && old(missing.gen)) missing = null;
+  }
+
+  // latest reports whether y is still the generation of its name.
+  const latest = (y) => !shown.has(y.name) || gen(shown.get(y.name)) === gen(y);
+
+  function revealPlan(y, plan) {
+    reveal = { gen: gen(y), plan, key: `${y.name}/${plan}`, after: loaded.get(gen(y)) ?? 0 };
     missing = null;
   }
 
-  async function load(name) {
-    const running = loading.get(name);
+  async function load(y) {
+    const g = gen(y);
+    const running = loading.get(g);
     if (running) {
       running.again = true;
       return;
     }
     const entry = { again: false };
-    loading.set(name, entry);
+    loading.set(g, entry);
+    let got;
     try {
-      const view = await host.call('Schedules', name);
-      views.set(name, { view, error: null });
+      got = { view: await host.call('Schedules', y.name, y.hiredAt), error: null };
     } catch (err) {
-      views.set(name, { view: views.get(name)?.view ?? null, error: err?.message || String(err) });
+      got = { view: views.get(g)?.view ?? null, error: err?.message || String(err) };
     }
-    loading.delete(name);
-    if (entry.again) return load(name);
-    loaded.set(name, (loaded.get(name) ?? 0) + 1);
+    if (loading.get(g) === entry) loading.delete(g);
+    // An answer for a generation replaced meanwhile shows nowhere.
+    if (!latest(y)) return;
+    views.set(g, got);
+    if (entry.again) return load(y);
+    loaded.set(g, (loaded.get(g) ?? 0) + 1);
     host.changed();
-    if (current()?.name === name) render();
+    const now = current();
+    if (now && gen(now) === g) render();
   }
 
   // ---------- Summary, for the info panel ----------
 
   function summary(y) {
-    const v = views.get(y.name);
-    if (!v && !loading.has(y.name)) load(y.name);
+    adopt(y);
+    const v = views.get(gen(y));
+    if (!v && !loading.has(gen(y))) load(y);
     if (!v?.view) return { loading: !v, error: v?.error ?? null };
     const plans = v.view.plans.filter((p) => p.state !== 'archived');
     const on = plans.filter((p) => p.state === 'on');
@@ -204,13 +238,15 @@ export function createSchedules(host) {
     aside.hidden = !y;
     aside.setAttribute('aria-label', t('Tasks'));
     document.documentElement.dataset.tasks = y ? 'open' : 'closed';
+    if (y) adopt(y);
+    const g = y ? gen(y) : null;
     // What was asked for one yesman's Tasks is dropped once they no longer
     // show, so that it never takes the focus later.
-    if (!y || missing?.name !== y.name) missing = null;
-    if (!y || reveal?.name !== y.name) reveal = null;
+    if (!y || missing?.gen !== g) missing = null;
+    if (!y || reveal?.gen !== g) reveal = null;
     if (!y) return;
-    const v = views.get(y.name);
-    if (!v && !loading.has(y.name)) load(y.name);
+    const v = views.get(g);
+    if (!v && !loading.has(g)) load(y);
     const view = v?.view;
     const scroll = $('.sched-body', aside)?.scrollTop ?? 0;
     // Keep focus on the control it was on, by its key, across the redraw;
@@ -219,7 +255,7 @@ export function createSchedules(host) {
     const inPane = !!activeEl && aside.contains(activeEl);
     let focused = inPane ? activeEl.closest('[data-key]')?.dataset.key : null;
     let fallback = null;
-    if (pendingFocus && (inPane || !activeEl || activeEl === document.body)) {
+    if (pendingFocus?.gen === g && (inPane || !activeEl || activeEl === document.body)) {
       focused ??= pendingFocus.key;
       fallback = pendingFocus.fallback;
     }
@@ -229,10 +265,10 @@ export function createSchedules(host) {
     const archived = plans.filter((p) => p.state === 'archived');
     const on = active.filter((p) => p.state === 'on').length;
     const readOnly = view && !view.owner;
-    if (reveal?.name === y.name && view && !v.error && (loaded.get(y.name) ?? 0) > reveal.after && !plans.some((p) => p.id === reveal.plan)) {
+    if (reveal?.gen === g && view && !v.error && (loaded.get(g) ?? 0) > reveal.after && !plans.some((p) => p.id === reveal.plan)) {
       // Read since it was asked for, and not there: it was forgotten. Say so,
       // rather than show another plan for it.
-      missing = { name: y.name, plan: reveal.plan };
+      missing = { gen: g, plan: reveal.plan };
       reveal = null;
     }
     const body = h('div', { class: 'sched-body' });
@@ -243,7 +279,7 @@ export function createSchedules(host) {
       if (view.error) body.append(h('p', { class: 'sched-notice', 'data-tone': 'error', role: 'alert' }, icon('alert'), h('span', null, view.error)));
       if (view.notice) body.append(h('p', { class: 'sched-notice', 'data-tone': 'error', role: 'alert' }, icon('alert'), h('span', null, view.notice)));
       if (v.error) body.append(h('p', { class: 'sched-notice', 'data-tone': 'error', role: 'alert' }, icon('alert'), h('span', null, v.error)));
-      if (missing?.name === y.name) body.append(h('p', { class: 'sched-notice', role: 'status' }, icon('alert'), h('span', null, t('Scheduled task {id} is no longer kept here.', { id: missing.plan }))));
+      if (missing?.gen === g) body.append(h('p', { class: 'sched-notice', role: 'status' }, icon('alert'), h('span', null, t('Scheduled task {id} is no longer kept here.', { id: missing.plan }))));
       if (!active.length) {
         body.append(h('div', { class: 'board-empty' },
           h('strong', null, t('No scheduled tasks yet')),
@@ -255,7 +291,7 @@ export function createSchedules(host) {
       if (archived.length) {
         // An archived plan being revealed shows: Archived opens for it. It
         // stays archived; nothing is changed by looking at it.
-        if (reveal?.name === y.name && archived.some((p) => p.id === reveal.plan)) archivedOpen = true;
+        if (reveal?.gen === g && archived.some((p) => p.id === reveal.plan)) archivedOpen = true;
         const fold = h('details', { class: 'board-done', open: archivedOpen },
           h('summary', null, icon('chevron', 'mds-icon board-fold'), t('Archived {n}', { n: formatNumber(archived.length) })),
           h('ol', { class: 'sched-list' }, archived.map((p) => planRow(y, view, p))));
@@ -276,7 +312,7 @@ export function createSchedules(host) {
           h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Close the tasks'), 'aria-label': t('Close the tasks'), onclick: () => host.setOpen(false) }, icon('x')))),
       body);
     body.scrollTop = scroll;
-    if (reveal?.name === y.name) {
+    if (reveal?.gen === g) {
       // Taken once it shows; until then (a load under way) it waits.
       const el = $(`#schedules [data-plan="${CSS.escape(reveal.key)}"]`);
       if (el && el.getClientRects().length) {
@@ -313,16 +349,17 @@ export function createSchedules(host) {
   }
 
   function planRow(y, view, p) {
-    const key = `${y.name}/${p.id}`;
-    const isExpanded = expanded.has(key);
+    const key = `${y.name}/${p.id}`; // in the page
+    const plan = `${gen(y)}/${p.id}`; // kept
+    const isExpanded = expanded.has(plan);
     const last = lastRun(p);
     const writable = view.owner && !view.error && p.state !== 'archived';
     const zoneNote = p.timezone !== localZone() ? ` · ${p.timezone}` : '';
     const toggle = h('button', {
       class: 'sched-toggle', type: 'button', 'data-key': `${key}:open`, 'aria-expanded': String(isExpanded),
       onclick: () => {
-        if (expanded.has(key)) expanded.delete(key);
-        else expanded.add(key);
+        if (expanded.has(plan)) expanded.delete(plan);
+        else expanded.add(plan);
         render();
       },
     },
@@ -335,9 +372,9 @@ export function createSchedules(host) {
       const sw = h('input', {
         type: 'checkbox', role: 'switch', checked: p.enabled, 'data-key': `${key}:switch`,
         'aria-label': p.enabled ? t('On: {title}. Turn off', { title: p.title }) : t('Off: {title}. Turn on', { title: p.title }),
-        'aria-disabled': busy.has(`${key}:switch`) ? 'true' : null,
+        'aria-disabled': busy.has(`${plan}:switch`) ? 'true' : null,
         onchange: (e) => {
-          if (busy.has(`${key}:switch`)) {
+          if (busy.has(`${plan}:switch`)) {
             e.target.checked = !e.target.checked; // one change at a time
             return;
           }
@@ -345,7 +382,7 @@ export function createSchedules(host) {
         },
       });
       actions.push(h('label', { class: 'mds-switch', title: p.enabled ? t('On: turn it off to stop its runs') : t('Off: turn it on to run it at its times') }, sw, h('span', { class: 'mds-switch-track' })));
-      const inFlight = running.has(key) || p.sending;
+      const inFlight = running.has(plan) || p.sending;
       actions.push(h('button', {
         class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-key': `${key}:run`,
         title: inFlight ? t('Sending to the lead…') : t('Run now'), 'aria-label': t('Run {title} now', { title: p.title }),
@@ -388,13 +425,14 @@ export function createSchedules(host) {
   }
 
   function runRow(y, view, p, r, writable) {
-    const key = `${y.name}/${r.id}`;
+    const key = `${y.name}/${r.id}`; // in the page
+    const run = `${gen(y)}/${r.id}`; // kept
     const at = r.kind === 'missed'
       ? (r.count > 1 ? t('{first} – {last}', { first: when(r.first, p.timezone), last: when(r.last, p.timezone) }) : when(r.first, p.timezone))
       : when(r.at, p.timezone);
     const action = (name, label, iconName, fn) => h('button', {
       class: 'mds-link-button sched-run-action', type: 'button', 'data-key': `${key}:${name}`,
-      'aria-disabled': busy.has(`${key}:${name}`) ? 'true' : null, 'aria-busy': busy.has(`${key}:${name}`) ? 'true' : null, onclick: fn,
+      'aria-disabled': busy.has(`${run}:${name}`) ? 'true' : null, 'aria-busy': busy.has(`${run}:${name}`) ? 'true' : null, onclick: fn,
     }, icon(iconName), h('span', null, label));
     const acts = [];
     if (writable && view.owner) {
@@ -433,29 +471,33 @@ export function createSchedules(host) {
   // ---------- Actions ----------
 
   // act runs one action of a control at a time, keeping focus on it (or on
-  // its task's row when it goes away) while the pane redraws.
-  async function act(busyKey, focus, fn) {
+  // its task's row when it goes away) while the pane redraws. busyKey is
+  // the action's kept key; focus names the control in the page, for y.
+  async function act(y, busyKey, focus, fn) {
     if (busy.has(busyKey)) return;
     busy.add(busyKey);
-    pendingFocus = focus;
+    pendingFocus = { ...focus, gen: gen(y) };
+    const mine = pendingFocus;
     render();
     try {
       await fn();
     } catch (err) {
-      host.fail(err);
+      // A request for a generation replaced meanwhile says so only if that
+      // generation still shows; it changed nothing.
+      if (latest(y)) host.fail(err);
     } finally {
       busy.delete(busyKey);
-      const y = host.yesman();
-      if (y) await load(y.name);
-      if (pendingFocus === focus) pendingFocus = null;
+      const now = host.yesman();
+      if (now) await load(now);
+      if (pendingFocus === mine) pendingFocus = null;
     }
   }
 
   function setEnabled(y, p, on) {
     const key = `${y.name}/${p.id}`;
-    return act(`${key}:switch`, { key: `${key}:switch`, fallback: `${key}:open` }, async () => {
-      const res = await host.call('SetScheduleEnabled', y.name, p.id, on, p.revision);
-      if (res.error) host.fail(translateError(res.error));
+    return act(y, `${gen(y)}/${p.id}:switch`, { key: `${key}:switch`, fallback: `${key}:open` }, async () => {
+      const res = await host.call('SetScheduleEnabled', y.name, y.hiredAt, p.id, on, p.revision);
+      if (res.error && latest(y)) host.fail(translateError(res.error));
     });
   }
 
@@ -477,7 +519,8 @@ export function createSchedules(host) {
   }
 
   async function runNow(y, p, again = false) {
-    const key = `${y.name}/${p.id}`;
+    const page = `${y.name}/${p.id}`;
+    const key = `${gen(y)}/${p.id}`;
     if (claiming.has(key) || running.has(key)) return;
     claiming.add(key);
     try {
@@ -494,9 +537,9 @@ export function createSchedules(host) {
       // retry a click whose answer did not arrive.
       const id = retryIDs.get(key) ?? requestID();
       running.set(key, id);
-      await act(`${key}:run`, { key: `${key}:run`, fallback: `${key}:open` }, async () => {
+      await act(y, `${key}:run`, { key: `${page}:run`, fallback: `${page}:open` }, async () => {
         try {
-          await host.call('RunSchedule', y.name, p.id, id, '');
+          await host.call('RunSchedule', y.name, y.hiredAt, p.id, id, '');
           retryIDs.delete(key);
         } catch (err) {
           // Kept for a retry, unless yesman says that click's run was made
@@ -522,8 +565,9 @@ export function createSchedules(host) {
   // first while the plan's last run is open, and waits for a Run now of the
   // same plan under way, and the other way round.
   async function catchUp(y, p, r) {
-    const plan = `${y.name}/${p.id}`;
-    const key = `${y.name}/${r.id}`;
+    const page = `${y.name}/${r.id}`;
+    const plan = `${gen(y)}/${p.id}`;
+    const key = `${gen(y)}/${r.id}`;
     if (claiming.has(plan) || running.has(plan) || busy.has(`${key}:catchup`)) return;
     claiming.add(plan);
     try {
@@ -532,9 +576,9 @@ export function createSchedules(host) {
         if (!stillShown(y)) return;
       }
       running.set(plan, 'catchup');
-      await act(`${key}:catchup`, { key: `${key}:catchup`, fallback: `${plan}:open` }, async () => {
+      await act(y, `${key}:catchup`, { key: `${page}:catchup`, fallback: `${y.name}/${p.id}:open` }, async () => {
         try {
-          await host.call('RunSchedule', y.name, p.id, requestID(), r.id);
+          await host.call('RunSchedule', y.name, y.hiredAt, p.id, requestID(), r.id);
         } finally {
           running.delete(plan); // before act redraws the pane
         }
@@ -547,22 +591,22 @@ export function createSchedules(host) {
 
   function retry(y, p, r) {
     const key = `${y.name}/${r.id}`;
-    return act(`${key}:retry`, { key: `${key}:retry`, fallback: `${y.name}/${p.id}:open` }, () => host.call('RetryScheduleRun', y.name, r.id));
+    return act(y, `${gen(y)}/${r.id}:retry`, { key: `${key}:retry`, fallback: `${y.name}/${p.id}:open` }, () => host.call('RetryScheduleRun', y.name, y.hiredAt, r.id));
   }
 
   function check(y, p, r) {
     const key = `${y.name}/${r.id}`;
-    return act(`${key}:check`, { key: `${key}:check`, fallback: `${y.name}/${p.id}:open` }, () => host.call('CheckScheduleRun', y.name, r.id));
+    return act(y, `${gen(y)}/${r.id}:check`, { key: `${key}:check`, fallback: `${y.name}/${p.id}:open` }, () => host.call('CheckScheduleRun', y.name, y.hiredAt, r.id));
   }
 
   async function archive(y, p) {
     if (!(await host.confirm(t('Archive {title}?', { title: p.title }), t('It will not run again. Its history stays, under Archived. A run already on its way goes on.'), t('Archive')))) return;
     try {
-      await host.call('ArchiveSchedule', y.name, p.id, p.revision);
+      await host.call('ArchiveSchedule', y.name, y.hiredAt, p.id, p.revision);
     } catch (err) {
-      host.fail(err);
+      if (latest(y)) host.fail(err);
     }
-    await load(y.name);
+    if (latest(y)) await load(y);
   }
 
   // ---------- The editor ----------
@@ -578,7 +622,7 @@ export function createSchedules(host) {
     const mine = ++session;
     let closed = false;
     const gone = () => closed || mine !== session || !dialog.open;
-    const view = views.get(y.name)?.view;
+    const view = views.get(gen(y))?.view;
     const limits = view?.limits ?? { title: 120, instructions: 4000, minEvery: 15, maxEvery: 10080 };
     const s = p?.schedule ?? { kind: 'daily', time: '09:00' };
     const today = new Date();
@@ -742,19 +786,19 @@ export function createSchedules(host) {
       for (const el of [save, cancel]) el.disabled = true;
       form.setAttribute('aria-busy', 'true');
       try {
-        const res = await host.call('SaveSchedule', y.name, inp);
+        const res = await host.call('SaveSchedule', y.name, y.hiredAt, inp);
         if (gone()) {
           // Closed meanwhile: the list shows what was saved, nothing else.
-          if (res.plan) load(y.name);
+          if (res.plan && latest(y)) load(y);
           return;
         }
         if (res.plan) {
           const changed = new Set(controls.filter((el) => valueOf(el) !== sent.get(el)));
-          expanded.add(`${y.name}/${res.plan.id}`);
+          expanded.add(`${gen(y)}/${res.plan.id}`);
           if (!changed.size) {
-            revealPlan(y.name, res.plan.id);
+            revealPlan(y, res.plan.id);
             close('save');
-            load(y.name);
+            load(y);
             return;
           }
           // Changed while it saved: this version is saved, and the dialog
@@ -766,13 +810,13 @@ export function createSchedules(host) {
           save.textContent = t('Save');
           saved.textContent = t('Saved. You changed it while it was saving; save again to keep those changes too.');
           saved.hidden = false;
-          load(y.name);
+          load(y);
           return;
         }
         if (res.conflict) {
-          await load(y.name);
+          await load(y);
           if (gone()) return;
-          latestPlan = views.get(y.name)?.view?.plans.find((x) => x.id === p?.id) ?? null;
+          latestPlan = views.get(gen(y))?.view?.plans.find((x) => x.id === p?.id) ?? null;
           showError(t('This task was changed since you opened it. Your text is kept here; use the latest version to start again from it.'));
           latest.hidden = !latestPlan;
           return;
@@ -814,25 +858,39 @@ export function createSchedules(host) {
 
   // ---------- Following changes ----------
 
+  // known returns the generation of name that is kept, if any: changes are
+  // followed for it only.
+  function known(name) {
+    const y = shown.get(name);
+    return y && views.has(gen(y)) ? y : null;
+  }
+
   // onChange follows a yesman whose tasks or runs changed.
   function onChange(name) {
-    if (views.has(name) || current()?.name === name) load(name);
+    const now = current();
+    const y = now?.name === name ? now : known(name);
+    if (y) load(y);
   }
 
   // A board change can change a run's status.
   function onBoard(name) {
-    if (views.has(name)) load(name);
+    const y = known(name);
+    if (y) load(y);
   }
 
-  // open shows the pane, and a plan when given: by its ID, in the yesman it
-  // belongs to, archived or not, without changing it.
+  // open shows the pane, and a plan when given: by its ID, in the yesman
+  // shown, the one it belongs to, archived or not, without changing it.
   function open(name, plan) {
-    if (plan) {
-      expanded.add(`${name}/${plan}`);
-      revealPlan(name, plan);
+    const y = host.yesman();
+    if (y?.name === name) {
+      adopt(y);
+      if (plan) {
+        expanded.add(`${gen(y)}/${plan}`);
+        revealPlan(y, plan);
+      }
     }
     host.setOpen(true);
-    load(name);
+    if (y?.name === name) load(y);
   }
 
   return { render, onChange, onBoard, open, summary };

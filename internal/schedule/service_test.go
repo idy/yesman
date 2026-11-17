@@ -761,9 +761,11 @@ func TestValidation(t *testing.T) {
 	}
 	y, _ := e.store.Get(ws)
 	draft := PlanInput{Title: "Lead's draft", Instructions: "x", Schedule: daily("09:00"), Timezone: "UTC", Enabled: true}
-	d, err := e.svc.Draft(ws, y.HiredAt, func() bool { return true }, draft)
-	if err != nil || d.Enabled || d.CreatedBy != "lead" {
-		t.Fatalf("draft = %+v %v", d, err)
+	admitted, released := 0, 0
+	admit := func(yesmen.Yesman) (func(), error) { admitted++; return func() { released++ }, nil }
+	d, err := e.svc.Draft(ws, y.HiredAt, admit, draft)
+	if err != nil || d.Enabled || d.CreatedBy != "lead" || admitted != 1 || released != 1 {
+		t.Fatalf("draft = %+v %v, admitted %d released %d", d, err, admitted, released)
 	}
 	// A lead no longer running, or of another generation, saves nothing.
 	plans := len(e.view().Plans)
@@ -771,7 +773,13 @@ func TestValidation(t *testing.T) {
 		since   time.Time
 		current bool
 	}{{y.HiredAt, false}, {y.HiredAt.Add(-time.Second), true}, {time.Time{}, true}} {
-		if _, err := e.svc.Draft(ws, c.since, func() bool { return c.current }, draft); !errors.Is(err, ErrStaleCaller) {
+		admit := func(yesmen.Yesman) (func(), error) {
+			if !c.current {
+				return nil, errors.New("stopped")
+			}
+			return func() {}, nil
+		}
+		if _, err := e.svc.Draft(ws, c.since, admit, draft); !errors.Is(err, ErrStaleCaller) {
 			t.Fatalf("a stale lead's draft: %v", err)
 		}
 	}

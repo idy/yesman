@@ -84,8 +84,15 @@ type TaskRef struct {
 
 // View returns a workspace's tasks.
 func (s *Service) View(name string) (View, error) {
+	return s.view(name, time.Time{})
+}
+
+func (s *Service) view(name string, since time.Time) (View, error) {
 	y, err := s.cfg.Yesmen.Get(name)
 	if err != nil {
+		return View{}, err
+	}
+	if err := hiredAt(y, since); err != nil {
 		return View{}, err
 	}
 	board, boardErr := s.cfg.Yesmen.Board(name)
@@ -220,7 +227,11 @@ type Summary struct {
 
 // Summarize returns a workspace's Summary.
 func (s *Service) Summarize(name string) (Summary, error) {
-	v, err := s.View(name)
+	return s.summarize(name, time.Time{})
+}
+
+func (s *Service) summarize(name string, since time.Time) (Summary, error) {
+	v, err := s.view(name, since)
 	if err != nil {
 		return Summary{}, err
 	}

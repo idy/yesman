@@ -332,7 +332,7 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 	}
 	m.mu.Lock()
 	d, ok := a.deliveries[id]
-	if !ok || a.retiring || a.proc != p || d.Session != p.deliverySession() || d.State != "sending" {
+	if !ok || a.retiring || a.proc != p || d.Session != p.deliverySession() {
 		m.mu.Unlock()
 		return
 	}
@@ -340,19 +340,35 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 		Disposition string `json:"disposition"`
 	}
 	_ = json.Unmarshal(r.Data, &data)
+	ack := ""
 	if r.Success {
 		// pi's answer is the one fact of acceptance a receipt has; a later
 		// settle or queue snapshot leaves it standing but proves nothing more.
-		d.Ack = "accepted"
+		ack = "accepted"
 		switch {
 		case data.Disposition == "handled":
-			d.Ack = "handled"
+			ack = "handled"
 		case data.Disposition == "queued" && behavior == "followUp":
-			d.Ack = "queued"
+			ack = "queued"
 		case data.Disposition == "queued":
-			d.Ack = "steering"
+			ack = "steering"
 		}
 	}
+	if d.State != "sending" {
+		// pi's own queue reported this very submission before pi answered
+		// the command (native queue identity): the answer still records
+		// the acceptance, beside the state its queue reported, which stays.
+		if ack == "" || d.Ack != "" || !nativeIntake(d.State) {
+			m.mu.Unlock()
+			return
+		}
+		d.Ack = ack
+		ev := m.deliveryLocked(a, d)
+		m.mu.Unlock()
+		m.cfg.OnEvent(ev)
+		return
+	}
+	d.Ack = ack
 	switch {
 	case !r.Success:
 		d.State, d.Error = "failed", r.Error
@@ -374,6 +390,12 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 	ev := m.deliveryLocked(a, d)
 	m.mu.Unlock()
 	m.cfg.OnEvent(ev)
+}
+
+// nativeIntake reports whether a receipt's state came from pi's own queue
+// identifying it: in the queue, taken from it, or taken out of it.
+func nativeIntake(state string) bool {
+	return state == "queued" || state == "steering" || state == "dispatched" || state == "cancelled"
 }
 
 // observeDelivery never matches user content to receipts. queue_update is a

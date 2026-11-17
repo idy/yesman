@@ -242,13 +242,17 @@ func (s *service) Checkout(yesman string, req server.CheckoutRequest) (pool.Work
 }
 
 // Schedules returns a yesman's scheduled tasks (Tasks) and their runs.
-func (s *service) Schedules(yesman string) (schedule.View, error) {
-	return s.app.schedules.View(yesman)
+// Like every Tasks call below, it names the yesman's generation, since,
+// when it was hired: a yesman dismissed and hired again under its name
+// since the page showed it is refused (schedule.ErrReplaced), and its
+// replacement's tasks are neither shown nor changed.
+func (s *service) Schedules(yesman string, since time.Time) (schedule.View, error) {
+	return s.app.schedules.At(since).View(yesman)
 }
 
 // ScheduleSummary is what the info panel shows of a yesman's Tasks.
-func (s *service) ScheduleSummary(yesman string) (schedule.Summary, error) {
-	return s.app.schedules.Summarize(yesman)
+func (s *service) ScheduleSummary(yesman string, since time.Time) (schedule.Summary, error) {
+	return s.app.schedules.At(since).Summarize(yesman)
 }
 
 // ScheduleSave is the outcome of saving a plan: the plan, or the field the
@@ -262,8 +266,8 @@ type ScheduleSave struct {
 
 // SaveSchedule creates a plan, or changes the one at the revision given.
 // Saving it on is the user's authorization to send its request at its times.
-func (s *service) SaveSchedule(yesman string, in schedule.PlanInput) (ScheduleSave, error) {
-	p, err := s.app.schedules.Save(yesman, in)
+func (s *service) SaveSchedule(yesman string, since time.Time, in schedule.PlanInput) (ScheduleSave, error) {
+	p, err := s.app.schedules.At(since).Save(yesman, in)
 	var fe *schedule.FieldError
 	switch {
 	case errors.As(err, &fe):
@@ -277,8 +281,8 @@ func (s *service) SaveSchedule(yesman string, in schedule.PlanInput) (ScheduleSa
 }
 
 // SetScheduleEnabled turns a plan on or off. Off stops future runs only.
-func (s *service) SetScheduleEnabled(yesman, id string, enabled bool, revision int) (ScheduleSave, error) {
-	p, err := s.app.schedules.SetEnabled(yesman, id, enabled, revision)
+func (s *service) SetScheduleEnabled(yesman string, since time.Time, id string, enabled bool, revision int) (ScheduleSave, error) {
+	p, err := s.app.schedules.At(since).SetEnabled(yesman, id, enabled, revision)
 	var fe *schedule.FieldError
 	switch {
 	case errors.As(err, &fe):
@@ -292,24 +296,24 @@ func (s *service) SetScheduleEnabled(yesman, id string, enabled bool, revision i
 }
 
 // ArchiveSchedule puts a plan away, keeping its history.
-func (s *service) ArchiveSchedule(yesman, id string, revision int) error {
-	return s.app.schedules.Archive(yesman, id, revision)
+func (s *service) ArchiveSchedule(yesman string, since time.Time, id string, revision int) error {
+	return s.app.schedules.At(since).Archive(yesman, id, revision)
 }
 
 // RunSchedule runs a plan now, or catches up a missed run (from). requestID
 // names the click, so a repeated request returns the same run.
-func (s *service) RunSchedule(yesman, id, requestID, from string) (schedule.Run, error) {
-	return s.app.schedules.RunNow(yesman, id, requestID, from)
+func (s *service) RunSchedule(yesman string, since time.Time, id, requestID, from string) (schedule.Run, error) {
+	return s.app.schedules.At(since).RunNow(yesman, id, requestID, from)
 }
 
 // RetryScheduleRun sends again a run that was definitely not sent.
-func (s *service) RetryScheduleRun(yesman, runID string) (schedule.Run, error) {
-	return s.app.schedules.Retry(yesman, runID)
+func (s *service) RetryScheduleRun(yesman string, since time.Time, runID string) (schedule.Run, error) {
+	return s.app.schedules.At(since).Retry(yesman, runID)
 }
 
 // CheckScheduleRun reads a run's delivery receipt again, sending nothing.
-func (s *service) CheckScheduleRun(yesman, runID string) (schedule.Run, error) {
-	return s.app.schedules.Check(yesman, runID)
+func (s *service) CheckScheduleRun(yesman string, since time.Time, runID string) (schedule.Run, error) {
+	return s.app.schedules.At(since).Check(yesman, runID)
 }
 
 // Board returns a yesman's task board, which its agents keep.

@@ -10,10 +10,18 @@ export function inputIdentity(metadata) {
   if (!metadata) return undefined;
   const submissionId = /^[a-f0-9]{48}$/.test(metadata.submissionId ?? '') ? metadata.submissionId : undefined;
   const source = metadata.hostOrigin?.source;
-  const origin = ['user','lead','yesman'].includes(source) ? {source} : submissionId ? {source:'user'} : undefined;
+  // A scheduled task's run (source schedule) is the app sending the request
+  // the user saved: never a person, so never "user". Its plan and run IDs are
+  // host-only, as the rest of the identity is: kept beside the message, never
+  // in it, in context or in a provider request.
+  const origin = ['user','lead','yesman','schedule'].includes(source) ? {source} : submissionId ? {source:'user'} : undefined;
   if (origin) {
     if (/^[a-z]{1,16}$/.test(metadata.hostOrigin?.kind ?? '')) origin.kind = metadata.hostOrigin.kind;
     if (/^[a-z0-9][a-z0-9-]{0,31}$/.test(metadata.hostOrigin?.worker ?? '')) origin.worker = metadata.hostOrigin.worker;
+    if (source === 'schedule' && /^s[1-9][0-9]{0,5}$/.test(metadata.hostOrigin?.plan ?? '') && /^s[1-9][0-9]{0,5}-[a-z0-9-]{1,80}$/.test(metadata.hostOrigin?.run ?? '')) {
+      origin.plan = metadata.hostOrigin.plan;
+      origin.run = metadata.hostOrigin.run;
+    }
   }
   return submissionId || origin ? Object.freeze({...(submissionId ? {submissionId}:{}), ...(origin ? {origin:Object.freeze(origin)}:{})}) : undefined;
 }
