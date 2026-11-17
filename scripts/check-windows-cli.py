@@ -42,7 +42,8 @@ def historical_launcher(directory, repository=OLD_REPOSITORY, revision=OLD, tree
     require(re.fullmatch('[0-9a-f]{40}', revision) and re.fullmatch('[0-9a-f]{40}', tree), 'Historical identity must use full object IDs')
     env = {k: v for k, v in os.environ.items() if k in (
         'PATH', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP')}
-    env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+    env.update(HOME=str(directory.parent), USERPROFILE=str(directory.parent),
+               GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
                GIT_TERMINAL_PROMPT='0', GIT_NO_REPLACE_OBJECTS='1')
 
     def git(*args):

@@ -61,10 +61,19 @@ class HistoricalSourceTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             git(limited, 'show', self.revision + ':tools/launcher/main.go')
         before = git(limited, 'show-ref')
+        actual = subprocess.check_output
+        def isolated(args, **kwargs):
+            self.assertEqual(kwargs['env']['HOME'], str(self.root))
+            self.assertEqual(kwargs['env']['USERPROFILE'], str(self.root))
+            self.assertNotIn('GH_TOKEN', kwargs['env'])
+            self.assertNotIn('GIT_ALTERNATE_OBJECT_DIRECTORIES', kwargs['env'])
+            return actual(args, **kwargs)
         with patch.dict(os.environ, {'GIT_OBJECT_DIRECTORY': str(self.root/'absent-objects'),
                                      'GIT_ALTERNATE_OBJECT_DIRECTORIES': str(self.upstream/'objects'),
                                      'GIT_DIR': str(limited), 'GIT_CONFIG_COUNT': '1',
-                                     'GIT_CONFIG_KEY_0': 'url.invalid.insteadOf', 'GIT_CONFIG_VALUE_0': 'file://'}):
+                                     'GIT_CONFIG_KEY_0': 'url.invalid.insteadOf', 'GIT_CONFIG_VALUE_0': 'file://',
+                                     'HOME': str(self.root/'outside-home'), 'USERPROFILE': str(self.root/'outside-home'),
+                                     'GH_TOKEN': 'synthetic-must-not-inherit'}), patch('subprocess.check_output', isolated):
             self.assertEqual(self.acquire(), self.data)
         self.assertEqual(git(limited, 'show-ref'), before)
         with self.assertRaises(subprocess.CalledProcessError):
