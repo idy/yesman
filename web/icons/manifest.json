@@ -58,6 +58,10 @@
       "name": "warning",
       "codepoint": "e4e0"
     },
+    "error": {
+      "name": "warning-circle",
+      "codepoint": "e4e2"
+    },
     "info": {
       "name": "info",
       "codepoint": "e2ce"

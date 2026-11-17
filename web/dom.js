@@ -1,4 +1,5 @@
-// The page's DOM helpers: h builds elements, icon renders local Phosphor glyphs.
+// The page's DOM helpers: h builds elements, icon renders local Phosphor glyphs,
+// openModal opens a dialog.
 
 export const $ = (selector, root = document) => root.querySelector(selector);
 
@@ -36,6 +37,7 @@ export const ICONS = Object.freeze({
   up: '\ue08e', // arrow-up
   x: '\ue4f6', // x
   alert: '\ue4e0', // warning
+  error: '\ue4e2', // warning-circle
   info: '\ue2ce', // info
   palette: '\ue6c8', // palette
   type: '\ue48a', // text-t
@@ -90,6 +92,32 @@ export const ICONS = Object.freeze({
   keyboard: '\ue2d8', // keyboard
   chart: '\ue150', // chart-bar
 });
+
+// The opening of each dialog still waiting for its close.
+const openings = new WeakMap();
+
+// openModal opens a dialog modally and resolves with how this opening
+// closed: its returnValue, or fallback for Escape and a close without one.
+// The close event comes a task after the dialog closes, so it can arrive
+// once the dialog has opened again; it then belongs to the earlier opening
+// and never settles this one. The earlier opening is settled as it closed
+// when the next one starts, or with fallback if it is still showing.
+export function openModal(dialog, { fallback = 'cancel' } = {}) {
+  openings.get(dialog)?.(dialog.open ? fallback : dialog.returnValue || fallback);
+  return new Promise((resolve) => {
+    const settle = (value) => {
+      if (openings.get(dialog) !== settle) return;
+      openings.delete(dialog);
+      dialog.removeEventListener('close', onClose);
+      resolve(value);
+    };
+    const onClose = () => { if (!dialog.open) settle(dialog.returnValue || fallback); };
+    openings.set(dialog, settle);
+    dialog.addEventListener('close', onClose);
+    dialog.returnValue = fallback;
+    if (!dialog.open) dialog.showModal();
+  });
+}
 
 export function icon(name, cls = 'mds-icon') {
   if (!ICONS[name]) throw new Error(`Unknown UI icon: ${name}`);

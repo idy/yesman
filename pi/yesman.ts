@@ -5,14 +5,14 @@
 // worktrees, the repo pool, Knowledge, the task-log path, the board and other
 // agents)
 // and tools to check repositories out of the pool, keep the board and, for
-// a lead, to run workers. Its shell tool sets the user's secrets and
+// a lead, to run workers and hand the user what only they can do (Needs you). Its shell tool sets the user's secrets and
 // variables in every command, asking the app for them each time, and what
 // tools return hides the secrets' values from the model. It also records in
 // the session who wrote each user message, as the app knows (trackOrigins).
 // Everything is done by the yesman app; this file only forwards.
 //
 // A lead delegates, so that it is always free to talk: it has no shell and
-// writes only Knowledge notes and the task log. Its tools are narrowed when
+// writes only Knowledge notes and the working log. Its tools are narrowed when
 // its session starts, and any call outside them is refused.
 import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
@@ -32,39 +32,58 @@ const LEAD_DENIED = ["bash"];
 const LEAD_WRITES = ["edit", "write"]; // allowed only for shared documents
 const LEAD_ADDED = ["grep", "find", "ls"];
 
-// writableTaskLog checks the new exception's actual file boundary. A linked
-// .yesman directory or task-log file could otherwise write code or another
-// workspace. Resolve the workspace itself (for paths such as /tmp on macOS),
-// then accept only ordinary directories and an unaliased regular file, or a
-// missing path that write may create. Existing user links stay untouched.
-function writableTaskLog(): boolean {
-	if (!WORKSPACE) return false;
+// writableTaskLog checks only the TOC and flat Markdown records. The workspace
+// itself may be an alias; metadata/record parents and files must be ordinary.
+// This is a pi tool hook, not an OS sandbox or a grant to other plugin tools.
+function writableTaskLog(path: string): boolean {
+	if (!WORKSPACE || path.split(/[\\/]/).includes("..")) return false;
 	try {
 		const workspace = realpathSync(WORKSPACE);
-		const meta = resolve(workspace, ".yesman");
-		let parent;
-		try {
-			parent = lstatSync(meta);
-		} catch (err) {
-			return (err as NodeJS.ErrnoException).code === "ENOENT";
+		const target = resolve(WORKSPACE, path);
+		const roots = [resolve(WORKSPACE), workspace];
+		const fold = (s: string) => process.platform === "win32" ? s.toLowerCase() : s;
+		// Absolute paths may spell the workspace through an OS alias (/var,
+		// /tmp, drive casing or a workspace junction). Resolve only that prefix,
+		// then validate .yesman/task-log parents below the canonical root.
+		const alias = target.match(/^(.*)[\\/]\.yesman[\\/](?:task-log\.md|task-log[\\/][^\\/]+)$/i);
+		if (alias && fold(realpathSync(alias[1])) === fold(workspace)) roots.push(alias[1]);
+		let rel: string | undefined;
+		for (const root of roots) {
+			const candidate = relative(fold(root), fold(target)).replace(/\\/g, "/");
+			const name = candidate.slice(".yesman/task-log/".length);
+			const frozen = /^legacy-[0-9a-f]{64}-(?:original|[0-9]{4}|index-[0-9]{4})\.md$/i.test(name);
+			const record = candidate.startsWith(".yesman/task-log/") && /^[a-z0-9][a-z0-9._-]*\.md$/i.test(name) && !frozen && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
+			if (candidate === ".yesman/task-log.md" || record) {
+				rel = relative(root, target).replace(/\\/g, "/");
+				break;
+			}
 		}
-		if (!parent.isDirectory() || parent.isSymbolicLink()) return false;
-		try {
-			const file = lstatSync(resolve(meta, "task-log.md"));
-			return file.isFile() && !file.isSymbolicLink() && file.nlink === 1;
-		} catch (err) {
-			return (err as NodeJS.ErrnoException).code === "ENOENT";
+		if (!rel) return false;
+		const parts = rel.split("/");
+		let current = workspace;
+		for (let i = 0; i < parts.length; i++) {
+			current = resolve(current, parts[i]);
+			try {
+				const st = lstatSync(current);
+				if (st.isSymbolicLink()) return false;
+				if (i < parts.length - 1 ? !st.isDirectory() : !st.isFile() || st.nlink !== 1) return false;
+			} catch (err) {
+				// Only the preselected .yesman and task-log parents may be created.
+				return (err as NodeJS.ErrnoException).code === "ENOENT";
+			}
 		}
+		return true;
 	} catch {
 		return false;
 	}
 }
 
-// sharedDocumentPath allows Knowledge notes and the single task-log file.
+// The Knowledge exception is unchanged. The working log has a narrower file set.
 function sharedDocumentPath(path: unknown): boolean {
 	if (typeof path !== "string" || !path || !WORKSPACE) return false;
-	const target = resolve(WORKSPACE, path.replace(/^@/, ""));
-	if (target === resolve(WORKSPACE, ".yesman", "task-log.md")) return writableTaskLog();
+	const input = path.replace(/^@/, "");
+	if (writableTaskLog(input)) return true;
+	const target = resolve(WORKSPACE, input);
 	const dir = resolve(WORKSPACE, ".yesman", "knowledge");
 	const rel = relative(dir, target);
 	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
@@ -155,6 +174,41 @@ async function commandEnv(signal?: AbortSignal): Promise<{ env: Record<string, s
 		if (signal?.aborted) throw err;
 		return { env: {}, note: `The yesman app did not answer (${(err as Error).message}), so this command ran without the secrets and variables.` };
 	}
+}
+
+// shellEnvironment preserves configured variables but reserves the local broker
+// identity and prefixes only command PATH. The wrapper remains present when the
+// env endpoint is unavailable, so PR creation cannot silently become personal.
+function shellEnvironment(base: Record<string, string>, injected: Record<string, string>): Record<string, string> {
+	const env = { ...base, ...injected };
+	const shim = process.env.YESMAN_GH_SHIM;
+	if (!shim) return env;
+	const pathOf = (source: Record<string, string>) => Object.entries(source).find(([name]) => name.toUpperCase() === "PATH")?.[1];
+	const path = pathOf(injected) ?? pathOf(base) ?? "";
+	for (const name of Object.keys(env)) if (name.toUpperCase() === "PATH") delete env[name];
+	const separator = process.platform === "win32" ? ";" : ":";
+	env.PATH = [shim, ...path.split(separator).filter((part) => part !== shim)].join(separator);
+	env.YESMAN_GH_REAL = process.env.YESMAN_GH_REAL ?? "";
+	env.YESMAN_API = API!;
+	env.YESMAN_TOKEN = TOKEN!;
+	return env;
+}
+
+// A saved App mode cannot fall back to an unwrapped gh if startup could not
+// install the wrapper (for example an orphan holds it open on Windows). The
+// desktop stays usable; only enabled/unknown scopes fail closed until repaired
+// or explicitly disabled. This flag is fixed for the current app instance.
+async function requireGitHubRouting(signal?: AbortSignal): Promise<void> {
+	if (process.env.YESMAN_GH_REQUIRED !== "1" || process.env.YESMAN_GH_SHIM) return;
+	let mode;
+	try {
+		const deadline = AbortSignal.timeout(5000);
+		mode = await call("GET", "/v1/github-app/mode", undefined, signal ? AbortSignal.any([signal, deadline]) : deadline);
+	} catch (err) {
+		if (signal?.aborted) throw err;
+		throw new Error("GitHub App routing is unavailable and its mode could not be verified. No command ran with fallback credentials; repair the runtime wrapper or disable App identity in Settings.");
+	}
+	if (mode?.mode !== "personal") throw new Error("GitHub App routing is unavailable for this workspace. Repair the runtime wrapper and restart, or explicitly disable App identity in Settings; no command ran with fallback credentials.");
 }
 
 // refreshHidden asks the app for the secrets' values to hide, keeping
@@ -298,7 +352,7 @@ export default function yesman(pi: ExtensionAPI) {
 				return { block: true, reason: "The lead has no shell, to stay free for the user. Hand this to a worker with yesman_worker_start." };
 			}
 			if (LEAD_WRITES.includes(event.toolName) && !sharedDocumentPath((event.input as { path?: unknown } | undefined)?.path)) {
-				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/ and a regular task log at .yesman/task-log.md in this workspace; task-log aliases are not writable. Hand code and other changes to a worker with yesman_worker_start." };
+				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/, the Working log TOC .yesman/task-log.md and flat Markdown records .yesman/task-log/<name>.md in this workspace; linked Working log files or parents and frozen legacy snapshots are not writable. Hand code and other changes to a worker with yesman_worker_start." };
 			}
 		});
 	}
@@ -326,8 +380,9 @@ export default function yesman(pi: ExtensionAPI) {
 			...base,
 			defaultActive: false,
 			async execute(id, params, signal, onUpdate, ctx) {
+				await requireGitHubRouting(signal);
 				const { env, note } = await commandEnv(signal);
-				const tool = make(ctx.cwd, { spawnHook: (c) => ({ ...c, env: { ...c.env, ...env } }) });
+				const tool = make(ctx.cwd, { spawnHook: (c) => ({ ...c, env: shellEnvironment(c.env, env) }) });
 				const update: typeof onUpdate = onUpdate && ((partial) => onUpdate({ ...partial, content: hideContent(partial.content ?? []) }));
 				let out;
 				try {
@@ -453,7 +508,7 @@ export default function yesman(pi: ExtensionAPI) {
 				head: Type.String({ description: "Exact full HEAD; review must match the original checkout" }),
 				outcome: Type.String({ description: "pass, findings-handed-off, waiting-release, audit-complete; or done for a finished author/release task" }),
 				ref: Type.String({ description: "Reviewed PR/ref; author/release cleanup requires the merged https://github.com/owner/repo/pull/number URL" }),
-				evidence: Type.String({ description: "Saved conclusion/handoff and evidence outside this tree (board/session/task log), including reconstruction details" }),
+				evidence: Type.String({ description: "Saved conclusion/handoff and evidence outside this tree (board/session/Working log), including reconstruction details" }),
 				unused: Type.Boolean({ description: "True after stopping tree processes and confirming no other agent/task uses it" }),
 			})),
 			handoff: Type.Optional(Type.String({ description: "Lead only: name of the cleanup worker to delegate this verified resource to; saves permission without removal" })),
@@ -613,6 +668,63 @@ export default function yesman(pi: ExtensionAPI) {
 		async execute(_id, params, signal) {
 			await call("POST", "/v1/workers/answer", params, signal);
 			return result(`Answered ${params.name}.`);
+		},
+	});
+
+	const handoffLine = (h: any) => `- ${h.id} (${h.type}): ${h.title}${h.task ? `, task ${h.task}` : ""}${h.worker ? `, worker ${h.worker}` : ""}, since ${h.createdAt}`;
+	pi.registerTool({
+		name: "yesman_needs_you",
+		label: "yesman: needs you",
+		description:
+			"What waits on the user, under Needs you in their window. Call it with no arguments to list it in short, or with id for one handoff in full. " +
+			"add registers something only the user can do or decide: a decision, information, logging in, installing, or another manual step; link it to the board task that waits on it, which you mark blocked. " +
+			"handOver gives the user a worker's question you cannot answer yourself (its requestId from the [yesman] message); you can still answer it. " +
+			"resolve closes a handoff that was settled otherwise. When the user marks one done or not needed, you hear of it. " +
+			"Never ask for passwords, keys, tokens or codes this way or in chat: point the user to Settings › Secrets.",
+		parameters: Type.Object({
+			id: Type.Optional(Type.String({ description: "A handoff's ID, such as n3, to read it in full" })),
+			add: Type.Optional(
+				Type.Object({
+					type: Type.String({ description: "decision, input, login, install or manual" }),
+					title: Type.String({ description: "What the user needs to do, in one line, up to 200 characters" }),
+					detail: Type.Optional(Type.String({ description: "How, in Markdown: the options and your recommendation, where to log in, what to install" })),
+					task: Type.Optional(Type.String({ description: "The board task waiting on it, such as t5" })),
+					worker: Type.Optional(Type.String({ description: "The worker whose work it concerns" })),
+				}),
+			),
+			handOver: Type.Optional(
+				Type.Object({
+					worker: Type.String({ description: "The worker's name" }),
+					requestId: Type.String({ description: "The question's requestId, from its notification; never substitute a newer question" }),
+				}),
+			),
+			resolve: Type.Optional(
+				Type.Object({
+					id: Type.String({ description: "The handoff's ID, such as n3" }),
+					note: Type.Optional(Type.String({ description: "How it was settled" })),
+				}),
+			),
+		}),
+		async execute(toolCallId, params, signal) {
+			if (params.add || params.handOver || params.resolve) {
+				const out = await call("POST", "/v1/needs-you", { add: params.add, handOver: params.handOver, resolve: params.resolve, toolCall: toolCallId }, signal);
+				if (params.handOver) return result(`Handed ${params.handOver.worker}'s question to the user.`, out);
+				if (params.resolve) return result(`Resolved ${out.id}.`, out);
+				const m = out.callMemory;
+				const memory = m ? `\nThe tool-call memory of Needs you holds ${m.used} of ${m.capacity} tool calls: ${m.used >= m.capacity ? "it is full, so" : "once it is full,"} add is refused until the user starts a new one under Needs you.` : "";
+				return result(`Registered ${out.id}: it shows under Needs you until the user acts on it.${memory}`, out);
+			}
+			if (params.id) {
+				const h = await call("GET", `/v1/needs-you?id=${encodeURIComponent(params.id)}`, undefined, signal);
+				return result(json(h), h);
+			}
+			const view = await call("GET", "/v1/needs-you", undefined, signal);
+			const memory = view.callMemory ? `Tool-call memory: ${view.callMemory.used} of ${view.callMemory.capacity} tool calls remembered (${view.callMemory.state}).\n` : "";
+			const lines = [
+				...view.handoffs.map(handoffLine),
+				...view.questions.map((q: any) => `- worker ${q.worker}'s question ${JSON.stringify(q.requestId)}: ${q.title}, since ${q.since}`),
+			];
+			return result(memory + (lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user."), {});
 		},
 	});
 

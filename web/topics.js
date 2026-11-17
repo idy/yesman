@@ -13,7 +13,7 @@ import { $, h, icon } from './dom.js';
 import { renderMarkdown } from './markdown.js';
 import { t, tn, formatNumber } from './i18n.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
-import { DELIVERY_LABELS, newSubmissionID, sameSubmissionImages, topicMarker, isCommand, withoutLine } from './submission.js';
+import { DELIVERY_LABELS, deliveryLabel, newSubmissionID, sameSubmissionImages, topicMarker, isCommand, withoutLine } from './submission.js';
 import { originOf } from './conversation.js';
 
 const STATUS = { open: 'Open', resolved: 'Resolved', archived: 'Archived' };
@@ -309,7 +309,7 @@ export function createTopics(host) {
     const sendRows = sends.slice(0, 10).map((s) => {
       const live = convo?.deliveries?.get?.(s.id);
       const state = live?.state ?? s.state;
-      const label = live ? DELIVERY_LABELS[state] : state === 'failed' ? 'Not sent' : state ? 'Submitted · delivery unconfirmed' : '';
+      const label = live ? deliveryLabel(live) : state === 'failed' ? 'Not sent' : state ? 'Submitted · delivery unconfirmed' : '';
       const m = native.get(s.id);
       return h('li', { class: 'topic-send', 'data-state': state ?? '' },
         h('span', { class: 'topic-send-text' }, excerpt(s.preview) || t('Attached images'), s.truncated ? '…' : ''),

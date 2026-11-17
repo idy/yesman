@@ -11,6 +11,7 @@
 import { $, h, icon } from './dom.js';
 import { counts, formatSize } from './diff.js';
 import { t, tn, formatNumber } from './i18n.js';
+import { isTaskLog } from './task-log.js';
 
 // How long each part is kept before the panel asks again by itself.
 const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
@@ -21,7 +22,11 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   isOpen()               whether the panel shows
 //   files()                what the files pane shows (files.shown())
 //   openKnowledge(), openTaskLog(), openWorktree(dir, show), checkout(y)
-//   pane(), openBoard(), openTopics()   the pane beside the conversation
+//   needsYou(y)            what waits on the user from y: { count, error,
+//                          refused, open (the Needs you pane shows) }
+//   openNeedsYou(y)        open the Needs you pane, of y, beside its conversation
+//   pane()                 the pane beside the conversation, as state.pane
+//   openTopics()           open the Topics pane beside the conversation
 //   openURL(url)
 export function createInfo(host) {
   const data = new Map(); // yesman name -> what was read of it
@@ -114,14 +119,14 @@ export function createInfo(host) {
     const d = stateOf(y.name);
     stale(y.name);
     const top = aside.scrollTop;
+    // A redraw keeps focus on the entry it was on.
+    const focused = aside.contains(document.activeElement) ? document.activeElement.closest('[data-info-entry]')?.dataset.infoEntry : null;
     aside.replaceChildren(
-      knowledge(y, d),
-      taskLog(y),
-      boardLink(y, d),
-      topicsLink(y, d),
+      entriesCard(y, d),
       storage(y, d),
       worktrees(y, d));
     aside.scrollTop = top;
+    if (focused) aside.querySelector(`[data-info-entry="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
   }
 
   function section(title, actions, ...body) {
@@ -135,56 +140,79 @@ export function createInfo(host) {
       busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload'));
   }
 
-  // ---------- Knowledge ----------
+  // ---------- Entries ----------
 
-  function knowledge(y, d) {
+  // One card lists what of the yesman opens elsewhere, a row each, in this
+  // order: what it keeps, what it did, what waits on the user, and what the
+  // user discussed with it. A new part adds its row to entries.
+  function entries(y, d) {
+    return [knowledgeEntry(y, d), workingLogsEntry(y), needsYouEntry(y), topicsEntry(y, d)];
+  }
+
+  function entriesCard(y, d) {
+    return h('section', { class: 'info-section info-section--entries' },
+      h('ul', { class: 'info-entries' }, entries(y, d).map((e) => h('li', null,
+        h('button', { class: 'info-link', type: 'button', 'data-info-entry': e.key, 'aria-current': e.current ? 'page' : null, title: e.title, onclick: e.open },
+          h('span', { class: 'info-link-label' }, e.label),
+          icon('chevron', 'mds-icon info-chevron'),
+          h('span', { class: 'info-aside', 'data-tone': e.tone ?? null }, e.aside ?? ''))))));
+  }
+
+  function knowledgeEntry(y, d) {
     const k = d.info?.knowledge;
     const shown = host.files();
-    const current = shown?.yesman === y.name && shown.kind === 'knowledge';
-    const aside = !k ? '' : k.notes || k.index ? tn(k.notes, '{n} note', '{n} notes') : t('Empty');
-    return h('section', { class: 'info-section info-section--link' },
-      h('button', { class: 'info-link', type: 'button', 'aria-current': current ? 'page' : null, onclick: () => host.openKnowledge(),
-        title: t('Read the notes the agents keep, in the files pane') },
-      h('span', { class: 'info-link-label' }, t('Knowledge')),
-      icon('chevron', 'mds-icon info-chevron'),
-      h('span', { class: 'info-aside' }, aside)));
+    return {
+      key: 'knowledge', label: t('Knowledge'), title: t('Read the notes the agents keep, in the files pane'),
+      current: shown?.yesman === y.name && shown.kind === 'knowledge',
+      aside: !k ? '' : k.notes || k.index ? tn(k.notes, '{n} note', '{n} notes') : t('Empty'),
+      open: () => host.openKnowledge(),
+    };
   }
 
-  function taskLog(y) {
+  // Working logs is the task log, .yesman/task-log.md, under the name the
+  // page gives it.
+  function workingLogsEntry(y) {
     const shown = host.files();
-    const current = shown?.yesman === y.name && shown.path === '.yesman/task-log.md';
-    return h('section', { class: 'info-section info-section--link' },
-      h('button', { class: 'info-link', type: 'button', 'aria-current': current ? 'page' : null, onclick: () => host.openTaskLog(),
-        title: t('Read task and PR history in the files pane') },
-      h('span', { class: 'info-link-label' }, t('Task log')),
-      icon('chevron', 'mds-icon info-chevron')));
+    return {
+      key: 'working-logs', label: t('Working Logs'), title: t('Read task and PR history in the files pane'),
+      current: shown?.yesman === y.name && isTaskLog(shown.path),
+      open: () => host.openTaskLog(),
+    };
   }
 
-  // The board and the topics open beside the conversation, with their counts.
-  function boardLink(y, d) {
-    const b = d.info?.board;
-    const aside = !b ? '' : b.error ? t('Unreadable') : b.open ? t('{n} open', { n: formatNumber(b.open) }) : t('Nothing open');
-    return h('section', { class: 'info-section info-section--link' },
-      h('button', { class: 'info-link', type: 'button', 'aria-current': host.pane() === 'board' ? 'page' : null, onclick: () => host.openBoard(),
-        title: b?.error || t('The tasks of the plan and who has each, beside the conversation') },
-      h('span', { class: 'info-link-label' }, t('Board')),
-      icon('chevron', 'mds-icon info-chevron'),
-      h('span', { class: 'info-aside' }, aside)));
+  // What waits on the user from this yesman, counted from what the Needs
+  // you pane shows; it opens the pane.
+  function needsYouEntry(y) {
+    const { count, error, refused, open } = host.needsYou(y);
+    return {
+      key: 'needs-you', label: t('Needs You'), title: t('See what {name} needs from you', { name: y.displayName || y.name }),
+      current: open,
+      // A file that cannot be read is said, not counted as nothing; and so
+      // is a lead that cannot hand over new requests.
+      aside: error ? [count && tn(count, '{n} waiting', '{n} waiting'), t('Cannot be read')].filter(Boolean).join(' · ')
+        : refused ? [count && tn(count, '{n} waiting', '{n} waiting'), t('New requests refused')].filter(Boolean).join(' · ')
+        : count ? tn(count, '{n} waiting', '{n} waiting') : t('Nothing waiting'),
+      tone: error || refused ? 'error' : count ? 'waiting' : null,
+      open: () => host.openNeedsYou(y),
+    };
   }
 
-  function topicsLink(y, d) {
+  // The topics worth finding again, counted from what the Info read of the
+  // topics file; it opens the Topics pane.
+  function topicsEntry(y, d) {
     const c = d.info?.topics;
-    const aside = !c ? '' : c.error ? t('Unreadable') : c.open ? t('{n} open', { n: formatNumber(c.open) }) : c.resolved + c.archived ? t('Nothing open') : t('Empty');
-    return h('section', { class: 'info-section info-section--link' },
-      h('button', { class: 'info-link', type: 'button', 'aria-current': host.pane() === 'topics' ? 'page' : null, onclick: () => host.openTopics(),
-        title: c?.error || t('Questions and discussions worth keeping: conclusions and open questions, beside the conversation') },
-      h('span', { class: 'info-link-label' }, t('Topics')),
-      icon('chevron', 'mds-icon info-chevron'),
-      h('span', { class: 'info-aside' }, aside)));
+    return {
+      key: 'topics', label: t('Topics'), title: c?.error || t('Questions and discussions worth keeping: conclusions and open questions, beside the conversation'),
+      current: host.pane() === 'topics',
+      // A file that cannot be read is said, not counted as nothing.
+      aside: !c ? '' : c.error ? t('Cannot be read') : c.open ? t('{n} open', { n: formatNumber(c.open) }) : c.resolved + c.archived ? t('Nothing open') : t('Empty'),
+      tone: c?.error ? 'error' : null,
+      open: () => host.openTopics(),
+    };
   }
 
-  // The board or topics changed: their counts are read again.
-  function onBoard(name) {
+  // The topics changed: their count is read again.
+  function onTopics(name) {
     if (data.has(name)) soon(name, ['info'], 1500);
   }
 
@@ -367,5 +395,5 @@ export function createInfo(host) {
     return (y.worktrees ?? []).map((w) => ({ ...w, dir: (w.dir ?? '').replace(/\\/g, '/') }));
   }
 
-  return { render, onChanged, onFiles, onAgentEvent, onBoard, worktrees: listWorktrees };
+  return { render, onChanged, onFiles, onAgentEvent, onTopics, worktrees: listWorktrees };
 }

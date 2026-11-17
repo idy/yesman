@@ -30,6 +30,10 @@ func TestMain(m *testing.M) {
 }
 
 func fakePi() {
+	if os.Getenv("FAKE_PI_RECALL_LIFECYCLE") != "" {
+		fakeRecallLifecyclePi()
+		return
+	}
 	if os.Getenv("FAKE_PI_DELIVERIES") != "" {
 		fakeDeliveryPi()
 		return
@@ -54,6 +58,7 @@ func fakePi() {
 		out.Flush()
 	}
 	stateChecks := 0
+	retrying := false
 	var heldPrompts, heldReports []string
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
@@ -183,6 +188,12 @@ func fakePi() {
 			write(map[string]any{"type": "thinking_level_changed", "level": effort})
 		}
 		write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": true, "data": data})
+		if cmd.Type == "abort" && retrying {
+			// pi's _finishCancelledRetry: the wait ends with no new message.
+			retrying = false
+			write(map[string]any{"type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled"})
+			write(map[string]any{"type": "agent_settled", "aborted": true})
+		}
 		if cmd.Type == "get_messages" && os.Getenv("FAKE_PI_TRAIL") != "" {
 			write(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant"}})
 		}
@@ -192,6 +203,29 @@ func fakePi() {
 				os.Exit(3)
 			}
 			write(map[string]any{"type": "agent_start"})
+			if reason, ok := strings.CutPrefix(cmd.Message, "test-run:"); ok {
+				// A run that ends on its one assistant message, as pi records
+				// a provider's error, a stop by the user or a reply. "retry"
+				// fails and waits to retry until it is aborted; "blank" fails
+				// with no errorMessage.
+				stop := reason
+				if reason == "retry" || reason == "blank" {
+					stop = "error"
+				}
+				msg := map[string]any{"role": "assistant", "content": []any{}, "stopReason": stop, "provider": "codex", "model": "gpt-5", "timestamp": time.Now().UnixMilli()}
+				if reason == "error" || reason == "retry" {
+					msg["errorMessage"] = "server_error: Codex: The usage limit has been reached (429: you can retry your request)"
+				}
+				write(map[string]any{"type": "message_start", "message": msg})
+				write(map[string]any{"type": "message_end", "message": msg})
+				if reason == "retry" {
+					retrying = true
+					write(map[string]any{"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 60000, "errorMessage": msg["errorMessage"]})
+					continue
+				}
+				write(map[string]any{"type": "agent_settled", "aborted": reason == "aborted"})
+				continue
+			}
 			if os.Getenv("FAKE_PI_SLOW_RUNS") != "" {
 				// A real run takes a while: its prompt's answer is handled
 				// well before it settles.
@@ -635,8 +669,34 @@ func TestSleepIfIdle(t *testing.T) {
 func TestSleepIfIdleLeavesPromptsAlone(t *testing.T) {
 	m, _ := newTestManager(t, 0, "FAKE_PI_HOLD_PROMPTS=1")
 	id := ID("alice", yesmen.LeadName)
+	promptReceived := make(chan struct{}, 1)
+	onEvent := m.cfg.OnEvent
+	m.cfg.OnEvent = func(ev Event) {
+		onEvent(ev)
+		var msg struct {
+			Type string `json:"type"`
+		}
+		if ev.Agent == id && json.Unmarshal(ev.Data, &msg) == nil && msg.Type == "test_prompt_received" {
+			select {
+			case promptReceived <- struct{}{}:
+			default:
+			}
+		}
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- m.Prompt(context.Background(), id, "hi") }()
+	promptDone := make(chan struct{})
+	t.Cleanup(func() {
+		m.StopAll()
+		select {
+		case <-promptDone:
+		case <-time.After(10 * time.Second):
+			t.Error("the prompt did not end after stopping its fixture")
+		}
+	})
+	go func() {
+		defer close(promptDone)
+		errc <- m.Prompt(context.Background(), id, "hi")
+	}()
 	// The prompt is registered and pi has not answered it: the agent may
 	// still read Idle, but a message is on its way.
 	deadline := time.Now().Add(10 * time.Second)
@@ -660,12 +720,26 @@ func TestSleepIfIdleLeavesPromptsAlone(t *testing.T) {
 	if m.SleepIfIdle(id, time.Now().Add(time.Hour)) {
 		t.Fatal("slept an agent with a message on its way")
 	}
-	p := m.running(id)
-	if _, err := p.call(context.Background(), map[string]any{"type": "test_release_prompts"}); err != nil {
-		t.Fatal(err)
+	// Registration precedes dispatch. Wait for the fake to receive the prompt
+	// before releasing it; the fake handles that release after installing its hold.
+	select {
+	case <-promptReceived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the fake never received the registered prompt")
 	}
-	if err := <-errc; err != nil {
-		t.Fatal(err)
+	p := m.running(id)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := p.call(ctx, map[string]any{"type": "test_release_prompts"}); err != nil {
+		t.Fatalf("releasing the held prompt: %v", err)
+	}
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the prompt did not complete after the fake released it")
 	}
 }
 

@@ -7,8 +7,12 @@ export const DELIVERY_LABELS = {
   sending: 'Sending…', accepted: 'Accepted · delivery unconfirmed',
   steering: 'Accepted for steering · delivery unconfirmed', queued: 'Accepted for follow-up · delivery unconfirmed',
   unconfirmed: 'Delivery unconfirmed', failed: 'Not sent', interrupted: 'Delivery interrupted',
-  handled: 'Handled by an extension',
+  handled: 'Handled by an extension', dispatched: 'Taken by pi', cancelled: 'Recalled',
 };
+
+// A receipt's label: a message still in pi's native queue says which queue
+// it waits in rather than its admission.
+export const deliveryLabel = (d) => d.nativePending ? (d.state === 'queued' ? 'Waiting · follow-up' : 'Steering · waiting for input checkpoint') : DELIVERY_LABELS[d.state];
 
 // A 12-hex millisecond timestamp, then 36 random hex digits.
 export const newSubmissionID = () => Date.now().toString(16).padStart(12, '0') +
