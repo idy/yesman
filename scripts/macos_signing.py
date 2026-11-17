@@ -19,9 +19,9 @@ docs/macos-signing.md. Commands:
            checking that the directory is still the one setup made (device,
            inode, owner and the receipt's random nonce), through a
            descriptor of that directory held until it is deleted. No tool
-           that takes the keychain's path deletes anything. A directory
-           kept because processes might still use it (retained.json) is
-           removed only once they have all stopped. Without a state it does
+           that takes the keychain's path deletes anything. While a use
+           record (below) names a process group not confirmed empty, or a
+           record is malformed, it removes nothing. Without a state it does
            nothing.
   verify   After the build, requires both apps and disk images to carry the
            prepared identity's notarized, stapled signature, and both apps
@@ -34,14 +34,19 @@ certificate's passphrase and the app-specific password do reach `security
 import` and `notarytool store-credentials` as arguments, the only way those
 tools take them without a terminal; error messages never include arguments.
 
-Every tool runs as the leader of a process group of its own (run_owned). On
-a timeout, a TERM/INT/HUP or any failure, the processes of that group are
-stopped and waited for before files are removed. When that cannot be
-confirmed (a survivor, or members that cannot be listed), nothing those
-processes may use is deleted: the directory keeps a retained.json naming the
-group, the step fails, and a later cleanup removes it only after the group
-is confirmed empty. Processes that leave the group (a new session or process
-group) and a SIGKILL of this script are outside that guarantee.
+Every tool runs as the leader of a process group of its own (run_owned). Its
+first process waits until the group is recorded, as an empty file
+use-<group>, in each directory the tool may use (setup's signing directory;
+for the release build also the launcher's own directories); if a record
+cannot be made the tool is not started. On a timeout, a TERM/INT/HUP or any
+failure, the processes of that group are stopped and waited for; only then
+are the records withdrawn and files removed. When that cannot be confirmed
+(a survivor, or members that cannot be listed), the records stay and nothing
+is written or deleted: the step fails, and a later cleanup removes the
+directory only once every recorded group is confirmed empty. Processes that
+leave the group (a new session or process group) and a SIGKILL of this
+script while a tool runs are outside that guarantee; the records then keep
+the directory until the disposable runner goes, or its group is found empty.
 """
 import argparse
 import base64
@@ -77,7 +82,10 @@ CODESIGN = '/usr/bin/codesign'
 PROFILE = 'yesman-release-notary'
 KEYCHAIN = 'signing.keychain-db'
 RECEIPT = 'receipt.json'
-RETAINED = 'retained.json'  # kept because processes of these groups might still use the directory
+# A directory a tool may use holds use-<its process group> from before the
+# tool runs until its group is confirmed stopped (run_owned).
+USE = re.compile(r'use-([1-9][0-9]{0,9})\Z')
+LOCK_WAIT = 10  # seconds to wait for another step's lock on a directory
 RECEIPT_LIMIT = 4096  # bytes; the receipt holds one 64-hex nonce
 DEADLINE = 300  # seconds for any one tool; notarytool validates credentials online
 GRACE = ((signal.SIGTERM, 5.0), (signal.SIGKILL, 3.0))  # stopping a tool's process group
@@ -90,6 +98,8 @@ KNOWN_VALUES = []
 # group IDs stay this process's while it lives.
 UNDRAINED = []
 _UNREAPED = []
+# The participant directories of the tools run() starts now (setup's signing directory).
+USING = []
 
 
 class SigningError(Exception):
@@ -103,6 +113,106 @@ class Undrained(SigningError):
 def drained():
     """Whether every process group this process started is confirmed stopped."""
     return not UNDRAINED
+
+
+class Participant:
+    """An open directory a tool may use; check(fd) says whether it is still the expected one."""
+
+    def __init__(self, fd, label, check=None):
+        self.fd, self.label, self.check = fd, label, check
+
+
+class locked:
+    """An exclusive flock on an open directory, waited for at most LOCK_WAIT seconds."""
+
+    def __init__(self, fd, label):
+        self.fd, self.label = fd, label
+
+    def __enter__(self):
+        import fcntl
+        end = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except BlockingIOError:
+                if time.monotonic() >= end:
+                    raise SigningError('%s is in use by another step: leaving it alone' % self.label)
+                time.sleep(0.05)
+
+    def __exit__(self, *exc):
+        import fcntl
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+        return False
+
+
+def record_use(participant, group):
+    """Records, durably, that group may use the participant directory; raises when it cannot.
+
+    The record is the empty file use-<group>: its name says everything, so
+    there is no content to write partially. Created under the directory's
+    lock after checking that the directory is still the expected one, so a
+    directory a cleanup is emptying never gets a new user.
+    """
+    with locked(participant.fd, participant.label):
+        if participant.check is not None and not participant.check(participant.fd):
+            raise SigningError('%s is no longer the directory this run uses' % participant.label)
+        name = 'use-%d' % group
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=participant.fd)
+        except FileExistsError:
+            # Left by an earlier group of that ID, which cannot exist any more while this one does.
+            if not stat.S_ISREG(os.stat(name, dir_fd=participant.fd, follow_symlinks=False).st_mode):
+                raise SigningError('%s holds an unexpected %s' % (participant.label, name))
+        else:
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        os.fsync(participant.fd)
+
+
+def withdraw_use(participant, group):
+    """Removes the record of a group confirmed stopped; a record left behind names a group cleanup finds empty."""
+    try:
+        os.unlink('use-%d' % group, dir_fd=participant.fd)
+        os.fsync(participant.fd)
+    except OSError:
+        pass
+
+
+def use_groups(fd, label):
+    """The process groups the use records of the open directory fd name; a malformed record raises."""
+    groups = []
+    with os.scandir(fd) as listing:
+        names = [entry.name for entry in listing]
+    for name in names:
+        if not (name.startswith('use-') or name.startswith('.use-')):
+            continue
+        match = USE.match(name)
+        try:
+            regular = stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode)
+        except OSError:
+            regular = False
+        if not match or not regular:
+            raise SigningError('%s holds an unknown use record %r: leaving it alone' % (label, name))
+        groups.append(int(match.group(1)))
+    return sorted(groups)
+
+
+class using:
+    """Makes run() record its tools' use of these participants (none: tools that use no directory)."""
+
+    def __init__(self, participants):
+        self.participants = list(participants)
+
+    def __enter__(self):
+        self.saved = USING[:]
+        USING[:] = self.participants
+
+    def __exit__(self, *exc):
+        USING[:] = self.saved
+        return False
 
 
 def clean_environment(environ, secret_values=()):
@@ -267,18 +377,71 @@ def stop_group(pgid):
     return members
 
 
-def run_owned(label, args, env, timeout=None, capture=True, cwd=None):
+# The first process of every owned tool: it waits on a pipe until the
+# supervisor has recorded its group (its own process ID) in every directory
+# the tool may use, then becomes the tool. Anything but the go-ahead byte,
+# including the supervisor going away, ends it before the tool runs.
+GATE = r'''import os, sys
+fd = int(sys.argv[1])
+try:
+    go = os.read(fd, 1)
+except OSError:
+    go = b''
+os.close(fd)
+if go != b'1':
+    os._exit(125)
+try:
+    os.execvp(sys.argv[2], sys.argv[2:])
+except OSError as error:
+    os.write(2, ('cannot run %s: %s\n' % (sys.argv[2], error.strerror)).encode())
+    os._exit(127)
+'''
+
+
+def run_owned(label, args, env, timeout=None, capture=True, cwd=None, participants=()):
     """Runs args as the leader of a new process group; returns (exit code, captured output).
 
-    After the leader exits, times out, or a signal or error interrupts the
-    wait, every remaining process of the group is stopped and waited for;
-    only then is the leader reaped. Survivors, or a group whose members
-    cannot be listed, make this fail rather than report the tool done.
+    Before the tool itself can run, its group is recorded in every
+    participant directory (record_use); if that fails anywhere, the tool is
+    not started. After the leader exits, times out, or a signal or error
+    interrupts the wait, every remaining process of the group is stopped and
+    waited for; only then is the leader reaped and the records withdrawn.
+    Survivors, or a group whose members cannot be listed, make this fail
+    rather than report the tool done, and leave the records in place.
     """
     pipe = subprocess.PIPE if capture else None
     _signals['shield'] += 1  # a signal during the start is held, then raised below
     try:
-        child = subprocess.Popen(args, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=pipe, stderr=pipe, start_new_session=True)
+        gate, release = os.pipe()
+        try:
+            child = subprocess.Popen([sys.executable, '-I', '-c', GATE, str(gate)] + list(args), env=env, cwd=cwd, stdin=subprocess.DEVNULL,
+                                     stdout=pipe, stderr=pipe, start_new_session=True, pass_fds=(gate,))
+        except BaseException:
+            os.close(release)
+            raise
+        finally:
+            os.close(gate)
+        recorded = []
+        try:
+            for participant in participants:
+                record_use(participant, child.pid)
+                recorded.append(participant)
+        except BaseException as error:
+            # The gate is still closed: nothing but the waiting first process ran.
+            os.close(release)
+            os.kill(child.pid, signal.SIGKILL)
+            child.wait()
+            for stream in (child.stdout, child.stderr):
+                if stream:
+                    stream.close()
+            for participant in recorded:
+                withdraw_use(participant, child.pid)
+            raise SigningError('%s was not started: its use of %s could not be recorded (%s)'
+                               % (label, participant.label, error.strerror if isinstance(error, OSError) else error)) from error
+        try:
+            os.write(release, b'1')
+        finally:
+            os.close(release)
     finally:
         _signals['shield'] -= 1
     tails, interrupted, exited, problem = [], None, False, None
@@ -303,6 +466,9 @@ def run_owned(label, args, env, timeout=None, capture=True, cwd=None):
         if survivors != []:
             _UNREAPED.append(child)
             UNDRAINED.append({'label': label, 'group': child.pid})
+        else:
+            for participant in participants:
+                withdraw_use(participant, child.pid)
         for tail in tails:
             tail.join(2)
     if survivors is None:
@@ -328,7 +494,7 @@ def run_owned(label, args, env, timeout=None, capture=True, cwd=None):
 def run(label, args, redact=(), check=True, timeout=None):
     """Run a tool; on failure report label and its redacted output, never args."""
     timeout = timeout or DEADLINE
-    code, out = run_owned(label, args, clean_environment(os.environ, KNOWN_VALUES), timeout=timeout)
+    code, out = run_owned(label, args, clean_environment(os.environ, KNOWN_VALUES), timeout=timeout, participants=list(USING))
     for value in redact:
         if value:
             out = out.replace(value, '***')
@@ -477,38 +643,6 @@ def read_receipt(fd):
     return nonce if isinstance(nonce, str) else None
 
 
-def retained_groups(fd):
-    """The process groups the retained.json of the open directory fd names; None without one."""
-    try:
-        os.stat(RETAINED, dir_fd=fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        raise SigningError('Its %s cannot be read: leaving it alone' % RETAINED)
-    data = read_small(fd, RETAINED)
-    try:
-        groups = json.loads(data)['groups']
-        assert isinstance(groups, list) and groups and all(isinstance(g, int) and not isinstance(g, bool) and g > 1 for g in groups)
-    except Exception:
-        raise SigningError('Its %s cannot be read: leaving it alone' % RETAINED)
-    return groups
-
-
-def keep(fd):
-    """Records in the open directory fd the groups that might still use it (merged with any already named)."""
-    groups = sorted(set(retained_groups(fd) or []) | {entry['group'] for entry in UNDRAINED})
-    new = RETAINED + '.new'
-    try:
-        os.unlink(new, dir_fd=fd)
-    except FileNotFoundError:
-        pass
-    out = os.open(new, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
-    with os.fdopen(out, 'w') as handle:
-        handle.write(json.dumps({'groups': groups}))
-    os.replace(new, RETAINED, src_dir_fd=fd, dst_dir_fd=fd)
-    return groups
-
-
 def still_running(groups):
     """Why the processes of groups may still run, or None once every group is confirmed empty.
 
@@ -605,24 +739,70 @@ def prepared(text):
     return PROFILE, folder / KEYCHAIN
 
 
+def borrow(text):
+    """Opens and checks the signing directory of a state for a tool that will use its keychain.
+
+    Returns the notary profile, the keychain and a Participant whose use is
+    recorded before the tool runs, so that the always-run cleanup leaves the
+    keychain alone while that tool's processes may run. The caller closes
+    participant.fd.
+    """
+    folder, state = parse_state(text)
+
+    def check(fd):
+        if not validate(fd, state):
+            return False
+        try:
+            return stat.S_ISREG(os.stat(KEYCHAIN, dir_fd=fd, follow_symlinks=False).st_mode)
+        except OSError:
+            return False
+    try:
+        fd = os.open(folder, DIRECTORY)
+    except OSError:
+        raise SigningError('The signing state does not name a keychain that setup prepared')
+    if not check(fd):
+        os.close(fd)
+        raise SigningError('The signing state does not name a keychain that setup prepared')
+    return PROFILE, folder / KEYCHAIN, Participant(fd, str(folder), check)
+
+
+def kept(fd, label):
+    """Raises unless every process that may use the open directory fd is confirmed stopped.
+
+    Use records (use-<group>) are made before a tool runs and withdrawn only
+    once its group is confirmed stopped; a record still present, or one that
+    cannot be read as a record, means its group must be confirmed empty
+    first. Groups this process could not stop count too. Nothing is
+    signalled: those groups are not this process's to stop.
+    """
+    groups = use_groups(fd, label)
+    busy = still_running(groups) if groups else None
+    if busy:
+        raise SigningError('Kept %s: %s; run the cleanup again once they have stopped' % (label, busy))
+    if not drained():
+        raise SigningError('Kept %s: processes this step started (groups %s) might still use it'
+                           % (label, ', '.join(str(entry['group']) for entry in UNDRAINED)))
+
+
 def remove(folder, state):
     """Removes the search-list entry of folder's keychain, then the keychain and folder, if setup made it.
 
     The directory is opened once, relative to its parent, and that
-    descriptor is what gets checked and emptied: the keychain file is
-    unlinked through it, never deleted by a tool that reopens its path
+    descriptor is what gets checked, locked and emptied: the keychain file
+    is unlinked through it, never deleted by a tool that reopens its path
     (security delete-keychain would delete whatever keychain the path then
     names). Its entry is removed only while the parent still names that
     descriptor's directory, with rmdir, which cannot remove a directory
     holding anything. A directory moved away is emptied where it is;
     whatever replaced it is left alone.
 
-    While processes this process started may still run, or those a
-    retained.json names are not confirmed stopped, nothing is deleted.
+    Nothing is deleted while a use record names a group not confirmed empty,
+    a record is malformed, or this process has a group it could not stop
+    (kept). The lock keeps a tool from being admitted meanwhile.
     """
     keychain = folder / KEYCHAIN
     problems = []
-    with shielded():
+    with shielded(), using(()):
         try:
             parent = os.open(folder.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK)
         except OSError:
@@ -636,45 +816,31 @@ def remove(folder, state):
                     held = None
                 except OSError:
                     raise SigningError('%s is not the directory this setup made: leaving it alone' % folder)
-            if held is not None:
-                if not owned(folder, state) or not validate(held, state):
-                    raise SigningError('%s is not the directory this setup made: leaving it alone' % folder)
-                retain(held, folder)
-                groups = retained_groups(held)
-                busy = groups and still_running(groups)
-                if busy:
-                    raise SigningError('Kept %s: %s. Run the cleanup again once they have stopped' % (folder, busy))
-            elif not drained():
-                raise SigningError('Processes this step started may still run: nothing removed')
-            try:
-                # Only the list of paths changes here; no keychain file is opened or deleted.
-                listed = search_list()
-                if any(same_file(p, keychain) for p in listed):
-                    set_search_list([p for p in listed if not same_file(p, keychain)])
-                    if any(same_file(p, keychain) for p in search_list()):
-                        problems.append('the keychain is still in the search list')
-            except Undrained:
-                if held is not None:
-                    retain(held, folder)
-                raise
-            except SigningError as error:
-                problems.append(str(error))
-            if held is not None:
-                if not validate(held, state):  # checked again just before deleting
-                    raise SigningError('%s changed during cleanup: leaving it alone' % folder)
-                retain(held, folder)
-                # The held directory is setup's wherever it now is; the path is
-                # only removed while it still leads there.
-                moved = not owned(folder, state)
-                problems += empty(held)
-                if not moved and names(parent, folder.name, held):
-                    try:
-                        os.rmdir(folder.name, dir_fd=parent)
-                    except OSError as error:
-                        problems.append('%s remains (%s)' % (folder, error.strerror))
-                else:
-                    problems.append('%s was replaced during cleanup: the signing directory was emptied where it went, '
-                                    'and what replaced it was left alone' % folder)
+            if held is None:
+                if not drained():
+                    raise SigningError('Processes this step started may still run: nothing removed')
+                problems += unlist(keychain)
+            else:
+                with locked(held, str(folder)):
+                    if not owned(folder, state) or not validate(held, state):
+                        raise SigningError('%s is not the directory this setup made: leaving it alone' % folder)
+                    kept(held, str(folder))
+                    problems += unlist(keychain)
+                    if not validate(held, state):  # checked again just before deleting
+                        raise SigningError('%s changed during cleanup: leaving it alone' % folder)
+                    kept(held, str(folder))
+                    # The held directory is setup's wherever it now is; the path is
+                    # only removed while it still leads there.
+                    moved = not owned(folder, state)
+                    problems += empty(held)
+                    if not moved and names(parent, folder.name, held):
+                        try:
+                            os.rmdir(folder.name, dir_fd=parent)
+                        except OSError as error:
+                            problems.append('%s remains (%s)' % (folder, error.strerror))
+                    else:
+                        problems.append('%s was replaced during cleanup: the signing directory was emptied where it went, '
+                                        'and what replaced it was left alone' % folder)
         finally:
             for fd in (held, parent):
                 if fd is not None:
@@ -683,13 +849,19 @@ def remove(folder, state):
         raise SigningError('Signing cleanup incomplete: ' + '; '.join(problems))
 
 
-def retain(fd, folder):
-    """When this process has a process group not confirmed stopped, marks the open directory fd kept and fails."""
-    if drained():
-        return
-    groups = keep(fd)
-    raise SigningError('Kept %s (%s names process groups %s that might still use it); run the cleanup again once they have stopped'
-                       % (folder, RETAINED, ', '.join(str(g) for g in groups)))
+def unlist(keychain):
+    """Takes keychain out of the user search list; only the list of paths changes. Returns problems."""
+    try:
+        listed = search_list()
+        if any(same_file(p, keychain) for p in listed):
+            set_search_list([p for p in listed if not same_file(p, keychain)])
+            if any(same_file(p, keychain) for p in search_list()):
+                return ['the keychain is still in the search list']
+    except Undrained:
+        raise
+    except SigningError as error:
+        return [str(error)]
+    return []
 
 
 def setup(root=ROOT):
@@ -717,66 +889,72 @@ def setup(root=ROOT):
     redact = [values[name] for name in SECRETS] + [password]
 
     folder, state_text = make_state()
+    signing = None
     try:
-        # Published before any keychain exists, so the always-run cleanup
-        # step can remove what a killed setup leaves. If this write fails,
-        # setup removes the directory itself.
-        write_output({'state': state_text})
-        keychain = folder / KEYCHAIN
-        previous = search_list()
-        run('Creating the signing keychain', ['security', 'create-keychain', '-p', password, str(keychain)], redact)
-        if not keychain.is_file() or keychain.is_symlink():
-            raise SigningError('The signing keychain was not created where setup asked')
-        run('Configuring the signing keychain', ['security', 'set-keychain-settings', '-lut', '21600', str(keychain)], redact)
-        run('Unlocking the signing keychain', ['security', 'unlock-keychain', '-p', password, str(keychain)], redact)
-        certificate = folder / 'identity.p12'
-        descriptor = os.open(certificate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        try:
-            with os.fdopen(descriptor, 'wb') as out:
-                out.write(p12)
-            # The key's access list names codesign; the partition list below
-            # lets Apple-signed tools and codesign use it without a prompt.
-            run('Importing the signing certificate', ['security', 'import', str(certificate), '-k', str(keychain), '-f', 'pkcs12',
-                                                      '-P', values['MACOS_SIGNING_CERTIFICATE_PASSWORD'], '-T', CODESIGN], redact)
-        finally:
-            with shielded():
-                if drained():  # else security import may still be reading it
-                    certificate.unlink()
-        run('Allowing codesign to use the key', ['security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', password, str(keychain)], redact)
-        # codesign, as MyGo runs it, finds identities through the search list.
-        set_search_list([str(keychain)] + [p for p in previous if not same_file(p, keychain)])
+        # Every tool setup runs records its use of the directory before it
+        # runs (run_owned), so a cleanup never removes what a tool still uses.
+        state = parse_state(state_text)[1]
+        signing = Participant(os.open(folder, DIRECTORY), str(folder), lambda fd: validate(fd, state))
+        with using([signing]):
+            # Published before any keychain exists, so the always-run cleanup
+            # step can remove what a killed setup leaves. If this write fails,
+            # setup removes the directory itself.
+            write_output({'state': state_text})
+            keychain = folder / KEYCHAIN
+            previous = search_list()
+            run('Creating the signing keychain', ['security', 'create-keychain', '-p', password, str(keychain)], redact)
+            if not keychain.is_file() or keychain.is_symlink():
+                raise SigningError('The signing keychain was not created where setup asked')
+            run('Configuring the signing keychain', ['security', 'set-keychain-settings', '-lut', '21600', str(keychain)], redact)
+            run('Unlocking the signing keychain', ['security', 'unlock-keychain', '-p', password, str(keychain)], redact)
+            certificate = folder / 'identity.p12'
+            descriptor = os.open(certificate, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            try:
+                with os.fdopen(descriptor, 'wb') as out:
+                    out.write(p12)
+                # The key's access list names codesign; the partition list below
+                # lets Apple-signed tools and codesign use it without a prompt.
+                run('Importing the signing certificate', ['security', 'import', str(certificate), '-k', str(keychain), '-f', 'pkcs12',
+                                                          '-P', values['MACOS_SIGNING_CERTIFICATE_PASSWORD'], '-T', CODESIGN], redact)
+            finally:
+                with shielded():
+                    if drained():  # else security import may still be reading it
+                        certificate.unlink()
+            run('Allowing codesign to use the key', ['security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', password, str(keychain)], redact)
+            # codesign, as MyGo runs it, finds identities through the search list.
+            set_search_list([str(keychain)] + [p for p in previous if not same_file(p, keychain)])
 
-        every = identities(keychain, valid=False)
-        valid = identities(keychain, valid=True)
-        if len(every) != 1:
-            raise SigningError('The .p12 must hold exactly one signing identity, the Developer ID Application one; it holds %d' % len(every))
-        if len(valid) != 1:
-            raise SigningError('The signing identity is not valid on the runner (expired, revoked or not issued by Apple)')
-        sha1, name = valid[0]
-        match = IDENTITY_NAME.fullmatch(name)
-        if not match:
-            raise SigningError('The identity is not a "Developer ID Application" certificate (Apple Development, Mac App Distribution and Installer certificates cannot be used)')
-        if match.group(1) != team:
-            raise SigningError('The Developer ID certificate belongs to team %s, not the teamId %s of %s' % (match.group(1), team, TEAM_FILE))
+            every = identities(keychain, valid=False)
+            valid = identities(keychain, valid=True)
+            if len(every) != 1:
+                raise SigningError('The .p12 must hold exactly one signing identity, the Developer ID Application one; it holds %d' % len(every))
+            if len(valid) != 1:
+                raise SigningError('The signing identity is not valid on the runner (expired, revoked or not issued by Apple)')
+            sha1, name = valid[0]
+            match = IDENTITY_NAME.fullmatch(name)
+            if not match:
+                raise SigningError('The identity is not a "Developer ID Application" certificate (Apple Development, Mac App Distribution and Installer certificates cannot be used)')
+            if match.group(1) != team:
+                raise SigningError('The Developer ID certificate belongs to team %s, not the teamId %s of %s' % (match.group(1), team, TEAM_FILE))
 
-        # Sign a scratch file as MyGo will sign the app, through the search
-        # list, and let codesign evaluate Apple's Developer ID policy for
-        # this team.
-        # On a failure the scratch directory goes with the rest (remove).
-        scratch = pathlib.Path(tempfile.mkdtemp(dir=folder))
-        probe = scratch / 'probe.txt'
-        probe.write_text('yesman signing preflight\n')
-        run('Signing a preflight file', ['codesign', '--force', '--sign', sha1, '--timestamp=none', str(probe)], redact)
-        run('Checking the Developer ID requirement', ['codesign', '--verify', '--strict', '-R=' + developer_id_requirement(team), str(probe)], redact)
-        _, described = run('Describing the preflight signature', ['codesign', '-d', '--verbose=2', str(probe)], redact)
-        if 'TeamIdentifier=%s\n' % team not in described + '\n':
-            raise SigningError('The preflight signature names another team')
-        shutil.rmtree(scratch)
+            # Sign a scratch file as MyGo will sign the app, through the search
+            # list, and let codesign evaluate Apple's Developer ID policy for
+            # this team.
+            # On a failure the scratch directory goes with the rest (remove).
+            scratch = pathlib.Path(tempfile.mkdtemp(dir=folder))
+            probe = scratch / 'probe.txt'
+            probe.write_text('yesman signing preflight\n')
+            run('Signing a preflight file', ['codesign', '--force', '--sign', sha1, '--timestamp=none', str(probe)], redact)
+            run('Checking the Developer ID requirement', ['codesign', '--verify', '--strict', '-R=' + developer_id_requirement(team), str(probe)], redact)
+            _, described = run('Describing the preflight signature', ['codesign', '-d', '--verbose=2', str(probe)], redact)
+            if 'TeamIdentifier=%s\n' % team not in described + '\n':
+                raise SigningError('The preflight signature names another team')
+            shutil.rmtree(scratch)
 
-        run('Storing the notary credentials', ['xcrun', 'notarytool', 'store-credentials', PROFILE, '--apple-id', values['MACOS_NOTARY_APPLE_ID'],
-                                               '--team-id', team, '--password', values['MACOS_NOTARY_PASSWORD'], '--keychain', str(keychain)], redact)
-        # The build reads these; a failed write fails setup and removes the keychain.
-        write_output({'mode': 'developer-id', 'identity': sha1, 'team': team, 'name': name})
+            run('Storing the notary credentials', ['xcrun', 'notarytool', 'store-credentials', PROFILE, '--apple-id', values['MACOS_NOTARY_APPLE_ID'],
+                                                   '--team-id', team, '--password', values['MACOS_NOTARY_PASSWORD'], '--keychain', str(keychain)], redact)
+            # The build reads these; a failed write fails setup and removes the keychain.
+            write_output({'mode': 'developer-id', 'identity': sha1, 'team': team, 'name': name})
     except BaseException:
         # Leave nothing behind for the remaining steps of a failed job.
         with shielded():
@@ -785,6 +963,9 @@ def setup(root=ROOT):
             except SigningError as error:
                 print('::error::' + str(error), file=sys.stderr)
         raise
+    finally:
+        if signing is not None:
+            os.close(signing.fd)
     print('Prepared Developer ID signing: %s (%s), notary profile %s' % (name, sha1, PROFILE))
 
 

@@ -37,11 +37,15 @@ when it ends.
 MyGo runs as the leader of a process group of its own. When it ends, fails,
 or a TERM/INT/HUP reaches the launcher, every process left in that group is
 stopped and waited for before the key, token and configuration are deleted.
-When that cannot be confirmed (a survivor, or members that cannot be listed)
-the step fails and both directories are kept, each with a retained.json naming
-the group, rather than taken from processes that may still read them;
-`release_build.py --remove-retained DIR...` removes them once that group is
-confirmed empty, and the disposable runner goes with them otherwise. Processes
+Before MyGo runs, its group is recorded (use-<group>) in both directories
+and, in Developer ID mode, in setup's signing directory, whose keychain MyGo
+uses; if a record cannot be made MyGo is not started. When the stop cannot
+be confirmed (a survivor, or members that cannot be listed) the step fails
+and the records stay, so nothing is taken from processes that may still read
+it: the always-run signing cleanup keeps the keychain, and
+`release_build.py --remove-retained DIR...` removes the launcher's
+directories, only once every recorded group is confirmed empty; the
+disposable runner goes with them otherwise. Processes
 that leave the group (a new session) and a SIGKILL of the launcher are not
 covered; the files then stay until the disposable runner goes.
 """
@@ -57,8 +61,8 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from macos_signing import (DIRECTORY, SigningError, clean_environment, drained, empty, install_signal_handlers, keep, names,  # noqa: E402
-                           prepared, retained_groups, run_owned, shielded, still_running)
+from macos_signing import (DIRECTORY, Participant, SigningError, borrow, clean_environment, drained, empty,  # noqa: E402
+                           install_signal_handlers, kept, locked, names, run_owned, shielded, use_groups)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Each key of mygo.json that the derived configuration knows how to carry.
@@ -149,14 +153,16 @@ def build(platforms, system, mode, identity, state, upload, root=ROOT):
     if not targets or not all(re.fullmatch(r'(darwin|linux|windows)/(amd64|arm64|universal)', p) for p in targets):
         raise SigningError('Unexpected platforms: ' + platforms)
     darwin = any(p.startswith('darwin/') for p in targets)
-    notarize, sign = None, []
+    notarize, sign, borrowed = None, [], None
     if system == 'macOS':
         if not all(p.startswith('darwin/') for p in targets):
             raise SigningError('The macOS row builds only darwin platforms')
         if mode == 'developer-id':
             if not re.fullmatch(r'[0-9A-F]{40}', identity):
                 raise SigningError('No prepared signing identity')
-            profile, keychain = prepared(state)
+            # MyGo's codesign and notarytool use setup's keychain: that
+            # directory is a participant of the build like the launcher's own.
+            profile, keychain, borrowed = borrow(state)
             notarize, sign = {'keychainProfile': profile, 'keychain': str(keychain)}, ['-sign', identity]
         elif mode == 'adhoc':
             if identity or state:
@@ -166,13 +172,21 @@ def build(platforms, system, mode, identity, state, upload, root=ROOT):
     elif mode or identity or state or darwin:
         raise SigningError('Only the macOS row signs or builds darwin platforms')
 
+    try:
+        _build(targets, upload, sign, notarize, borrowed, key, token, root)
+    finally:
+        if borrowed is not None:
+            os.close(borrowed.fd)
+
+
+def _build(targets, upload, sign, notarize, borrowed, key, token, root):
     real_gh = shutil.which('gh') if token else None
     if token and not real_gh:
         raise SigningError('Uploading needs the GitHub CLI')
     env = clean_environment(os.environ, [key, token])
     tracked = json.loads((root / 'mygo.json').read_text())
     private = pathlib.Path(tempfile.mkdtemp(prefix='yesman-release-', dir=os.environ.get('RUNNER_TEMP') or None))
-    project = None
+    project, held = None, []
     try:
         key_file = None
         if key:
@@ -192,37 +206,36 @@ def build(platforms, system, mode, identity, state, upload, root=ROOT):
         command = ['go', 'tool', 'mygo', 'build', '-platform', ','.join(targets)] + (['-upload'] if upload else []) + sign + [str(project)]
         print('Building:', ' '.join(shlex.quote(c) for c in command[:-1]), '<derived project>', flush=True)
         # MyGo and everything it starts (go, compilers, codesign, xcrun, gh)
-        # run in one process group of their own; on failure or a signal the
-        # group is stopped and waited for before the files are removed.
-        code, _ = run_owned('mygo build', command, env, capture=False, cwd=root)
+        # run in one process group of their own, recorded in every directory
+        # they use before they run; on failure or a signal the group is
+        # stopped and waited for before the files are removed.
+        for folder in (private, project):
+            held.append(Participant(os.open(folder, DIRECTORY), str(folder)))
+        participants = held + ([borrowed] if borrowed else [])
+        code, _ = run_owned('mygo build', command, env, capture=False, cwd=root, participants=participants)
         if code != 0:
             raise SigningError('mygo build failed (exit %d)' % code)
     finally:
         with shielded():
+            for participant in held:
+                os.close(participant.fd)
             if drained():
                 shutil.rmtree(private, ignore_errors=True)
                 if project:
                     shutil.rmtree(project, ignore_errors=True)
             else:
-                kept = []
-                for folder in (private, project):
-                    if folder:
-                        try:
-                            fd = os.open(folder, DIRECTORY)
-                            try:
-                                keep(fd)
-                            finally:
-                                os.close(fd)
-                        except (OSError, SigningError) as error:  # kept all the same, only unmarked
-                            print('::error::Could not mark %s as kept: %s' % (folder, error), file=sys.stderr)
-                        kept.append(str(folder))
-                print('::error::Kept %s: processes MyGo started might still read them. Once they have stopped: '
-                      'python3 scripts/release_build.py --remove-retained %s' % (', '.join(kept), ' '.join(shlex.quote(k) for k in kept)),
+                # Their use records (made before MyGo started) stay; nothing
+                # is written now. The always-run signing cleanup honours the
+                # record in a borrowed signing directory the same way.
+                folders = [str(f) for f in (private, project) if f]
+                print('::error::Kept %s%s: processes MyGo started might still read them. Once they have stopped: '
+                      'python3 scripts/release_build.py --remove-retained %s'
+                      % (', '.join(folders), ' and the signing keychain' if borrowed else '', ' '.join(shlex.quote(k) for k in folders)),
                       file=sys.stderr)
 
 
 def remove_retained(path):
-    """Removes a directory this launcher kept, once every process group its retained.json names is confirmed empty."""
+    """Removes a directory this launcher kept, once every process group its use records name is confirmed empty."""
     path = pathlib.Path(os.path.abspath(path))
     try:
         parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK)
@@ -234,18 +247,17 @@ def remove_retained(path):
         except OSError:
             raise SigningError('%s is not a directory this launcher kept' % path)
         try:
-            info = os.fstat(held)
-            groups = retained_groups(held) if info.st_uid == os.getuid() and not info.st_mode & 0o077 else None
-            if not groups:
-                raise SigningError('%s is not a directory this launcher kept: leaving it alone' % path)
-            busy = still_running(groups)
-            if busy:
-                raise SigningError('Kept %s: %s' % (path, busy))
-            problems = empty(held)
-            if not problems and names(parent, path.name, held):
-                os.rmdir(path.name, dir_fd=parent)
-            elif not problems:
-                problems.append('it was replaced meanwhile; what replaced it was left alone')
+            with locked(held, str(path)):
+                info = os.fstat(held)
+                ours = info.st_uid == os.getuid() and not info.st_mode & 0o077
+                if not ours or not use_groups(held, str(path)):
+                    raise SigningError('%s is not a directory this launcher kept: leaving it alone' % path)
+                kept(held, str(path))
+                problems = empty(held)
+                if not problems and names(parent, path.name, held):
+                    os.rmdir(path.name, dir_fd=parent)
+                elif not problems:
+                    problems.append('it was replaced meanwhile; what replaced it was left alone')
         finally:
             os.close(held)
     finally:

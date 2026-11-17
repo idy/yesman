@@ -555,7 +555,8 @@ def retention_cases(temporary):
         record('swapped-keychain-survives', hook=hook)
 
     # Setup: a tool's descendant ignores TERM and its group cannot be signalled. The p12, keychain and
-    # directory stay, marked; the always-run cleanup refuses while the group lives and removes once it is empty.
+    # directory stay, with the use record made before the tool ran; the always-run cleanup refuses while
+    # the group lives and removes once it is empty.
     fixture = Fixture(temporary, 'setup-undrained', good_identity())
     pidfile = fixture.dir / 'child-pid'
     stubborn_tool(fixture, 'security', 'sys.argv[1] == "import"', pidfile)
@@ -564,7 +565,8 @@ def retention_cases(temporary):
     process = subprocess.run([sys.executable, '-c', code], env=fixture.env(full_inputs()), capture_output=True, text=True, timeout=60)
     assert process.returncode == 1 and 'files they may use are kept' in process.stderr and 'Kept ' in process.stderr, process.stderr
     [folder] = fixture.folders()
-    groups = json.loads((folder / 'retained.json').read_text())['groups']
+    groups = use_records(folder)
+    assert len(groups) == 1, groups
     assert alive(int(pidfile.read_text())) and (folder / 'identity.p12').is_file() and (folder / 'signing.keychain-db').is_file()
     before = snapshot(folder)
     state = fixture.outputs()['state']
@@ -596,7 +598,7 @@ def retention_cases(temporary):
         kept = sorted(fixture.runner_temp.glob('yesman-release-*')) + sorted((fixture.source / 'build').glob('.release-config-*'))
         assert process.returncode == 1 and 'could not tell' in output and '--remove-retained' in output, output
         assert len(kept) == 2 and (kept[0] / 'updater.key').read_text().strip() == UPDATER_KEY and (kept[1] / 'mygo.json').is_file()
-        assert all((k / 'retained.json').is_file() for k in kept)
+        assert all(len(use_records(k)) == 1 for k in kept)
         pid = int(pidfile.read_text())
         if case == 'unknown-and-denied':
             assert alive(pid)
@@ -623,6 +625,125 @@ def retention_cases(temporary):
                              env=fixture.env(), capture_output=True, text=True, timeout=60)
     assert process.returncode == 1 and (other / 'updater.key').is_file(), process.stderr
     record('remove-retained-needs-marker')
+
+    use_record_cases(temporary)
+
+
+def use_records(folder):
+    return sorted(int(p.name[4:]) for p in pathlib.Path(folder).iterdir() if p.name.startswith('use-'))
+
+
+def use_record_cases(temporary):
+    """R4 review: use records exist before a tool runs; failing to make one means the tool never runs."""
+    # Making the record fails (no space, or its fsync fails): the tool is not started, setup cleans up.
+    for case, injected in (
+        ('create-enospc', 'orig = m.os.open\ndef opened(name, *a, **k):\n    if str(name).startswith("use-"):\n'
+                          '        raise OSError(28, "injected no space")\n    return orig(name, *a, **k)\nm.os.open = opened\n'),
+        ('fsync-eio', 'orig = m.os.fsync\ndef synced(fd):\n    raise OSError(5, "injected fsync failure")\nm.os.fsync = synced\n'),
+    ):
+        fixture = Fixture(temporary, 'record-' + case, good_identity())
+        code = 'import sys; sys.argv = ["m", "setup"]; sys.path.insert(0, %r); import macos_signing as m\n%sm.main()\n' % (
+            str(fixture.source / 'scripts'), injected)
+        process = subprocess.run([sys.executable, '-c', code], env=fixture.env(full_inputs()), capture_output=True, text=True, timeout=60)
+        assert process.returncode == 1 and 'was not started' in process.stderr, process.stderr
+        tools = [c['args'][:1] for c in fixture.calls()]
+        assert tools in ([], [['list-keychains']] * len(tools)), ('no tool but cleanup\'s search-list reads ran', tools)
+        assert_clean(fixture)
+        record('use-record-failure-starts-nothing', variant=case)
+
+    # Withdrawing a record fails after a confirmed stop: setup still succeeds; the stale records name
+    # groups with no member, which cleanup confirms before removing everything.
+    fixture = Fixture(temporary, 'record-withdraw-fails', good_identity())
+    code = ('import sys; sys.argv = ["m", "setup"]; sys.path.insert(0, %r); import macos_signing as m\n'
+            'orig = m.os.unlink\ndef unlinked(name, *a, **k):\n    if str(name).startswith("use-"):\n        raise OSError(5, "injected")\n'
+            '    return orig(name, *a, **k)\nm.os.unlink = unlinked\nm.main()\n') % str(fixture.source / 'scripts')
+    process = subprocess.run([sys.executable, '-c', code], env=fixture.env(full_inputs()), capture_output=True, text=True, timeout=60)
+    assert process.returncode == 0, process.stderr
+    [folder] = fixture.folders()
+    assert len(use_records(folder)) >= 5, 'every setup tool left its record'
+    process = fixture.signing('cleanup', state=fixture.outputs()['state'])
+    assert process.returncode == 0, process.stderr
+    assert_clean(fixture)
+    record('stale-use-records-confirmed-empty-then-cleaned')
+
+    # A malformed record, or another step holding the directory's lock: cleanup removes nothing.
+    for case in ('malformed', 'temporary', 'locked'):
+        fixture, state = prepared(temporary, 'record-' + case)
+        [folder] = fixture.folders()
+        holder = None
+        if case == 'malformed':
+            (folder / 'use-abc').write_text('')
+        elif case == 'temporary':
+            (folder / '.use-123.tmp').write_text('{"gr')
+        else:
+            holder = subprocess.Popen([sys.executable, '-c', 'import fcntl, os, sys, time\nfd = os.open(sys.argv[1], os.O_RDONLY)\n'
+                                       'fcntl.flock(fd, fcntl.LOCK_EX)\nprint("held", flush=True)\ntime.sleep(30)\n', str(folder)],
+                                      stdout=subprocess.PIPE, text=True)
+            assert holder.stdout.readline().strip() == 'held'
+        before = snapshot(folder)
+        code = 'import sys; sys.path.insert(0, %r); import macos_signing as m\nm.LOCK_WAIT = 0.5\nsys.argv = ["m", "cleanup"]\nm.main()\n' % str(
+            fixture.source / 'scripts')
+        env = fixture.env()
+        env['SIGNING_STATE'] = state
+        process = subprocess.run([sys.executable, '-c', code], env=env, capture_output=True, text=True, timeout=60)
+        expected = 'in use by another step' if case == 'locked' else 'unknown use record'
+        assert process.returncode == 1 and expected in process.stderr and snapshot(folder) == before, process.stderr
+        if holder:
+            holder.kill()
+            holder.wait()
+            assert fixture.signing('cleanup', state=state).returncode == 0
+            assert_clean(fixture)
+        else:
+            shutil.rmtree(folder)
+        record('cleanup-refuses-unreadable-use', variant=case)
+
+    # The Developer ID launcher borrows setup's keychain: MyGo's group is recorded in the signing directory
+    # before MyGo runs, so the always-run cleanup keeps the keychain while a descendant may use it.
+    fixture, state = prepared(temporary, 'borrowed-keychain')
+    [folder] = fixture.folders()
+    pidfile = fixture.dir / 'child-pid'
+    stubborn_tool(fixture, 'go', 'True', pidfile, parent_exits=True)
+    code = ('import sys; sys.argv = ["b", "--platform", "darwin/arm64", "--system", "macOS", "--signing-mode", "developer-id", '
+            '"--signing-identity", %r]; sys.path.insert(0, %r)\nimport macos_signing as m, release_build as b\n%s%sb.main()\n') % (
+        SHA, str(fixture.source / 'scripts'), SHORT, UNKNOWN + DENIED)
+    env = fixture.env({'MYGO_UPDATER_PRIVATE_KEY': UPDATER_KEY})
+    env['SIGNING_STATE'] = state
+    with open(fixture.dir / 'launcher.log', 'w+') as log:
+        process = subprocess.run([sys.executable, '-c', code], env=env, cwd=fixture.source, stdout=log, stderr=log, timeout=60)
+        log.seek(0)
+        output = log.read()
+    pid = int(pidfile.read_text())
+    assert process.returncode == 1 and 'could not tell' in output and 'signing keychain' in output, output
+    assert len(use_records(folder)) == 1 and alive(pid)
+    before = snapshot(folder)
+    cleanup = fixture.signing('cleanup', state=state)
+    assert cleanup.returncode == 1 and 'still running' in cleanup.stderr and snapshot(folder) == before, cleanup.stderr
+    assert alive(pid), 'cleanup signals nothing'
+    os.kill(pid, signal.SIGKILL)  # the fixture's own process
+    assert gone(pid)
+    assert fixture.signing('cleanup', state=state).returncode == 0
+    kept = sorted(fixture.runner_temp.glob('yesman-release-*')) + sorted((fixture.source / 'build').glob('.release-config-*'))
+    process = subprocess.run([sys.executable, str(fixture.source / 'scripts/release_build.py'), '--remove-retained', *map(str, kept)],
+                             env=fixture.env(), capture_output=True, text=True, timeout=60)
+    assert process.returncode == 0 and not any(os.path.lexists(k) for k in kept), process.stderr
+    assert_clean(fixture)
+    record('borrowed-keychain-kept-while-build-may-use-it')
+
+    # The borrowed directory is gone before the build: MyGo is not started, the launcher's files go.
+    fixture, state = prepared(temporary, 'borrowed-gone')
+    report, real_bin = fake_go(fixture)
+    code = ('import sys; sys.argv = ["b", "--platform", "darwin/arm64", "--system", "macOS", "--signing-mode", "developer-id", '
+            '"--signing-identity", %r]; sys.path.insert(0, %r)\nimport macos_signing as m, release_build as b\n'
+            'orig = m.record_use\ndef recorded(participant, group):\n    if participant.label.startswith(%r):\n'
+            '        (__import__("pathlib").Path(participant.label) / "receipt.json").unlink()\n    return orig(participant, group)\n'
+            'm.record_use = recorded\nb.main()\n') % (SHA, str(fixture.source / 'scripts'), str(fixture.runner_temp / 'yesman-signing-'))
+    env = fixture.env({'MYGO_UPDATER_PRIVATE_KEY': UPDATER_KEY})
+    env['SIGNING_STATE'] = state
+    env['PATH'] = str(real_bin) + os.pathsep + env['PATH']
+    process = subprocess.run([sys.executable, '-c', code], env=env, cwd=fixture.source, capture_output=True, text=True, timeout=60)
+    assert process.returncode == 1 and 'was not started' in process.stderr and not report.exists(), process.stderr
+    assert not list(fixture.runner_temp.glob('yesman-release-*')) and not list((fixture.source / 'build').iterdir())
+    record('borrowed-directory-changed-build-not-started')
 
 
 def signatures(**changes):
