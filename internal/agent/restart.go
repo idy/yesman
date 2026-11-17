@@ -37,18 +37,29 @@ func (h reportHandoff) report() *restart.Report {
 type sendTrack struct {
 	admit  func() bool
 	result func(state string)
+	// bounded: the prompt's start and model lock end with its context too,
+	// for a restart, which waits for nothing past its deadline.
+	bounded bool
 }
 
 // reportTrack tracks the delivery of report run of a to its lead. Once
 // the manager has closed for a restart or a quit, nothing more is
-// admitted: the state recorded then is final for this instance. once
-// admits no other attempt after one sent with no answer, which may have
-// arrived: a report handed on after a restart is not sent twice.
+// admitted: the state recorded then is final for this instance. Only the
+// latest run's report is tracked: an earlier one, still on its way when
+// the worker finished another run, is delivered as before, untracked.
+// once, for a report handed on after a restart, admits no other attempt
+// after one sent with no answer, which may have arrived, and bounds the
+// lead's start and model lock by ctx.
 func (m *Manager) reportTrack(ctx context.Context, a *agent, run uint64, once bool) *sendTrack {
 	return &sendTrack{
+		bounded: once,
 		admit: func() bool {
-			if m.closed || ctx.Err() != nil || a.handoff.run != run ||
-				once && a.handoff.state == restart.ReportUncertain {
+			switch {
+			case m.closed || ctx.Err() != nil:
+				return false
+			case a.handoff.run != run:
+				return true // an earlier run's report: not tracked, not held back
+			case once && a.handoff.state == restart.ReportUncertain:
 				return false
 			}
 			a.handoff.state = restart.ReportUncertain // sent from here on, until pi answers

@@ -383,3 +383,72 @@ func TestNeedsYouYieldsToARunningAgent(t *testing.T) {
 		t.Fatalf("lead got %q", p)
 	}
 }
+
+// A worker that finishes another run while its earlier report waits for
+// the lead still has both reports delivered: tracking the latest run for a
+// restart does not hold the earlier one back.
+func TestEarlierRunReportStillDelivered(t *testing.T) {
+	store, tmp, _ := restartStore(t)
+	addWorker(t, store, "worker")
+	m, got := restartInstance(t, store, tmp)
+	id, leadID := ID("alice", "worker"), ID("alice", "lead")
+	lead, _, err := m.ensure(leadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, p, err := m.ensure(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lead.modelMu.Lock() // the first report waits for the lead
+	m.record(a, p, "agent_start", runStart)
+	m.record(a, p, "agent_settled", runSettled)
+	eventually(t, "the first report read", func() bool { m.mu.Lock(); defer m.mu.Unlock(); return a.handoff.digest != "" })
+	m.record(a, p, "agent_start", runStart)
+	m.record(a, p, "agent_settled", runSettled)
+	eventually(t, "the second report read", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return a.handoff.run == 2 && a.handoff.digest != ""
+	})
+	lead.modelMu.Unlock()
+	eventually(t, "both reports at the lead", func() bool { return len(got.reports(leadID, "worker")) == 2 })
+}
+
+// A report handed on after a restart gives up waiting for the lead's model
+// lock when its time ends, and sends nothing after.
+func TestHandedOnReportBoundedByLeadLock(t *testing.T) {
+	store, tmp, y := restartStore(t)
+	w := addWorker(t, store, "worker")
+	m, got := restartInstance(t, store, tmp)
+	leadID := ID("alice", "lead")
+	lead, _, err := m.ensure(leadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lead.modelMu.Lock()
+	entry := restart.Agent{Yesman: "alice", Name: "worker", Role: RoleWorker, WorkspaceHiredAt: y.HiredAt, AgentSince: w.StartedAt,
+		Reason: restart.ReasonReport, Report: &restart.Report{State: restart.ReportNotSent, Digest: digest("done")}}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan string, 1)
+	go func() { o, _ := m.Resume(ctx, entry, "must not run"); done <- o }()
+	var outcome string
+	select {
+	case outcome = <-done:
+	case <-time.After(3 * time.Second):
+		lead.modelMu.Unlock()
+		t.Fatal("the handed-on report waited for the lead's lock past its time")
+	}
+	lead.modelMu.Unlock()
+	if outcome != restart.Failed {
+		t.Fatalf("Resume = %s", outcome)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := len(got.reports(leadID, "worker")); n != 0 {
+		t.Fatalf("an expired report was sent %d times", n)
+	}
+	if !finishedAt(t, store, "worker").IsZero() {
+		t.Fatal("recorded finished without its report")
+	}
+}

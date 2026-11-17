@@ -381,6 +381,11 @@ func (m *Manager) ensure(id string) (*agent, *proc, error) {
 }
 
 func (m *Manager) ensureScoped(id string, owner *agent, messageID string, scope *time.Time) (*agent, *proc, error) {
+	return m.ensureScopedCtx(context.Background(), id, owner, messageID, scope)
+}
+
+// ensureScopedCtx is ensureScoped whose start ends with ctx; see ensureInCtx.
+func (m *Manager) ensureScopedCtx(ctx context.Context, id string, owner *agent, messageID string, scope *time.Time) (*agent, *proc, error) {
 	ys, name, err := SplitID(id)
 	if err != nil {
 		return nil, nil, err
@@ -405,7 +410,7 @@ func (m *Manager) ensureScoped(id string, owner *agent, messageID string, scope 
 			}
 		}
 		var err error
-		a, p, err = m.ensureIn(y, id, name)
+		a, p, err = m.ensureInCtx(ctx, y, id, name)
 		return err
 	})
 	return a, p, err
@@ -853,16 +858,29 @@ func (m *Manager) promptTracked(ctx context.Context, id, text, behavior, message
 		a *agent
 		p *proc
 	)
+	// A bounded prompt (a restart's) gives up its start and the model lock
+	// with ctx; every other caller starts and waits as it always has.
+	bounded := track != nil && track.bounded
 	for {
 		var err error
-		if a, p, err = m.ensureScoped(id, owner, messageID, scope); err != nil {
+		start := context.Background()
+		if bounded {
+			start = ctx
+		}
+		if a, p, err = m.ensureScopedCtx(start, id, owner, messageID, scope); err != nil {
 			return err
 		}
 		// Register before dispatch, under the same lock as configuration's
 		// idle check and writes, SleepIfIdle, and closing a finished worker.
 		// Release it before waiting so other messages can steer a running
 		// turn. pi may await extensions before reporting isStreaming.
-		a.modelMu.Lock()
+		if bounded {
+			if err := lockWithin(ctx, &a.modelMu); err != nil {
+				return err
+			}
+		} else {
+			a.modelMu.Lock()
+		}
 		if err := ctx.Err(); err != nil {
 			a.modelMu.Unlock()
 			return err
