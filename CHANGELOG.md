@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.38
+
+- Add optional Settings › GitHub App configuration for agent-created pull requests, with a separate encrypted key vault and explicit repository and workspace selection. App identity starts disabled when no App configuration exists.
+- Configure your own App, test the current connection and scope, then explicitly enable App identity. Saving a changed key or scope disables it until a fresh connection test and explicit enablement.
+- Route supported PR creation in selected workspaces through the configured App identity. Git pushes and other GitHub operations keep their existing credentials; unavailable keys, services or installations in App mode stop creation without silently switching to a personal author. Keep App credentials out of agents and managed runtime dependency installation.
+- The actual idy/yesman installation's Bot author, avatar and PR events have not yet been verified; this release does not mean that account is connected. Users can configure and explicitly enable their own App, while this feature's compatibility with the real GitHub service remains unverified.
+
 ## 0.1.37
 
 - Open Needs You beside the conversation as a Board-style pane for the yesman shown and its current hire. Use the Info card or command palette to view its requests; the global sidebar entry and all-yesmen page are removed. Opening a request goes to its agent and question without answering it, while preserving unsent drafts and images. Request-memory notices, unreadable-file errors and recently handled requests stay available in the pane.
