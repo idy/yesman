@@ -1015,15 +1015,15 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 /* Board: the yesman's task list, beside the conversation in place of the
    files. Rows keep their place; a finished task folds into Done. */
 .board { grid-column: 4; grid-row: 1 / -1; display: flex; flex-direction: column; width: clamp(240px, calc(100vw - var(--side-width) - var(--info-beside) - 280px), var(--board-width, 340px)); max-width: calc(100vw - 320px); min-width: 0; min-height: 0; border-left: 1px solid var(--mds-line); background: var(--app-pane); }
-/* The place the board and Needs you share leaves the conversation 280px:
+/* The place the board, Needs you and Topics share leaves the conversation 280px:
    beside the info panel it narrows, down to 240px; once even that does not
    fit (264 + 288 + 240 + 280 = 1072px), the info panel makes way for it, as
    it does for a wide file, and shows again when the pane closes. */
 :root { --info-beside: 0px; }
 :root[data-info="open"] { --info-beside: var(--info-width); }
 @media (max-width: 1071px) {
-  :root:is([data-board="open"], [data-needs-you="open"]) { --info-beside: 0px; }
-  :root:is([data-board="open"], [data-needs-you="open"]) .info-panel { display: none; }
+  :root:is([data-board="open"], [data-needs-you="open"], [data-topics="open"]) { --info-beside: 0px; }
+  :root:is([data-board="open"], [data-needs-you="open"], [data-topics="open"]) .info-panel { display: none; }
 }
 .board .files-title { flex: 0 0 auto; }
 .board-count { color: var(--mds-muted); font-size: var(--mds-text-caption); white-space: nowrap; }
@@ -1125,8 +1125,9 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 .needs-you-back .mds-icon { width: 14px; height: 14px; font-size: 14px; }
 @media (pointer: coarse) { .needs-you-more { min-height: 44px; } }
 
-/* Topics: the board's pane, a little wider for reading a topic. */
-.topics { width: var(--topics-width, 380px); }
+/* Topics: the board's pane, a little wider for reading a topic; it makes
+   room for the conversation as the board does. */
+.topics { width: clamp(240px, calc(100vw - var(--side-width) - var(--info-beside) - 280px), var(--topics-width, 380px)); }
 .topics-tools { display: grid; gap: 8px; margin: 2px 2px 10px; }
 .topics-search { width: 100%; min-width: 0; }
 .topics-filter { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -1186,8 +1187,8 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 .topic-source-picker { display: grid; gap: 6px; }
 .topic-source-ref { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px; }
 .topic-edit-actions { margin-top: 4px; }
-/* Below this, as wide as the board, so either fits the same windows. */
-@media (max-width: 1000px) { .topics { width: var(--board-width, 340px); } .topic-source-ref { grid-template-columns: minmax(0, 1fr); } }
+/* Below this, a source's reference takes a row of its own. */
+@media (max-width: 1000px) { .topic-source-ref { grid-template-columns: minmax(0, 1fr); } }
 
 /* A message sent from a topic names it in a chip that opens it. */
 .msg-user--topic { display: grid; gap: 6px; justify-items: start; }
