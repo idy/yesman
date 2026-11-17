@@ -58,6 +58,10 @@
       "name": "warning",
       "codepoint": "e4e0"
     },
+    "error": {
+      "name": "warning-circle",
+      "codepoint": "e4e2"
+    },
     "info": {
       "name": "info",
       "codepoint": "e2ce"
@@ -246,6 +250,14 @@
     "pencil": {
       "name": "pencil-simple",
       "codepoint": "e3b4"
+    },
+    "keyboard": {
+      "name": "keyboard",
+      "codepoint": "e2d8"
+    },
+    "chart": {
+      "name": "chart-bar",
+      "codepoint": "e150"
     }
   },
   "fonts": {

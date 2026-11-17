@@ -7,10 +7,12 @@
 //	  .yesman/
 //	    yesman.json        when it was hired, and the model its lead starts as
 //	    workers.json       the workers its lead started
+//	    worker-starts.json when each worker started, removed ones too
 //	    board.json         the task board its agents keep
 //	    knowledge/         durable guidance shared by every agent; INDEX.md lists it
 //	    task-log.md        short history TOC, maintained by the lead
 //	    task-log/          dated per-task/PR/release Markdown details
+//	    needs-you.json     what the lead handed to the user to do (Needs you)
 //	    sessions/<agent>/  each agent's pi session log
 //	  <repo>--<topic>/     worktrees
 package yesmen
@@ -127,8 +129,9 @@ type Store struct {
 	mu            sync.Mutex
 	metaMu        sync.Mutex // serialize metadata reads with atomic replacement on Windows
 
-	lmu   sync.Mutex
-	locks map[string]*sync.RWMutex // per yesman: Use reads, Archive writes
+	lmu    sync.Mutex
+	locks  map[string]*sync.RWMutex // per yesman: Use reads, Archive writes
+	hlocks map[string]*sync.Mutex   // per yesman: its handoffs, in turn
 }
 
 // New returns the store of workspaces under root, archiving into archive.
@@ -207,10 +210,14 @@ func ensureTaskLog(y Yesman) error {
 // It never rewrites Knowledge or other metadata, and repeated calls are safe.
 func (s *Store) EnsureTaskLogs() error {
 	ys, err := s.List()
-	if err != nil {
-		return err
-	}
 	var errs []error
+	if err != nil {
+		var metadataErrors MetadataErrors
+		if !errors.As(err, &metadataErrors) {
+			return err
+		}
+		errs = append(errs, err)
+	}
 	for _, y := range ys {
 		if err := s.Use(y.Name, ensureTaskLog); err != nil {
 			errs = append(errs, fmt.Errorf("%s working log: %w", y.Name, err))
@@ -239,7 +246,13 @@ func (s *Store) get(name string) (Yesman, error) {
 		DisplayName string    `json:"displayName"`
 		Model       string    `json:"model"`
 	}
-	_ = readJSON(filepath.Join(y.MetaDir(), "yesman.json"), &meta)
+	if err := readYesmanMetadata(filepath.Join(y.MetaDir(), "yesman.json"), &meta); err != nil {
+		var issue *MetadataError
+		if errors.As(err, &issue) {
+			issue.Name = name
+			return Yesman{}, issue
+		}
+	}
 	y.HiredAt, y.Model = meta.HiredAt, meta.Model
 	y.DisplayName = meta.DisplayName
 	return y, nil
@@ -272,14 +285,14 @@ func (s *Store) Rename(name, label string) (Yesman, error) {
 		}
 		path := filepath.Join(y.MetaDir(), "yesman.json")
 		meta := map[string]json.RawMessage{}
-		if err := readJSON(path, &meta); err != nil {
+		if err := readYesmanMetadata(path, &meta); err != nil {
 			return err
 		}
 		if meta == nil {
 			return errors.New("invalid yesman metadata")
 		}
 		meta["displayName"], _ = json.Marshal(label)
-		if err := writeJSON(path, meta); err != nil {
+		if err := writeYesmanMetadata(path, meta); err != nil {
 			return err
 		}
 		y.DisplayName = label
@@ -289,7 +302,9 @@ func (s *Store) Rename(name, label string) (Yesman, error) {
 	return renamed, err
 }
 
-// List returns the hired yesmen, oldest first.
+// List returns the healthy hired yesmen, oldest first. Oversized metadata is
+// reported separately as MetadataErrors alongside these results; an affected
+// workspace is never returned with a fabricated zero-metadata identity.
 func (s *Store) List() ([]Yesman, error) {
 	entries, err := os.ReadDir(s.root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -299,12 +314,18 @@ func (s *Store) List() ([]Yesman, error) {
 		return nil, err
 	}
 	var out []Yesman
+	var issues MetadataErrors
 	for _, e := range entries {
 		if !e.IsDir() || ValidName(e.Name()) != nil {
 			continue
 		}
 		if y, err := s.Get(e.Name()); err == nil {
 			out = append(out, y)
+		} else {
+			var issue *MetadataError
+			if errors.As(err, &issue) {
+				issues = append(issues, *issue)
+			}
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -313,6 +334,9 @@ func (s *Store) List() ([]Yesman, error) {
 		}
 		return out[i].Name < out[j].Name
 	})
+	if len(issues) > 0 {
+		return out, issues
+	}
 	return out, nil
 }
 
@@ -410,7 +434,12 @@ func (s *Store) AddWorker(name string, w Worker) error {
 		w.Number = max(w.Number, x.Number+1)
 	}
 	y, _ := s.Get(name)
-	return writeJSON(filepath.Join(y.MetaDir(), "workers.json"), append(ws, w))
+	ws = append(ws, w)
+	if err := writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws); err != nil {
+		return err
+	}
+	s.noteStarts(y, ws)
+	return nil
 }
 
 // FinishWorker records that a worker finished: its report reached its lead.
@@ -451,7 +480,8 @@ func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, 
 	return true, writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws)
 }
 
-// RemoveWorker forgets a worker. Its session log stays.
+// RemoveWorker forgets a worker. Its session log stays, and so does when
+// it started (see WorkerStarts).
 func (s *Store) RemoveWorker(name, worker string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -460,6 +490,7 @@ func (s *Store) RemoveWorker(name, worker string) error {
 		return err
 	}
 	y, _ := s.Get(name)
+	s.noteStarts(y, ws)
 	ws = slices.DeleteFunc(ws, func(x Worker) bool { return x.Name == worker })
 	return writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws)
 }

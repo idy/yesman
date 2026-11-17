@@ -17,6 +17,7 @@ import (
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/pipkg"
+	"github.com/idy/yesman/internal/piruntime"
 )
 
 // pi's packages are installed for the user: in pi's agent directory, where
@@ -91,13 +92,21 @@ func newPiJobs(run func(context.Context, ...string) (string, error), changed fun
 // runPi runs a pi command in dir, a folder with no project settings, so
 // that it reads and writes only the user's.
 func runPi(pi, dir string) func(context.Context, ...string) (string, error) {
+	return runPiCommand(func(context.Context) (string, []string, error) { return pi, nil, nil }, dir)
+}
+
+func runPiCommand(command func(context.Context) (string, []string, error), dir string) func(context.Context, ...string) (string, error) {
 	return func(ctx context.Context, args ...string) (string, error) {
-		cmd := exec.CommandContext(ctx, pi, args...)
+		pi, prefix, err := command(ctx)
+		if err != nil {
+			return "", err
+		}
+		cmd := exec.CommandContext(ctx, pi, append(prefix, args...)...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "NO_COLOR=1", "FORCE_COLOR=0")
 		var out bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &out
-		err := cmd.Run()
+		err = cmd.Run()
 		text := pipkg.StripANSI(out.String())
 		if err != nil {
 			if ctx.Err() != nil {
@@ -304,9 +313,13 @@ func (j *piJobs) ChangedAt() time.Time {
 
 // PiView is what the pi settings page shows.
 type PiView struct {
-	Pi      string `json:"pi"`
-	Version string `json:"version,omitempty"`
-	PiError string `json:"piError,omitempty"`
+	Pi            string `json:"pi"`
+	Managed       bool   `json:"managed,omitempty"`
+	RuntimeState  string `json:"runtimeState,omitempty"`
+	PinnedVersion string `json:"pinnedVersion,omitempty"` // selected build, not an installation-success claim
+	PackagesKnown bool   `json:"packagesKnown"`
+	Version       string `json:"version,omitempty"`
+	PiError       string `json:"piError,omitempty"`
 	// SettingsFile is pi's user settings, which list the packages.
 	SettingsFile string `json:"settingsFile"`
 	// NpmCommand is what pi installs npm packages with.
@@ -349,7 +362,26 @@ func npmCommand(settingsFile string) []string {
 func (s *service) PiPackages(ctx context.Context) PiView {
 	a := s.app
 	settings := filepath.Join(piAgentDir(), "settings.json")
-	v := PiView{Pi: a.pi, SettingsFile: settings, NpmCommand: npmCommand(settings), Packages: []pipkg.Installed{}}
+	v := PiView{Pi: a.pi, Managed: a.managedPi, SettingsFile: settings, NpmCommand: npmCommand(settings), Packages: []pipkg.Installed{}}
+	if a.managedPi {
+		v.PinnedVersion = piruntime.Version
+	}
+	if a.piRuntime != nil {
+		if a.piRuntime.State() == "unprepared" {
+			if err := a.piRuntime.Start(); err != nil {
+				v.PiError = err.Error()
+			}
+		}
+		v.RuntimeState = a.piRuntime.State()
+		if v.RuntimeState == "failed" {
+			v.PiError = a.piRuntime.PreparationError()
+		}
+		if v.RuntimeState != "ready" {
+			v.PiJobs = a.piJobs.List()
+			return v
+		}
+		v.Version = piruntime.Version
+	}
 	if a.piErr != nil {
 		v.PiError = a.piErr.Error()
 		v.PiJobs = a.piJobs.List()
@@ -357,13 +389,15 @@ func (s *service) PiPackages(ctx context.Context) PiView {
 	}
 	var wg sync.WaitGroup
 	var version string
-	wg.Go(func() {
-		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		if out, err := a.runPi(ctx, "--version"); err == nil {
-			version = strings.TrimSpace(out)
-		}
-	})
+	if !a.managedPi {
+		wg.Go(func() {
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			if out, err := a.runPi(ctx, "--version"); err == nil {
+				version = strings.TrimSpace(out)
+			}
+		})
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, err := a.runPi(ctx, "list", "--no-approve")
@@ -371,12 +405,28 @@ func (s *service) PiPackages(ctx context.Context) PiView {
 		v.ListError = err.Error()
 	} else {
 		v.Packages = pipkg.ParseList(out)
+		v.PackagesKnown = true
 	}
 	wg.Wait()
-	v.Version = version
+	if !a.managedPi {
+		v.Version = version
+		v.RuntimeState = "unknown"
+		if version != "" {
+			v.RuntimeState = "ready"
+		}
+	}
 	// The jobs as they are once pi has listed the packages, not before.
 	v.PiJobs = a.piJobs.List()
 	return v
+}
+
+// RetryPiRuntime is an explicit Settings retry; ordinary status reads do not
+// repeatedly restart a failed installation.
+func (s *service) RetryPiRuntime(ctx context.Context) PiView {
+	if r := s.app.piRuntime; r != nil {
+		_ = r.Start()
+	}
+	return s.PiPackages(ctx)
 }
 
 // PiPackageUpdates names the latest version of each installed npm package

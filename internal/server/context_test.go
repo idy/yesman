@@ -45,6 +45,8 @@ func TestContextBoardAndRoles(t *testing.T) {
 		"what you take on, you see through to the end",
 		"yesman_worker_answer",
 		"put the open decisions to the user together",
+		"Your text is what the user reads",
+		"do not restate a worker's report",
 	} {
 		if !strings.Contains(lead, want) {
 			t.Errorf("the lead's context lacks %q:\n%s", want, lead)

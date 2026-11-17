@@ -83,6 +83,7 @@ function dragHandle(el, { widthAt, current, apply, reset }) {
 //   checkout(y), dismiss(name)
 //   confirm(title, body, ok)  asks before something is lost
 //   shown()                   after the pane draws, or what it shows changes
+//   keys()                    the shortcuts its menu's items show, by action
 export function createFiles(host) {
   const panes = new Map(); // yesman name and part shown -> that pane's state
   const scopes = new Map(); // yesman name -> the part of its workspace shown
@@ -714,7 +715,7 @@ export function createFiles(host) {
     const kind = p.scope.kind;
     return h('button', {
       class: 'files-crumb files-crumb--scope', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
-      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, Knowledge, the working log or another worktree'),
+      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, Knowledge, the Working Logs or another worktree'),
       onclick: (e) => scopeMenu(e.currentTarget, p),
     }, icon(kind === 'worktree' ? 'branch' : kind === 'knowledge' ? 'book' : 'folder', 'mds-icon files-crumb-icon'), h('span', null, scopeLabel(p)));
   }
@@ -942,9 +943,9 @@ export function createFiles(host) {
     const items = [
       item(WORKSPACE, 'folder', y.displayName || y.name, h('span', { class: 'files-menu-aside' }, t('All files')), y.path),
       item({ kind: 'knowledge' }, 'book', t('Knowledge'), null, KNOWLEDGE),
-      // Working log is a shortcut to a file in the workspace, not another scope.
+      // Working Logs is a shortcut to a file in the workspace, not another scope.
       h('button', { class: 'files-menu-item', type: 'button', role: 'menuitem', title: TASK_LOG,
-        onclick: () => { closeMenu(); openTaskLog(); } }, icon('fileText'), h('span', null, t('Working log'))),
+        onclick: () => { closeMenu(); openTaskLog(); } }, icon('fileText'), h('span', null, t('Working Logs'))),
     ];
     const wts = host.worktrees?.(y) ?? [];
     if (wts.length) items.push(h('p', { class: 'files-menu-heading', role: 'presentation' }, t('Worktrees')));
@@ -960,7 +961,7 @@ export function createFiles(host) {
   async function more(e, p) {
     const r = e.currentTarget.getBoundingClientRect();
     try {
-      const action = await host.call('FilesMenu', Math.round(r.left), Math.round(r.bottom + 4), prefs.tree, prefs.wrap, prefs.autoSave, p.expanded.size > 0);
+      const action = await host.call('FilesMenu', Math.round(r.left), Math.round(r.bottom + 4), prefs.tree, prefs.wrap, prefs.autoSave, p.expanded.size > 0, host.keys?.() ?? {});
       if (current() !== p) return;
       const y = host.yesman();
       switch (action) {
@@ -1296,25 +1297,16 @@ export function createFiles(host) {
     input?.select();
   }
 
-  // onKey takes the page's shortcuts for the pane, and reports whether it
-  // used the key.
+  // onKey saves the file shown with ⌘S or Ctrl+S, a key of its own, and
+  // reports whether it used the key. Going to a file and showing the tree
+  // are actions with keys of their own in Settings › Shortcuts (actions.js).
   function onKey(e) {
     const mod = e.metaKey || e.ctrlKey;
-    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's' && !e.defaultPrevented) {
+    if (mod && !e.shiftKey && !e.altKey && e.key?.toLowerCase() === 's' && !e.defaultPrevented) {
       const p = current();
       if (!p?.active) return false;
       e.preventDefault();
       save(p, p.active);
-      return true;
-    }
-    if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
-      e.preventDefault();
-      focusFind();
-      return true;
-    }
-    if (mod && e.shiftKey && e.key.toLowerCase() === 'y' && current()) {
-      e.preventDefault();
-      toggleTree();
       return true;
     }
     return false;
@@ -1326,5 +1318,5 @@ export function createFiles(host) {
     return t('The workspace is empty. Agents check repositories out into it.');
   }
 
-  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, shown, onChange, onKey };
+  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, shown, onChange, onKey, focusFind, toggleTree, current: () => !!current() };
 }

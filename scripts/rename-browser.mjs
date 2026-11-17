@@ -34,6 +34,7 @@ window.mygo = {locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...
  case 'Rename':if(failRename)throw Error('Synthetic write failure');localStorage.setItem('synthetic.label',args[1]);return {name:'alice',displayName:args[1],path:'/synthetic/yesmen/alice'};
  case 'Info':return {knowledge:[],worktrees:[]};
  case 'Board':return {tasks:[]};
+ case 'Shortcuts':return {}; // no keys changed from their defaults, as Go says
  case 'Abort':case 'Stop':case 'Send':case 'WatchFiles':return;
  default:throw Error('Unmocked method '+m);
  }
@@ -135,10 +136,12 @@ try {
      agents.push({id:'alice/active',name:'active',yesman:'alice',role:'worker',number:3,status:'working'});
      emitChanged();
    });
-   await page.waitForFunction(()=>document.querySelectorAll('[data-agent="alice/lead"]').length===2);
+   // A waiting lead has one sidebar entry: its requests show in its Needs you pane.
+   await page.waitForFunction(()=>document.querySelector('[data-agent="alice/lead"][data-sidebar-entry="yesman"]')?.dataset.status==='waiting');
+   assert.equal(await page.locator('[data-agent="alice/lead"]').count(),1);
    const workerIDs=()=>page.locator('#yesmen [data-sidebar-entry="worker"]').evaluateAll(rows=>rows.map(r=>r.dataset.agent));
    assert.deepEqual(await workerIDs(),['alice/worker-one','alice/active','alice/ended']);
-   for(const entry of ['yesman','needs-you']) {
+   for(const entry of ['yesman']) {
      const row=page.locator(`[data-agent="alice/lead"][data-sidebar-entry="${entry}"]`);
      await row.focus();
      await page.evaluate(entry=>{localStorage.setItem('synthetic.label','刷新名称 '+entry);emitChanged();},entry);
@@ -153,13 +156,39 @@ try {
      assert.equal(anchor.y,anchor.bottom);
    }
    await page.evaluate(()=>{agents[0].status='idle';emitChanged();});
-   await page.waitForFunction(()=>document.querySelectorAll('[data-agent="alice/lead"]').length===1);
+   await page.waitForFunction(()=>document.querySelector('[data-agent="alice/lead"]')?.dataset.status==='idle');
    assert.equal(await page.evaluate(()=>document.activeElement.dataset.sidebarEntry),'yesman');
    await page.evaluate(()=>{agents[0].status='waiting';const ended=agents.find(a=>a.name==='ended');ended.status='starting';delete ended.finishedAt;emitChanged();});
-   await page.waitForFunction(()=>document.querySelectorAll('[data-agent="alice/lead"]').length===2);
+   await page.waitForFunction(()=>document.querySelector('[data-agent="alice/lead"]')?.dataset.status==='waiting');
    assert.deepEqual(await workerIDs(),['alice/ended','alice/worker-one','alice/active']);
    assert.equal(await page.evaluate(()=>document.activeElement.dataset.sidebarEntry),'yesman');
    assert.equal(await page.locator('.composer textarea').inputValue(),'synthetic worker draft');
+   // While the rename form is open its keys stay the form's: no palette and
+   // no Hire form; Enter renames once. The palette's Rename opens the same
+   // form, which keeps focus, and Escape writes nothing.
+   const MOD=await page.evaluate(()=>/mac/i.test(navigator.platform)?'Meta':'Control');
+   const yesmanRow=page.locator('[data-agent="alice/lead"][data-sidebar-entry="yesman"]');
+   await page.evaluate(()=>{menuAction='rename';calls.length=0;});
+   await yesmanRow.click({button:'right'});
+   await input.waitFor();
+   await page.keyboard.press(MOD+'+KeyK');await page.keyboard.press(MOD+'+KeyN');
+   assert.equal(await page.locator('dialog[open]').count(),1);
+   assert.equal(await dialog.evaluate(e=>e.open),true);
+   await input.fill('键盘 Keys');await input.press('Enter');
+   await page.waitForFunction(()=>!document.querySelector('#rename-dialog').open);
+   await page.waitForTimeout(150);
+   assert.deepEqual(await page.evaluate(()=>calls.filter(c=>c[0]==='Rename').map(c=>c[2])),['键盘 Keys']);
+   await yesmanRow.click();
+   await page.keyboard.press(MOD+'+KeyK');
+   await page.locator('dialog.palette-dialog').waitFor();
+   await page.keyboard.type('rename this');await page.keyboard.press('Enter');
+   await page.waitForFunction(()=>document.querySelector('#rename-dialog').open);
+   await page.waitForTimeout(300);
+   assert.equal(await page.evaluate(()=>document.activeElement===document.querySelector('#rename-form input')),true);
+   assert.equal(await input.inputValue(),'键盘 Keys');
+   await input.press('Escape');
+   await page.waitForFunction(()=>!document.querySelector('#rename-dialog').open);
+   assert.equal(await page.evaluate(()=>calls.filter(c=>c[0]==='Rename').length),1);
    assert.deepEqual(errors,[]);
    console.log(engineName+': rename/cancel/failure/reload/routing plus same-label repo users, single-ID dedup and rename refresh passed');
   } finally {await browser.close();}

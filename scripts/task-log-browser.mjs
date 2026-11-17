@@ -10,7 +10,7 @@ const root = fileURLToPath(new URL('../web/', import.meta.url));
 const out = process.env.YESMAN_TASKLOG_EVIDENCE || '/tmp/t68-browser';
 await mkdir(out, { recursive: true });
 const bridge = `<script>
-window.calls=[];window.menuAction='';window.delayed={};window.releases={};
+window.calls=[];window.unmocked=[];window.menuAction='';window.delayed={};window.releases={};
 const handlers={}; const toc='.yesman/task-log.md';
 const hash='a'.repeat(64); const legacy='.yesman/task-log/legacy-'+hash+'-0001.md';
 window.filesFixture={
@@ -37,11 +37,14 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
  switch(m){
  case 'State':return {home:'/synthetic',pool:'/synthetic/repos',yesmen:['alice','bob'].map(name=>({name,path:'/synthetic/'+name,worktrees:[]})),agents};
  case 'Settings':return {appearance:'system',autoFetch:0};
+ case 'Shortcuts':return {};
+ case 'Context':return {agent:args[0],available:true};
+ case 'Usage':return {bytes:0,files:0,parts:[],measuredAt:'2026-01-15T00:00:00Z'};
  case 'Repos':case 'Clones':case 'Pulls':return [];
  case 'Fetches':return {fetching:[],errors:{}};
  case 'TakeFocus':return '';case 'Update':return {enabled:false};
  case 'Messages':return {messages:[]};case 'Models':return {models:[],agent:agents.find(a=>a.id===args[0])};
- case 'Info':return {knowledge:[],worktrees:[]};case 'Board':return {tasks:[]};
+ case 'Info':return {knowledge:{notes:1,index:true},worktrees:[]};case 'Board':return {tasks:[]};
  case 'WatchFiles':case 'Reveal':case 'OpenURL':return;
  case 'FilesMenu':return menuAction;
  case 'ReadFile':{
@@ -56,7 +59,7 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
    const dir=args[1]==='.'?'':args[1]+'/';const paths=Object.keys(filesFixture).filter(p=>p.startsWith(dir));const map=new Map();
    for(const p of paths){const rest=p.slice(dir.length),base=rest.split('/')[0],full=dir+base;map.set(full,{name:base,path:full,dir:rest.includes('/')});}return [...map.values()];
  }
- default:throw Error('Unmocked '+m);
+ default:unmocked.push(m);throw Error('Unmocked '+m);
  }
 }};
 window.emitFile=(path)=>handlers.files({yesman:'alice',paths:[path]});
@@ -84,12 +87,25 @@ try {
    await page.goto(url);
    await page.locator('[data-agent="alice/lead"]').click();
    const files=page.locator('#files');
-   await page.getByRole('button',{name:'Working log',exact:true}).click();
+   await page.getByRole('button',{name:'Working Logs',exact:true}).click();
    await files.getByRole('link',{name:'Picker',exact:true}).waitFor();
    assert.equal(await files.getByRole('button',{name:'Source',exact:true}).count(),0);
    assert.equal(await files.getByText('<!-- yesman-task-log-toc v1 -->',{exact:true}).count(),0);
    await files.getByRole('link',{name:'Picker',exact:true}).click();
    await files.locator('#validation').waitFor();
+   assert.equal(await page.locator('[data-info-entry="working-logs"]').getAttribute('aria-current'),'page');
+   assert.deepEqual(await page.locator('[data-info-entry]').evaluateAll(es=>es.map(e=>e.dataset.infoEntry)),['knowledge','working-logs','needs-you']);
+   await page.locator('[data-info-entry="needs-you"]').focus();await page.keyboard.press('Enter');
+   await page.getByRole('button',{name:'Close Needs You',exact:true}).waitFor();
+   assert.equal(await page.locator('[data-info-entry="needs-you"]').getAttribute('aria-current'),'page');
+   await page.getByRole('button',{name:'Close Needs You',exact:true}).click();
+   assert.equal(await page.evaluate(()=>document.activeElement.dataset.infoEntry),'needs-you');
+   await page.locator('[data-info-entry="working-logs"]').focus();await page.keyboard.press('Enter');
+   await files.getByRole('link',{name:'Picker',exact:true}).click();await files.locator('#validation').waitFor();
+   await page.keyboard.press(process.platform==='darwin'?'Meta+k':'Control+k');
+   await page.locator('.palette-dialog').waitFor();
+   assert.ok(await page.locator('.palette-dialog').getByText('Open Working Logs',{exact:true}).count());
+   await page.keyboard.press('Escape');
    assert.equal(await page.evaluate(()=>document.activeElement.id),'validation');
    assert.match(page.url(),/#task-log=/);
    await files.locator('.files-crumb--scope').click();
@@ -128,7 +144,7 @@ try {
    await files.getByRole('link',{name:'Knowledge',exact:true}).click();
    await files.locator('#durable').waitFor();
    assert.equal(await page.evaluate(()=>calls.filter(c=>c[0]==='ReadFile').at(-1)[2]),'.yesman/knowledge/rules.md');
-   await page.getByRole('button',{name:'Working log',exact:true}).click();
+   await page.getByRole('button',{name:'Working Logs',exact:true}).click();
    await files.getByRole('link',{name:'Picker',exact:true}).click();
    await files.getByRole('link',{name:'Plain',exact:true}).click();
    await files.getByRole('button',{name:'Source',exact:true}).click();
@@ -136,13 +152,13 @@ try {
    await files.locator('.cm-content').fill('# Edited plain');
    await page.keyboard.press(process.platform==='darwin'?'Meta+s':'Control+s');
    await page.waitForFunction(()=>calls.some(c=>c[0]==='WriteFile'&&c[2]==='notes.md'&&c[3].includes('Edited plain')));
-   await page.getByRole('button',{name:'Working log',exact:true}).click();
+   await page.getByRole('button',{name:'Working Logs',exact:true}).click();
    await files.getByRole('link',{name:'Picker',exact:true}).click();
    await files.getByRole('link',{name:'Backup',exact:true}).click();
    await files.locator('.cm-content').waitFor();await files.locator('.cm-content').fill('edited backup');
    await page.keyboard.press(process.platform==='darwin'?'Meta+s':'Control+s');
    await page.waitForFunction(()=>calls.some(c=>c[0]==='WriteFile'&&c[2]==='notes.md.bak'&&c[3]==='edited backup'));
-   await page.getByRole('button',{name:'Working log',exact:true}).click();
+   await page.getByRole('button',{name:'Working Logs',exact:true}).click();
    await files.getByRole('link',{name:'Custom history',exact:true}).click();
    await files.getByText('Existing custom history',{exact:true}).waitFor();
    assert.equal(await files.getByRole('button',{name:'Source',exact:true}).count(),0);
@@ -160,7 +176,7 @@ try {
    await files.getByRole('link',{name:'Picker',exact:true}).click();
    await page.waitForFunction(()=>releases['alice:.yesman/task-log/2026-01-15-t3-picker.md']);
    await page.locator('[data-agent="bob/lead"]').click();
-   await page.getByRole('button',{name:'Working log',exact:true}).click();
+   await page.getByRole('button',{name:'Working Logs',exact:true}).click();
    await files.getByText('Only Bob',{exact:true}).waitFor();
    await page.evaluate(()=>{delayed['alice:.yesman/task-log/2026-01-15-t3-picker.md']=false;releases['alice:.yesman/task-log/2026-01-15-t3-picker.md']();});
    assert.equal(await files.getByText('Only Bob',{exact:true}).count(),1);
@@ -170,13 +186,13 @@ try {
    await page.goBack();await files.getByRole('link',{name:'Plain',exact:true}).waitFor();
    await page.goForward();await files.getByText('Only Bob',{exact:true}).waitFor();
    await page.locator('[data-agent="alice/lead"]').click();
-   await page.getByRole('button',{name:'Working log',exact:true}).click();
+   await page.getByRole('button',{name:'Working Logs',exact:true}).click();
    // Old TOC anchors receive a visible path to the unmodified original.
    await page.goto(url+'/#task-log='+encodeURIComponent(JSON.stringify({name:'alice',path:'.yesman/task-log.md',anchor:'old-heading'})));
    await files.getByRole('button',{name:'Complete original',exact:true}).click();
    await files.locator('#old-heading').waitFor();
    await files.getByRole('button',{name:'Close the files',exact:true}).click();
-   await page.getByRole('button',{name:'Working log',exact:true}).click();
+   await page.getByRole('button',{name:'Working Logs',exact:true}).click();
    await files.getByRole('link',{name:'Picker',exact:true}).waitFor();
    const toc85=files.getByRole('link',{name:'Record 85',exact:true});
    await toc85.scrollIntoViewIfNeeded();
@@ -195,7 +211,7 @@ try {
     await page.setViewportSize({width,height:850});
     await page.evaluate(({locale,dark})=>{document.documentElement.dataset.theme=dark?'dark':'light';window.setFixtureLocale(locale);}, {locale,dark});
     assert.equal(await page.locator('html').getAttribute('lang'), locale);
-    assert.equal(await page.getByRole('button',{name:locale==='zh-Hans'?'工作日志':'Working log',exact:true}).count(),1);
+    assert.equal(await page.getByRole('button',{name:locale==='zh-Hans'?'工作日志':'Working Logs',exact:true}).count(),1);
     assert.equal(await page.getByRole('button',{name:'Task log',exact:true}).count(),0);
     const reload = files.getByRole('button',{name:locale==='zh-Hans'?'重新载入':'Reload',exact:true});
     await reload.focus(); assert.equal(await reload.evaluate(e=>e===document.activeElement),true);
@@ -207,6 +223,8 @@ try {
     await page.screenshot({path:join(out,name+'-'+locale+'-'+width+'.png')});
    }
    assert.deepEqual(errors,[]);
+   assert.deepEqual(await page.evaluate(()=>unmocked),[]);
+   assert.equal((await page.locator('body').innerText()).includes('NaN'),false,'fixture DTOs render valid values');
    assert.equal(await page.evaluate(()=>calls.some(c=>c[0]==='WriteFile'&&c[2].startsWith('.yesman/task-log'))),false);
    report.push({engine:name,pass:true,readCalls:await page.evaluate(()=>calls.filter(c=>c[0]==='ReadFile').length),scope:'production DOM; controlled bridge, synthetic files; Go filesystem tested separately'});
   } finally {await browser.close();}
