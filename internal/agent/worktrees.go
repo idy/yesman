@@ -28,7 +28,7 @@ func (m *Manager) WithWorktreeOwner(owner, caller string, remove func() error) e
 		for _, d := range a.deliveries {
 			busy = busy || d.State == "sending" && d.Session == ""
 		}
-		if busy || a.prompts != 0 || owner != caller && (a.starting != nil || a.proc != nil || a.reports != 0 || a.info.Status == Starting || a.info.Status == Working || a.info.Status == Waiting || a.info.Status == Idle) {
+		if busy || a.prompts != 0 || a.recalls != 0 || owner != caller && (a.starting != nil || a.proc != nil || a.reports != 0 || a.info.Status == Starting || a.info.Status == Working || a.info.Status == Waiting || a.info.Status == Idle) {
 			m.mu.Unlock()
 			return fmt.Errorf("retain worktree: owner %s is active", owner)
 		}

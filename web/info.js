@@ -11,6 +11,7 @@
 import { $, h, icon } from './dom.js';
 import { counts, formatSize } from './diff.js';
 import { t, tn, formatNumber } from './i18n.js';
+import { isTaskLog } from './task-log.js';
 
 // How long each part is kept before the panel asks again by itself.
 const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
@@ -22,6 +23,11 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   files()                what the files pane shows (files.shown())
 //   openKnowledge(), openTaskLog(), openWorktree(dir, show), checkout(y)
 //   openTasks(), tasksOpen(), tasksSummary(y)   the Tasks pane and its summary
+//   needsYou(y)            what waits on the user from y: { count, error,
+//                          refused, open (the Needs you pane shows) }
+//   openNeedsYou(y)        open the Needs you pane, of y, beside its conversation
+//   pane()                 the pane beside the conversation, as state.pane
+//   openTopics()           open the Topics pane beside the conversation
 //   openURL(url)
 export function createInfo(host) {
   const data = new Map(); // yesman name -> what was read of it
@@ -114,13 +120,14 @@ export function createInfo(host) {
     const d = stateOf(y.name);
     stale(y.name);
     const top = aside.scrollTop;
+    // A redraw keeps focus on the entry it was on.
+    const focused = aside.contains(document.activeElement) ? document.activeElement.closest('[data-info-entry]')?.dataset.infoEntry : null;
     aside.replaceChildren(
-      knowledge(y, d),
-      taskLog(y),
-      tasks(y),
+      entriesCard(y, d),
       storage(y, d),
       worktrees(y, d));
     aside.scrollTop = top;
+    if (focused) aside.querySelector(`[data-info-entry="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
   }
 
   function section(title, actions, ...body) {
@@ -134,51 +141,105 @@ export function createInfo(host) {
       busy ? h('span', { class: 'mds-spinner', 'aria-hidden': 'true' }) : icon('reload'));
   }
 
-  // ---------- Knowledge ----------
+  // ---------- Entries ----------
 
-  function knowledge(y, d) {
-    const k = d.info?.knowledge;
-    const shown = host.files();
-    const current = shown?.yesman === y.name && shown.kind === 'knowledge';
-    const aside = !k ? '' : k.notes || k.index ? tn(k.notes, '{n} note', '{n} notes') : t('Empty');
-    return h('section', { class: 'info-section info-section--link' },
-      h('button', { class: 'info-link', type: 'button', 'aria-current': current ? 'page' : null, onclick: () => host.openKnowledge(),
-        title: t('Read the notes the agents keep, in the files pane') },
-      h('span', { class: 'info-link-label' }, t('Knowledge')),
-      icon('chevron', 'mds-icon info-chevron'),
-      h('span', { class: 'info-aside' }, aside)));
+  // One card lists what of the yesman opens elsewhere, a row each, in this
+  // order: what it keeps, what it did, what waits on the user, and what the
+  // user discussed with it. A new part adds its row to entries.
+  function entries(y, d) {
+    return [knowledgeEntry(y, d), workingLogsEntry(y), needsYouEntry(y), topicsEntry(y, d), tasksEntry(y)].filter(Boolean);
   }
 
-  function taskLog(y) {
+  function entriesCard(y, d) {
+    return h('section', { class: 'info-section info-section--entries' },
+      h('ul', { class: 'info-entries' }, entries(y, d).map((e) => h('li', null,
+        h('button', { class: 'info-link', type: 'button', 'data-info-entry': e.key, 'aria-current': e.current ? 'page' : null, title: e.title, onclick: e.open },
+          h('span', { class: 'info-link-label' }, e.label),
+          icon('chevron', 'mds-icon info-chevron'),
+          h('span', { class: 'info-aside', 'data-tone': e.tone ?? null }, e.aside ?? ''))))));
+  }
+
+  function knowledgeEntry(y, d) {
+    const k = d.info?.knowledge;
     const shown = host.files();
-    const current = shown?.yesman === y.name && shown.path === '.yesman/task-log.md';
-    return h('section', { class: 'info-section info-section--link' },
-      h('button', { class: 'info-link', type: 'button', 'aria-current': current ? 'page' : null, onclick: () => host.openTaskLog(),
-        title: t('Read task and PR history in the files pane') },
-      h('span', { class: 'info-link-label' }, t('Task log')),
-      icon('chevron', 'mds-icon info-chevron')));
+    return {
+      key: 'knowledge', label: t('Knowledge'), title: t('Read the notes the agents keep, in the files pane'),
+      current: shown?.yesman === y.name && shown.kind === 'knowledge',
+      aside: !k ? '' : k.notes || k.index ? tn(k.notes, '{n} note', '{n} notes') : t('Empty'),
+      open: () => host.openKnowledge(),
+    };
+  }
+
+  // Working logs is the task log, .yesman/task-log.md, under the name the
+  // page gives it.
+  function workingLogsEntry(y) {
+    const shown = host.files();
+    return {
+      key: 'working-logs', label: t('Working Logs'), title: t('Read task and PR history in the files pane'),
+      current: shown?.yesman === y.name && isTaskLog(shown.path),
+      open: () => host.openTaskLog(),
+    };
+  }
+
+  // What waits on the user from this yesman, counted from what the Needs
+  // you pane shows; it opens the pane.
+  function needsYouEntry(y) {
+    const { count, error, refused, open } = host.needsYou(y);
+    return {
+      key: 'needs-you', label: t('Needs You'), title: t('See what {name} needs from you', { name: y.displayName || y.name }),
+      current: open,
+      // A file that cannot be read is said, not counted as nothing; and so
+      // is a lead that cannot hand over new requests.
+      aside: error ? [count && tn(count, '{n} waiting', '{n} waiting'), t('Cannot be read')].filter(Boolean).join(' · ')
+        : refused ? [count && tn(count, '{n} waiting', '{n} waiting'), t('New requests refused')].filter(Boolean).join(' · ')
+        : count ? tn(count, '{n} waiting', '{n} waiting') : t('Nothing waiting'),
+      tone: error || refused ? 'error' : count ? 'waiting' : null,
+      open: () => host.openNeedsYou(y),
+    };
+  }
+
+  // The topics worth finding again, counted from what the Info read of the
+  // topics file; it opens the Topics pane.
+  function topicsEntry(y, d) {
+    const c = d.info?.topics;
+    return {
+      key: 'topics', label: t('Topics'), title: c?.error || t('Questions and discussions worth keeping: conclusions and open questions, beside the conversation'),
+      current: host.pane() === 'topics',
+      // A file that cannot be read is said, not counted as nothing.
+      aside: !c ? '' : c.error ? t('Cannot be read') : c.open ? t('{n} open', { n: formatNumber(c.open) }) : c.resolved + c.archived ? t('Nothing open') : t('Empty'),
+      tone: c?.error ? 'error' : null,
+      open: () => host.openTopics(),
+    };
+  }
+
+  // The topics changed: their count is read again.
+  function onTopics(name) {
+    if (data.has(name)) soon(name, ['info'], 1500);
   }
 
   // ---------- Tasks ----------
 
   // Tasks: the yesman's scheduled tasks, how many are on and when the next
-  // one runs. They open in the place beside the conversation.
-  function tasks(y) {
+  // one runs, and whether a run needs a look; it opens the Tasks pane.
+  function tasksEntry(y) {
     const s = host.tasksSummary?.(y);
     if (!s) return null;
-    let aside;
-    if (s.loading) aside = t('Loading…');
-    else if (s.error && s.total == null) aside = h('span', { class: 'danger', title: s.error }, t('can’t read'));
-    else if (!s.total) aside = t('None');
-    else if (!s.on) aside = t('All off');
-    else aside = s.next ? t('{n} on · next {when}', { n: formatNumber(s.on), when: nextWhen(s.next, s.zone) }) : t('{n} on', { n: formatNumber(s.on) });
-    const attention = s.attention ? h('span', { class: 'info-attention', title: tn(s.attention, '1 run needs a look', '{n} runs need a look') }, icon('alert'), h('span', { class: 'mds-visually-hidden' }, tn(s.attention, '1 run needs a look', '{n} runs need a look'))) : null;
-    return h('section', { class: 'info-section info-section--link' },
-      h('button', { class: 'info-link', type: 'button', 'aria-current': host.tasksOpen?.() ? 'page' : null, onclick: () => host.openTasks(),
-        title: t('Scheduled tasks: requests the lead gets at times you choose') },
-      h('span', { class: 'info-link-label' }, t('Tasks')),
-      icon('chevron', 'mds-icon info-chevron'),
-      h('span', { class: 'info-aside' }, attention, aside)));
+    // A file that cannot be read is said, not counted as nothing.
+    const unread = !!s.error && s.total == null;
+    let text;
+    if (s.loading) text = t('Loading…');
+    else if (unread) text = t('Cannot be read');
+    else if (!s.total) text = t('None');
+    else if (!s.on) text = t('All off');
+    else text = s.next ? t('{n} on · next {when}', { n: formatNumber(s.on), when: nextWhen(s.next, s.zone) }) : t('{n} on', { n: formatNumber(s.on) });
+    const look = s.attention ? tn(s.attention, '1 run needs a look', '{n} runs need a look') : '';
+    const attention = look ? h('span', { class: 'info-attention', title: look }, icon('alert'), h('span', { class: 'mds-visually-hidden' }, look)) : null;
+    return {
+      key: 'tasks', label: t('Tasks'), title: unread ? s.error : t('Scheduled tasks: requests the lead gets at times you choose'),
+      current: !!host.tasksOpen?.(),
+      aside: [attention, text], tone: unread ? 'error' : null,
+      open: () => host.openTasks(),
+    };
   }
 
   // nextWhen says when the next run is, briefly: a time today, else a day.
@@ -369,5 +430,5 @@ export function createInfo(host) {
     return (y.worktrees ?? []).map((w) => ({ ...w, dir: (w.dir ?? '').replace(/\\/g, '/') }));
   }
 
-  return { render, onChanged, onFiles, onAgentEvent, worktrees: listWorktrees };
+  return { render, onChanged, onFiles, onAgentEvent, onTopics, worktrees: listWorktrees };
 }

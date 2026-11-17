@@ -74,18 +74,40 @@ type Info struct {
 	StartedAt time.Time `json:"startedAt,omitzero"`
 	// Detail explains a failure.
 	Detail string `json:"detail,omitempty"`
-	// Dialog is the extension_ui_request a Waiting agent waits on.
-	Dialog json.RawMessage `json:"dialog,omitempty"`
+	// Dialog is the extension_ui_request a Waiting agent waits on, and
+	// DialogAt when it was asked.
+	Dialog   json.RawMessage `json:"dialog,omitempty"`
+	DialogAt time.Time       `json:"dialogAt,omitzero"`
+	// HandedOver: the lead handed this worker's Dialog to the user, who
+	// sees it under Needs you. A worker's other questions stay with its lead.
+	HandedOver bool `json:"handedOver,omitempty"`
 	// Activity says what a working agent is doing now, from the events of
 	// its run, such as "Running go test ./...". Empty between steps.
 	Activity string `json:"activity,omitempty"`
 	// RunStartedAt is when the current run started; zero between runs.
 	RunStartedAt time.Time `json:"runStartedAt,omitzero"`
+	// RunError is set while the last run this agent finished ended on a
+	// model error, such as a provider's usage limit: pi recorded its last
+	// assistant message with stopReason "error". A later run that ends
+	// otherwise clears it, as does stopping a run, even one waiting to
+	// retry the error; starting a run does not. It belongs to this
+	// incarnation and is not kept on disk.
+	RunError     *RunError `json:"runError,omitempty"`
 	Model        string    `json:"model,omitempty"`
 	Provider     string    `json:"provider,omitempty"`
 	Effort       string    `json:"effort,omitempty"`
 	EffortLevels []string  `json:"effortLevels,omitempty"`
 	UpdatedAt    time.Time `json:"updatedAt,omitzero"`
+}
+
+// RunError is how an agent's last finished run failed, from pi's own record
+// of its last assistant message.
+type RunError struct {
+	// Message is pi's errorMessage, trimmed; empty when pi recorded none.
+	Message  string    `json:"message"`
+	Provider string    `json:"provider,omitempty"`
+	Model    string    `json:"model,omitempty"`
+	At       time.Time `json:"at"`
 }
 
 // Event is one record an agent's pi process emitted.
@@ -113,6 +135,9 @@ type Conversation struct {
 type Config struct {
 	// Pi is the pi executable.
 	Pi string
+	// Command resolves a managed runtime outside Manager locks. Nil preserves
+	// the executable supplied by callers and tests.
+	Command func(context.Context) (string, []string, error)
 	// Extension is the path of yesman's pi extension, loaded with -e.
 	Extension string
 	// Env is added to every agent's environment, after the app's own.
@@ -143,8 +168,12 @@ type Manager struct {
 	closed          bool              // StopAll permanently prevents further starts; guarded by mu
 	worktreeCleanup map[string]bool   // reservations preventing owner startup/input during final removal
 	shutdown        chan struct{}     // closed by StopAll to wake pending report retries
+	recallBytes     int               // full payload memory across all agent generations; guarded by mu
 
 	notify chan struct{} // wakes the goroutine that calls OnChange
+	// callsDone is signalled, under mu, when an agent's last caller
+	// operation ends; Stop waits for them.
+	callsDone *sync.Cond
 }
 
 type agent struct {
@@ -158,12 +187,17 @@ type agent struct {
 	info                           Info
 	proc                           *proc
 	token                          string
+	operations                     map[*externalOperation]struct{}
+	tokenProc                      *proc         // the process token was given to
 	seq                            uint64        // the last event's number
 	turn                           []Event       // the events of the assistant message in progress
 	starting                       chan struct{} // closed when a start finishes, nil otherwise
+	startCancel                    context.CancelFunc
 	stopping                       bool
 	dir                            string   // the workspace, to show paths in it relative to it
 	tools                          []string // the tool calls running, oldest first
+	handedOver                     string   // the dialog ID the lead handed to the user
+	calls                          int      // CallerOperations in progress; guarded by mu
 	labels                         map[string]string
 	deliveries                     map[string]Delivery // bounded receipt metadata; pi owns scheduling
 	deliveryOnce                   sync.Once
@@ -175,7 +209,14 @@ type agent struct {
 	retiring, deliverySealed       bool
 	removing                       bool
 	queue                          QueueStatus
+	nativeQueue                    pendingQueue
+	recallPayloads                 map[string]recallPayload
+	recallBytes, recalls           int
 	deliverySettled                uint64 // sequence of last observed settled boundary
+	// runEnd is how the run in progress ended so far: its latest assistant
+	// message's error, or nil; runSaid tells whether it had one at all.
+	runEnd  *RunError
+	runSaid bool
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
 	nudged bool
@@ -197,6 +238,7 @@ func New(cfg Config) *Manager {
 		cfg.OnChange = func([]Info) {}
 	}
 	m := &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}, shutdown: make(chan struct{}), notify: make(chan struct{}, 1)}
+	m.callsDone = sync.NewCond(&m.mu)
 	go func() {
 		for range m.notify {
 			m.cfg.OnChange(m.List())
@@ -280,6 +322,10 @@ func (m *Manager) infoLocked(id, role string, w yesmen.Worker, subject string) I
 	i := Info{ID: id, Status: Stopped}
 	if a := m.agents[id]; a != nil && (a.info.Since.Equal(w.StartedAt) || a.info.Since.IsZero() && !a.retiring) {
 		i = a.info
+		i.HandedOver = a.handedOver != "" && dialogID(i.Dialog) == a.handedOver
+	}
+	if i.Dialog == nil {
+		i.DialogAt = time.Time{}
 	}
 	i.Yesman, i.Name, _ = SplitID(id)
 	i.Role, i.Number, i.Title, i.Task, i.Since, i.FinishedAt = role, w.Number, subject, w.Task, w.StartedAt, w.FinishedAt
@@ -401,8 +447,18 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			p := a.proc
 			select {
 			case <-p.done:
-				// Exited, and watch has not cleared it yet.
-				m.clearLocked(a, p)
+				// Exited, and watch has not cleared it yet. Its credential
+				// stops authenticating now; the changes it already began end
+				// first, without the lock they may wait for.
+				m.revokeLocked(a, p)
+				m.mu.Unlock()
+				p.retireChanges()
+				m.mu.Lock()
+				if a.proc == p {
+					m.clearLocked(a, p)
+				}
+				m.mu.Unlock()
+				continue
 			default:
 				m.mu.Unlock()
 				return a, p, nil
@@ -415,20 +471,28 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 			continue
 		}
 		a.starting = make(chan struct{})
+		startContext, cancelStart := context.WithCancel(context.Background())
+		a.startCancel = cancelStart
 		a.stopping = false
 		a.info.Status, a.info.Detail, a.info.UpdatedAt = Starting, "", time.Now()
 		m.mu.Unlock()
 		m.changed()
 
 		started := time.Now()
-		p, state, err := m.spawn(a, y, name, role)
+		p, state, err := m.spawn(startContext, a, y, name, role)
+		cancelStart()
 
 		m.mu.Lock()
+		a.startCancel = nil
+		if (a.stopping || m.closed) && err != nil {
+			err = errStopped
+		}
 		if err == nil && (a.stopping || m.closed) {
 			// Stop came during the start: end what it started before
 			// letting Stop return.
 			m.mu.Unlock()
 			p.stop(10 * time.Second)
+			m.retireCredential(a, p)
 			m.mu.Lock()
 			m.clearLocked(a, p)
 			err = errStopped
@@ -449,6 +513,10 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 		}
 		a.proc = p
 		p.piSession.Store(state.SessionID)
+		a.nativeQueue = state.PendingQueue
+		if state.PendingQueue.supported() {
+			a.queue = pendingStatus(state.PendingQueue)
+		}
 		a.info.StartedAt = started
 		a.info.Status, a.info.Model, a.info.UpdatedAt = Idle, state.Model.ID, time.Now()
 		a.info.Provider, a.info.Effort, a.info.EffortLevels = state.Model.Provider, state.ThinkingLevel, nil
@@ -459,7 +527,7 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string) (*agent, *proc, err
 	}
 }
 
-func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, modelState, error) {
+func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman, name, role string) (*proc, modelState, error) {
 	sessions := y.SessionDir(name)
 	if err := os.MkdirAll(sessions, 0o755); err != nil {
 		return nil, modelState{}, err
@@ -481,22 +549,35 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 		"YESMAN_ROLE="+role,
 		"YESMAN_WORKSPACE="+y.Path,
 	)
-	p, err := startProc(spec{Path: m.cfg.Pi, Args: args, Dir: y.Path, Env: env}, func(p *proc, kind string, raw json.RawMessage) {
+	path := m.cfg.Pi
+	if m.cfg.Command != nil {
+		ctx, cancel := context.WithTimeout(startContext, 10*time.Minute)
+		var prefix []string
+		var err error
+		path, prefix, err = m.cfg.Command(ctx)
+		cancel()
+		if err != nil {
+			return nil, modelState{}, err
+		}
+		args = append(prefix, args...)
+	}
+	p, err := startProc(spec{Path: path, Args: args, Dir: y.Path, Env: env}, func(p *proc, kind string, raw json.RawMessage) {
 		m.record(a, p, kind, raw)
 	})
 	if err != nil {
 		return nil, modelState{}, err
 	}
 	m.mu.Lock()
-	a.token = token
+	a.token, a.tokenProc = token, p
 	m.tokens[token] = a.info.ID
 	m.mu.Unlock()
 	// get_state answers once pi has loaded its session and extensions.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(startContext, 60*time.Second)
 	defer cancel()
-	state, err := p.modelState(ctx)
+	state, err := p.startupState(ctx)
 	if err != nil {
 		p.stop(2 * time.Second)
+		m.retireCredential(a, p)
 		m.mu.Lock()
 		m.clearLocked(a, p)
 		m.mu.Unlock()
@@ -525,9 +606,14 @@ func (m *Manager) spawn(a *agent, y yesmen.Yesman, name, role string) (*proc, mo
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 	raw = p.origins.observe(kind, raw)
+	m.observeNativeInput(a, p, kind, raw)
 	m.observeDelivery(a, p, kind, raw)
 	m.follow(a, p, kind, raw)
 	switch kind {
+	case "queue_resume_start":
+		// Native Session reserved preparation; no message has been taken and no
+		// provider turn/usage is implied. Expose Stop while the app context loads.
+		m.setStatus(a, p, Working, "")
 	case "agent_start":
 		m.setStatus(a, p, Working, "")
 	case "agent_settled":
@@ -592,14 +678,25 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 		_ = json.Unmarshal(raw, &e)
 		switch e.Method {
 		case "select", "confirm", "input", "editor":
+			var d dialog
+			_ = json.Unmarshal(raw, &d)
 			m.mu.Lock()
 			current := a.proc == p || a.proc == nil
 			if current {
-				a.info.Status, a.info.Dialog, a.info.UpdatedAt = Waiting, raw, time.Now()
+				now := time.Now()
+				a.info.Status, a.info.Dialog, a.info.DialogAt, a.info.UpdatedAt = Waiting, raw, now, now
+				if a.handedOver != d.ID {
+					a.handedOver = ""
+				}
 			}
 			worker := a.info.Role == RoleWorker
 			m.mu.Unlock()
 			m.changed()
+			if current && d.Timeout > 0 && d.ID != "" {
+				// pi answers a dialog itself when its timeout passes, and says
+				// nothing: stop offering it then, so no late answer is taken.
+				time.AfterFunc(time.Duration(d.Timeout)*time.Millisecond, func() { m.expireDialog(a, p, d.ID) })
+			}
 			if current && worker {
 				// The lead answers for its workers; the user hears of it only
 				// if the lead cannot decide.
@@ -643,6 +740,7 @@ func (m *Manager) number(a *agent, kind string, raw json.RawMessage) Event {
 // watch follows a process until it exits.
 func (m *Manager) watch(a *agent, p *proc) {
 	<-p.done
+	m.retireCredential(a, p)
 	m.mu.Lock()
 	if a.proc != p {
 		m.mu.Unlock()
@@ -778,6 +876,15 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		}
 		m.mu.Lock()
 		retiring := a.retiring || a.proc != p
+		if a.nativeQueue.Capability == 3 {
+			cmd["hostOrigin"] = origin
+		}
+		if messageID != "" && a.nativeQueue.supported() {
+			cmd["submissionId"] = messageID
+		}
+		if !a.nativeQueue.supported() {
+			m.forgetRecallLocked(a, messageID)
+		}
 		m.mu.Unlock()
 		var err error
 		if retiring {
@@ -839,6 +946,7 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	_, _ = p.modelState(ctx, func(s modelState) {
 		session = s.SessionID
 		m.deliverySessionChanged(a, p, s.SessionID)
+		m.syncPending(a, p, s.PendingQueue)
 	})
 	// Origins recorded before this process are in the session's entries,
 	// read once per session; the reader adds later ones.
@@ -856,7 +964,16 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	// reader as the answer arrives: events it handles next are not in the
 	// history, and the client replays them.
 	var conv Conversation
-	r, err := p.callAt(ctx, map[string]any{"type": "get_messages"}, func() {
+	r, err := p.callObserved(ctx, map[string]any{"type": "get_messages"}, func(r response) {
+		if p.origins.native && r.Success {
+			var recorded struct {
+				HostSession    string         `json:"hostSession"`
+				RecordedInputs []hostInputRef `json:"recordedInputs"`
+			}
+			if json.Unmarshal(r.Data, &recorded) == nil {
+				m.reconcileRecordedInputs(a, p, recorded.HostSession, recorded.RecordedInputs)
+			}
+		}
 		m.mu.Lock()
 		pruned := m.pruneDeliveryEventLocked(a)
 		conv.Live, conv.Seq = append([]Event(nil), a.turn...), a.seq
@@ -870,12 +987,23 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 		return Conversation{}, err
 	}
 	var data struct {
-		Messages json.RawMessage `json:"messages"`
+		Messages       json.RawMessage `json:"messages"`
+		InputRefs      []hostInputRef  `json:"inputRefs"`
+		RecordedInputs []hostInputRef  `json:"recordedInputs"`
+		HostSession    string          `json:"hostSession"`
 	}
 	if err := json.Unmarshal(r.Data, &data); err != nil {
 		return Conversation{}, err
 	}
-	conv.Messages = p.origins.project(data.Messages)
+	if p.origins.native && data.HostSession == p.piSession.Load().(string) {
+		conv.Messages = projectNativeMessages(data.Messages, data.InputRefs)
+	} else if p.origins.native {
+		// v2 can move queues but cannot bind user events/history. Do not feed
+		// transfers into the legacy text/count provenance heuristic.
+		conv.Messages = projectNativeMessages(data.Messages, nil)
+	} else {
+		conv.Messages = p.origins.project(data.Messages)
+	}
 	return conv, nil
 }
 
@@ -896,6 +1024,7 @@ func (m *Manager) Answer(id, requestID string, answer map[string]any) error {
 	p, raw := a.proc, a.info.Dialog
 	// Reserve the question before sending. A second answer cannot consume
 	// it, and events after the response (including a new question) stay put.
+	handedOver := a.handedOver
 	a.info.Status, a.info.Dialog, a.info.UpdatedAt = Working, nil, time.Now()
 	m.mu.Unlock()
 	msg := map[string]any{}
@@ -907,6 +1036,7 @@ func (m *Manager) Answer(id, requestID string, answer map[string]any) error {
 		m.mu.Lock()
 		if a.proc == p && a.info.Status == Working && a.info.Dialog == nil {
 			a.info.Status, a.info.Dialog = Waiting, raw
+			a.handedOver = handedOver
 		}
 		m.mu.Unlock()
 		m.changed()
@@ -926,6 +1056,15 @@ func (m *Manager) Stop(id string) {
 		return
 	}
 	a.stopping = true
+	cancelOperationsLocked(a, a.tokenProc)
+	if a.startCancel != nil {
+		a.startCancel()
+	}
+	// Caller operations already admitted finish first; stopping admits no
+	// more, so none commits for this process after Stop returns.
+	for a.calls > 0 {
+		m.callsDone.Wait()
+	}
 	wait := a.starting
 	m.mu.Unlock()
 	if wait != nil {
@@ -938,6 +1077,9 @@ func (m *Manager) Stop(id string) {
 		return
 	}
 	p.stop(10 * time.Second)
+	// Its credential stops authenticating, and the changes its requests
+	// already began end before Stop does.
+	m.retireCredential(a, p)
 	m.mu.Lock()
 	if a.proc == p {
 		m.clearLocked(a, p)
@@ -964,7 +1106,7 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
 	p := a.proc
-	idle := p != nil && a.starting == nil && a.prompts == 0 && a.reports == 0 && a.info.Status == Idle &&
+	idle := p != nil && a.starting == nil && a.prompts == 0 && a.recalls == 0 && a.reports == 0 && a.info.Status == Idle &&
 		!a.info.StartedAt.IsZero() && a.info.StartedAt.Before(startedBefore)
 	m.mu.Unlock()
 	if !idle {
@@ -981,12 +1123,14 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 }
 
 // clearLocked forgets an agent's process, its credential, and the reply
-// it was writing, which a new process will not continue.
+// it was writing, which a new process will not continue. Callers first
+// retire p's credential (retireCredential), which already forgot it.
 func (m *Manager) clearLocked(a *agent, p *proc) {
 	if a.proc == p {
 		a.proc = nil
 	}
 	a.turn = nil
+	a.handedOver = ""
 	if events := m.interruptDeliveriesLocked(a); len(events) > 0 {
 		go func() {
 			for _, ev := range events {
@@ -997,7 +1141,7 @@ func (m *Manager) clearLocked(a *agent, p *proc) {
 	a.endRun()
 	if a.token != "" {
 		delete(m.tokens, a.token)
-		a.token = ""
+		a.token, a.tokenProc = "", nil
 	}
 }
 
@@ -1019,6 +1163,7 @@ func (m *Manager) StopAll() {
 		ids = append(ids, id)
 		a := m.agents[id]
 		a.retiring = true
+		cancelOperationsLocked(a, a.tokenProc)
 	}
 	m.mu.Unlock()
 	// Initializers already published their agent before leaving the manager
@@ -1123,6 +1268,7 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 			return errStopped
 		}
 		a.retiring, a.removing = true, true
+		cancelOperationsLocked(a, a.tokenProc)
 	}
 	m.mu.Unlock()
 	fail := func(err error) error {
@@ -1224,7 +1370,7 @@ func (m *Manager) closeIfFinished(a *agent, p *proc, finishedAt time.Time) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	m.mu.Lock()
-	idle := !a.retiring && a.proc == p && a.starting == nil && a.info.Status == Idle && a.prompts == 0
+	idle := !a.retiring && a.proc == p && a.starting == nil && a.info.Status == Idle && a.prompts == 0 && a.recalls == 0
 	yesman, name := a.info.Yesman, a.info.Name
 	m.mu.Unlock()
 	if !idle {

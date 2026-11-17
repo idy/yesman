@@ -46,6 +46,12 @@ export function registerActions(shortcuts, host) {
       },
     },
     {
+      id: 'composer.recall', label: 'Cancel and edit the newest queued message', group: 'Conversation', keys: ['ArrowUp'], palette: false,
+      context: { id: 'composer', label: 'In the message box', test: target => !!target?.matches?.('.composer textarea'), bare: ['ArrowUp'] },
+      when: ctx => host.canRecall(ctx) ? true : 'An empty message box and a recallable queued input are required.',
+      run: () => host.recallLatest(),
+    },
+    {
       id: 'agent.stop', label: 'Stop the current run', group: 'Conversation', keys: ['Mod+.'], keywords: ['abort', 'interrupt', 'cancel'],
       when: () => {
         const a = agent();
@@ -87,6 +93,13 @@ export function registerActions(shortcuts, host) {
       when: () => (host.needsYou() ? true : 'No yesman needs you now.'),
       run: () => host.selectAgent(host.needsYou().id),
     },
+    {
+      // Unbound: a key is the user's to give it in Settings › Shortcuts.
+      // It opens the Needs you pane of the yesman shown, beside its
+      // conversation.
+      id: 'needs-you.show', label: 'Show Needs You', group: 'Go to', keywords: ['requests', 'inbox', 'waiting', 'handoffs'],
+      when: needAgent, run: () => host.showNeedsYou(),
+    },
     ...GOTO.map((n) => ({
       id: `yesman.goto.${n}`, label: 'Go to yesman {n}', params: { n }, group: 'Go to', keys: [`Mod+${n}`], palette: false,
       when: () => (host.leads()[n - 1] ? true : host.t('There is no yesman {n}.', { n })),
@@ -108,6 +121,10 @@ export function registerActions(shortcuts, host) {
       when: needAgent, run: () => host.togglePane('tasks'),
     },
     {
+      id: 'pane.topics', label: 'Show or hide the topics', group: 'Panels', keywords: ['questions', 'discussions', 'conclusions', 'qa'],
+      when: needAgent, run: () => host.togglePane('topics'),
+    },
+    {
       id: 'pane.info', label: 'Show or hide the info', group: 'Panels', keywords: ['worktrees', 'storage', 'panel'],
       when: needAgent, run: () => host.togglePanel(),
     },
@@ -125,7 +142,7 @@ export function registerActions(shortcuts, host) {
       when: needAgent, run: () => host.files().openKnowledge(),
     },
     {
-      id: 'files.task-log', label: 'Open the task log', group: 'Panels', keywords: ['history'],
+      id: 'files.task-log', label: 'Open Working Logs', group: 'Panels', keywords: ['task log', 'history'],
       when: needAgent, run: () => host.files().openTaskLog(),
     },
 

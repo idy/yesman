@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -424,5 +425,72 @@ func TestDeliveryBridgeFixture(t *testing.T) {
 	}
 	if err = os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A finished receipt is kept for deliveryRetention from when it finished.
+// Run boundaries, queue snapshots, conversation reads and duplicate submits
+// carry no new fact about it: they must not revise it, renew its expiry or
+// add a record, however often they repeat.
+func TestDeliveryFinishedReceiptsAreNotRenewed(t *testing.T) {
+	m, _ := newTestManager(t, 0, "FAKE_PI_DELIVERIES=1", "FAKE_PI_DELIVERY_MODE=steer")
+	var updates atomic.Int32
+	m.cfg.OnEvent = func(e Event) {
+		var head struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(e.Data, &head) == nil && head.Type == "delivery_update" {
+			updates.Add(1)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	id := "alice/lead"
+	ids := []string{deliveryTestID(1), deliveryTestID(2), deliveryTestID(3)}
+	for _, messageID := range ids {
+		if d, err := m.Submit(ctx, id, messageID, "same text", nil); err != nil || d.State != "steering" {
+			t.Fatalf("submit %+v %v", d, err)
+		}
+	}
+	p := m.running(id)
+	if _, err := p.call(ctx, map[string]any{"type": "abort"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, messageID := range ids {
+		deliveryState(t, m, id, messageID, "unconfirmed")
+	}
+	flushDeliveries(t, m, id)
+	snapshot := func() map[string][2]int64 {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		got := map[string][2]int64{}
+		for _, d := range m.agents[id].deliveries {
+			got[d.ID] = [2]int64{int64(d.Revision), d.expires}
+		}
+		return got
+	}
+	before, events := snapshot(), updates.Load()
+	if len(before) != len(ids) {
+		t.Fatalf("records %v", before)
+	}
+	for i := 0; i < 30; i++ {
+		for _, cmd := range []string{"test_settle", "clear_queue"} {
+			if _, err := p.call(ctx, map[string]any{"type": cmd}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		conv, err := m.Messages(ctx, id)
+		if err != nil || len(conv.Deliveries) != len(ids) {
+			t.Fatalf("read %d receipts: %v", len(conv.Deliveries), err)
+		}
+		if d, err := m.Submit(ctx, id, ids[i%len(ids)], "same text", nil); err != nil || d.State != "unconfirmed" {
+			t.Fatalf("duplicate %+v %v", d, err)
+		}
+	}
+	if after := snapshot(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("finished receipts were renewed or added:\nbefore %v\nafter  %v", before, after)
+	}
+	if n := updates.Load() - events; n != 0 {
+		t.Fatalf("%d receipt updates without a new fact", n)
 	}
 }

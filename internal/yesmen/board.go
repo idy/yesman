@@ -162,8 +162,8 @@ func (s *Store) AddScheduledTask(name string, link TaskSchedule, title, detail s
 			return t, false, nil
 		}
 	}
-	title = clipRunes(strings.Join(strings.Fields(title), " "), maxTitleLen)
-	detail = clipRunes(detail, maxDetailLen)
+	title = clipBoardText(strings.Join(strings.Fields(title), " "), maxTitleLen)
+	detail = clipBoardText(detail, maxDetailLen)
 	if err := b.apply(BoardChange{Add: []TaskEdit{{Title: &title, Detail: &detail}}}, time.Now().UTC()); err != nil {
 		return Task{}, false, err
 	}
@@ -193,7 +193,7 @@ func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task
 		if !fn(&t) {
 			return b.Tasks[i], false, nil
 		}
-		t.Note = clipRunes(t.Note, maxNoteLen)
+		t.Note = clipBoardText(t.Note, maxNoteLen)
 		if !slices.Contains(TaskStatuses, t.Status) {
 			return b.Tasks[i], false, fmt.Errorf("status %q is not one of %s", t.Status, strings.Join(TaskStatuses, ", "))
 		}
@@ -211,7 +211,7 @@ func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task
 	return Task{}, false, nil
 }
 
-func clipRunes(s string, n int) string {
+func clipBoardText(s string, n int) string {
 	if r := []rune(s); len(r) > n {
 		return string(r[:n-1]) + "…"
 	}

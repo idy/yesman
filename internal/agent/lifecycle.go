@@ -55,7 +55,7 @@ func (m *Manager) ForgetYesman(name string, since time.Time) {
 		if a.info.Yesman == name && a.workspaceSince.Equal(since) && a.retiring && a.proc == nil && a.starting == nil && (a.deliveryWriter == nil || a.deliveryWriter.finished()) {
 			if a.token != "" {
 				delete(m.tokens, a.token)
-				a.token = ""
+				a.token, a.tokenProc = "", nil
 			}
 			delete(m.agents, id)
 		}
@@ -82,6 +82,7 @@ func (m *Manager) StopYesmanContext(ctx context.Context, name string) error {
 	for _, a := range m.agents {
 		if a.info.Yesman == name && (a.workspaceSince.IsZero() || a.workspaceSince.Equal(y.HiredAt)) {
 			a.retiring = true
+			cancelOperationsLocked(a, a.tokenProc)
 			agents = append(agents, a)
 		}
 	}
@@ -143,6 +144,7 @@ func (m *Manager) sealDeliveriesLocked(a *agent) []Event {
 	if a.deliverySealed {
 		return nil
 	}
+	m.clearRecallLocked(a)
 	var events []Event
 	for _, d := range a.deliveries {
 		if !pendingDelivery(d.State) {

@@ -293,7 +293,7 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 			return nil, 0, errors.New("invalid delivery metadata")
 		}
 		switch d.State {
-		case "sending", "accepted", "steering", "queued", "unconfirmed", "failed", "interrupted", "handled":
+		case "sending", "accepted", "steering", "queued", "unconfirmed", "failed", "interrupted", "handled", "dispatched", "cancelled":
 		default:
 			return nil, 0, errors.New("invalid delivery state")
 		}
@@ -314,6 +314,7 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 		d.Error, _ = deliveryClip(d.Error, maxDeliveryError)
 		d.Session, _ = deliveryClip(d.Session, 160)
 		d.Images = nil
+		d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload = false, false, false, false, false, false
 		if pendingDelivery(d.State) {
 			d.State, d.Error = "interrupted", ""
 			d.expires = now.Add(deliveryRetention).UnixMilli()
@@ -400,5 +401,9 @@ func newDeliveryIDAllowed(id string, floor int64, now time.Time) error {
 	return nil
 }
 func (m *Manager) pruneDeliveriesLocked(a *agent) []string {
-	return pruneDeliveryRecords(a.deliveries, &a.deliveryFloor, time.Now())
+	removed := pruneDeliveryRecords(a.deliveries, &a.deliveryFloor, time.Now())
+	for _, id := range removed {
+		m.forgetRecallLocked(a, id)
+	}
+	return removed
 }

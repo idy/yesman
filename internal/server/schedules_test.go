@@ -87,41 +87,48 @@ func TestSchedulesAreTheLeadsAndDraftsStayOff(t *testing.T) {
 // The board agents read and change names a scheduled run's plan, never the
 // scheduler's run handle, for a lead and a worker alike.
 func TestAgentBoardLeavesOutTheRunHandle(t *testing.T) {
-	tmp := t.TempDir()
-	store := yesmen.New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
-	y, err := store.Hire("alice")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The board's real fixture: a change is admitted for the caller's
+	// running process (agent.BeginChange), as an agent's request is.
+	f := newBoardFixture(t)
+	y := f.hire("alice")
 	const run = "s1-m-0123456789abcdef"
-	if _, _, err := store.AddScheduledTask("alice", yesmen.TaskSchedule{Plan: "s1", Run: run}, "Morning check", "detail"); err != nil {
+	if _, _, err := f.store.AddScheduledTask("alice", yesmen.TaskSchedule{Plan: "s1", Run: run}, "Morning check", "detail"); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{Yesmen: store}
 	ctx := context.Background()
-	for _, role := range []string{agent.RoleLead, agent.RoleWorker} {
-		c := caller{agent: agent.Info{ID: "alice/x", Yesman: "alice", Role: role}, yesman: y}
-		read, err := s.board(ctx, c, httptest.NewRequest("GET", "/v1/board", nil))
+	for _, id := range []string{"alice/lead", "alice/helper"} {
+		if id == "alice/helper" {
+			if _, err := f.m.StartWorker(ctx, "alice", "helper", "Helper", "help"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		tr := f.start(id)
+		info, err := f.m.Authenticate(tr.Token)
 		if err != nil {
 			t.Fatal(err)
 		}
-		changed, err := s.changeBoard(ctx, c, httptest.NewRequest("POST", "/v1/board", strings.NewReader(`{"update":[{"id":"t1","status":"doing"}]}`)))
+		c := caller{agent: info, yesman: y, token: tr.Token}
+		read, err := f.srv.board(ctx, c, httptest.NewRequest("GET", "/v1/board", nil))
 		if err != nil {
 			t.Fatal(err)
 		}
-		empty, err := s.changeBoard(ctx, c, httptest.NewRequest("POST", "/v1/board", strings.NewReader(`{}`)))
+		changed, err := f.srv.changeBoard(ctx, c, httptest.NewRequest("POST", "/v1/board", strings.NewReader(`{"update":[{"id":"t1","status":"doing"}]}`)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		empty, err := f.srv.changeBoard(ctx, c, httptest.NewRequest("POST", "/v1/board", strings.NewReader(`{}`)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, out := range []any{read, changed, empty} {
 			data, _ := json.Marshal(out)
 			if strings.Contains(string(data), run) || !strings.Contains(string(data), `"schedule":{"plan":"s1"}`) || !strings.Contains(string(data), `"id":"t1"`) {
-				t.Fatalf("%s sees %s", role, data)
+				t.Fatalf("%s (%s) sees %s", id, info.Role, data)
 			}
 		}
 	}
 	// The run handle stays on the board itself, for the scheduler.
-	if b, _ := store.Board("alice"); b.Tasks[0].Schedule == nil || b.Tasks[0].Schedule.Run != run || b.Tasks[0].Status != yesmen.TaskDoing {
+	if b, _ := f.store.Board("alice"); b.Tasks[0].Schedule == nil || b.Tasks[0].Schedule.Run != run || b.Tasks[0].Status != yesmen.TaskDoing {
 		t.Fatalf("board: %+v", b.Tasks[0])
 	}
 }

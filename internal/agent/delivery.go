@@ -15,37 +15,47 @@ import (
 // Therefore no receipt claims that its message was consumed. Native transcript
 // messages remain independent, including transformed inputs and identical text.
 type Delivery struct {
-	ID         string    `json:"id"`
-	Session    string    `json:"session"`
-	Revision   uint64    `json:"revision"`
-	State      string    `json:"state"`
-	Text       string    `json:"text"`
-	Images     []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
-	ImageCount int       `json:"imageCount"`
-	Preview    bool      `json:"preview,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	Order      uint64    `json:"order"`
-	AgentSince time.Time `json:"agentSince,omitzero"`
+	ID              string    `json:"id"`
+	Session         string    `json:"session"`
+	Revision        uint64    `json:"revision"`
+	State           string    `json:"state"`
+	Text            string    `json:"text"`
+	Images          []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
+	ImageCount      int       `json:"imageCount"`
+	Preview         bool      `json:"preview,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	Order           uint64    `json:"order"`
+	AgentSince      time.Time `json:"agentSince,omitzero"`
+	CanCancel       bool      `json:"canCancel,omitempty"` // view only; never persisted as authority
+	CanRestore      bool      `json:"canRestore,omitempty"`
+	OriginalText    bool      `json:"originalText,omitempty"`
+	OriginalPayload bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
+	NativePending   bool      `json:"nativePending,omitempty"`
+	CanPromote      bool      `json:"canPromote,omitempty"` // live native membership/admission only
 	// Ack is how pi's answer accepted it (accepted, queued, steering or
 	// handled); empty until pi answered, or when it refused. It stays when
 	// the state later turns unconfirmed or interrupted.
 	Ack string `json:"ack,omitempty"`
 	// Origin marks a submission the app made for the user, a scheduled
 	// task's run; nil for what a person typed.
-	Origin      *Origin `json:"origin,omitempty"`
-	boundSeq    uint64
-	fingerprint string
-	created     int64
-	expires     int64
-	registered  uint64
+	Origin              *Origin `json:"origin,omitempty"`
+	queueRevision       uint64
+	queueID, queueEpoch string
+	boundSeq            uint64
+	fingerprint         string
+	created             int64
+	expires             int64
+	registered          uint64
 }
 
 // QueueStatus describes the whole native pi queue, not receipt membership.
 // Known is false after process/session replacement until pi reports a snapshot.
 type QueueStatus struct {
-	Known    bool `json:"known"`
-	Steering int  `json:"steering"`
-	FollowUp int  `json:"followUp"`
+	Known            bool `json:"known"`
+	Steering         int  `json:"steering"`
+	FollowUp         int  `json:"followUp"`
+	RecallSupported  bool `json:"recallSupported,omitempty"`
+	PromoteSupported bool `json:"promoteSupported,omitempty"`
 }
 
 var deliveryID = regexp.MustCompile(`^[a-f0-9]{48}$`)
@@ -56,7 +66,7 @@ func pendingDelivery(state string) bool {
 func (a *agent) deliverySnapshot() []Delivery {
 	receipts := make([]Delivery, 0, len(a.deliveries))
 	for _, d := range a.deliveries {
-		receipts = append(receipts, d)
+		receipts = append(receipts, a.deliveryView(d))
 	}
 	return receipts
 }
@@ -70,6 +80,11 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 	previous := a.deliveries[d.ID]
 	if !pendingDelivery(d.State) && (pendingDelivery(previous.State) || d.expires == 0) {
 		d.expires = time.Now().Add(deliveryRetention).UnixMilli()
+	}
+	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload = false, false, false, false, false, false
+	if d.State == "dispatched" || d.State == "failed" || d.State == "handled" || d.State == "interrupted" || d.State == "accepted" {
+		d.queueID = ""
+		m.forgetRecallLocked(a, d.ID)
 	}
 	d.Revision++
 	d.Error, _ = deliveryClip(d.Error, maxDeliveryError)
@@ -87,14 +102,23 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 		Delivery Delivery `json:"delivery"`
 		Removed  []string `json:"removed,omitempty"`
 		Retained []string `json:"retained"`
-	}{"delivery_update", d, removed, retained})
+	}{"delivery_update", a.deliveryView(d), removed, retained})
 	return Event{Agent: a.info.ID, AgentSince: a.info.Since, Seq: a.seq, Data: raw}
 }
 
 // Submit registers a stable client ID before dispatch. Repeating an uncertain
 // bridge call returns its existing receipt and never sends the prompt twice.
 func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
-	return m.submit(ctx, id, messageID, text, images, "steer", nil, expectedSince...)
+	d, err := m.submit(ctx, id, messageID, text, images, "steer", nil, expectedSince...)
+	m.mu.Lock()
+	if a := m.agents[id]; a != nil && a.info.Since.Equal(d.AgentSince) {
+		if current, ok := a.deliveries[d.ID]; ok {
+			d = current
+		}
+		d = a.deliveryView(d)
+	}
+	m.mu.Unlock()
+	return d, err
 }
 func (m *Manager) submit(ctx context.Context, id, messageID, text string, images []Image, behavior string, origin *Origin, expectedSince ...time.Time) (Delivery, error) {
 	if err := ctx.Err(); err != nil {
@@ -210,6 +234,11 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	a.deliveryOrder++
 	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, Origin: origin, fingerprint: fingerprint, created: deliveryTimestamp(messageID)}
 	a.deliveries[messageID] = d
+	// Only what a person typed can be recalled, edited or shown again in
+	// full: a scheduled run's request is the plan's, never the user's draft.
+	if origin == nil {
+		m.retainRecallLocked(a, messageID, text, images)
+	}
 	ev := m.deliveryLocked(a, d)
 	registered := a.deliveryVersion
 	d = a.deliveries[messageID]
@@ -360,6 +389,17 @@ func (m *Manager) observeDelivery(a *agent, p *proc, kind string, raw json.RawMe
 		return
 	}
 	if kind == "queue_update" {
+		var native struct {
+			Pending pendingQueue `json:"pending"`
+		}
+		if json.Unmarshal(raw, &native) == nil && native.Pending.supported() {
+			events := m.applyPendingLocked(a, p, native.Pending)
+			m.mu.Unlock()
+			for _, event := range events {
+				m.cfg.OnEvent(event)
+			}
+			return
+		}
 		var e struct {
 			Steering []string `json:"steering"`
 			FollowUp []string `json:"followUp"`
@@ -376,7 +416,7 @@ func (m *Manager) observeDelivery(a *agent, p *proc, kind string, raw json.RawMe
 	for _, d := range a.deliveries {
 		uncertain := kind == "agent_settled" && (d.State == "accepted" || d.State == "steering" || d.State == "queued") ||
 			kind == "queue_update" && a.queue.Steering+a.queue.FollowUp == 0 && (d.State == "steering" || d.State == "queued")
-		if d.Session == p.deliverySession() && uncertain {
+		if d.Session == p.deliverySession() && uncertain && d.queueID == "" {
 			d.State = "unconfirmed"
 			events = append(events, m.deliveryLocked(a, d))
 		}
@@ -391,6 +431,14 @@ func (m *Manager) interruptDeliveriesLocked(a *agent) []Event {
 		return nil
 	}
 	a.queue = QueueStatus{}
+	for id, d := range a.deliveries {
+		if d.State != "cancelled" {
+			m.forgetRecallLocked(a, id)
+		}
+		d.queueID = ""
+		a.deliveries[id] = d
+	}
+	a.nativeQueue = pendingQueue{}
 	a.seq++
 	raw, _ := json.Marshal(struct {
 		Type  string      `json:"type"`

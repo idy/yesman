@@ -13,6 +13,7 @@ import { languageOf } from './code.js';
 import { createEditor } from './editor.js';
 import { createChanges, statusMark, counts } from './diff.js';
 import { t, tn, formatNumber } from './i18n.js';
+import { TASK_LOG, isTaskLog, legacyLog, logBase, documentLink, logRoute, saveLogRoute, saveLogScroll, headingAnchors } from './task-log.js';
 
 // A folder's menu shows this many entries.
 const MENU_ROWS = 500;
@@ -20,7 +21,6 @@ const MENU_ROWS = 500;
 // The knowledge notes of a workspace, and the note that lists them.
 const KNOWLEDGE = '.yesman/knowledge';
 const KNOWLEDGE_INDEX = `${KNOWLEDGE}/INDEX.md`;
-const TASK_LOG = '.yesman/task-log.md';
 
 // A folder shows this many entries; Go to File finds the rest.
 const MAX_TREE_ROWS = 2000;
@@ -89,6 +89,51 @@ export function createFiles(host) {
   const scopes = new Map(); // yesman name -> the part of its workspace shown
   let watching = null;
   let wide = false;
+  let restoredRoute = null;
+  let routedWorkspace = null; // only the log reader opened by this router
+  const logPositions = new Map(); // bounded session positions; no document bodies
+  function rememberLogPosition() {
+    const section=$('#files-view');
+    const p=section && panes.get(section.dataset.pane);
+    const rel=section?.dataset.path;
+    if (!p || !isTaskLog(rel) || p.pendingAnchor || p.pendingScroll != null) return;
+    const key=`${p.name}\u0001${rel}`;
+    logPositions.delete(key);logPositions.set(key,section.scrollTop);
+    while(logPositions.size>512) logPositions.delete(logPositions.keys().next().value);
+    saveLogScroll(p.name,rel,p.taskAnchor ?? '',section.scrollTop);
+  }
+  const restoreRoute = () => {
+    const route = logRoute();
+    const y = host.yesman();
+    if (!route || route.name !== y?.name) return false;
+    const key = `${y.name}\u0001${location.hash}`;
+    if (restoredRoute === key) return false;
+    restoredRoute = key;
+    scopes.delete(y.name);
+    open(route.path, true, route.anchor, false, route.scroll);
+    return true;
+  };
+  window.addEventListener('popstate', () => {
+    restoredRoute = null;
+    const route = logRoute();
+    if (!route) {
+      const owner = routedWorkspace;
+      routedWorkspace = null;
+      const p = current();
+      // A no-log history entry releases only our visible log reader. An
+      // ordinary document, another workspace or another pane keeps its view.
+      if (p?.name === owner && isTaskLog(p.active)) {
+        rememberLogPosition();
+        p.pendingAnchor = false;
+        p.pendingScroll = null;
+        p.loads?.set(p.active, (p.loads.get(p.active) ?? 0) + 1);
+        host.setOpen(false);
+      }
+      return;
+    }
+    if (route.name !== host.yesman()?.name) host.selectWorkspace?.(route.name);
+    restoreRoute();
+  });
 
   // A scope is the part of a workspace the pane shows: all of it, the
   // knowledge, or a worktree by its directory.
@@ -97,8 +142,8 @@ export function createFiles(host) {
   const scopeKey = (sc) => (sc.kind === 'worktree' ? `worktree:${sc.dir}` : sc.kind);
   const rootOf = (sc) => (sc.kind === 'knowledge' ? KNOWLEDGE : sc.kind === 'worktree' ? sc.dir : '.');
   const within = (rel, root) => root === '.' || rel === root || rel.startsWith(`${root}/`);
-  // Knowledge and the task log read as rendered pages.
-  const locked = (p, rel = p.active) => p.scope.kind === 'knowledge' || rel === TASK_LOG;
+  // Knowledge and the working log read as rendered pages.
+  const locked = (p, rel = p.active) => p.scope.kind === 'knowledge' || isTaskLog(rel);
   // A worktree's pane shows its files, or its changes.
   const isChanges = (p) => p?.scope.kind === 'worktree' && p.show === 'changes';
 
@@ -146,9 +191,13 @@ export function createFiles(host) {
   }
 
   async function loadView(p, rel) {
+    p.loads ??= new Map();
+    const seq = (p.loads.get(rel) ?? 0) + 1;
+    p.loads.set(rel, seq);
     if (!p.views.has(rel)) p.views.set(rel, 'loading');
     try {
       const v = await host.call('ReadFile', p.name, rel);
+      if (p.loads.get(rel) !== seq || !tabOf(p, rel)) return;
       const tab = tabOf(p, rel);
       if (tab && v.kind === 'text' && !editor?.has(keyOf(p, rel))) {
         tab.base = v.hash;
@@ -156,6 +205,7 @@ export function createFiles(host) {
       }
       p.views.set(rel, v);
     } catch (err) {
+      if (p.loads.get(rel) !== seq || !tabOf(p, rel)) return;
       p.views.set(rel, { error: err?.message || String(err) });
     }
     if (current() === p && p.active === rel) renderView();
@@ -254,6 +304,9 @@ export function createFiles(host) {
     await tab.saving;
     if (tabOf(p, rel) !== tab) return;
     const k = keyOf(p, rel);
+    // Read-only documents have no editor state. Share the request sequence so
+    // a late refresh cannot replace a newer navigation/reload of the same page.
+    if (locked(p, rel)) { await loadView(p, rel); return; }
     let v;
     try {
       v = await host.call('ReadFile', p.name, rel);
@@ -306,9 +359,20 @@ export function createFiles(host) {
   // open shows a file in a tab: a preview tab, in italics, that the next
   // file replaces, unless pin keeps it. A file outside the part of the
   // workspace shown opens with all of it.
-  function open(rel, pin = false) {
+  function open(rel, pin = false, anchor = '', route = true, scroll) {
     const y = host.yesman();
     if (!y) return;
+    rememberLogPosition();
+    const destination = Number.isFinite(scroll) ? scroll : (logPositions.get(`${y.name}\u0001${rel}`) ?? 0);
+    if (isTaskLog(rel)) {
+      routedWorkspace = y.name;
+      if (route) saveLogRoute(y.name, rel, anchor, false, destination);
+      restoredRoute = `${y.name}\u0001${location.hash}`;
+    } else if (route && logRoute()?.name === y.name) {
+      history.replaceState(null, '', location.pathname + location.search);
+      restoredRoute = null;
+      routedWorkspace = null;
+    }
     let p = pane(y);
     if (!within(rel, p.root)) {
       scopes.delete(y.name);
@@ -330,14 +394,24 @@ export function createFiles(host) {
         p.tabs.push(tab);
       }
     }
+    const sameAnchorPage = p.active === rel && isTaskLog(rel) && Boolean(anchor);
     p.active = rel;
+    p.taskAnchor = anchor;
+    // A restored entry's saved reading offset wins over its original anchor.
+    // Fresh fragment actions still jump to the heading, even on this page.
+    const restoringScroll = !route && Number.isFinite(scroll);
+    p.pendingAnchor = isTaskLog(rel) && Boolean(anchor) && !restoringScroll;
+    p.pendingScroll = isTaskLog(rel) && (restoringScroll || !anchor) ? destination : null;
     // Show where it is in the tree.
     for (let dir = parentOf(rel); dir !== '.' && dir !== p.root; dir = parentOf(dir)) p.expanded.add(dir);
     if (!host.isOpen()) host.setOpen(true);
     // A file the editor has open may have changed while nothing watched
     // it: refresh reconciles it, keeping unsaved changes as a conflict.
-    if (editor?.has(keyOf(p, rel))) refresh(p, rel);
-    else loadView(p, rel);
+    if (!(sameAnchorPage && p.views.get(rel)?.kind === 'text')) {
+      if (isTaskLog(rel)) p.views.set(rel,'loading');
+      if (editor?.has(keyOf(p, rel))) refresh(p, rel);
+      else loadView(p, rel);
+    }
     for (const dir of p.expanded) if (!p.dirs.has(dir)) loadDir(p, dir);
     render();
   }
@@ -355,7 +429,13 @@ export function createFiles(host) {
     editor?.forget(keyOf(p, rel));
     p.tabs.splice(at, 1);
     p.views.delete(rel);
+    p.loads?.set(rel, (p.loads.get(rel) ?? 0) + 1);
     if (p.active === rel) p.active = p.tabs[Math.min(at, p.tabs.length - 1)]?.path ?? null;
+    if (logRoute()?.name === p.name) {
+      if (isTaskLog(p.active)) saveLogRoute(p.name, p.active);
+      else history.replaceState(null, '', location.pathname + location.search);
+      restoredRoute = `${p.name}\u0001${location.hash}`;
+    }
     render();
   }
 
@@ -369,9 +449,19 @@ export function createFiles(host) {
     // Windows paths match regardless of case.
     const inside = /^[A-Za-z]:\//.test(root) ? path.toLowerCase().startsWith(root.toLowerCase()) : path.startsWith(root);
     if (!inside) return false;
-    const rel = path.slice(root.length).replace(/\/+$/, '');
+    const parts = [];
+    for (const part of path.slice(root.length).split('/')) {
+      if (part === '..') { if (!parts.length) return false; parts.pop(); }
+      else if (part && part !== '.') parts.push(part);
+    }
+    const rel = parts.join('/');
     if (!rel) return false;
-    open(rel, true);
+    const anchored = rel.match(/^(.+\.md)#(.*)$/i);
+    if (anchored && isTaskLog(anchored[1])) {
+      let anchor;
+      try { anchor = decodeURIComponent(anchored[2]); } catch { anchor = anchored[2]; }
+      open(anchored[1], true, anchor);
+    } else open(rel, true);
     return true;
   }
 
@@ -399,7 +489,7 @@ export function createFiles(host) {
     if (!p.tabs.length && Array.isArray(entries) && entries.some((e) => e.path === KNOWLEDGE_INDEX)) open(KNOWLEDGE_INDEX, true);
   }
 
-  // openTaskLog opens the single history document in the workspace viewer.
+  // Working log always opens its TOC; detail links and browser Back keep their route.
   function openTaskLog() {
     if (setScope(WORKSPACE)) open(TASK_LOG, true);
   }
@@ -453,9 +543,11 @@ export function createFiles(host) {
   // ---------- Rendering ----------
 
   function render() {
+    if (restoreRoute()) return;
     const aside = $('#files');
     const p = current();
     aside.hidden = !p;
+    aside.toggleAttribute('data-history', Boolean(p && isTaskLog(p.active)));
     const diff = isChanges(p);
     const hasView = Boolean(p && (p.active || diff));
     document.documentElement.dataset.files = p ? (wide && hasView ? 'wide' : 'open') : 'closed';
@@ -469,7 +561,7 @@ export function createFiles(host) {
     closeMenu();
     if (diff) changes.ensure(p);
     else if (!p.dirs.has(p.root)) loadDir(p, p.root);
-    const keep = scrolls();
+    const keep = scrolls(Boolean(p.pendingAnchor || p.pendingScroll != null));
     aside.toggleAttribute('data-has-file', hasView);
     const mode = hasView ? 'file' : 'tree';
     const fixed = wide && hasView;
@@ -494,17 +586,17 @@ export function createFiles(host) {
 
   // scrolls keeps where the view and tree were scrolled, and the focused
   // row, across a render.
-  function scrolls() {
+  function scrolls(navigating = false) {
     const viewPath = $('#files-view')?.dataset.path;
     const view = $('#files-view')?.scrollTop ?? 0;
     const list = $('#files-tree-list')?.scrollTop ?? 0;
     const focused = document.activeElement?.closest?.('#files [data-path], #files input')?.dataset?.path ?? document.activeElement?.id;
     return () => {
       const v = $('#files-view');
-      if (v && v.dataset.path === viewPath) v.scrollTop = view;
+      if (!navigating && v && v.dataset.path === viewPath) v.scrollTop = view;
       const l = $('#files-tree-list');
       if (l) l.scrollTop = list;
-      if (!focused) return;
+      if (navigating || !focused) return;
       const again = document.getElementById(focused) ?? $(`#files [data-path="${CSS.escape(focused)}"]`);
       again?.focus({ preventScroll: true });
     };
@@ -560,11 +652,25 @@ export function createFiles(host) {
     return h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: label, 'aria-label': label, onclick, ...extra }, icon(name));
   }
 
+  function selectTab(p, tab) {
+    if (isTaskLog(tab.path)) { open(tab.path, tab.pinned); return; }
+    if (logRoute()?.name === p.name) {
+      history.replaceState(null, '', location.pathname + location.search);
+      restoredRoute = null;
+    }
+    p.active = tab.path;
+    p.taskAnchor = '';
+    p.pendingAnchor = false;
+    p.pendingScroll = null;
+    if (!p.views.has(tab.path)) loadView(p, tab.path);
+    render();
+  }
+
   function head(p) {
     const diff = isChanges(p);
     const title = diff ? t('Changes') : p.scope.kind === 'knowledge' ? t('Knowledge') : t('Files');
     const tabs = (diff ? [] : p.tabs).map((tab) => h('div', { class: 'files-tab', role: 'tab', 'aria-selected': String(tab.path === p.active), 'data-pinned': tab.pinned ? 'true' : null, 'data-dirty': tab.dirty ? 'true' : null, title: tab.dirty ? t('{path} (not saved)', { path: tab.path }) : tab.path },
-      h('button', { class: 'files-tab-name', type: 'button', onclick: () => { p.active = tab.path; if (!p.views.has(tab.path)) loadView(p, tab.path); render(); }, ondblclick: () => { tab.pinned = true; render(); } }, baseOf(tab.path), tab.dirty ? icon('record', 'mds-icon files-dirty-mark') : null),
+      h('button', { class: 'files-tab-name', type: 'button', onclick: () => selectTab(p, tab), ondblclick: () => { tab.pinned = true; render(); } }, baseOf(tab.path), tab.dirty ? icon('record', 'mds-icon files-dirty-mark') : null),
       iconButton('x', t('Close {file}', { file: baseOf(tab.path) }), () => closeTab(p, tab.path))));
     return h('div', { class: 'files-head drag' },
       tabs.length ? h('div', { class: 'files-tabs', role: 'tablist', 'aria-label': t('Open files') }, tabs) : h('strong', { class: 'files-title' }, title),
@@ -599,9 +705,11 @@ export function createFiles(host) {
       crumbs(p),
       h('div', { class: 'files-bar-actions' },
         tabs,
+        isTaskLog(p.active) && p.active !== TASK_LOG ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: openTaskLog }, t('Contents')) : null,
+        isTaskLog(p.active) ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: () => loadView(p, p.active) }, t('Reload')) : null,
         isMarkdown ? h('button', { class: 'mds-button mds-button--small mds-button--subtle', type: 'button', onclick: () => { p.mode.set(p.active, mode === 'preview' ? 'source' : 'preview'); render(); } }, mode === 'preview' ? t('Source') : t('Preview')) : null,
         iconButton('collapse', t('Collapse all folders'), () => { p.expanded.clear(); renderTree(); }, { disabled: !p.expanded.size, 'data-action': 'collapse' }),
-        p.active ? iconButton('tree', prefs.tree ? t('Hide the file tree') : t('Show the file tree'), toggleTree, { 'aria-pressed': String(prefs.tree) }) : null,
+        p.active ? iconButton('tree', prefs.tree ? t('Hide the file tree') : t('Show the file tree'), toggleTree, { 'aria-pressed': String(prefs.tree), 'data-action': 'tree' }) : null,
         iconButton('more', t('More'), (e) => more(e, p))));
   }
 
@@ -628,7 +736,7 @@ export function createFiles(host) {
     const kind = p.scope.kind;
     return h('button', {
       class: 'files-crumb files-crumb--scope', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false',
-      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, Knowledge, the task log or another worktree'),
+      'aria-current': (isChanges(p) ? changes.shown(p).path : p.active) ? null : 'page', title: t('Show all files, Knowledge, the Working Logs or another worktree'),
       onclick: (e) => scopeMenu(e.currentTarget, p),
     }, icon(kind === 'worktree' ? 'branch' : kind === 'knowledge' ? 'book' : 'folder', 'mds-icon files-crumb-icon'), h('span', null, scopeLabel(p)));
   }
@@ -856,9 +964,9 @@ export function createFiles(host) {
     const items = [
       item(WORKSPACE, 'folder', y.displayName || y.name, h('span', { class: 'files-menu-aside' }, t('All files')), y.path),
       item({ kind: 'knowledge' }, 'book', t('Knowledge'), null, KNOWLEDGE),
-      // Task log is a shortcut to a file in the workspace, not another scope.
+      // Working Logs is a shortcut to a file in the workspace, not another scope.
       h('button', { class: 'files-menu-item', type: 'button', role: 'menuitem', title: TASK_LOG,
-        onclick: () => { closeMenu(); openTaskLog(); } }, icon('fileText'), h('span', null, t('Task log'))),
+        onclick: () => { closeMenu(); openTaskLog(); } }, icon('fileText'), h('span', null, t('Working Logs'))),
     ];
     const wts = host.worktrees?.(y) ?? [];
     if (wts.length) items.push(h('p', { class: 'files-menu-heading', role: 'presentation' }, t('Worktrees')));
@@ -875,6 +983,7 @@ export function createFiles(host) {
     const r = e.currentTarget.getBoundingClientRect();
     try {
       const action = await host.call('FilesMenu', Math.round(r.left), Math.round(r.bottom + 4), prefs.tree, prefs.wrap, prefs.autoSave, p.expanded.size > 0, host.keys?.() ?? {});
+      if (current() !== p) return;
       const y = host.yesman();
       switch (action) {
         case 'find': focusFind(); break;
@@ -986,7 +1095,7 @@ export function createFiles(host) {
     e.preventDefault();
     try {
       const action = await host.call('FileMenu', p.name, entry.path, Boolean(entry.dir), Math.round(e.clientX), Math.round(e.clientY));
-      if (action === 'open') open(entry.path, true);
+      if (action === 'open' && current() === p) open(entry.path, true);
     } catch (err) {
       host.fail(err);
     }
@@ -1068,6 +1177,11 @@ export function createFiles(host) {
     const section = $('#files-view');
     const p = current();
     if (!section || !p?.active || isChanges(p)) return;
+    section.dataset.pane = p.key;
+    if (!section.dataset.logScrollListener) {
+      section.dataset.logScrollListener='true';
+      section.addEventListener('scroll',rememberLogPosition);
+    }
     const rel = p.active;
     const v = p.views.get(rel);
     section.dataset.fresh = section.dataset.path === rel ? '' : 'true';
@@ -1103,20 +1217,54 @@ export function createFiles(host) {
     const notice = v.truncated ? h('p', { class: 'files-notice' }, t('Showing the first {shown} of this {size} file. Large files open read-only.', { shown: formatSize(new Blob([v.text]).size), size })) : null;
     const banner = h('div', { id: 'files-banner' });
     const lang = languageOf(rel);
-    const rendered = lang === 'markdown' && (locked(p) || (p.mode.get(rel) ?? 'preview') === 'preview');
+    const legacy = legacyLog(rel);
+    const raw = editor?.has(k) ? editor.text(k) : (v.text ?? '');
+    const text = isTaskLog(rel) && rel.toLowerCase() === TASK_LOG ? raw.replace(/^<!-- yesman-task-log-toc v1 -->\r?\n?/m, '') : raw;
+    const rendered = (lang === 'markdown' || isTaskLog(rel)) && (locked(p) || (p.mode.get(rel) ?? 'preview') === 'preview');
     section.classList.toggle('files-view--editor', !rendered);
     if (rendered) {
-      const article = h('article', { class: 'md files-md', html: renderDocument(editor?.has(k) ? editor.text(k) : v.text) });
-      // Links to other files of the workspace open them here.
+      const article = h('article', { class: 'md files-md', html: renderDocument(text) });
+      headingAnchors(article);
       article.addEventListener('click', (e) => {
-        const href = e.target.closest('a[href]')?.getAttribute('href');
-        if (!href || href.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(href) || e.target.closest('a').dataset.path) return;
-        const target = resolve(parentOf(rel), href.split('#')[0]);
-        if (target) open(target, true);
+        const link = e.target.closest('a[href]');
+        const href = link?.getAttribute('href');
+        if (!href || /^[a-z][a-z0-9+.-]*:/i.test(href) || link.dataset.path) return;
+        e.preventDefault();
+        if (href.startsWith('#')) {
+          let anchor;
+          try { anchor = decodeURIComponent(href.slice(1)); } catch { return; }
+          if (isTaskLog(rel)) open(rel, true, anchor);
+          else article.querySelector(`[id="${CSS.escape(anchor)}"]`)?.scrollIntoView();
+          return;
+        }
+        const target = documentLink(legacy ? logBase(rel) : parentOf(rel), href);
+        if (target?.path) open(target.path, true, target.anchor);
       });
-      section.replaceChildren(...[banner, notice, article].filter(Boolean));
+      const legacyNotice = legacy ? h('p', { class: 'files-notice' }, t('Legacy slice: Markdown may continue across files. The complete original preserves its formatting and old anchors.')) : null;
+      section.replaceChildren(...[banner, notice, legacyNotice, article].filter(Boolean));
       renderBanner();
       if (!section.dataset.fresh) section.scrollTop = top;
+      const target = p.taskAnchor ? article.querySelector(`[id="${CSS.escape(p.taskAnchor)}"]`) : article.querySelector('h1,h2,h3,h4,h5,h6');
+      if (p.pendingAnchor && target) { target.scrollIntoView(); target.focus({ preventScroll: true }); }
+      else if (p.pendingScroll != null) {
+        section.scrollTop = p.pendingScroll;
+        section.tabIndex = -1;
+        (p.taskAnchor && target ? target : section).focus({ preventScroll: true });
+      }
+      if (isTaskLog(rel) && p.taskAnchor && !target) {
+        const fallback = h('p', { class: 'files-notice', role: 'status' }, t('This anchor is not on this page. For migrated history, open the complete original from Contents and search for the heading.'));
+        if (rel === TASK_LOG) {
+          const original = article.querySelector('a[href$="-original.md"]');
+          if (original) fallback.append(' ', h('button', { class: 'mds-link-button', type: 'button', onclick: () => {
+            const target = documentLink('.yesman', original.getAttribute('href'));
+            if (target && isTaskLog(target.path)) open(target.path, true, p.taskAnchor);
+          } }, t('Complete original')));
+        }
+        section.prepend(fallback);
+      }
+      p.pendingAnchor = false;
+      p.pendingScroll = null;
+      rememberLogPosition();
       return;
     }
     const slot = h('div', { class: 'files-editor', id: 'files-editor' }, h('p', { class: 'files-note' }, t('Loading…')));
@@ -1152,16 +1300,6 @@ export function createFiles(host) {
           ? h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => closeTab(p, p.active) }, t('Close'))
           : h('button', { class: 'mds-button mds-button--small', type: 'button', onclick: () => reload(p, p.active) }, t('Use the File on Disk')),
         h('button', { class: 'mds-button mds-button--small mds-button--primary', type: 'button', onclick: () => save(p, p.active, true) }, gone ? t('Save Again') : t('Keep Mine'))));
-  }
-
-  // resolve joins a relative link to the directory it is in, or returns
-  // null when it climbs out of the workspace.
-  function resolve(dir, href) {
-    const parts = dir === '.' ? [] : dir.split('/');
-    for (const part of decodeURI(href).split('/')) {
-      if (part === '..') { if (!parts.length) return null; parts.pop(); } else if (part && part !== '.') parts.push(part);
-    }
-    return parts.join('/') || null;
   }
 
   function formatSize(n) {

@@ -1,0 +1,239 @@
+//go:build !js
+
+package mygo
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/egoist/mygo/internal/update"
+)
+
+// This contract executes the actual pinned MyGo updater against a signed,
+// synthetic old install. Main is a harmless argument recorder, not a rebuild
+// of the production GUI with a test identity. No real install/profile opens.
+func TestYesmanRenameSignedInstallAndLegacyRestart(t *testing.T) {
+	for _, useDelta := range []bool{false, true} {
+		name := "archive"
+		if useDelta {
+			name = "delta"
+		}
+		t.Run(name, func(t *testing.T) { testYesmanRenameInstall(t, useDelta) })
+	}
+}
+
+func testYesmanRenameInstall(t *testing.T, useDelta bool) {
+	root := t.TempDir()
+	target := filepath.Join(root, "Install with spaces")
+	src := filepath.Join(root, "new archive")
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+	oldMain := filepath.Join(target, "yesman"+ext)
+	newMain := filepath.Join(src, "Yes Man"+ext)
+	legacy := filepath.Join(src, "yesman"+ext)
+	if runtime.GOOS == "darwin" {
+		target += ".app"
+		src = filepath.Join(src, "yesman.app")
+		oldMain = filepath.Join(target, "Contents", "MacOS", "yesman")
+		newMain = filepath.Join(src, "Contents", "MacOS", "Yes Man")
+		legacy = filepath.Join(src, "Contents", "MacOS", "yesman")
+	}
+	write := func(path, text string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(oldMain, "old version")
+	sentinel := filepath.Join(target, "portable-user-data")
+	if runtime.GOOS == "darwin" {
+		sentinel = filepath.Join(root, "workspace-vault-session-sentinel")
+	}
+	write(sentinel, "preserve")
+	if err := os.MkdirAll(filepath.Dir(newMain), 0755); err != nil {
+		t.Fatal(err)
+	}
+	project := os.Getenv("YESMAN_PACKAGE_SOURCE")
+	build := func(out, pkg string) {
+		t.Helper()
+		cmd := exec.Command("go", "build", "-o", out, pkg)
+		cmd.Dir = project
+		if b, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("build: %v: %s", err, b)
+		}
+	}
+	build(newMain, "./tools/launcher/testdata/record")
+	if runtime.GOOS == "darwin" {
+		if err := os.Symlink("Yes Man", legacy); err != nil {
+			t.Fatal(err)
+		}
+		write(filepath.Join(src, "Contents", "Info.plist"), `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleName</key><string>Yes Man Update Fixture</string><key>CFBundleIdentifier</key><string>dev.idy.yesman.update-fixture</string><key>CFBundleExecutable</key><string>Yes Man</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>1</string></dict></plist>`)
+	} else {
+		build(legacy, "./tools/launcher")
+	}
+	var archive bytes.Buffer
+	archiveRoot, entries := src, []string{"Yes Man" + ext, "yesman" + ext}
+	if runtime.GOOS == "darwin" {
+		archiveRoot, entries = filepath.Dir(src), []string{"yesman.app"}
+	} else {
+		if err := update.WriteFileList(target, []string{"yesman" + ext}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := update.WriteArchive(&archive, archiveRoot, entries); err != nil {
+		t.Fatal(err)
+	}
+	pub, key, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(archive.Bytes())
+	m := update.Manifest{Version: "1.0.1", URL: "fixture://archive", Size: int64(archive.Len()), Signature: update.Sign(key, sum[:])}
+	var delta bytes.Buffer
+	if useDelta {
+		deltaEntries := entries
+		if runtime.GOOS == "darwin" {
+			deltaEntries = nil
+		}
+		if err := update.WriteDelta(&delta, "1.0.0", "1.0.1", target, src, deltaEntries); err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(delta.Bytes())
+		m.Deltas = []update.Delta{{From: "1.0.0", URL: "fixture://delta", Size: int64(delta.Len()), Signature: update.Sign(key, sum[:])}}
+	}
+	archives, deltas := 0, 0
+	get := func(_ context.Context, url string) (io.ReadCloser, error) {
+		if url == "fixture://delta" {
+			deltas++
+			return io.NopCloser(bytes.NewReader(delta.Bytes())), nil
+		}
+		archives++
+		return io.NopCloser(bytes.NewReader(archive.Bytes())), nil
+	}
+	start := startExe
+	startExe = oldMain
+	t.Cleanup(func() { startExe = start })
+	// An invalid archive never mutates the old executable or portable data.
+	bad := m
+	bad.Deltas = nil // refuse the corrupt archive itself, without a valid delta
+	bad.Signature = base64.StdEncoding.EncodeToString(make([]byte, 64))
+	if err := installUpdate(context.Background(), get, bad, base64.StdEncoding.EncodeToString(pub), "1.0.0", target, nil); err == nil {
+		t.Fatal("accepted invalid signature")
+	}
+	if b, _ := os.ReadFile(oldMain); string(b) != "old version" {
+		t.Fatal("failed verification changed old install")
+	}
+	report := filepath.Join(root, "restart result.json")
+	args := []string{report, "a b", `quote"and\`, "中文", ""}
+	archives = 0
+	quit := runningApp(t)
+	if err := installUpdate(context.Background(), get, m, base64.StdEncoding.EncodeToString(pub), "1.0.0", target, nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "darwin" {
+		if b, _ := os.ReadFile(oldMain); string(b) != "old version" {
+			t.Fatal("moved running bundle before exit")
+		}
+		if !relaunchUpdated(args) {
+			t.Fatal("did not arm the real restart helper")
+		}
+	}
+	quit() // waits for the real install-after-exit/relaunch shell helper on macOS
+	if useDelta && (deltas != 1 || archives != 0) {
+		t.Fatalf("renamed-image delta fell back to archive: delta=%d archive=%d", deltas, archives)
+	}
+	if !useDelta && (deltas != 0 || archives != 1) {
+		t.Fatalf("archive requests: delta=%d archive=%d", deltas, archives)
+	}
+	if b, _ := os.ReadFile(sentinel); string(b) != "preserve" {
+		t.Fatal("lost user data")
+	}
+	if runtime.GOOS != "darwin" {
+		oldDir, oldArgs := startDir, App.relaunchArgs
+		startDir, App.relaunchArgs = root, args
+		t.Cleanup(func() { startDir, App.relaunchArgs = oldDir, oldArgs })
+		relaunchNow() // the updater's real restart path, still the old basename
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var data []byte
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(report); err == nil {
+			data = b
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var result struct {
+		Exe  string
+		Args []string
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("restart: %v: %s", err, data)
+	}
+	expected := filepath.Join(target, "Yes Man"+ext)
+	if runtime.GOOS == "darwin" {
+		expected = filepath.Join(target, "Contents", "MacOS", "Yes Man")
+	}
+	expected, _ = filepath.EvalSymlinks(expected)
+	if result.Exe != expected {
+		t.Fatalf("main image=%q, want %q", result.Exe, expected)
+	}
+	want, _ := json.Marshal(args)
+	got, _ := json.Marshal(result.Args)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("relaunch arguments changed: %s", got)
+	}
+	mode := "archive"
+	if useDelta {
+		mode = "delta"
+	}
+	t.Logf("signed %s update -> old basename -> real main %s; portable/workspace/vault sentinel preserved", mode, expected)
+}
+
+func TestYesmanRenameMacHelperRollback(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("bundle swap helper is macOS only")
+	}
+	root := t.TempDir()
+	target := filepath.Join(root, "old install with spaces.app")
+	work := filepath.Join(root, "update work")
+	unpacked := filepath.Join(work, "unpacked")
+	fresh := filepath.Join(unpacked, "yesman.app")
+	for _, dir := range []string{target, fresh} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.WriteFile(filepath.Join(target, "sentinel"), []byte("original"), 0644)
+	quit := runningApp(t)
+	if err := stageBundle(work, unpacked, target); err != nil {
+		t.Fatal(err)
+	}
+	// Force the real mv of the new bundle to fail after the old bundle has
+	// been moved aside. The shipped helper must restore the original target.
+	if err := os.RemoveAll(fresh); err != nil {
+		t.Fatal(err)
+	}
+	quit()
+	b, err := os.ReadFile(filepath.Join(target, "sentinel"))
+	if err != nil || strings.TrimSpace(string(b)) != "original" {
+		t.Fatalf("rollback lost original: %q, %v", b, err)
+	}
+}

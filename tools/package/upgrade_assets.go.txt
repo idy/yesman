@@ -1,0 +1,114 @@
+package main
+
+import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"github.com/egoist/mygo/internal/update"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type stage struct {
+	Version, Archive, Manifest, Web, Source string
+	BinarySHA256                            string `json:"binarySHA256"`
+	Official                                bool   `json:"official"`
+}
+type plan struct {
+	PublicKey, Feed string
+	Stages          []stage
+	Target          string
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+func main() {
+	file := os.Args[1]
+	b, err := os.ReadFile(file)
+	must(err)
+	var p plan
+	must(json.Unmarshal(b, &p))
+	verifyOnly := len(os.Args) > 2 && os.Args[2] == "verify"
+	pub, err := update.ParsePublicKey(p.PublicKey)
+	must(err)
+	var key ed25519.PrivateKey
+	if !verifyOnly {
+		key, err = update.ParsePrivateKey(os.Getenv("MYGO_UPDATER_PRIVATE_KEY"))
+		must(err)
+		if base64.StdEncoding.EncodeToString(key.Public().(ed25519.PublicKey)) != p.PublicKey {
+			panic("signer/public key mismatch")
+		}
+	}
+	work, err := os.MkdirTemp("", "production-upgrade-delta-")
+	must(err)
+	defer os.RemoveAll(work)
+	dirs := make([]string, len(p.Stages))
+	for i, s := range p.Stages {
+		if !filepath.IsAbs(s.Archive) {
+			s.Archive = filepath.Join(filepath.Dir(file), filepath.FromSlash(s.Archive))
+		}
+		if !filepath.IsAbs(s.Manifest) {
+			s.Manifest = filepath.Join(filepath.Dir(file), filepath.FromSlash(s.Manifest))
+		}
+		archive, err := os.ReadFile(s.Archive)
+		must(err)
+		raw, err := os.ReadFile(s.Manifest)
+		must(err)
+		var m update.Manifest
+		must(json.Unmarshal(raw, &m))
+		sum := sha256.Sum256(archive)
+		must(update.Verify(pub, sum[:], m.Signature))
+		dir := filepath.Join(work, fmt.Sprint(i))
+		must(update.ExtractArchive(bytes.NewReader(archive), dir))
+		dirs[i] = dir
+		if strings.HasPrefix(p.Target, "darwin-") {
+			dirs[i] = filepath.Join(dir, "yesman.app")
+		}
+		if verifyOnly {
+			for _, d := range m.Deltas {
+				path := filepath.Join(filepath.Dir(file), filepath.Base(d.URL))
+				body, err := os.ReadFile(path)
+				must(err)
+				sum := sha256.Sum256(body)
+				must(update.Verify(pub, sum[:], d.Signature))
+			}
+			continue
+		}
+		if s.Official {
+			continue
+		} // preserve published/draft manifest bytes and deltas
+		m.URL = p.Feed + "/" + filepath.Base(s.Archive)
+		m.Deltas = nil
+		if i > 0 {
+			entries := []string(nil)
+			if !strings.HasPrefix(p.Target, "darwin-") {
+				files, err := os.ReadDir(dir)
+				must(err)
+				for _, f := range files {
+					entries = append(entries, f.Name())
+				}
+			}
+			var delta bytes.Buffer
+			must(update.WriteDelta(&delta, p.Stages[i-1].Version, s.Version, dirs[i-1], dirs[i], entries))
+			path := filepath.Join(filepath.Dir(file), fmt.Sprintf("%s-to-%s-%s.delta", p.Stages[i-1].Version, s.Version, p.Target))
+			must(os.WriteFile(path, delta.Bytes(), 0600))
+			sum := sha256.Sum256(delta.Bytes())
+			m.Deltas = []update.Delta{{From: p.Stages[i-1].Version, URL: p.Feed + "/" + filepath.Base(path), Size: int64(delta.Len()), Signature: update.Sign(key, sum[:])}}
+		}
+		out, err := json.MarshalIndent(m, "", "  ")
+		must(err)
+		must(os.WriteFile(s.Manifest, append(out, '\n'), 0600))
+	}
+	if verifyOnly {
+		fmt.Println("PASS: verified production archives and deltas using the public key only")
+	} else {
+		fmt.Println("PASS: verified normal production archives; signed renamed-image/multi-hop deltas; no private key in output")
+	}
+}

@@ -1,0 +1,23 @@
+// Actual session projection/entry links, including identical objects and .30 history.
+import assert from 'node:assert/strict';
+import {resolve} from 'node:path';
+import {pathToFileURL} from 'node:url';
+const root=process.env.YESMAN_TEST_RUNTIME;if(!root)throw Error('Set YESMAN_TEST_RUNTIME');
+const {SessionManager}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js')));
+const {recordedInputs,bindProjectedInputs,hostInputRefs,publicInputEntry,INPUT_ENTRY}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-agent-core/dist/pending-queue.js')));
+const manager=SessionManager.inMemory('/synthetic');
+const same={role:'user',content:[{type:'text',text:'identical'},{type:'image',mimeType:'image/png',data:'original'}],timestamp:1};
+const a='a'.repeat(48),b='b'.repeat(48),c='c'.repeat(48);
+manager.appendCustomEntry('yesman-origin',{timestamp:1,origin:{source:'user',submission:a}});const entryA=manager.appendMessage(same);
+manager.appendCustomEntry('yesman-origin',{timestamp:1,origin:{source:'lead',kind:'message',submission:b}});const entryB=manager.appendMessage(same);
+const entryC=manager.appendMessage({...same,content:[{type:'text',text:'native'}]});manager.appendCustomEntry(INPUT_ENTRY,{entryId:entryC,identity:{submissionId:c,origin:{source:'user'}}});
+const project=()=>{const projection=manager.buildSessionProjection();const msgs=bindProjectedInputs(projection,manager.getBranch());return hostInputRefs(msgs).filter(r=>r?.identity?.submissionId)};
+assert.deepEqual(project().map(r=>[r.entryId,r.identity.submissionId]),[[entryA,a],[entryB,b],[entryC,c]]);
+manager.appendCompaction('summary',entryC,100);
+assert.deepEqual(project().map(r=>r.identity.submissionId),[c]);
+assert.deepEqual([...recordedInputs(manager.getBranch()).values()].filter(r=>r.identity).map(r=>r.identity.submissionId),[a,b,c]);
+const publicEntries=manager.getBranch().map(publicInputEntry);
+for(const id of [a,b,c])assert(!JSON.stringify(publicEntries).includes(id),'private input handle leaked into hook entry view');
+const forged={...same,content:[{type:'text',text:'missing side record'}]};manager.appendMessage(forged);
+assert.equal(project().length,1,'a different same-timestamp message inherited an origin without a parent-side association');
+console.log('PASS: same-object legacy entries use exact parent links; native entry association survives compaction; missing evidence stays unknown; hook views strip private IDs');

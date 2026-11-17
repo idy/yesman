@@ -25,13 +25,13 @@ import (
 // The main test binary doubles as a deterministic pi when YESMAN_FAKE_PI is
 // set, for the Tasks browser fixture: it never calls a model. A prompt is
 // logged, then accepted, or queued while FAKE_PI_MODE_FILE holds "busy",
-// or refused while it holds "reject".
-func TestMain(m *testing.M) {
+// or refused while it holds "reject". It is chosen before any test runs,
+// beside the package's TestMain (metadata_test.go).
+func init() {
 	if os.Getenv("YESMAN_FAKE_PI") != "" {
 		browserFakePi()
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
 }
 
 func browserFakePi() {
