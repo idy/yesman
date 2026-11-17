@@ -1,6 +1,6 @@
 <p align="center"><img src="resources/icon.svg" width="128" height="128" alt=""></p>
 
-<h1 align="center">yesman</h1>
+<h1 align="center">Yes Man</h1>
 
 <p align="center"><strong>Yes-man Ships!</strong></p>
 
@@ -280,18 +280,18 @@ Automation cannot reach native file dialogs, so in such builds `YESMAN_E2E_SAVE`
 
 ## Release
 
-`mygo.json` describes the app for `mygo build`: its name, identifier, version, and where its updates come from. When changing the managed pi dependency, regenerate its lockfile and source patch hashes and complete the native protocol/SDK/Manager/browser acceptance checks in [the runtime maintenance guide](docs/native-queue-cancellation.md). Do not move the runtime to npm/latest or remove older cache directories as part of an app update; running processes may still use them.
+`mygo.json` describes the app for the packaging adapter: its display name, stable slug, identifier, version, and update source. The main executable is `Yes Man` (`Yes Man.exe` on Windows); `yesman` stays available as a compatibility entry. See [application naming and packaging](docs/application-name.md) for installation and update compatibility. When changing the managed pi dependency, regenerate its lockfile and source patch hashes and complete the native protocol/SDK/Manager/browser acceptance checks in [the runtime maintenance guide](docs/native-queue-cancellation.md). Do not move the runtime to npm/latest or remove older cache directories as part of an app update; running processes may still use them.
 
 To release a version:
 
 1. Set `version` in `mygo.json` and add its section to `CHANGELOG.md`, which installed copies show as the release notes.
-2. Merge that, then push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Merge that, then push the tag matching the next allocated `0.1.x` patch (for example, `git tag v0.1.30 && git push origin v0.1.30`).
 3. [`.github/workflows/release.yml`](.github/workflows/release.yml) builds macOS, Windows and Linux and uploads them, with their signed updates, to a draft release.
 4. Look the draft over and publish it. Installed copies then update to it.
 
 Updates are signed with a key whose secret half is the repository's `MYGO_UPDATER_PRIVATE_KEY` secret, with a copy kept outside the repository. Installed copies accept only updates signed with it, so it must not be lost or replaced.
 
-To build a release locally, without uploading: `go tool mygo build`, with the key in `MYGO_UPDATER_PRIVATE_KEY` for the update files. On macOS, enable the app-owned native permission bridge with `CGO_ENABLED=1 CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0' MACOSX_DEPLOYMENT_TARGET=13.0 go tool mygo build`; the release workflow sets these automatically. These builds are signed ad hoc.
+To build a release locally, without uploading: `go tool mygo build`, with the key in `MYGO_UPDATER_PRIVATE_KEY` for the update files. The repository's `mygo` tool routes builds through `tools/package`, which stages the pinned MyGo dependency in a temporary directory, applies the reviewed naming adapter, then invokes its ordinary builder. Other MyGo commands forward to the pinned upstream tool. The repository and module cache are unchanged; plain `go build` remains available for development. On macOS, enable the app-owned native permission bridge with `CGO_ENABLED=1 CGO_CFLAGS='-O2 -g -mmacosx-version-min=13.0' MACOSX_DEPLOYMENT_TARGET=13.0 go tool mygo build`; the release workflow sets these automatically. These builds are signed ad hoc.
 
 Releases are built through `scripts/release_build.py`, which keeps the updater key and the upload token away from compilers and other build tools. macOS releases are signed with a Developer ID and notarized once `packaging/macos/signing.json` names the Team ID and the repository's four signing secrets are set; see [macOS signing](docs/macos-signing.md). Without them, macOS apps are signed ad hoc, which Gatekeeper blocks on first open from a download. Windows apps have no signature, so SmartScreen warns.
 
