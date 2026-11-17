@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/crew"
+	"github.com/idy/yesman/internal/piruntime"
 )
 
 // Settings are the user's choices in the Settings pages, kept in
@@ -31,6 +33,66 @@ type Settings struct {
 	// Crew matches pi's models to Artificial Analysis's, and chooses the
 	// crew and what new agents start as.
 	Crew crew.Config `json:"crew,omitzero"`
+	// Shortcuts are the keys chosen in Settings › Shortcuts instead of an
+	// action's defaults (shortcuts.go).
+	Shortcuts Shortcuts `json:"shortcuts,omitempty"`
+
+	// extra keeps the keys of settings.json this yesman does not know, as
+	// a newer one wrote them, so saving a setting does not lose them.
+	extra map[string]json.RawMessage
+}
+
+// settingsKeys are the keys of settings.json this yesman knows.
+var settingsKeys = func() map[string]bool {
+	keys := map[string]bool{}
+	t := reflect.TypeFor[Settings]()
+	for i := range t.NumField() {
+		if name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ","); name != "" && name != "-" {
+			keys[name] = true
+		}
+	}
+	return keys
+}()
+
+func (s *Settings) UnmarshalJSON(data []byte) error {
+	type plain Settings
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return err
+	}
+	p.extra = nil
+	for key, value := range all {
+		if !settingsKeys[key] {
+			if p.extra == nil {
+				p.extra = map[string]json.RawMessage{}
+			}
+			p.extra[key] = value
+		}
+	}
+	*s = Settings(p)
+	return nil
+}
+
+func (s Settings) MarshalJSON() ([]byte, error) {
+	type plain Settings
+	data, err := json.Marshal(plain(s))
+	if err != nil || len(s.extra) == 0 {
+		return data, err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, err
+	}
+	for key, value := range s.extra {
+		if !settingsKeys[key] {
+			all[key] = value
+		}
+	}
+	return json.Marshal(all)
 }
 
 // autoFetchChoices are the intervals the Repositories page offers, in
@@ -227,15 +289,17 @@ func (a *app) putSettingsLocked(next Settings) error {
 type AboutView struct {
 	// Version is the module version of a released build, empty for a
 	// development build, which the revision identifies instead.
-	Version  string `json:"version,omitempty"`
-	Revision string `json:"revision,omitempty"`
-	Time     string `json:"time,omitempty"` // the revision's commit time, RFC 3339
-	Modified bool   `json:"modified,omitempty"`
-	Go       string `json:"go"`
-	MyGo     string `json:"mygo,omitempty"`
-	Magpie   string `json:"magpie,omitempty"`
-	Pi       string `json:"pi,omitempty"`
-	PiError  string `json:"piError,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Revision  string `json:"revision,omitempty"`
+	Time      string `json:"time,omitempty"` // the revision's commit time, RFC 3339
+	Modified  bool   `json:"modified,omitempty"`
+	Go        string `json:"go"`
+	MyGo      string `json:"mygo,omitempty"`
+	Magpie    string `json:"magpie,omitempty"`
+	Pi        string `json:"pi,omitempty"`
+	PiError   string `json:"piError,omitempty"`
+	PiState   string `json:"piState,omitempty"`
+	PiManaged bool   `json:"piManaged,omitempty"`
 }
 
 // releaseVersion is a tagged module version, or "" for a development build:
@@ -282,17 +346,36 @@ func (s *service) About(ctx context.Context) AboutView {
 		}
 	}
 	a := s.app
+	v.PiManaged = a.managedPi
+	if a.piRuntime != nil {
+		v.PiState = a.piRuntime.State()
+		if v.PiState == "ready" {
+			v.Pi = piruntime.Version
+		}
+		if v.PiState == "failed" {
+			v.PiError = a.piRuntime.PreparationError()
+		}
+		return v // observational; About never starts or waits for installation
+	}
 	if a.piErr != nil {
 		v.PiError = a.piErr.Error()
 		return v
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, a.pi, "--version").Output()
+	var out string
+	var err error
+	if a.runPi != nil {
+		out, err = a.runPi(ctx, "--version")
+	} else {
+		var data []byte
+		data, err = exec.CommandContext(ctx, a.pi, "--version").Output()
+		out = string(data)
+	}
 	if err != nil {
 		v.PiError = "pi --version failed: " + err.Error()
 	} else {
-		v.Pi = strings.TrimSpace(string(out))
+		v.Pi = strings.TrimSpace(out)
 	}
 	return v
 }

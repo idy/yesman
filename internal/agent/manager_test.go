@@ -30,6 +30,10 @@ func TestMain(m *testing.M) {
 }
 
 func fakePi() {
+	if os.Getenv("FAKE_PI_RECALL_LIFECYCLE") != "" {
+		fakeRecallLifecyclePi()
+		return
+	}
 	if os.Getenv("FAKE_PI_DELIVERIES") != "" {
 		fakeDeliveryPi()
 		return
@@ -54,6 +58,7 @@ func fakePi() {
 		out.Flush()
 	}
 	stateChecks := 0
+	retrying := false
 	var heldPrompts, heldReports []string
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
@@ -183,6 +188,12 @@ func fakePi() {
 			write(map[string]any{"type": "thinking_level_changed", "level": effort})
 		}
 		write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": true, "data": data})
+		if cmd.Type == "abort" && retrying {
+			// pi's _finishCancelledRetry: the wait ends with no new message.
+			retrying = false
+			write(map[string]any{"type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled"})
+			write(map[string]any{"type": "agent_settled", "aborted": true})
+		}
 		if cmd.Type == "get_messages" && os.Getenv("FAKE_PI_TRAIL") != "" {
 			write(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant"}})
 		}
@@ -192,6 +203,29 @@ func fakePi() {
 				os.Exit(3)
 			}
 			write(map[string]any{"type": "agent_start"})
+			if reason, ok := strings.CutPrefix(cmd.Message, "test-run:"); ok {
+				// A run that ends on its one assistant message, as pi records
+				// a provider's error, a stop by the user or a reply. "retry"
+				// fails and waits to retry until it is aborted; "blank" fails
+				// with no errorMessage.
+				stop := reason
+				if reason == "retry" || reason == "blank" {
+					stop = "error"
+				}
+				msg := map[string]any{"role": "assistant", "content": []any{}, "stopReason": stop, "provider": "codex", "model": "gpt-5", "timestamp": time.Now().UnixMilli()}
+				if reason == "error" || reason == "retry" {
+					msg["errorMessage"] = "server_error: Codex: The usage limit has been reached (429: you can retry your request)"
+				}
+				write(map[string]any{"type": "message_start", "message": msg})
+				write(map[string]any{"type": "message_end", "message": msg})
+				if reason == "retry" {
+					retrying = true
+					write(map[string]any{"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 60000, "errorMessage": msg["errorMessage"]})
+					continue
+				}
+				write(map[string]any{"type": "agent_settled", "aborted": reason == "aborted"})
+				continue
+			}
 			if os.Getenv("FAKE_PI_SLOW_RUNS") != "" {
 				// A real run takes a while: its prompt's answer is handled
 				// well before it settles.
@@ -333,7 +367,7 @@ func TestStopAllCancelsReportRetry(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		w := &agent{info: Info{ID: ID("alice", "w1"), Yesman: "alice", Name: "w1", Role: RoleWorker}}
-		done <- m.tellLeadWithin(ctx, w, "[yesman] Worker w1 finished a run")
+		done <- m.tellLeadWithin(ctx, w, "report", "[yesman] Worker w1 finished a run")
 	}()
 	select {
 	case <-rejected:
@@ -363,7 +397,7 @@ func TestStopAllWakesReportBackoff(t *testing.T) {
 		m := &Manager{cfg: Config{Yesmen: yesmen.New("", "")}, shutdown: make(chan struct{})}
 		w := &agent{info: Info{Yesman: "invalid name"}}
 		done := make(chan error, 1)
-		go func() { done <- m.tellLeadWithin(context.Background(), w, "report") }()
+		go func() { done <- m.tellLeadWithin(context.Background(), w, "report", "report") }()
 		synctest.Wait() // invalid name fails synchronously; the retry is asleep
 		m.StopAll()
 		synctest.Wait()

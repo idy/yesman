@@ -7,7 +7,7 @@ a deployed-binary update.
 | --- | --- | --- |
 | Low-level `-verify-updater` | Real pinned MyGo signatures/archive/delta/swap/helper/rollback, placeholder old file and recorder successor | Not a running old production main or released artifact chain |
 | `application-name.yml` production-source upgrade jobs | Fixed `.29` source plus exact PR source, normal production builds, real windows/webviews/Go APIs and helpers; archive and delta old→new→next→failed install→rollback→legacy CLI; profile/locale/localStorage/data sentinels | Recompiled inputs: temporary fixture versions/public signing key/notes, no Git build metadata. Original compiled GitHub feed is retained; constrained VM TLS supplies signed cached inputs. No `.go` source edits. Not the downloaded `.29` release binary. |
-| `application-upgrade-draft.yml` | Downloaded immutable public `.35` and draft `.36` archives; original binary bytes and original Ed25519 key; same real runner plus separately signed private QA successors for next-update/rollback | Actual `.35/.36` pair cannot exist before their ordered release preparation. QA successors are normal production-source builds from candidate source with private fixture versions, not future releases. Controlled feed transport does not prove public latest discovery. |
+| `application-upgrade-draft.yml` | Downloaded immutable public `.38` and draft `.39` archives; original binary bytes and original Ed25519 key; same real runner plus separately signed private QA successors for next-update/rollback | Actual `.38/.39` pair cannot exist before their ordered release preparation. QA successors are normal production-source builds from candidate source with private fixture versions, not future releases. Controlled feed transport does not prove public latest discovery. |
 
 The controlled jobs build four production inputs: `.29`, then private fixture
 `0.1.900001`/`900002`/`900003`. These versions are never tagged, uploaded to GitHub
@@ -42,23 +42,26 @@ initial direct child and the final real legacy bindings CLI have observable exit
 codes. The separate packaged naming jobs verify direct normal exits. Windows
 uses process handles for actual child exit status.
 
-## Final `.35 → .36` hard gate
+## Final `.38 → .39` hard gate
 
-After `.35` is public and all six ordinary latest/download manifests serve `.35`,
-and after final reviewed `.36` metadata is merged/tagged and its draft six assets
+After `.38` is public and all six ordinary latest/download manifests serve `.38`,
+and after final reviewed `.39` metadata is merged/tagged and its draft six assets
 are signed and verified, run:
 
 ```sh
 gh workflow run application-upgrade-draft.yml -R idy/yesman --ref main \
-  -f predecessor=v0.1.35 -f candidate=v0.1.36
+  -f predecessor=v0.1.38 -f candidate=v0.1.39
 ```
 
-Do not publish `.36` until that specific run's download, all four signing jobs
+Do not publish `.39` until that specific run's download, all four signing jobs
 and all four fresh native VM jobs succeed. Do not rebuild the official pair as
 a substitute or move an immutable tag to repair a failed gate.
 
-The download job is the only job with draft-read `contents:write`, and its token
-is scoped to downloading. It checks canonical allocated tags, public/draft flags,
+The download job is the only job with draft-read `contents:write`. It has no
+checkout and executes only the reviewed inline downloader; all `gh` operations
+are GET/download. The token exists only in that step. The local Python entry
+extracts this exact inline implementation for offline contract tests. The job
+checks canonical allocated tags, public/draft flags,
 all six ordinary predecessor manifests, stable tag commits, unique nonempty
 assets and API SHA256 digests. It downloads the original signed archives,
 manifests/deltas and each tag's original web source. The signing jobs receive the
@@ -80,20 +83,20 @@ and all six ordinary public manifest checks remain separate mandatory gates.
 
 Keep `released-upgrade-proof-*` and signed input artifacts. Evidence must show:
 
-1. Correct run ID; exact `.35`/`.36` tag commits/release IDs/asset IDs and API
+1. Correct run ID; exact `.38`/`.39` tag commits/release IDs/asset IDs and API
    digests; unchanged official archive/main hashes; expected version/OS/arch.
-2. Old real main/helper → actual `.36` main through the legacy path, then `.36`
+2. Old real main/helper → actual `.39` main through the legacy path, then `.39`
    initiates the private QA successor update; full and delta paths both succeed.
 3. Real failed-install rollback/preservation at the documented platform point,
    previous image hash/version restored and actual legacy CLI still usable.
 4. Actual native process/window/Go bridge and preserved locale/localStorage,
    settings and synthetic workspace/vault/session markers, with no duplicate app
    profile or resident GUI forwarding process.
-5. Existing Grant final-draft startup checks still pass for the downloaded `.36`
+5. Existing Grant final-draft startup checks still pass for the downloaded `.39`
    Mac ARM/Intel packages, with minOS13/cgo, exact entitlements/purpose strings and
    source identity intact. This upgrade gate does not replace those checks.
 
-The workflow is prepared for the future immutable pair. Until `.35/.36` exist,
+The workflow is prepared for the future immutable pair. Until `.38/.39` exist,
 no result is pre-recorded as PASS. Native Windows/Linux ARM64 execution is also
 not inferred from x64 jobs or six-target cross-builds.
 

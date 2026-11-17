@@ -22,17 +22,26 @@ type service struct{ app *app }
 
 // State is everything the sidebar shows.
 type State struct {
-	Home    string       `json:"home"`
-	Pool    string       `json:"pool"`
-	PiError string       `json:"piError,omitempty"`
-	Yesmen  []YesmanView `json:"yesmen"`
-	Agents  []agent.Info `json:"agents"`
+	Home            string                 `json:"home"`
+	Pool            string                 `json:"pool"`
+	PiError         string                 `json:"piError,omitempty"`
+	Yesmen          []YesmanView           `json:"yesmen"`
+	Agents          []agent.Info           `json:"agents"`
+	WorkspaceErrors []yesmen.MetadataError `json:"workspaceErrors,omitempty"`
 }
 
-// YesmanView is a yesman with its worktrees.
+// YesmanView is a yesman with its worktrees, and its handoffs: what its lead
+// handed the user to do, open and recently closed (Needs you).
 type YesmanView struct {
 	yesmen.Yesman
-	Worktrees []pool.Worktree `json:"worktrees"`
+	Worktrees []pool.Worktree  `json:"worktrees"`
+	Handoffs  []yesmen.Handoff `json:"handoffs"`
+	// HandoffsError says why its handoffs cannot be read; the page shows it
+	// rather than an empty list.
+	HandoffsError string `json:"handoffsError,omitempty"`
+	// CallMemory is how full the memory of its lead's tool calls is, and
+	// what the user may reset: counts only.
+	CallMemory *yesmen.CallMemory `json:"callMemory,omitempty"`
 }
 
 // State returns the yesmen, their worktrees and agents.
@@ -44,7 +53,11 @@ func (s *service) State(ctx context.Context) (State, error) {
 	}
 	ys, err := a.yesmen.List()
 	if err != nil {
-		return st, err
+		var metadataErrors yesmen.MetadataErrors
+		if !errors.As(err, &metadataErrors) {
+			return st, err
+		}
+		st.WorkspaceErrors = metadataErrors
 	}
 	if len(ys) > 0 {
 		snapshot, scanErr := a.pool.Snapshot(ctx)
@@ -52,7 +65,15 @@ func (s *service) State(ctx context.Context) (State, error) {
 			snapshot.Worktrees = nil
 		}
 		for _, y := range ys {
-			st.Yesmen = append(st.Yesmen, YesmanView{Yesman: y, Worktrees: snapshot.Under(y.Path)})
+			view := YesmanView{Yesman: y, Worktrees: snapshot.Under(y.Path), Handoffs: []yesmen.Handoff{}}
+			if hs, err := a.yesmen.Handoffs(y.Name); err != nil {
+				view.HandoffsError = err.Error()
+			} else {
+				view.Handoffs = hs.Items
+				m := hs.CallMemory()
+				view.CallMemory = &m
+			}
+			st.Yesmen = append(st.Yesmen, view)
 		}
 	}
 	return st, nil
@@ -122,6 +143,7 @@ func (s *service) Dismiss(name string) (string, error) {
 		return "", err
 	}
 	a.agents.ForgetYesman(name, archivedSince)
+	a.countHandoffs(name) // its handoffs went into the archive with it
 	// The pool still records the worktrees at their old paths: point it at
 	// the archive before pruning, or the prune would delete their records
 	// and break the archived checkouts.
@@ -248,6 +270,25 @@ func (s *service) Submit(ctx context.Context, id, messageID, text string, images
 		return agent.Delivery{}, s.app.piErr
 	}
 	return s.app.agents.Submit(ctx, id, messageID, text, images, since)
+}
+
+// CancelSubmission removes one native pending occurrence and restores only its
+// exact original payload. Capability and generation are checked by the Manager.
+func (s *service) CancelSubmission(ctx context.Context, id, messageID string, since time.Time) (agent.RecallResult, error) {
+	return s.app.agents.CancelSubmission(ctx, id, messageID, since)
+}
+func (s *service) PromoteSubmission(ctx context.Context, id, messageID string, since time.Time) (agent.PromotionResult, error) {
+	return s.app.agents.PromoteSubmission(ctx, id, messageID, since)
+}
+
+func (s *service) SubmissionPayload(id, messageID string, since time.Time) (agent.RecallPayload, error) {
+	return s.app.agents.SubmissionPayload(id, messageID, since)
+}
+func (s *service) SubmissionText(id, messageID string, since time.Time) (string, error) {
+	return s.app.agents.SubmissionText(id, messageID, since)
+}
+func (s *service) AckRecall(id, messageID string, since time.Time) error {
+	return s.app.agents.AckRecall(id, messageID, since)
 }
 
 // Models lists pi's available models and this agent's effective selection.

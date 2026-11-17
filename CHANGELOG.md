@@ -2,6 +2,69 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.38
+
+- Add optional Settings › GitHub App configuration for agent-created pull requests, with a separate encrypted key vault and explicit repository and workspace selection. App identity starts disabled when no App configuration exists.
+- Configure your own App, test the current connection and scope, then explicitly enable App identity. Saving a changed key or scope disables it until a fresh connection test and explicit enablement.
+- Route supported PR creation in selected workspaces through the configured App identity. Git pushes and other GitHub operations keep their existing credentials; unavailable keys, services or installations in App mode stop creation without silently switching to a personal author. Keep App credentials out of agents and managed runtime dependency installation.
+- The actual idy/yesman installation's Bot author, avatar and PR events have not yet been verified; this release does not mean that account is connected. Users can configure and explicitly enable their own App, while this feature's compatibility with the real GitHub service remains unverified.
+
+## 0.1.37
+
+- Open Needs You beside the conversation as a Board-style pane for the yesman shown and its current hire. Use the Info card or command palette to view its requests; the global sidebar entry and all-yesmen page are removed. Opening a request goes to its agent and question without answering it, while preserving unsent drafts and images. Request-memory notices, unreadable-file errors and recently handled requests stay available in the pane.
+- Keep room for the message box beside Board or Needs You: the Info panel steps aside in narrow windows and returns when the pane closes. Preserve focus when opening, closing and refreshing the pane.
+- Show an X on the queued message's Cancel and edit button, keeping its labels and existing cancellation and full text-and-image restore behavior.
+- Use the application's context menus throughout the window, retaining existing row menus and offering selection, link and text-editing actions for their targets. On macOS, Control-click opens only the menu; editor Find fields keep their own editing actions. Menu Paste can attach PNG images in the message box within the existing limits, and a clipboard with nothing usable pastes nothing. Passwords and secret values remain protected.
+
+## 0.1.36
+
+- Fold consecutive runs that end only with a model error into one closed row that shows the count and the error text. Expand it to see each distinct error with its provider, model and count, copy the error text, and open each run's time and original work. A person's message, a reply, a partial reply or a stop ends the fold, and text that only mentions an error never counts as one. History and submission records are unchanged.
+- Mark an agent whose last finished run ended with a model error with a red exclamation mark, a label and a tooltip in the sidebar and header; a yesman's entry follows its lead's own state. Working, waiting, Needs You and asking keep their own marks. Stopping the run, or a later run that ends any other way, clears the mark while the conversation keeps its error rows. The mark is not kept across an app restart. A crashed agent process shows the same red mark.
+- Show an error recorded without a message as "The model returned an error without a message." and fold such errors together.
+
+## 0.1.35
+
+- Add a global Needs You inbox for explicit requests that need human action across yesmen and agents. Ordinary worker questions stay with their lead; blocked Board tasks and queued messages do not add inbox items.
+- Bring Knowledge, Working Logs and Needs You together in the current yesman's Info card. Knowledge and Working Logs open in the app's file viewer, and Needs You opens that yesman's requests; the sidebar inbox covers every yesman.
+- Open the matching agent and request while preserving an unsent draft. Viewing a request leaves it pending until it is answered, completed or dismissed through its available action.
+- Show when long-term request memory approaches capacity. Start a new memory only after explicit confirmation, preserving current requests. A forgotten request can return if its tool call runs again, and each later reset can allow it to return again. Keep keyboard focus and confirmation dialogs tied to the correct view and request.
+- Prevent named pipes in workspace metadata from blocking the app. Report oversized historical metadata for the affected workspace while keeping healthy workspaces available.
+- Give earlier submission records a neutral heading with their count, and show their recorded outcomes in the expanded details. Keep current pending, failed and recoverable messages explicit, with their existing actions and original text and images.
+
+## 0.1.34
+
+- Show human submissions with their actual status and available actions, using original text and images while retained or the saved preview and image count otherwise. Fold older unmatched submission records into one collapsed section; uncertain delivery stays unconfirmed.
+- Use Send now on a selected pending follow-up to move it to Steering while preserving the other queued inputs. It takes effect at the next eligible input checkpoint after the current response and tool batch.
+- Cancel and edit eligible pending inputs to restore retained original text and images without overwriting a draft. Recover a recalled input after a missed reply while its original remains available, use the configurable composer recall shortcut, or copy complete message text. A whole app restart cannot recreate lost originals.
+- Fix accepted queued inputs silently stalling during slow preparation. They run once when preparation completes; Stop or cancellation before intake keeps the original pending input recoverable.
+- Prepare an isolated, verified runtime for supported queue actions. First preparation needs Node.js, npm and network access; a verified cache then needs only Node.js. Settings shows preparation and retry status, and unsupported external runtimes expose only the actions they support.
+- Align repository refresh buttons in the final column, keeping worktree information to their left and readable in narrow windows.
+- Prevent delayed requests from stopped, exited or archived agents from changing a replacement Board or its completion ownership. Exited processes lose authorization immediately; stopping an agent process waits for its already accepted Board writes to finish.
+
+## 0.1.33
+
+- Add Settings › Model usage to compare actual usage by provider, full model ID and recorded effort: worker participation, current done board-task attribution, responses, and input, output, cache and total tokens. Filter by yesman, agent role and period.
+- Show measured output tokens per second across timed completed responses, weighted by their response durations and including first-token latency. Keep these measurements separate from Artificial Analysis benchmarks; missing effort or timing stays unknown.
+- Explain coverage and attribution: only current workspaces and retained logs are included, and tasks follow the owner's latest response that ended by completion. A done board task does not establish independent verification or a model's causal contribution; these totals are not a billing statement or a reconstruction of all past usage.
+
+## 0.1.32
+
+- Add application shortcuts with Command on macOS and Ctrl on Windows and Linux. Open the searchable command palette with Cmd/Ctrl+K or Cmd/Ctrl+Shift+P to find actions, yesmen and workers, see their keys and availability, and run the same actions as their buttons and menus.
+- Customize bindings in Settings › Shortcuts: search actions, record keys, resolve conflicts, remove bindings or restore defaults. Changes persist across restarts and travel with configuration imports and exports; titlebar buttons and the existing files menu show the current keys.
+- Keep dialogs, menus, text editing, the file editor and input-method composition in control of their keys. Shortcuts act on the conversation shown and retain existing confirmations. These shortcuts work inside yesman's focused window; they are not global OS hotkeys and need no Accessibility or Input Monitoring permission.
+
+## 0.1.31
+
+- Add Settings › Grant to view this copy of yesman's OS permission status, refresh it without prompting, and choose individual Request or Open Settings actions.
+- On macOS, cover Bluetooth, notifications, Full Disk Access, microphone, camera, Accessibility, Screen Recording, Input Monitoring and Automation. Full Disk Access and Automation use manual settings guidance; opening settings does not mean access was granted.
+- On Windows, provide fixed settings entries for Bluetooth, notifications, microphone and camera. On Linux, explain desktop, device, session and portal policy limits. Independently launched terminals, runtimes and helpers may need their own authorization.
+
+## 0.1.30
+
+- Keep your messages and images, ordinary replies and questions visible in full, while folding thinking, tool activity and recorded background collaboration into expandable work lines in their original order.
+- Render thinking with Markdown and show delivery states from actual submission records beneath linked messages. Work-line status describes only the steps it contains; it does not confirm individual message consumption or that every worker has finished.
+- Keep older or ambiguous messages visible when their source cannot be established, including their images.
+
 ## 0.1.29
 
 - Accept display names such as GizMoth, names with spaces and Chinese text when creating a yesman from the welcome page or Hire dialog, preserving their spelling and capitalization.

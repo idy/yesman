@@ -14,12 +14,16 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/githubapp"
+	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/server"
@@ -45,6 +49,16 @@ func main() {
 			log.Fatal(err)
 		}
 		return
+	}
+	if githubapp.IsShim(os.Args) {
+		args := os.Args[1:]
+		if len(args) > 0 && args[0] == "--yesman-github-app-gh" {
+			args = args[1:]
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := githubapp.RunShim(ctx, args, os.Stdin, os.Stdout, os.Stderr)
+		cancel()
+		os.Exit(code)
 	}
 	mygo.App.SetName(appName)
 	mygo.App.SetLanguages(languages...)
@@ -76,7 +90,23 @@ func main() {
 		log.Print("workspace task logs: ", err)
 	}
 	a.pi, a.piErr = findPi()
+	var piCommand func(context.Context) (string, []string, error)
+	var managedRuntime *piruntime.Runtime
+	if os.Getenv("YESMAN_PI") == "" && (a.piErr != nil || piruntime.OfficialNPM(a.pi)) {
+		a.managedPi = true
+		managed, err := piruntime.New(h.Runtime())
+		a.piErr = err
+		if err == nil {
+			a.pi = managed.Description()
+			piCommand = managed.Command
+			managedRuntime = managed
+			a.piRuntime = managed
+		}
+	}
 	a.runPi = runPi(a.pi, h.Runtime())
+	if piCommand != nil {
+		a.runPi = runPiCommand(piCommand, h.Runtime())
+	}
 	a.piJobs = newPiJobs(a.runPi, func(j PiJobs) { _ = piJobsEvent.Broadcast(j) })
 	a.settings = loadSettings(h.Settings())
 	a.setTheme = mygo.Theme.SetSource
@@ -101,21 +131,44 @@ func main() {
 	a.variables = secrets.NewVariables(h.Variables())
 	a.keychain = appKeychain()
 	go a.unlockFromKeychain() // the system may ask the user first
+	gh, ghErr := exec.LookPath("gh")
+	if ghErr != nil {
+		gh = ""
+	} else if absolute, err := filepath.Abs(gh); err == nil {
+		gh = absolute
+	} else {
+		gh = ""
+	}
+	executable, _ := os.Executable()
+	shim, routingErr := a.prepareGitHubAppRouting(gh, executable)
+	if routingErr != nil {
+		log.Print("GitHub App command routing is unavailable: ", routingErr)
+	}
+	routingRequired := ""
+	if shim == "" && a.githubApp.RequiresRouting() {
+		routingRequired = "1"
+	}
+	if a.githubApp.Configured() {
+		go func() { _ = a.githubApp.Prepare("") }()
+	}
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
-		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) },
-		Secrets:      a.vault, Variables: a.variables, Crew: a.leadCrew}
+		BoardChanged:    func(yesman string) { _ = boardEvent.Broadcast(yesman) },
+		NeedsYouChanged: func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
+		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew, GitHubApp: a.githubApp}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}
 	a.agents = agent.New(agent.Config{
 		Pi:        a.pi,
+		Command:   piCommand,
 		Extension: extension,
-		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root},
+		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root, "YESMAN_GH_SHIM=" + shim, "YESMAN_GH_REAL=" + gh, "YESMAN_GH_REQUIRED=" + routingRequired},
 		Yesmen:    a.yesmen,
 		OnEvent:   func(e agent.Event) { _ = agentEvent.Broadcast(e) },
 		OnChange:  a.agentsChanged,
 	})
 	srv.Agents = a.agents
+	a.countHandoffs() // for the tray, before the first change of the agents
 	a.catalog = newCatalog(func(ctx context.Context) ([]agent.Model, error) {
 		if a.piErr != nil {
 			return nil, a.piErr
@@ -138,7 +191,14 @@ func main() {
 	mygo.App.OnWindowAllClosed(func() {}) // keep running in the tray
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
-	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { a.agents.StopAll() })
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		a.stopGitHubAppSetup()
+		a.githubApp.Close()
+		if managedRuntime != nil {
+			managedRuntime.Close()
+		}
+		a.agents.StopAll()
+	})
 	mygo.App.WhenReady(func() {
 		if err := mygo.App.Dock.SetIcon(appIcon); err != nil {
 			log.Print("dock icon: ", err)

@@ -65,6 +65,17 @@ func (c *catalog) get(ctx context.Context, refresh bool) ([]crew.Model, time.Tim
 	return c.models, c.at, c.err
 }
 
+// peek returns the models last read, without reading them: nil until a
+// read succeeds.
+func (c *catalog) peek() []crew.Model {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.models
+}
+
 func (c *catalog) load(done chan struct{}) {
 	ctx, cancel := context.WithTimeout(context.Background(), catalogTimeout)
 	defer cancel()

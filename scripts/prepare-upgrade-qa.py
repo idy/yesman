@@ -10,10 +10,10 @@ def main():
     inputs=pathlib.Path(sys.argv[1]).resolve();out=pathlib.Path(sys.argv[2]).resolve();out.mkdir(parents=True,exist_ok=True)
     meta=json.loads((inputs/'release-inputs.json').read_text(encoding='utf-8'))
     target=subprocess.check_output(['go','env','GOOS'],text=True).strip()+'-'+subprocess.check_output(['go','env','GOARCH'],text=True).strip()
-    source=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip();assert source==meta['refs']['v0.1.36']
+    source=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip();assert source==meta['refs']['v0.1.39']
     assert os.environ.get('MYGO_UPDATER_PRIVATE_KEY'),'signing-only job requires the existing configured key'
     stages=[]
-    for tag in ('v0.1.35','v0.1.36'):
+    for tag in ('v0.1.38','v0.1.39'):
         original=meta['stages'][tag+'/'+target];s=dict(original)
         for field in ('Archive','Manifest','Web'):
             dest=out/original[field];dest.parent.mkdir(parents=True,exist_ok=True)
@@ -40,7 +40,7 @@ def main():
             package=out/version/target;binary=package/('yesman.app/Contents/MacOS/Yes Man' if target.startswith('darwin-') else 'Yes Man'+('.exe' if target.startswith('windows-') else ''))
             web=out/version/'web';shutil.copytree(tree/'web',web)
             stages.append({'Version':version,'Source':source,'Archive':str((package/('yesman-'+version+'-'+target+'.tar.gz')).relative_to(out)),'Manifest':str((package/('update-'+target+'.json')).relative_to(out)),'Web':str(web.relative_to(out)),'mainName':'Yes Man','binarySHA256':hashlib.sha256(binary.read_bytes()).hexdigest(),'sourceGoHashes':before,'official':False,'limits':['private QA version, normal production build from exact candidate source','temporary packaging version/notes/linked loopback feed; no source change or formal tag','not a future released version']})
-    plan={'kind':'released-candidate-plus-private-QA','PublicKey':meta['PublicKey'],'Feed':'http://127.0.0.1:37059','Target':target,'Stages':stages,'releases':meta['releases'],'refs':meta['refs'],'sourceSHA':source,'limits':['first edge uses untouched published .35 and downloaded draft .36 bytes','subsequent edges are normal production-source private QA successors, not .37 releases','released feed discovery is supplied by a constrained VM TLS transport; original Ed25519 verification remains active']}
+    plan={'kind':'released-candidate-plus-private-QA','PublicKey':meta['PublicKey'],'Feed':'http://127.0.0.1:37059','Target':target,'Stages':stages,'releases':meta['releases'],'refs':meta['refs'],'sourceSHA':source,'limits':['first edge uses untouched published .38 and downloaded draft .39 bytes','subsequent edges are normal production-source private QA successors, not .40 releases','released feed discovery is supplied by a constrained VM TLS transport; original Ed25519 verification remains active']}
     path=out/'plan.json';path.write_text(json.dumps(plan,indent=2),encoding='utf-8')
     subprocess.run(['go','run','./tools/package','-upgrade-assets',str(path)],check=True)
     print('PASS: immutable official pair preserved; private production-source QA successors signed separately; no private key in runtime artifacts')

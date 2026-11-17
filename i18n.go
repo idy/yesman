@@ -101,8 +101,9 @@ var zhHans = map[string]string{
 	// Notifications
 	"%s needs you": "%s 需要你",
 	"It asked a question and is waiting for your answer.": "它提了一个问题，正在等你回答。",
-	"%s stopped":                    "%s 已停止",
-	"Finished and waiting for you.": "已完成，等你继续。",
+	"A worker's question was handed to you.":              "一个助手的问题交给了你。",
+	"%s stopped":                                          "%s 已停止",
+	"Finished and waiting for you.":                       "已完成，等你继续。",
 
 	// The agent menu
 	"Show Done Workers":   "显示已完成的助手",
@@ -135,6 +136,19 @@ var zhHans = map[string]string{
 	"Open":                    "打开",
 	"Copy Path":               "拷贝路径",
 	"Copy Relative Path":      "拷贝相对路径",
+
+	// The page's menu, as the Edit menu says them
+	"Open Link":  "打开链接",
+	"Copy Link":  "拷贝链接",
+	"Cut":        "剪切",
+	"Copy":       "拷贝",
+	"Paste":      "粘贴",
+	"Select All": "全选",
+	// Images pasted from the page's menu, as the composer says them
+	"Attach at most 4 images.":                  "最多添加 4 张图片。",
+	"This image is empty.":                      "这张图片是空文件。",
+	"Each image must be 5 MB or smaller.":       "每张图片不能超过 5 MB。",
+	"Images must be 10 MB or smaller in total.": "图片合计不能超过 10 MB。",
 
 	// Dialogs
 	"Choose a yesman folder":      "选择 yesman 文件夹",

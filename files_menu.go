@@ -35,6 +35,12 @@ func checked(on bool) func(*mygo.MenuItem) {
 
 func accel(a string) func(*mygo.MenuItem) { return func(m *mygo.MenuItem) { m.Accelerator = a } }
 
+// shortcut shows an item's keys, as Settings › Shortcuts has them: keys
+// names each action's first shortcut, which the page sends.
+func shortcut(keys map[string]string, action string) func(*mygo.MenuItem) {
+	return accel(shortcutAccelerator(keys[action]))
+}
+
 func disabled(off bool) func(*mygo.MenuItem) { return func(m *mygo.MenuItem) { m.Disabled = off } }
 
 // revealLabel names showing a file in the system's file manager.
@@ -50,13 +56,14 @@ func revealLabel() string {
 
 // FilesMenu opens the files pane's menu. tree, wrap, autoSave and folders
 // give the pane's state: the tree shown, long lines wrapped, edits saved as
-// they are made, folders expanded.
-func (s *service) FilesMenu(ctx context.Context, x, y int, tree, wrap, autoSave, folders bool) (string, error) {
+// they are made, folders expanded. keys has the shortcuts of its items'
+// actions, files.find and files.tree, "" for none.
+func (s *service) FilesMenu(ctx context.Context, x, y int, tree, wrap, autoSave, folders bool, keys map[string]string) (string, error) {
 	return popup(ctx, x, y, func(item func(string, string, ...func(*mygo.MenuItem)) *mygo.MenuItem) []*mygo.MenuItem {
 		return []*mygo.MenuItem{
-			item("find", tr("Go to File…"), accel("CmdOrCtrl+P")),
+			item("find", tr("Go to File…"), shortcut(keys, "files.find")),
 			mygo.Separator(),
-			item("tree", tr("Show File Tree"), checked(tree), accel("CmdOrCtrl+Shift+Y")),
+			item("tree", tr("Show File Tree"), checked(tree), shortcut(keys, "files.tree")),
 			item("collapse", tr("Collapse All Folders"), disabled(!folders)),
 			mygo.Separator(),
 			item("autosave", tr("Auto Save"), checked(autoSave)),
