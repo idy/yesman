@@ -94,7 +94,7 @@ func TestStaleCleanupRacesOwnerlessCheckout(t *testing.T) {
 	for range 8 {
 		go func() {
 			<-start
-			_, err := f.s.removeWorktree(context.Background(), f.lead, httptest.NewRequest("POST", "/v1/worktrees/remove", bytes.NewReader(body)))
+			_, err := f.removeRequest(context.Background(), f.lead, httptest.NewRequest("POST", "/v1/worktrees/remove", bytes.NewReader(body)))
 			errs <- err
 		}()
 	}
@@ -183,7 +183,7 @@ func TestLegacyAndCurrentCheckoutReuseAbsentRecords(t *testing.T) {
 					}
 					call := func(actor caller, req CheckoutRequest) (pool.Worktree, error) {
 						body, _ := json.Marshal(req)
-						out, err := f.s.checkout(context.Background(), actor, httptest.NewRequest("POST", "/v1/checkout", bytes.NewReader(body)))
+						out, err := f.checkoutRequest(context.Background(), actor, httptest.NewRequest("POST", "/v1/checkout", bytes.NewReader(body)))
 						if err != nil {
 							return pool.Worktree{}, err
 						}
@@ -239,7 +239,7 @@ func TestMissingLegacyRegistrationCannotBeRetired(t *testing.T) {
 	f := newCleanupFixture(t)
 	req := CheckoutRequest{Repo: f.repo.Name, Ref: f.head, Dir: "legacy"}
 	body, _ := json.Marshal(req)
-	out, err := f.s.checkout(context.Background(), f.owner, httptest.NewRequest("POST", "/v1/checkout", bytes.NewReader(body)))
+	out, err := f.checkoutRequest(context.Background(), f.owner, httptest.NewRequest("POST", "/v1/checkout", bytes.NewReader(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestMissingLegacyRegistrationCannotBeRetired(t *testing.T) {
 	if err := os.RemoveAll(wt.Path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.s.checkout(context.Background(), f.owner, httptest.NewRequest("POST", "/v1/checkout", bytes.NewReader(body))); err == nil {
+	if _, err := f.checkoutRequest(context.Background(), f.owner, httptest.NewRequest("POST", "/v1/checkout", bytes.NewReader(body))); err == nil {
 		t.Fatal("reused missing but registered tree")
 	}
 	records, _ := f.s.Yesmen.WorktreeRecords(f.y.Name)

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { lstatSync, realpathSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, linkSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { stripTypeScriptTypes } from 'node:module';
-import { isAbsolute, relative, resolve, join } from 'node:path';
+import { basename, isAbsolute, relative, resolve, join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { test } from 'node:test';
 
@@ -29,8 +29,9 @@ function extension(role, workspace, filesystem = { lstatSync, realpathSync }) {
   const Type = new Proxy({}, { get: () => factory });
   runInNewContext(`${source}\nyesman(pi);`, {
     process: { env: { YESMAN_API: 'http://unused', YESMAN_TOKEN: 'test', YESMAN_AGENT: `alice/${role}`, YESMAN_ROLE: role, YESMAN_WORKSPACE: workspace }, platform: process.platform, cwd: () => workspace },
-    pi, ...filesystem, isAbsolute, relative, resolve, Type,
+    pi, ...filesystem, readFileSync, basename, join, isAbsolute, relative, resolve, Type,
     createBashToolDefinition: factory, createPowerShellToolDefinition: factory,
+    createWriteToolDefinition: factory, createEditToolDefinition: factory,
   });
   return { handlers, active: () => active };
 }

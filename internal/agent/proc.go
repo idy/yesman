@@ -66,6 +66,10 @@ type proc struct {
 
 	origins originTracker // who wrote its user messages
 
+	// temp is the workspace directories reserved for this process; set
+	// once, before its credential is published, and never changed.
+	temp *agentTemp
+
 	// changes orders the workspace changes that API requests with this
 	// process's credential make against the credential's retirement: each
 	// change holds it for reading, and retiring takes it for writing once,

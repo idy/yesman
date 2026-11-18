@@ -32,6 +32,7 @@ function boardTool(role, answer) {
     process: { env: { YESMAN_API: 'http://unused', YESMAN_TOKEN: 'test', YESMAN_AGENT: `alice/${role}`, YESMAN_ROLE: role, YESMAN_WORKSPACE: '/tmp' }, platform: process.platform, cwd: () => '/tmp' },
     pi, lstatSync, realpathSync, isAbsolute, relative, resolve, Type, fetch, AbortSignal,
     createBashToolDefinition: factory, createPowerShellToolDefinition: factory,
+    createWriteToolDefinition: factory, createEditToolDefinition: factory,
   });
   return { tool: tools.get('yesman_board'), requests };
 }

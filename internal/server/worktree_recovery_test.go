@@ -73,7 +73,7 @@ func TestMainAndUserCheckoutsStay(t *testing.T) {
 	f := newCleanupFixture(t)
 	req := CheckoutRequest{Repo: f.repo.Name, Dir: "primary", Task: "t1", Purpose: "author", Branch: "main"}
 	body, _ := json.Marshal(req)
-	out, err := f.s.checkout(context.Background(), f.owner, httptest.NewRequest("POST", "/v1/checkout", bytes.NewReader(body)))
+	out, err := f.checkoutRequest(context.Background(), f.owner, httptest.NewRequest("POST", "/v1/checkout", bytes.NewReader(body)))
 	if err != nil {
 		t.Fatal(err)
 	}

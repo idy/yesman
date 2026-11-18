@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -122,6 +123,34 @@ func (f *cleanupFixture) caller(t *testing.T, name string) caller {
 	return caller{agent: i, yesman: f.y}
 }
 
+// The process-free fixture tests resource retention and completion policy below
+// caller admission. Endpoint tests with real credentials live in
+// worktree_admission_test.go; do not invent credentials for these policy cases.
+func (f *cleanupFixture) checkoutRequest(ctx context.Context, c caller, r *http.Request) (any, error) {
+	var req CheckoutRequest
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	l := f.s.worktreeLock(c.yesman.Name)
+	l.Lock()
+	defer l.Unlock()
+	return f.s.checkoutOwned(ctx, c, c.yesman, req)
+}
+
+func (f *cleanupFixture) removeRequest(ctx context.Context, c caller, r *http.Request) (any, error) {
+	var req removeWorktreeRequest
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	if !dirRE.MatchString(req.Dir) {
+		return nil, fmt.Errorf("invalid fixture worktree directory %q", req.Dir)
+	}
+	l := f.s.worktreeLock(c.yesman.Name)
+	l.Lock()
+	defer l.Unlock()
+	return f.s.cleanupWorktree(ctx, c, c.yesman, req)
+}
+
 func (f *cleanupFixture) checkout(t *testing.T, purpose, dir string) pool.Worktree {
 	t.Helper()
 	req := CheckoutRequest{Repo: f.repo.Name, Dir: dir, Task: "t1", Purpose: purpose}
@@ -131,7 +160,7 @@ func (f *cleanupFixture) checkout(t *testing.T, purpose, dir string) pool.Worktr
 		req.Branch = "feature"
 	}
 	body, _ := json.Marshal(req)
-	out, err := f.s.checkout(context.Background(), f.owner, httptest.NewRequest("POST", "/v1/checkout", bytes.NewReader(body)))
+	out, err := f.checkoutRequest(context.Background(), f.owner, httptest.NewRequest("POST", "/v1/checkout", bytes.NewReader(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +176,7 @@ func (f *cleanupFixture) remove(t *testing.T, who caller, req removeWorktreeRequ
 		}
 	}
 	body, _ := json.Marshal(req)
-	out, err := f.s.removeWorktree(context.Background(), who, httptest.NewRequest("POST", "/v1/worktrees/remove", bytes.NewReader(body)))
+	out, err := f.removeRequest(context.Background(), who, httptest.NewRequest("POST", "/v1/worktrees/remove", bytes.NewReader(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +416,7 @@ func TestCleanupCannotCrossWorkspaceOrForce(t *testing.T) {
 	}
 	for _, req := range []removeWorktreeRequest{{Dir: "../review"}, {Dir: wt.Dir, Force: true}} {
 		body, _ := json.Marshal(req)
-		if _, err := f.s.removeWorktree(context.Background(), f.owner, httptest.NewRequest("POST", "/v1/worktrees/remove", bytes.NewReader(body))); err == nil {
+		if _, err := f.removeRequest(context.Background(), f.owner, httptest.NewRequest("POST", "/v1/worktrees/remove", bytes.NewReader(body))); err == nil {
 			t.Fatalf("accepted unsafe request %+v", req)
 		}
 	}
