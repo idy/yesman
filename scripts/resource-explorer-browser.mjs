@@ -4,7 +4,7 @@
 // is answered here or recorded as unmocked, which fails the run.
 //
 // YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs \
-//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks \
+//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks,answer \
 //   EXPLORER_SHOTS=/path/for/screenshots node scripts/resource-explorer-browser.mjs
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -16,7 +16,7 @@ const root = fileURLToPath(new URL('../web/', import.meta.url));
 const shots = process.env.EXPLORER_SHOTS;
 if (shots) await mkdir(shots, { recursive: true });
 const engines = (process.env.EXPLORER_ENGINES || 'chromium,webkit').split(',');
-const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks').split(','));
+const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks,answer').split(','));
 
 const bridge = `<script>
 window.calls=[];window.unmocked=[];window.delayed={};window.releases={};
@@ -72,7 +72,7 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
  case 'TakeFocus':return '';case 'Update':return {enabled:false};
  case 'Messages':return {messages:[]};case 'Models':return {models:[],agent:fixtureState.agents.find(a=>a.id===args[0])};
  case 'Info':return {knowledge:{notes:2,index:true},worktrees:[]};case 'Board':return {tasks:[]};
- case 'Schedules':return {plans:[]};
+ case 'Schedules':return {plans:[]};case 'Crew':return {members:[],yesman:''};
  case 'WatchFiles':case 'Reveal':case 'OpenURL':return;
  case 'FilesMenu':return '';
  case 'ReadFile':{const [name,path]=args;await wait(name+':ReadFile:'+path);const text=filesFixture[name]?.[path];if(text===undefined)throw Error('no such file: '+path);return {path,kind:'text',text,size:text.length,hash:'h'+text.length,truncated:false};}
@@ -736,7 +736,76 @@ async function tasksPart(page, engine) {
   assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'ResolveHandoff', 'SubmitTopic', 'SaveSchedule', 'RunSchedule'].includes(c[0])).length), 0, 'navigation never performs an action');
 }
 
-const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart, tasks: tasksPart };
+// The default wide detail is already editable before its list row is
+// clicked. Editing it owns the visible column when the window narrows.
+async function answerPart(page, engine) {
+  const pane = page.locator('#needs-you');
+  const input = pane.locator('[data-detail-control="answer-text"]');
+  const text = 'Keep this draft while resizing';
+  const size = async (width) => { await page.setViewportSize({ width, height: 780 }); await frames(page); };
+  const answerState = () => input.evaluate((e) => ({ visible: !!e.getClientRects().length, active: document.activeElement === e, value: e.value, selection: [e.selectionStart, e.selectionEnd] }));
+  await page.locator('[data-info-entry="needs-you"]').click();
+  await input.fill(text); // do not click the already-selected navigation row
+  await input.evaluate((e) => { e.focus(); e.setSelectionRange(5, 9); window.originalAnswer = e; });
+  await size(1000);
+  assert.deepEqual(await answerState(), { visible: true, active: true, value: text, selection: [5, 9] }, 'default detail stays visible and focused with its selection');
+  assert.equal(await input.evaluate((e) => e === window.originalAnswer), true, 'resize does not replace the active input');
+  await shot(page, `${engine}-answer-narrow-focused`);
+  // A normal State redraw remembers the same content ownership and caret.
+  const states = await page.evaluate(() => calls.filter((c) => c[0] === 'State').length);
+  await page.evaluate(() => handlers.changed?.());
+  await page.waitForFunction((n) => calls.filter((c) => c[0] === 'State').length > n, states);
+  await frames(page);
+  assert.deepEqual(await answerState(), { visible: true, active: true, value: text, selection: [5, 9] });
+  // Back intentionally leaves the edit; a later resize must not revive it.
+  await pane.locator('[data-key="list"]').click();
+  const firstKey = await pane.locator('.needs-you-open').first().getAttribute('data-request');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.request), firstKey);
+  assert.equal(await input.isVisible(), false);
+  await size(1440);
+  await size(1000);
+  assert.equal(await input.isVisible(), false);
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.request), firstKey);
+  // A different request has its own detail and actions, not the old edit.
+  await pane.locator('.needs-you-open[data-request$=":n1"]').click();
+  assert.equal(await input.count(), 0);
+  await pane.locator('[data-detail-control="done"]').focus();
+  await size(1440);
+  await size(1000);
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.detailControl), 'done');
+  assert.equal(await pane.locator('[data-detail-control="done"]').isVisible(), true);
+  await pane.locator('[data-key="list"]').click();
+  await pane.locator('.needs-you-open').first().click();
+  assert.equal(await input.inputValue(), text);
+  // Returning to the workspace keeps its draft, but never takes focus from
+  // the sidebar or carries Alice's control into Bob's request.
+  await page.locator('[data-agent="bob/lead"]').first().click();
+  assert.equal(await input.count(), 0);
+  await size(1440);
+  await page.locator('[data-agent="alice/lead"]').first().click();
+  assert.equal(await input.inputValue(), text);
+  await page.locator('[data-agent="alice/lead"]').first().focus();
+  await size(1000);
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.agent), 'alice/lead');
+  // Neither the main composer nor a real dialog yields focus to this edit.
+  await size(1440);
+  const composer = page.locator('#dock textarea');
+  await composer.fill('Main draft stays here');
+  await composer.evaluate((e) => e.setSelectionRange(2, 6));
+  await size(1000);
+  assert.deepEqual(await composer.evaluate((e) => [document.activeElement === e, e.value, e.selectionStart, e.selectionEnd]), [true, 'Main draft stays here', 2, 6]);
+  await size(1440);
+  await page.getByRole('button', { name: 'Hire a yesman', exact: true }).click();
+  const dialog = page.locator('#hire-dialog input[name="name"]');
+  await dialog.fill('Dialog draft');
+  await dialog.evaluate((e) => e.setSelectionRange(1, 4));
+  await size(1000);
+  assert.deepEqual(await dialog.evaluate((e) => [document.activeElement === e, e.value, e.selectionStart, e.selectionEnd]), [true, 'Dialog draft', 1, 4]);
+  await page.locator('#hire-cancel').click();
+  assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'ResolveHandoff', 'HireNamed'].includes(c[0])).length), 0, 'focus and navigation perform no action');
+}
+
+const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart, tasks: tasksPart, answer: answerPart };
 try {
   for (const name of engines) {
     const browser = await pw[name].launch({ headless: true });

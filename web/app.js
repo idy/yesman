@@ -1734,6 +1734,19 @@ function needsYouPaneRow(item, chosen, at) {
 // through the same calls as where it was asked.
 function needsYouDetail(y, item) {
   const box = h('div', { class: 'needs-you-detail', 'data-detail': item.key });
+  const scope = JSON.stringify([y.name, y.hiredAt ?? '']);
+  // The default detail is editable beside the list even before its row is
+  // chosen. Focusing its controls keeps that detail visible when narrowing,
+  // without redrawing the input or disturbing its caret. Back still chooses
+  // navigation explicitly; a detached or different request cannot claim it.
+  box.addEventListener('focusin', (e) => {
+    if (!e.target.closest('[data-detail-control]') || needsYouScope() !== scope) return;
+    const aside = box.closest('#needs-you');
+    const chosen = needsYouChosen.get(scope);
+    if (!aside || aside.dataset.scope !== scope || chosen?.key !== item.key) return;
+    chosen.focus = 'content';
+    $('.explorer', aside).dataset.focus = 'content';
+  });
   box.append(
     narrowBack(t('All requests'), () => {
       const scope = needsYouScope();
