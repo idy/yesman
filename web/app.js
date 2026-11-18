@@ -3617,6 +3617,7 @@ const topics = createTopics({
       if (topicSends.size > 256) topicSends.delete(topicSends.keys().next().value);
     }
     const c = convo(lead);
+    reopenHandled(c, id);
     if (!c.deliveries.has(id)) {
       // Keep the whole topic line, so the receipt shows its chip, and clip
       // only the user's text after it, as the composer's receipts do.
