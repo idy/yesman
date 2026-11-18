@@ -86,11 +86,28 @@ type Info struct {
 	Activity string `json:"activity,omitempty"`
 	// RunStartedAt is when the current run started; zero between runs.
 	RunStartedAt time.Time `json:"runStartedAt,omitzero"`
+	// RunError is set while the last run this agent finished ended on a
+	// model error, such as a provider's usage limit: pi recorded its last
+	// assistant message with stopReason "error". A later run that ends
+	// otherwise clears it, as does stopping a run, even one waiting to
+	// retry the error; starting a run does not. It belongs to this
+	// incarnation and is not kept on disk.
+	RunError     *RunError `json:"runError,omitempty"`
 	Model        string    `json:"model,omitempty"`
 	Provider     string    `json:"provider,omitempty"`
 	Effort       string    `json:"effort,omitempty"`
 	EffortLevels []string  `json:"effortLevels,omitempty"`
 	UpdatedAt    time.Time `json:"updatedAt,omitzero"`
+}
+
+// RunError is how an agent's last finished run failed, from pi's own record
+// of its last assistant message.
+type RunError struct {
+	// Message is pi's errorMessage, trimmed; empty when pi recorded none.
+	Message  string    `json:"message"`
+	Provider string    `json:"provider,omitempty"`
+	Model    string    `json:"model,omitempty"`
+	At       time.Time `json:"at"`
 }
 
 // Event is one record an agent's pi process emitted.
@@ -170,6 +187,7 @@ type agent struct {
 	info                           Info
 	proc                           *proc
 	token                          string
+	operations                     map[*externalOperation]struct{}
 	tokenProc                      *proc         // the process token was given to
 	seq                            uint64        // the last event's number
 	turn                           []Event       // the events of the assistant message in progress
@@ -196,6 +214,10 @@ type agent struct {
 	recallBytes, recalls           int
 	appendGate                     chan struct{} // serializes composer submissions that may join an occurrence
 	deliverySettled                uint64        // sequence of last observed settled boundary
+	// runEnd is how the run in progress ended so far: its latest assistant
+	// message's error, or nil; runSaid tells whether it had one at all.
+	runEnd  *RunError
+	runSaid bool
 	// nudged: the lead was reminded of open tasks, and neither the user nor
 	// a worker has written to it since.
 	nudged bool
@@ -1053,6 +1075,7 @@ func (m *Manager) Stop(id string) {
 		return
 	}
 	a.stopping = true
+	cancelOperationsLocked(a, a.tokenProc)
 	if a.startCancel != nil {
 		a.startCancel()
 	}
@@ -1159,6 +1182,7 @@ func (m *Manager) StopAll() {
 		ids = append(ids, id)
 		a := m.agents[id]
 		a.retiring = true
+		cancelOperationsLocked(a, a.tokenProc)
 	}
 	m.mu.Unlock()
 	// Initializers already published their agent before leaving the manager
@@ -1263,6 +1287,7 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 			return errStopped
 		}
 		a.retiring, a.removing = true, true
+		cancelOperationsLocked(a, a.tokenProc)
 	}
 	m.mu.Unlock()
 	fail := func(err error) error {

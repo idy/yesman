@@ -94,9 +94,9 @@ var zhHans = map[string]string{
 	"coding is a percentage, at most 100":                    "编码是百分比，不能超过 100",
 
 	// The tray
-	"Open yesman":                            "打开 yesman",
-	"Quit yesman":                            "退出 yesman",
-	"yesman: %d working, %d waiting for you": "yesman：%d 个在工作，%d 个在等你",
+	"Open Yes Man": "打开 Yes Man",
+	"Quit Yes Man": "退出 Yes Man",
+	"Yes Man: %d working, %d waiting for you": "Yes Man：%d 个在工作，%d 个在等你",
 
 	// Notifications
 	"%s needs you": "%s 需要你",
@@ -113,7 +113,7 @@ var zhHans = map[string]string{
 	"View Workspace":      "查看工作区",
 	"Reveal Workspace":    "显示工作区位置",
 	"Reveal Knowledge":    "显示知识笔记位置",
-	"Reveal Task Log":     "显示任务日志位置",
+	"Reveal Working Logs": "显示工作日志位置",
 	"Reveal Session Logs": "显示会话日志位置",
 	"Stop Current Run":    "停止当前运行",
 	"Put to Sleep":        "让它休眠",
@@ -127,7 +127,7 @@ var zhHans = map[string]string{
 	"Auto Save":               "自动保存",
 	"Word Wrap":               "自动换行",
 	"Open Knowledge Notes":    "打开知识笔记",
-	"Open Task Log":           "打开任务日志",
+	"Open Working Logs":       "打开工作日志",
 	"Check Out a Repository…": "检出仓库…",
 	"Dismiss yesman…":         "解雇 yesman…",
 	"Reveal in Finder":        "在访达中显示",
@@ -136,6 +136,19 @@ var zhHans = map[string]string{
 	"Open":                    "打开",
 	"Copy Path":               "拷贝路径",
 	"Copy Relative Path":      "拷贝相对路径",
+
+	// The page's menu, as the Edit menu says them
+	"Open Link":  "打开链接",
+	"Copy Link":  "拷贝链接",
+	"Cut":        "剪切",
+	"Copy":       "拷贝",
+	"Paste":      "粘贴",
+	"Select All": "全选",
+	// Images pasted from the page's menu, as the composer says them
+	"Attach at most 4 images.":                  "最多添加 4 张图片。",
+	"This image is empty.":                      "这张图片是空文件。",
+	"Each image must be 5 MB or smaller.":       "每张图片不能超过 5 MB。",
+	"Images must be 10 MB or smaller in total.": "图片合计不能超过 10 MB。",
 
 	// Dialogs
 	"Choose a yesman folder":      "选择 yesman 文件夹",

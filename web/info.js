@@ -11,6 +11,7 @@
 import { $, h, icon } from './dom.js';
 import { counts, formatSize } from './diff.js';
 import { t, tn, formatNumber } from './i18n.js';
+import { isTaskLog } from './task-log.js';
 
 // How long each part is kept before the panel asks again by itself.
 const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
@@ -21,8 +22,12 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   isOpen()               whether the panel shows
 //   files()                what the files pane shows (files.shown())
 //   openKnowledge(), openTaskLog(), openWorktree(dir, show), checkout(y)
-//   needsYou(y)            what waits on the user from y: { count, error }
-//   openNeedsYou(y)        show what waits on the user from y
+//   openTasks(), tasksOpen(), tasksSummary(y)   the Tasks pane and its summary
+//   needsYou(y)            what waits on the user from y: { count, error,
+//                          refused, open (the Needs you pane shows) }
+//   openNeedsYou(y)        open the Needs you pane, of y, beside its conversation
+//   pane()                 the pane beside the conversation, as state.pane
+//   openTopics()           open the Topics pane beside the conversation
 //   openURL(url)
 export function createInfo(host) {
   const data = new Map(); // yesman name -> what was read of it
@@ -139,10 +144,10 @@ export function createInfo(host) {
   // ---------- Entries ----------
 
   // One card lists what of the yesman opens elsewhere, a row each, in this
-  // order: what it keeps, what it did, what waits on the user. A new part
-  // adds its row to entries.
+  // order: what it keeps, what it did, what waits on the user, and what the
+  // user discussed with it. A new part adds its row to entries.
   function entries(y, d) {
-    return [knowledgeEntry(y, d), workingLogsEntry(y), needsYouEntry(y)];
+    return [knowledgeEntry(y, d), workingLogsEntry(y), needsYouEntry(y), topicsEntry(y, d), tasksEntry(y)].filter(Boolean);
   }
 
   function entriesCard(y, d) {
@@ -171,17 +176,18 @@ export function createInfo(host) {
     const shown = host.files();
     return {
       key: 'working-logs', label: t('Working Logs'), title: t('Read task and PR history in the files pane'),
-      current: shown?.yesman === y.name && shown.path === '.yesman/task-log.md',
+      current: shown?.yesman === y.name && isTaskLog(shown.path),
       open: () => host.openTaskLog(),
     };
   }
 
-  // What waits on the user from this yesman, counted from what Needs you
-  // shows; it opens there.
+  // What waits on the user from this yesman, counted from what the Needs
+  // you pane shows; it opens the pane.
   function needsYouEntry(y) {
-    const { count, error, refused } = host.needsYou(y);
+    const { count, error, refused, open } = host.needsYou(y);
     return {
       key: 'needs-you', label: t('Needs You'), title: t('See what {name} needs from you', { name: y.displayName || y.name }),
+      current: open,
       // A file that cannot be read is said, not counted as nothing; and so
       // is a lead that cannot hand over new requests.
       aside: error ? [count && tn(count, '{n} waiting', '{n} waiting'), t('Cannot be read')].filter(Boolean).join(' · ')
@@ -190,6 +196,59 @@ export function createInfo(host) {
       tone: error || refused ? 'error' : count ? 'waiting' : null,
       open: () => host.openNeedsYou(y),
     };
+  }
+
+  // The topics worth finding again, counted from what the Info read of the
+  // topics file; it opens the Topics pane.
+  function topicsEntry(y, d) {
+    const c = d.info?.topics;
+    return {
+      key: 'topics', label: t('Topics'), title: c?.error || t('Questions and discussions worth keeping: conclusions and open questions, beside the conversation'),
+      current: host.pane() === 'topics',
+      // A file that cannot be read is said, not counted as nothing.
+      aside: !c ? '' : c.error ? t('Cannot be read') : c.open ? t('{n} open', { n: formatNumber(c.open) }) : c.resolved + c.archived ? t('Nothing open') : t('Empty'),
+      tone: c?.error ? 'error' : null,
+      open: () => host.openTopics(),
+    };
+  }
+
+  // The topics changed: their count is read again.
+  function onTopics(name) {
+    if (data.has(name)) soon(name, ['info'], 1500);
+  }
+
+  // ---------- Tasks ----------
+
+  // Tasks: the yesman's scheduled tasks, how many are on and when the next
+  // one runs, and whether a run needs a look; it opens the Tasks pane.
+  function tasksEntry(y) {
+    const s = host.tasksSummary?.(y);
+    if (!s) return null;
+    // A file that cannot be read is said, not counted as nothing.
+    const unread = !!s.error && s.total == null;
+    let text;
+    if (s.loading) text = t('Loading…');
+    else if (unread) text = t('Cannot be read');
+    else if (!s.total) text = t('None');
+    else if (!s.on) text = t('All off');
+    else text = s.next ? t('{n} on · next {when}', { n: formatNumber(s.on), when: nextWhen(s.next, s.zone) }) : t('{n} on', { n: formatNumber(s.on) });
+    const look = s.attention ? tn(s.attention, '1 run needs a look', '{n} runs need a look') : '';
+    const attention = look ? h('span', { class: 'info-attention', title: look }, icon('alert'), h('span', { class: 'mds-visually-hidden' }, look)) : null;
+    return {
+      key: 'tasks', label: t('Tasks'), title: unread ? s.error : t('Scheduled tasks: requests the lead gets at times you choose'),
+      current: !!host.tasksOpen?.(),
+      aside: [attention, text], tone: unread ? 'error' : null,
+      open: () => host.openTasks(),
+    };
+  }
+
+  // nextWhen says when the next run is, briefly: a time today, else a day.
+  function nextWhen(iso, zone) {
+    const d = new Date(iso);
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const opts = sameDay ? { hour: '2-digit', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+    return new Intl.DateTimeFormat(undefined, opts).format(d);
   }
 
   // ---------- Worktrees ----------
@@ -371,5 +430,5 @@ export function createInfo(host) {
     return (y.worktrees ?? []).map((w) => ({ ...w, dir: (w.dir ?? '').replace(/\\/g, '/') }));
   }
 
-  return { render, onChanged, onFiles, onAgentEvent, worktrees: listWorktrees };
+  return { render, onChanged, onFiles, onAgentEvent, onTopics, worktrees: listWorktrees };
 }

@@ -37,6 +37,7 @@ export const ICONS = Object.freeze({
   up: '\ue08e', // arrow-up
   x: '\ue4f6', // x
   alert: '\ue4e0', // warning
+  error: '\ue4e2', // warning-circle
   info: '\ue2ce', // info
   palette: '\ue6c8', // palette
   type: '\ue48a', // text-t
@@ -84,6 +85,13 @@ export const ICONS = Object.freeze({
   circle: '\ue18a', // circle
   record: '\ue3ee', // record
   pencil: '\ue3b4', // pencil-simple
+  clock: '\ue19a', // clock
+  play: '\ue3d0', // play
+  archive: '\ue00c', // archive
+  topics: '\ue17e', // chats-circle
+  archive: '\ue00c', // archive
+  undo: '\ue038', // arrow-counter-clockwise
+  question: '\ue3e8', // question
   keyboard: '\ue2d8', // keyboard
   chart: '\ue150', // chart-bar
 });

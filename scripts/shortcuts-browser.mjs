@@ -76,12 +76,16 @@ async function answer(m, args) {
   case 'Board': return {tasks:[]};
   case 'Crew': return {members:[],yesman:''};
   case 'Context': case 'Usage': return null;
+  // The info panel's Tasks entry: no scheduled tasks.
+  case 'Schedules': return {yesman:args[0],owner:true,plans:[],limits:{title:120,instructions:4000,minEvery:15,maxEvery:10080,history:60}};
   case 'ListFiles': return args[1] === '.' || args[1] === '' ? [{name:'main.js',path:'main.js',size:13}] : [];
   case 'ReadFile': return {path:args[1],size:fileText.length,modTime:'2026-11-14T00:00:00Z',kind:'text',text:fileText,hash:'h1'};
   case 'WriteFile': fileText = args[2]; return {path:args[1],size:args[2].length,modTime:'2026-11-14T00:00:01Z',kind:'text',text:args[2],hash:'h'+calls.length};
   case 'FilesMenu': return '';
   case 'Submit': case 'SubmitCoalescing': return {id:args[1],revision:1,state:'accepted',agentSince:''};
   case 'Shortcuts': return saved();
+  // Lead conversations read their yesman's topics, to name messages sent from one.
+  case 'Topics': return [];
   case 'SetShortcuts': {
     await hold();
     const next = saved();
@@ -220,7 +224,7 @@ async function palette(x, check) {
     reason: el.querySelector('.palette-option-reason')?.textContent ?? '', keys: [...el.querySelectorAll('.keycap')].map((k) => k.textContent),
   })));
   x.options = options;
-  assert.equal(options.length, 39); // 36 actions, one per Settings page among them, and 3 conversations
+  assert.equal(options.length, 42); // 39 actions (Topics and Tasks among them), one per Settings page among them, and 3 conversations
   for (const o of options) {
     assert.ok(o.label, o.key);
     if (o.disabled) assert.ok(o.reason, o.key);
@@ -238,6 +242,8 @@ async function palette(x, check) {
   assert.equal(option('action:agent.needs-you').disabled, false);
   assert.equal(option('item:alice/lead').reason, 'This is the conversation shown.');
   assert.deepEqual(option('action:pane.files').keys, [cap('⇧⌘E', 'Ctrl+Shift+E')]);
+  // Scheduled tasks too, from 0.1.40, with no key of its own.
+  assert.deepEqual(option('action:pane.tasks'), { ...option('action:pane.tasks'), label: 'Show or hide the scheduled tasks', disabled: false, keys: [] });
   assert.deepEqual(option('action:agent.next').keys, [cap('⌥⌘↓', 'Ctrl+PgDn')]);
   await page.keyboard.type('board');
   const first = x.palette.locator('[role="option"]').first();
@@ -249,7 +255,20 @@ async function palette(x, check) {
   await x.palette.waitFor({ state: 'hidden' });
   assert.equal(await x.boardShown(), true);
   assert.equal(await x.active(), 'Message');
-  check('38 entries, each disabled one with its reason, and an entry for every Settings page; search ranks, shows the platform keycap, runs once and gives focus back');
+  check('39 entries, each disabled one with its reason, and an entry for every Settings page; search ranks, shows the platform keycap, runs once and gives focus back');
+
+  // The scheduled tasks are found and opened there too; the board comes back.
+  await page.keyboard.press(`${MOD}+KeyK`);
+  await page.keyboard.type('scheduled');
+  assert.equal(await x.palette.locator('[role="option"]').first().locator('.palette-option-label').innerText(), 'Show or hide the scheduled tasks');
+  await page.keyboard.press('Enter');
+  await x.palette.waitFor({ state: 'hidden' });
+  await page.locator('#schedules').waitFor();
+  assert.equal(await x.boardShown(), false);
+  await page.keyboard.press(`${MOD}+Shift+KeyB`);
+  await page.locator('#schedules').waitFor({ state: 'hidden' });
+  assert.equal(await x.boardShown(), true);
+  check('the scheduled tasks are found in the palette, with no key, and open from it');
 
   // A held key repeats nothing, but stays taken.
   await page.keyboard.press(`${MOD}+Shift+KeyB`);

@@ -300,7 +300,7 @@ func TestCoalesceFallbacksWithManagedPi(t *testing.T) {
 		}
 		f.delivery(t, idB, "steering")
 		// A follow-up composer input never joins a steering occurrence.
-		if c, err := f.m.submitDelivery(ctx, f.info.ID, idC, "later", nil, "followUp", true, f.info.Since); err != nil || c.MergedInto != "" {
+		if c, err := f.m.submitDelivery(ctx, f.info.ID, idC, "later", nil, "followUp", submission{coalesce: true}, f.info.Since); err != nil || c.MergedInto != "" {
 			t.Fatalf("follow-up joined steering: %+v %v", c, err)
 		}
 		if items := f.pendingItems(); len(items) != 3 {
@@ -358,11 +358,11 @@ func TestCoalesceCancelAndPromoteFamilyWithManagedPi(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		idA, idB := deliveryTestID(88001), deliveryTestID(88002)
-		if _, err := f.m.submitDelivery(ctx, f.info.ID, idA, "follow A", nil, "followUp", true, f.info.Since); err != nil {
+		if _, err := f.m.submitDelivery(ctx, f.info.ID, idA, "follow A", nil, "followUp", submission{coalesce: true}, f.info.Since); err != nil {
 			t.Fatal(err)
 		}
 		f.delivery(t, idA, "queued")
-		if b, err := f.m.submitDelivery(ctx, f.info.ID, idB, "follow B", nil, "followUp", true, f.info.Since); err != nil || b.MergedInto != idA || b.State != "queued" {
+		if b, err := f.m.submitDelivery(ctx, f.info.ID, idB, "follow B", nil, "followUp", submission{coalesce: true}, f.info.Since); err != nil || b.MergedInto != idA || b.State != "queued" {
 			t.Fatalf("%+v %v", b, err)
 		}
 		waitFor(t, "merge recorded", func() bool { return slices.Equal(f.receipt(idA).Merged, []string{idB}) })
@@ -399,7 +399,7 @@ func TestCoalescePreparingWinsWithManagedPi(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	idA, idB := deliveryTestID(89001), deliveryTestID(89002)
-	if _, err := f.m.submitDelivery(ctx, f.info.ID, idA, "prepared A", nil, "followUp", true, f.info.Since); err != nil {
+	if _, err := f.m.submitDelivery(ctx, f.info.ID, idA, "prepared A", nil, "followUp", submission{coalesce: true}, f.info.Since); err != nil {
 		t.Fatal(err)
 	}
 	f.delivery(t, idA, "queued")

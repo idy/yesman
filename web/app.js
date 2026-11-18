@@ -5,15 +5,17 @@
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
 import { orderWorkers } from './sidebar.js';
-import { needsYouItems, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
+import { needsYouItems, requestsOf, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
 import { messageActions, messageText, receiptText } from './message-actions.js';
 import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
 import { renderMarkdown } from './markdown.js';
 import { project, originOf, FINISHED, familyOf, joinInputs } from './conversation.js';
 import { $, h, icon, openModal } from './dom.js';
 import { createFiles } from './files.js';
+import { logRoute } from './task-log.js';
 import { createInfo } from './info.js';
 import { createBoard } from './board.js';
+import { createSchedules } from './schedules.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
@@ -21,10 +23,15 @@ import { createCrew } from './crew.js';
 import { createGrants } from './grants.js';
 import { createUsagePage } from './usage.js';
 import { createEnvPage } from './env.js';
+import { createGitHubAppPage } from './github-app.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
+import { DELIVERY_LABELS, deliveryLabel, newSubmissionID, sameSubmissionImages, withoutLine } from './submission.js';
+import { createTopics } from './topics.js';
 import { detectPlatform } from './keys.js';
 import { createShortcuts } from './shortcuts.js';
+import { createContextMenu } from './contextmenu.js';
+import { editorViewOf } from './editor.js';
 import { createPalette } from './palette.js';
 import { registerActions, paletteItems } from './actions.js';
 import { createShortcutsPage } from './shortcuts-page.js';
@@ -53,8 +60,16 @@ const statusText = (status) => (STATUS[status] ? t(STATUS[status]) : status);
 // A worker's question goes to its lead, not to you: it shows as asking,
 // in the working colour, and only a lead can need you.
 const asking = (a) => a.role === 'worker' && a.status === 'waiting';
-const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: yesmanLabel(a.yesman) }) : statusText(a.status));
-const statusTone = (a) => (asking(a) ? 'asking' : a.status);
+// An agent whose last finished run ended on a model error, such as a usage
+// limit, shows it while at rest, until a later run ends otherwise. A run in
+// progress may be recovering and shows as working; a stopped run, a question
+// or a request for the user is no failure. Each agent shows its own: a
+// yesman's entry is its lead's.
+const runFailed = (a) => !!a.runError && (a.status === 'idle' || a.status === 'stopped');
+// An error's text as pi recorded it, or that it recorded none.
+const runErrorText = (text) => (text?.trim() ? text : t('The model returned an error without a message.'));
+const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: yesmanLabel(a.yesman) }) : runFailed(a) ? t('Last run ended with an error') : statusText(a.status));
+const statusTone = (a) => (asking(a) ? 'asking' : runFailed(a) ? 'error' : a.status);
 
 const state = {
   snap: { yesmen: [], agents: [] },
@@ -63,7 +78,7 @@ const state = {
   drafts: new Map(),
   attachments: new Map(),
   modelOptions: new Map(),
-  pane: null, // the pane beside the conversation: 'files', 'board' or null
+  pane: null, // the pane beside the conversation: 'files', 'board', 'needs-you', 'topics', 'tasks' or null
   hideDone: new Set(JSON.parse(localStorage.getItem('yesman.hideDone') ?? '[]')), // yesmen whose done workers are hidden
   // The info panel between the conversation and the files, open unless
   // closed, as it was last.
@@ -79,8 +94,8 @@ const state = {
   fetches: { fetching: [], errors: {} }, // Yesman.Fetches: repositories being fetched, and their last errors
   clones: [], // Yesman.Clones: repositories on their way into the pool
   update: null, // Yesman.Update: where updating yesman stands
-  // The Needs-you request being opened in its conversation: { key, agent,
-  // back (opened from the Needs you page), pending (still to be located) }.
+  // The Needs-you request being opened in its conversation, from the Needs
+  // you pane: { key, agent, pending (still to be located) }.
   request: null,
   resolving: new Set(), // keys of handoffs being closed
   resetting: new Set(), // yesmen whose request memory is being reset
@@ -102,6 +117,7 @@ class Convo {
     this.error = null;
     this.live = null; // { message }: the reply being written
     this.workOpen = new Set(); // keys of the work rows the user opened
+    this.failuresOpen = new Set(); // keys of the folded failed runs the user opened
     this.receiptsOpen = false; // the earlier submissions' row is open
     this.tools = new Map(); // toolCallId -> { args, status, result }
     this.recalled = new Set();
@@ -148,13 +164,6 @@ function pruneCaches() {
 // progress keeps streaming and none shows twice.
 const messageKey = (m) => originOf(m)?.submission ? `submission:${originOf(m).submission}` : `${m?.role}:${m?.timestamp}`;
 
-const DELIVERY_LABELS = {
-  sending: 'Sending…', accepted: 'Accepted · delivery unconfirmed',
-  steering: 'Accepted for steering · delivery unconfirmed', queued: 'Accepted for follow-up · delivery unconfirmed',
-  unconfirmed: 'Delivery unconfirmed', failed: 'Not sent', interrupted: 'Delivery interrupted',
-  handled: 'Handled by an extension', dispatched: 'Taken by pi', cancelled: 'Recalled',
-};
-const deliveryLabel = (d) => d.nativePending ? (d.preparing ? 'Preparing · being sent to pi' : d.state === 'queued' ? 'Waiting · follow-up' : 'Steering · waiting for input checkpoint') : DELIVERY_LABELS[d.state];
 
 // Only an explicit recorded submission identity can bind a receipt.
 const BOUND_DELIVERY = 'Taken by pi';
@@ -295,16 +304,30 @@ function deliveryStatus(d, bound) {
 // one message: the occurrence's row shows them all, in the same element.
 const receiptForm = (d, sent, line) => (line ? `line:${d.text ?? ''}:${d.imageCount ?? 0}` : 'bubble');
 
+// A receipt the app recorded as sent from a topic names the topic, as its
+// message will once pi takes it; its form changes when that becomes known.
+const receiptVariant = (c, d, sent, line) => `${!line && d.origin?.source === 'schedule' ? 'scheduled:' : ''}${receiptForm(d, sent, line)}:${line ? '' : topicKey(topicOfSubmission(c, d.id))}`;
+
+// What copying a topic's message copies: the person's text, without the line
+// the app sent before it.
+const ownText = (text, topic) => (topic && typeof text === 'string' ? withoutLine(text, topic.context) : text);
+
 function receiptEl(c, d, { sent, line = false, members } = {}) {
+  // A scheduled run is never shown as something a person typed.
+  if (!line && d.origin?.source === 'schedule') {
+    const el = scheduledEl({ plan: d.origin.plan, preview: d.text ? (d.preview ? `${d.text}…` : d.text) : '', delivery: d, bound: false });
+    el._variant = receiptVariant(c, d, sent, line);
+    return el;
+  }
   if (line) {
     const el = receiptLine(d);
-    el._variant = receiptForm(d, sent, line);
+    el._variant = receiptVariant(c, d, sent, line);
     return el;
   }
   const el = h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(d.state === 'sending') },
     h('div', { class: 'msg-user' }),
     h('div', { class: 'message-footer' }, deliveryStatus(d, false), h('div', { class: 'message-actions' })));
-  el._variant = receiptForm(d, sent, line);
+  el._variant = receiptVariant(c, d, sent, line);
   return updateBubble(c, el, d, { sent, members });
 }
 
@@ -328,11 +351,18 @@ function receiptContent(c, el, d, sent, members) {
 
 // The text and images of a receipt's message, as one bubble: replacing its
 // content keeps the element, and so its place, focus and what surrounds it.
-function fillBubble(el, content) {
-  const bubble = el.querySelector('.msg-user');
+// A topic's message (never more than one input) is drawn as the topic's.
+function fillBubble(el, content, topic = null) {
+  let bubble = el.querySelector('.msg-user');
   const images = content.images.filter((image) => imageURL(image));
-  bubble.replaceChildren(content.text || (content.imageCount && !images.length ? t('Attached images') : ''),
-    ...(images.length ? [h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' })))] : []));
+  if (topic) {
+    const drawn = userBubble({ role: 'user', content: [{ type: 'text', text: content.text }, ...images] }, topic);
+    bubble.replaceWith(drawn);
+    bubble = drawn;
+  } else {
+    bubble.replaceChildren(content.text || (content.imageCount && !images.length ? t('Attached images') : ''),
+      ...(images.length ? [h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' })))] : []));
+  }
   el.querySelector(':scope > .delivery-image-count')?.remove();
   if (!images.length && content.imageCount) bubble.after(imageNote(content.imageCount));
 }
@@ -342,6 +372,7 @@ function fillBubble(el, content) {
 function updateBubble(c, el, d, { sent, members = [d.id] }) {
   el._options = { sent, members };
   el.dataset.sending = String(d.state === 'sending');
+  const topic = topicOfSubmission(c, d.id);
   let content = receiptContent(c, el, d, sent, members);
   if (content.full && !sent) el.dataset.original = 'true';
   if (content.full) el._full = { members: content.members, text: content.text, images: content.images };
@@ -353,7 +384,7 @@ function updateBubble(c, el, d, { sent, members = [d.id] }) {
   if (content) {
     const sig = `${content.full}:${content.members.join(',')}:${content.text}:${content.images.length}:${content.imageCount ?? 0}`;
     if (shown?.sig !== sig) {
-      fillBubble(el, content);
+      fillBubble(el, content, topic);
       el._shown = { sig, full: content.full, members: content.members, text: content.text, images: content.images };
     }
   }
@@ -362,7 +393,7 @@ function updateBubble(c, el, d, { sent, members = [d.id] }) {
   // A receipt whose occurrence has not caught up with its appended inputs
   // keeps an older preview: only the Manager's whole message is copied then.
   const current = members.length === 1 + (d.merged?.length ?? 0);
-  const actions = copyActions(full ?? (current ? receiptText(d) : null), c, d);
+  const actions = copyActions(ownText(full ?? (current ? receiptText(d) : null), topic), c, d);
   const old = el.querySelector('.message-footer > .message-actions');
   if (old._copyText !== actions._copyText || old._recall !== actions._recall || old._state !== actions._state) {
     const focused = old.contains(document.activeElement) ? [...old.children].indexOf(document.activeElement) : -1;
@@ -429,9 +460,18 @@ function receiptLine(d) {
 // receiptEl brought up to date: a receipt changing state keeps its element
 // (and what is selected in it) unless it changes form.
 function updateReceipt(c, el, d, options = {}) {
-  if (el._variant === receiptForm(d, options.sent, options.line)) {
-    if (!options.line) return updateBubble(c, el, d, options);
-    el.querySelector('.delivery-status').replaceWith(historicalDeliveryStatus(d));
+  if (el._variant === receiptVariant(c, d, options.sent, options.line)) {
+    if (options.line) {
+      el.querySelector('.delivery-status').replaceWith(historicalDeliveryStatus(d));
+      return el;
+    }
+    if (d.origin?.source !== 'schedule') return updateBubble(c, el, d, options);
+  }
+  if (el._variant === receiptVariant(c, d, options.sent, options.line) && !d.images?.length) {
+    // A scheduled run's receipt: its plan's request, never recalled or joined.
+    el.dataset.sending = String(d.state === 'sending');
+    el.querySelector('.delivery-status').replaceWith(deliveryStatus(d, false));
+    el.querySelector('.message-actions')?.replaceWith(copyActions(options.sent?.text ?? receiptText(d), c, d));
     return el;
   }
   return receiptEl(c, d, options);
@@ -538,6 +578,17 @@ async function loadConvo(c) {
   c.queue = null;
   const a = selectedAgent();
   if (a && keyOf(a) === c.key) renderThread();
+  // The topics pane lists the lead's messages about the topic shown, live or
+  // read with the history.
+  topicsFollow(c);
+}
+
+// topicsFollow redraws the topics pane when it shows the yesman whose
+// current lead conversation c is.
+function topicsFollow(c) {
+  const a = c && agentById(c.id);
+  if (state.pane !== 'topics' || a?.role !== 'lead' || keyOf(a) !== c.key) return;
+  topics.refresh(yesmanOf(a.id));
 }
 
 const textOf = messageText;
@@ -647,8 +698,37 @@ function legacyNoteEl(text) {
   return null;
 }
 
-function userBubble(m) {
+// topicOfSubmission is the topic the app recorded a submission of
+// conversation c as sent from: { id, title, context }, or null. Only a lead's
+// conversation has them, and only the app's own record says so: what a
+// message's text says is never evidence of where it came from.
+const topicSends = new Map(); // `${yesman}@${hiredAt}/${submission}` -> topic, before the topic's record is read
+function topicOfSubmission(c, id) {
+  const a = c && agentById(c.id);
+  if (!id || a?.role !== 'lead' || `${c.id}@${a.since ?? ''}` !== c.key) return null;
+  const y = yesmanOf(a.id);
+  if (!y) return null;
+  return topics.bySubmission(y, id) ?? topicSends.get(`${y.name}@${y.hiredAt ?? ''}/${id}`) ?? null;
+}
+const topicKey = (topic) => (topic ? `${topic.id}:${topic.title}:${topic.context}` : '');
+
+function userBubble(m, topic = null) {
   const images = Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image' && imageURL(b)) : [];
+  // A message the app recorded as sent from a topic is drawn with a chip that
+  // opens the topic, and without the line it was sent with. A message whose
+  // text only looks like one is shown as it is.
+  if (topic) {
+    const a = selectedAgent();
+    const y = a && yesmanOf(a.id);
+    const text = withoutLine(textOf(m.content), topic.context);
+    const title = (y && topics.title(y, topic.id)) || topic.title;
+    return h('div', { class: 'msg-user msg-user--topic' },
+      h('button', { class: 'topic-chip', type: 'button', title: t('Open topic {id}', { id: topic.id }),
+        onclick: () => y && topics.open(y, topic.id) }, icon('topics', 'mds-icon topic-chip-mark'), h('span', null, t('Topic {id}', { id: topic.id })), h('span', { class: 'topic-chip-title' }, title)),
+      text ? h('div', { class: 'msg-user-text' }, text) : null,
+      images.length ? h('div', { class: 'message-images' }, images.map((image) =>
+        h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
+  }
   return h('div', { class: 'msg-user' }, textOf(m.content),
     images.length ? h('div', { class: 'message-images' }, images.map((image) =>
       h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
@@ -660,10 +740,38 @@ function userRowEl(row, c) {
   const images = Array.isArray(row.message.content) && row.message.content.some((b) => b?.type === 'image');
   const legacy = !row.origin && !images && legacyNoteEl(textOf(row.message.content));
   if (legacy) return legacy;
-  const bubble = userBubble(row.message);
-  if (!row.delivery) { bubble.append(copyActions(textOf(row.message.content))); return bubble; }
+  // A message the app recorded as sent from a topic (its native origin
+  // names one of the topic's submissions) shows the topic's chip.
+  const topic = row.origin?.source === 'user' ? topicOfSubmission(c, row.origin.submission) : null;
+  const bubble = userBubble(row.message, topic);
+  const text = ownText(textOf(row.message.content), topic);
+  if (!row.delivery) { bubble.append(copyActions(text)); return bubble; }
   return h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble,
-    h('div', { class: 'message-footer' }, deliveryStatus(row.delivery, true), copyActions(textOf(row.message.content))));
+    h('div', { class: 'message-footer' }, deliveryStatus(row.delivery, true), copyActions(text)));
+}
+
+// scheduledEl shows a scheduled task's run: the request the user saved in
+// Tasks, sent for them. Its origin, recorded beside the message, says so;
+// the text is never read to decide it.
+function scheduledEl({ plan, text, preview, delivery, bound }) {
+  const yesman = selectedAgent()?.yesman;
+  const label = plan ? t('Scheduled task {id}', { id: plan }) : t('Scheduled task');
+  let body = null;
+  if (text) {
+    body = h('details', { class: 'scheduled-request' }, h('summary', null, t('The request it sent')));
+    body.addEventListener('toggle', () => { if (body.open && !body.querySelector('.md')) body.append(md(text)); });
+  } else if (preview) {
+    body = h('div', { class: 'delivery-compact', title: preview }, preview.replace(/\s+/g, ' ').slice(0, 120));
+  }
+  return h('div', { class: 'note note--scheduled', 'data-delivery': delivery?.id ?? null },
+    h('div', { class: 'scheduled-head' }, icon('clock', 'mds-icon scheduled-mark'), h('strong', null, label),
+      plan && yesman ? h('button', { class: 'mds-link-button scheduled-open', type: 'button', onclick: () => schedules.open(yesman, plan) }, t('Open in Tasks')) : null),
+    body,
+    delivery ? deliveryStatus(delivery, bound) : null);
+}
+
+function scheduledRowEl(row) {
+  return scheduledEl({ plan: row.origin.plan, text: textOf(row.message.content), delivery: row.delivery, bound: true });
 }
 
 function leadRowEl(row) {
@@ -675,7 +783,7 @@ function leadRowEl(row) {
 function noteRowEl(row) {
   if (row.stopped) return h('div', { class: 'note note--quiet' }, t('Stopped.'));
   if (row.summary) return h('div', { class: 'note note--quiet' }, t('Earlier conversation was summarized to save context.'));
-  return h('div', { class: row.tone === 'error' ? 'note note--error' : 'note note--quiet' }, row.text);
+  return h('div', { class: row.tone === 'error' ? 'note note--error' : 'note note--quiet' }, row.tone === 'error' ? runErrorText(row.text) : row.text);
 }
 
 // The work row: one line saying what happened, opened to read it in order.
@@ -741,7 +849,7 @@ function patchChildren(parent, attr, entries, { make, sig, update }) {
     const s = sig(entry);
     if (el && el._kind === entry.type) {
       old.delete(entry.key);
-      if (el._sig !== s || entry.type === 'work' || entry.type === 'receipts') {
+      if (el._sig !== s || entry.type === 'work' || entry.type === 'receipts' || entry.type === 'failures' || entry.type === 'failure') {
         const fresh = update(el, entry);
         if (fresh && fresh !== el) {
           el.replaceWith(fresh);
@@ -815,24 +923,113 @@ function updateWork(c, el, row) {
   return el;
 }
 
+// Runs in a row that ended on nothing but an error: one line saying how many
+// and on what, opened to read each error in full under its count, when each
+// run failed and the work before it. It is no alert: the error is history.
+function failuresEl(c, row) {
+  const el = h('details', { class: 'failures' });
+  el.append(
+    h('summary', null, icon('error', 'mds-icon failures-mark'), h('span', { class: 'failures-label' }), h('span', { class: 'failures-facts' }), icon('chevron', 'mds-icon failures-caret')),
+    h('div', { class: 'failures-body' }));
+  el.open = c.failuresOpen.has(row.key);
+  el.addEventListener('toggle', () => {
+    if (el.open) c.failuresOpen.add(row.key);
+    else c.failuresOpen.delete(row.key);
+    if (el.open && el._row) patchFailures(c, el.lastElementChild, el._row);
+  });
+  return updateFailures(c, el, row);
+}
+
+const oneLine = (text) => text.trim().replace(/\s+/g, ' ');
+
+function updateFailures(c, el, row) {
+  const label = tn(row.runs.length, 'Ended with an error', 'Ended with an error {n} times');
+  const facts = row.errors.length === 1 ? oneLine(runErrorText(row.errors[0].text)) : tn(row.errors.length, '{n} error', '{n} different errors');
+  const summary = `${label}|${facts}`;
+  if (el._summary !== summary) {
+    el._summary = summary;
+    const s = el.firstElementChild;
+    s.children[1].textContent = label;
+    s.children[2].textContent = facts;
+    s.title = t('Runs in a row that ended on nothing but an error. Open to read each error, when it happened and the work before it.');
+  }
+  el._row = row;
+  if (el.open) patchFailures(c, el.lastElementChild, row);
+  return el;
+}
+
+function patchFailures(c, body, row) {
+  patchChildren(body, 'data-error', row.errors.map((e) => ({ type: 'failure', key: e.key, error: e })), {
+    make: (entry) => updateFailure(c, failureEl(entry.error), entry.error),
+    sig: () => '',
+    update: (el, entry) => updateFailure(c, el, entry.error),
+  });
+}
+
+const failureTime = (ms) => (ms == null ? '' : new Intl.DateTimeFormat(locale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(ms)));
+
+// One error, as pi recorded it, with the runs that ended on it.
+function failureEl(e) {
+  const copy = h('button', {
+    class: 'message-copy', type: 'button', title: t('Copy error text'), 'aria-label': t('Copy error text'),
+    onclick: async () => {
+      try {
+        await call('CopyValue', copy._text);
+        toast(t('Copied.'));
+      } catch (err) {
+        fail(err);
+      }
+    },
+  }, icon('copy'));
+  return h('div', { class: 'failure' },
+    h('div', { class: 'failure-head' }, h('span', { class: 'failure-count' }), h('span', { class: 'failure-source' }), copy),
+    h('pre', { class: 'failure-text' }),
+    h('div', { class: 'failure-runs' }));
+}
+
+function updateFailure(c, el, e) {
+  const [head, text, runs] = el.children;
+  head.children[0].textContent = tn(e.runs.length, 'Once', '{n} times');
+  head.children[1].textContent = [e.provider, ...e.models].filter(Boolean).join(' · ');
+  const said = runErrorText(e.text);
+  head.children[2]._text = said;
+  text.classList.toggle('failure-text--blank', !!e.blank);
+  if (text.textContent !== said) text.textContent = said;
+  patchChildren(runs, 'data-run', e.runs.map((run) => ({ type: 'run', key: run.key, run })), {
+    make: (entry) => h('div', { class: 'failure-run' },
+      h('time', null, failureTime(entry.run.note.failure.at)),
+      entry.run.work ? workEl(c, entry.run.work) : h('span', { class: 'failure-run-empty' }, t('No work before the error'))),
+    sig: () => '',
+    update: (el, entry) => {
+      const work = el.querySelector(':scope > .work');
+      if (work && entry.run.work) updateWork(c, work, entry.run.work);
+      return el;
+    },
+  });
+  return el;
+}
+
 function rowEl(c, row) {
   switch (row.type) {
     case 'user': return userRowEl(row, c);
     case 'lead': return leadRowEl(row);
+    case 'scheduled': return scheduledRowEl(row);
     case 'text': return h('div', { class: 'msg-assistant' }, md(row.text));
     case 'note': return noteRowEl(row);
     case 'work': return workEl(c, row);
+    case 'failures': return failuresEl(c, row);
     case 'receipt': return receiptEl(c, row.delivery, { sent: row.sent, members: row.members });
     case 'receipts': return receiptsEl(c, row);
     default: return h('div');
   }
 }
 
-function rowSig(row) {
+function rowSig(c, row) {
   switch (row.type) {
-    case 'user': return row.delivery ? `bound:${row.delivery.id}:${row.delivery.revision}` : '';
+    case 'user': return `${row.delivery ? `bound:${row.delivery.id}:${row.delivery.revision}` : ''}|${row.origin?.source === 'user' ? topicKey(topicOfSubmission(c, row.origin.submission)) : ''}`;
+    case 'scheduled': return `${row.origin.plan}:${row.delivery ? `${row.delivery.id}:${row.delivery.revision}` : ''}`;
     case 'text': return row.live ? `l:${row.text}` : 'f';
-    case 'receipt': return receiptSig(row.delivery, row.sent, row.members);
+    case 'receipt': return `${receiptSig(row.delivery, row.sent, row.members)}|${topicKey(topicOfSubmission(c, row.delivery.id))}`;
     default: return 'f';
   }
 }
@@ -858,9 +1055,10 @@ function patchThread(c) {
   if (rows.length) thread.querySelector('.thread-empty')?.remove();
   patchChildren(thread, 'data-row', rows, {
     make: (row) => rowEl(c, row),
-    sig: (row) => `${rowSig(row)}:${c.actions.has(row.delivery?.id)}`,
+    sig: (row) => `${rowSig(c, row)}:${c.actions.has(row.delivery?.id)}`,
     update: (el, row) => {
       if (row.type === 'work') return updateWork(c, el, row);
+      if (row.type === 'failures') return updateFailures(c, el, row);
       if (row.type === 'receipts') return updateReceipts(c, el, row);
       if (row.type === 'text') {
         el.firstElementChild.innerHTML = renderMarkdown(row.text);
@@ -1013,10 +1211,13 @@ function onAgentEvent(ev) {
   }
   if (e.type === 'delivery_update' || e.type === 'delivery_retained') {
     applyDeliveryReceipt(c,e,ev.seq);
+    topicsFollow(c);
     schedulePatch(c);
     return;
   }
   applyEvent(c, e, false);
+  // The topics pane lists the lead's messages about the topic shown.
+  if (e.type === 'message_end' && e.message?.role === 'user') topicsFollow(c);
 }
 
 // applyEvent updates a conversation with one record, and the thread when it
@@ -1070,6 +1271,7 @@ function applyEvent(c, e, replaying,seq = 0) {
         const after = `w:assistant:${m.timestamp ?? ''}:`;
         if (before !== after) {
           for (const key of [...c.workOpen]) if (key.startsWith(before)) { c.workOpen.delete(key); c.workOpen.add(after + key.slice(before.length)); }
+          for (const key of [...c.failuresOpen]) if (key.startsWith(`f:${before}`)) { c.failuresOpen.delete(key); c.failuresOpen.add(`f:${after}${key.slice(before.length + 2)}`); }
         }
       }
       const submission = originOf(m)?.submission;
@@ -1118,6 +1320,11 @@ function applyEvent(c, e, replaying,seq = 0) {
 // ---------- Sidebar ----------
 
 function statusDot(status) {
+  // A failure is a red exclamation mark, named for those who cannot see it.
+  if (status === 'error' || status === 'failed') {
+    const label = status === 'error' ? t('Last run ended with an error') : t('Stopped unexpectedly');
+    return h('span', { class: 'dot-wrap', 'data-status': status, role: 'img', 'aria-label': label, title: label }, icon('error', 'mds-icon status-error-mark'));
+  }
   return h('span', { class: 'dot-wrap', 'data-status': status }, h('i', { class: 'mds-dot', 'aria-hidden': 'true' }));
 }
 
@@ -1138,14 +1345,17 @@ function agentRow(a, cls, label) {
     ? h('span', { class: 'meta', 'data-since': a.runStartedAt, title: t('How long this run has gone on') }, elapsed(a.runStartedAt))
     : h('span', { class: 'meta' }, a.status === 'idle' || a.status === 'stopped' || a.status === 'working' ? '' : asking(a) ? t('Asking') : statusText(a.status));
   const worker = cls.includes('agent-row--worker');
-  const done = worker && a.finishedAt;
+  // A worker that finished on an error shows the error, not a check.
+  const done = worker && a.finishedAt && !runFailed(a);
   let status = done ? t('Done') : statusLabel(a);
   if (worker && a.status === 'failed') status = t('{status}; {name} was told', { status, name: yesmanLabel(a.yesman) });
+  // While a later run is going, the error it may recover from stays in the tooltip.
+  const lastError = a.runError ? `\n${runFailed(a) ? '' : `${t('The last run ended with an error')}: `}${runErrorText(a.runError.message)}` : '';
   return h('button', {
     class: `agent-row ${cls}`, type: 'button', 'data-agent': a.id, 'data-status': statusTone(a), 'data-done': done ? 'true' : null,
     'data-sidebar-entry': worker ? 'worker' : cls.includes('agent-row--yesman') ? 'yesman' : 'needs-you',
     'aria-current': current ? 'page' : null, 'aria-haspopup': 'menu',
-    title: `${a.id}: ${status}${a.title ? `\n${a.title}` : ''}${a.detail ? `\n${a.detail}` : ''}`,
+    title: `${a.id}: ${status}${a.title ? `\n${a.title}` : ''}${a.detail ? `\n${a.detail}` : ''}${lastError}`,
     onclick: () => selectAgent(a.id),
     oncontextmenu: (e) => openAgentMenu(e, a),
     onkeydown: (e) => {
@@ -1213,17 +1423,11 @@ async function openAgentMenu(e, a) {
 // hidden/removed worker. Keep focus unchanged when the workspace is gone.
 function restoreSidebarFocus(row) {
   const list = $('#yesmen');
-  if (row?.dataset.sidebarEntry === 'needs-you-page') {
-    list.querySelector('[data-sidebar-entry="needs-you-page"]')?.focus({ preventScroll: true });
-    return;
-  }
   if (!row?.dataset.agent) return;
   const agent = `[data-agent="${CSS.escape(row.dataset.agent)}"]`;
   const entry = `[data-sidebar-entry="${CSS.escape(row.dataset.sidebarEntry)}"]`;
   const lead = `${row.dataset.agent.split('/')[0]}/lead`;
-  // A Needs-you request keeps its row while it is open, by its own key.
-  const request = row.dataset.request ? list.querySelector(`[data-request="${CSS.escape(row.dataset.request)}"]`) : null;
-  const target = request ?? list.querySelector(agent + entry) ?? list.querySelector(agent)
+  const target = list.querySelector(agent + entry) ?? list.querySelector(agent)
     ?? list.querySelector(`[data-agent="${CSS.escape(lead)}"][data-sidebar-entry="yesman"]`);
   target?.focus({ preventScroll: true });
 }
@@ -1232,14 +1436,8 @@ function renderSidebar() {
   const list = $('#yesmen');
   const focusedRow = list.contains(document.activeElement) ? document.activeElement : null;
   list.replaceChildren();
-  // What waits on you, from every yesman: always there, with its count.
-  const items = needsYouItems(state.snap);
-  list.append(needsYouEntry(items));
-  for (const item of items.slice(0, SIDE_REQUESTS)) list.append(needsYouRow(item));
-  if (items.length > SIDE_REQUESTS) {
-    list.append(h('button', { class: 'needs-you-more', type: 'button', onclick: () => showNeedsYou() },
-      t('{n} more', { n: formatNumber(items.length - SIDE_REQUESTS) })));
-  }
+  // What waits on you shows by yesman, in the Needs you pane beside its
+  // conversation, never gathered here.
   list.append(h('div', { class: 'side-group' }, h('span', null, t('Yesmen')),
     h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: shortcuts.hint(t('Hire a yesman'), 'yesman.hire'), 'aria-label': t('Hire a yesman'),
       'aria-keyshortcuts': shortcuts.aria('yesman.hire'), onclick: openHire }, icon('plus'))));
@@ -1268,12 +1466,16 @@ function renderSidebar() {
 
 // ---------- Needs you ----------
 
-const SIDE_REQUESTS = 5;
+// Needs you is a pane beside the conversation, in the place of the board and
+// the files: what the yesman shown waits on the user for, for its current
+// hire only. A request opens where it was asked; opening it closes nothing:
+// answering it there, or marking it done or not needed, does.
+
 const REQUEST_ICONS = {
   confirm: 'check', select: 'listChecks', input: 'pencil', editor: 'pencil',
   decision: 'listChecks', login: 'lock', install: 'package', manual: 'info',
 };
-const requestIcon = (item) => icon(REQUEST_ICONS[item.type] ?? 'bell', 'mds-icon');
+const requestIcon = (item, cls = 'mds-icon') => icon(REQUEST_ICONS[item.type] ?? 'bell', cls);
 const RESOLUTIONS = { done: 'Marked done', 'not-needed': 'Marked not needed', resolved: 'Resolved by the lead' };
 
 // Where a request comes from: the yesman, and for a worker its number and
@@ -1287,111 +1489,163 @@ function requestFrom(item) {
 
 const requestWhat = (item) => item.title || t(typeLabel(item));
 
-function needsYouEntry(items) {
-  const n = items.length;
-  const label = n ? t('Needs You: {n} waiting', { n: formatNumber(n) }) : t('Needs You: nothing waiting');
-  return h('button', {
-    class: 'mds-nav-item needs-you-entry', type: 'button', 'data-sidebar-entry': 'needs-you-page', 'data-count': String(n),
-    'aria-current': state.view.kind === 'needs-you' ? 'page' : null, 'aria-label': label, title: label,
-    onclick: () => showNeedsYou(),
-  }, icon('bell'), h('span', { class: 'needs-you-label' }, t('Needs You')),
-  n ? h('span', { class: 'needs-you-count', 'aria-hidden': 'true' }, formatNumber(n)) : null);
-}
-
-// A request in the sidebar: where it is from, and what it asks.
-function needsYouRow(item) {
+// requestSource is the badge of who in the yesman asks: its lead, or a
+// worker by its number.
+function requestSource(item) {
+  if (item.role === 'lead') return t('Lead');
   const a = agentById(item.agent);
-  const current = state.view.kind === 'agent' && state.view.id === item.agent;
-  return h('button', {
-    class: 'agent-row needs-you-row', type: 'button', 'data-agent': item.agent, 'data-sidebar-entry': 'needs-you',
-    'data-request': item.key, 'data-status': 'waiting', 'aria-current': current ? 'page' : null, 'aria-haspopup': 'menu',
-    title: `${requestFrom(item)}: ${requestWhat(item)} (${t(typeLabel(item))})`,
-    onclick: () => openRequest(item),
-    oncontextmenu: (e) => { if (a) openAgentMenu(e, a); },
-    onkeydown: (e) => {
-      if (a && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) openAgentMenu(e, a);
-    },
-  }, statusDot('waiting'), h('span', { class: 'name' }, requestFrom(item)),
-  h('span', { class: 'meta' }, t(typeLabel(item))), h('span', { class: 'needs-you-what' }, requestWhat(item)));
+  return a ? workerNumber(a) : item.agent.split('/')[1];
 }
 
-// showNeedsYou shows what waits on the user: from every yesman, or, with a
-// scope, from one ({ yesman, hiredAt }), opened from where (from, an agent's
-// conversation to go back to).
-function showNeedsYou(focusKey = null, scope = null) {
-  state.view = scope?.yesman ? { kind: 'needs-you', yesman: scope.yesman, hiredAt: scope.hiredAt ?? '', from: scope.from ?? null } : { kind: 'needs-you' };
-  state.request = null;
-  render();
-  // The sidebar's entry keeps focus; going back to a request, or opening
-  // one yesman's, moves it to the page.
-  if (focusKey || scope?.yesman) ((focusKey && $(`#body [data-request="${CSS.escape(focusKey)}"]`)) || $('#body .needs-you-page h1'))?.focus();
+// What waits on the user from y, for its current hire (needsyou.js).
+const needsYouOf = (y) => requestsOf(state.snap, y);
+
+// The yesman the pane shows: the one whose conversation is shown. y is null
+// when its workspace cannot be read; the pane says so, never that nothing
+// waits.
+function needsYouShown() {
+  const a = state.pane === 'needs-you' ? selectedAgent() : null;
+  return a ? { name: a.yesman, y: yesmanOf(a.id) ?? null } : null;
 }
 
-// The yesman Needs you shows, while it is still the one it was opened for.
+// needsYouScope names the yesman and the hire the pane shows, or null.
 function needsYouScope() {
-  const v = state.view;
-  if (v.kind !== 'needs-you' || !v.yesman) return null;
-  const y = state.snap.yesmen.find((y) => y.name === v.yesman);
-  return y && (y.hiredAt ?? '') === v.hiredAt ? y : null;
+  const s = needsYouShown();
+  return s ? JSON.stringify([s.name, s.y ? s.y.hiredAt ?? '' : null]) : null;
+}
+
+let needsYouHistoryOpen = false;
+
+// showNeedsYou opens the pane for the yesman shown, and puts focus on the
+// request named or on the pane's heading. Outside a conversation there is no
+// yesman to show it for.
+function showNeedsYou(focusKey = null) {
+  if (!selectedAgent()) return false;
+  if (state.pane !== 'needs-you') setPane('needs-you');
+  const aside = $('#needs-you');
+  ((focusKey && aside.querySelector(`[data-request="${CSS.escape(focusKey)}"]`)) || aside.querySelector('.needs-you-heading'))?.focus({ preventScroll: true });
+  return true;
+}
+
+// closeNeedsYou closes the pane and gives focus back to what opens it: the
+// info panel's row, or the message box.
+function closeNeedsYou() {
+  setPane(null);
+  const row = $('#yesman-info [data-info-entry="needs-you"]');
+  (row?.getClientRects().length ? row : $('#dock textarea'))?.focus({ preventScroll: true });
 }
 
 // Open a request where it was asked: its agent's conversation, with the
 // request found and focused there.
-function openRequest(item, back = state.view.kind === 'needs-you' ? { yesman: state.view.yesman, hiredAt: state.view.hiredAt, from: state.view.from } : null) {
+function openRequest(item) {
   if (!agentById(item.agent)) {
     toast(t('This request is no longer open.'));
     refreshSoon();
     return;
   }
-  state.request = { key: item.key, agent: item.agent, back, pending: true };
+  state.request = { key: item.key, agent: item.agent, pending: true };
   selectAgent(item.agent);
 }
 
-function renderNeedsYou(body) {
-  const v = state.view;
+function renderNeedsYouPane() {
+  const aside = $('#needs-you');
+  const shown = needsYouShown();
+  aside.hidden = !shown;
+  aside.setAttribute('aria-label', t('Needs You'));
+  document.documentElement.dataset.needsYou = shown ? 'open' : 'closed';
+  if (!shown) {
+    aside.replaceChildren();
+    delete aside.dataset.scope;
+    return;
+  }
+  const { name, y } = shown;
   const scope = needsYouScope();
-  const inScope = (name) => !scope || name === scope.name;
-  const items = needsYouItems(state.snap).filter((item) => inScope(item.yesman));
-  // The page names what it shows (view, opener, and the hire it is for), so
-  // that a redraw puts focus back on a control only where it was.
-  const inner = h('div', { class: 'page-inner needs-you-page', 'data-page': JSON.stringify([v.yesman ?? '', v.hiredAt ?? '', scope?.hiredAt ?? null, v.from ?? '']) },
-    h('h1', { class: 'mds-title', tabindex: '-1' }, t('Needs You')),
-    h('p', { class: 'needs-you-intro' }, t('What your yesmen handed to you: their questions only you can answer, decisions, and steps only you can take. Open one to handle it in its conversation.')));
-  if (v.yesman) {
-    // Opened for one yesman: say which, or that it is gone, and offer all.
-    const from = v.from && agentById(v.from);
-    inner.append(h('div', { class: 'needs-you-scope', role: 'status' },
-      h('span', null, scope ? t('From {name} only', { name: yesmanLabel(scope.name) }) : t('{name} is no longer here; showing every yesman.', { name: v.yesman })),
-      scope ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-needs-you-nav': 'all', onclick: () => showNeedsYou() }, t('Show every yesman')) : null,
-      from ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-needs-you-nav': 'back', onclick: () => backToConversation(from.id) },
-        icon('arrowLeft'), t('Back to the conversation')) : null));
-  }
-  for (const y of state.snap.yesmen) {
-    if (!inScope(y.name)) continue;
-    if (y.handoffsError) {
-      inner.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
-        h('strong', null, t('What {name} handed to you cannot be read', { name: y.displayName || y.name })), h('p', null, y.handoffsError))));
-    }
-    const memory = callMemoryNotice(y);
-    if (memory) inner.append(memory);
-  }
-  if (!items.length) {
-    inner.append(h('div', { class: 'needs-you-empty', role: 'status' }, icon('check', 'mds-icon'),
-      h('p', null, scope ? t('Nothing from {name} needs you right now.', { name: yesmanLabel(scope.name) }) : t('Nothing needs you right now.')),
-      h('p', { class: 'needs-you-hint' }, t('When a yesman needs your answer, a decision or a step only you can take, it shows here.'))));
+  const same = aside.dataset.scope === scope;
+  // What had focus, to give back after the redraw: the request (or the one
+  // now in its place), the request memory, the history, the close button or
+  // the heading. A control gone with another yesman or hire leaves focus on
+  // the heading; focus outside the pane stays where it is.
+  const active = aside.contains(document.activeElement) ? document.activeElement : null;
+  const rows = [...aside.querySelectorAll('[data-request]')];
+  const at = rows.indexOf(active?.closest('[data-request]'));
+  const key = active?.closest('[data-request]')?.dataset.request;
+  const memory = active?.closest('[data-memory]') ? 'memory' : null;
+  const control = memory ?? active?.closest('[data-pane-control]')?.dataset.paneControl;
+  const scroll = same ? $('.board-body', aside)?.scrollTop ?? 0 : 0;
+
+  const label = yesmanLabel(name);
+  const items = y ? needsYouOf(y) : [];
+  const body = h('div', { class: 'board-body needs-you-body' });
+  if (!y) {
+    body.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+      h('strong', null, t('What {name} needs from you cannot be read', { name: label })),
+      h('p', null, t('Its workspace is unavailable; the sidebar says why.')))));
   } else {
-    inner.append(h('ul', { class: 'needs-you-list', 'aria-label': t('Waiting for you') }, items.map((item) => h('li', null, requestCard(item)))));
+    if (y.handoffsError) {
+      body.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+        h('strong', null, t('What {name} handed to you cannot be read', { name: label })), h('p', null, y.handoffsError))));
+    }
+    const notice = callMemoryNotice(y);
+    if (notice) body.append(notice);
+    if (items.length) {
+      body.append(h('ol', { class: 'board-list needs-you-list', 'aria-label': t('Waiting for you') }, items.map(needsYouPaneRow)));
+    } else if (!y.handoffsError) {
+      body.append(h('div', { class: 'board-empty needs-you-empty', role: 'status' },
+        h('strong', null, t('Nothing from {name} needs you right now.', { name: label })),
+        h('p', null, t('When a yesman needs your answer, a decision or a step only you can take, it shows here.'))));
+    }
+    const closed = closedHandoffs(state.snap, 20, y.name);
+    if (closed.length) {
+      const history = h('details', { class: 'board-done needs-you-history', open: needsYouHistoryOpen, 'data-pane-control': 'history' },
+        h('summary', null, icon('chevron', 'mds-icon board-fold'), t('Recently handled ({n})', { n: formatNumber(closed.length) })),
+        h('ul', null, closed.map(({ handoff }) => h('li', null,
+          h('span', { class: 'needs-you-history-title' }, handoff.title),
+          h('span', { class: 'needs-you-history-meta' },
+            `${t(RESOLUTIONS[handoff.resolution] ?? 'Closed')} · ${t('{time} ago', { time: elapsed(handoff.closedAt) })}`)))));
+      history.addEventListener('toggle', () => { needsYouHistoryOpen = history.open; });
+      body.append(history);
+    }
   }
-  const closed = closedHandoffs(state.snap, 20, scope?.name);
-  if (closed.length) {
-    inner.append(h('details', { class: 'needs-you-history' },
-      h('summary', null, t('Recently handled ({n})', { n: formatNumber(closed.length) })),
-      h('ul', null, closed.map(({ yesman, handoff }) => h('li', null,
-        h('span', { class: 'needs-you-history-title' }, handoff.title),
-        h('span', { class: 'needs-you-history-meta' },
-          `${yesmanLabel(yesman)} · ${t(RESOLUTIONS[handoff.resolution] ?? 'Closed')} · ${t('{time} ago', { time: elapsed(handoff.closedAt) })}`))))));
-  }
-  body.append(h('div', { class: 'page' }, inner));
+  const count = items.length ? tn(items.length, '{n} waiting', '{n} waiting') : '';
+  aside.replaceChildren(
+    h('div', { class: 'files-head drag' },
+      h('h2', { class: 'files-title needs-you-heading', tabindex: '-1' }, t('Needs You')),
+      count ? h('span', { class: 'board-count', 'data-tone': 'waiting' }, count) : null,
+      h('div', { class: 'files-head-actions' },
+        h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-pane-control': 'close', title: t('Close Needs You'), 'aria-label': t('Close Needs You'), onclick: closeNeedsYou }, icon('x')))),
+    body);
+  aside.dataset.scope = scope;
+  body.scrollTop = scroll;
+  if (!active) return;
+  let target = null;
+  if (same && key) {
+    const now = [...aside.querySelectorAll('[data-request]')];
+    target = now.find((el) => el.dataset.request === key) ?? (now.length ? now[Math.min(at, now.length - 1)] : null);
+  } else if (same && control === 'memory') target = aside.querySelector('[data-memory] button');
+  else if (same && control === 'history') target = aside.querySelector('[data-pane-control="history"] > summary');
+  else if (control === 'close') target = aside.querySelector('[data-pane-control="close"]');
+  (target ?? aside.querySelector('.needs-you-heading'))?.focus({ preventScroll: true });
+}
+
+// A request in the pane, as a task on the board: what it asks, a line of its
+// text, its kind and how long it has waited, and who asks.
+function needsYouPaneRow(item) {
+  const text = requestSummary(item.summary);
+  const opened = state.request?.key === item.key && state.view.kind === 'agent' && state.view.id === item.agent;
+  return h('li', { class: 'board-task needs-you-item', 'data-type': item.type, 'data-kind': item.kind },
+    h('button', {
+      class: 'board-toggle needs-you-open', type: 'button', 'data-request': item.key, 'aria-current': opened ? 'true' : null,
+      title: `${requestFrom(item)}: ${requestWhat(item)} (${t(typeLabel(item))})`,
+      onclick: () => openRequest(item),
+    }, requestIcon(item, 'mds-icon board-mark'),
+    h('span', { class: 'needs-you-item-text' },
+      h('span', { class: 'board-title' }, requestWhat(item)),
+      text ? h('span', { class: 'needs-you-item-summary' }, text) : null,
+      h('span', { class: 'needs-you-item-meta' },
+        h('span', null, t(typeLabel(item))),
+        item.since ? h('span', null, t('Waiting'), ' ', h('span', { 'data-elapsed': item.since }, elapsed(item.since))) : null,
+        item.timeout ? h('span', null, t('Goes on without you after {time}', { time: span(Math.round(item.timeout / 1000)) })) : null))),
+    h('span', { class: 'board-owner needs-you-source', title: requestFrom(item) }, requestSource(item)));
 }
 
 // What a yesman's memory of its lead's tool calls means for the user, when
@@ -1415,7 +1669,8 @@ function callMemoryNotice(y) {
     h('div', null,
       h('strong', null, t(text.title, { name })),
       h('p', null, t(text.body, { used: formatNumber(m.used), capacity: formatNumber(m.capacity) }))),
-    h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: busy, onclick: () => resetCallMemory(y, m) }, t('Start a new memory…')));
+    // Busy, it keeps focus, so that focus stays in the pane while it resets.
+    h('button', { class: 'mds-button mds-button--small', type: 'button', 'aria-disabled': busy ? 'true' : null, onclick: () => resetCallMemory(y, m) }, t('Start a new memory…')));
 }
 
 async function resetCallMemory(y, m) {
@@ -1428,9 +1683,12 @@ async function resetCallMemory(y, m) {
     t('Requests waiting for you, recently handled ones and the latest tool calls stay.'),
     t('A request handled long ago may show up once more if its lead repeats an old tool call; it is remembered again then. A later reset can let it back once more.')].join(' ');
   if (!(await confirmAction(t('Start a new request memory for {name}?', { name }), body, t('Start a new memory')))) return;
-  // Where the reset was asked: focus goes back there only if the user is
-  // still on that page and has not put it on something else meanwhile.
-  const asked = needsYouPageKey();
+  // Where the reset was asked: focus goes back there only if the pane still
+  // shows that yesman and hire, and the user has not put it on something
+  // else meanwhile. A closed confirmation can keep focus (WebKit): it goes
+  // back on the button now, before the conversation is drawn again.
+  const asked = JSON.stringify([y.name, y.hiredAt ?? '']);
+  if (needsYouScope() === asked && focusIsFree(y.name)) $(`#needs-you [data-memory="${CSS.escape(y.name)}"] button`)?.focus({ preventScroll: true });
   state.resetting.add(y.name);
   render();
   try {
@@ -1441,39 +1699,19 @@ async function resetCallMemory(y, m) {
   } finally {
     state.resetting.delete(y.name);
     await refreshState();
-    if (asked && needsYouPageKey() === asked && focusIsFree(y.name)) {
-      const same = state.snap.yesmen.some((v) => v.name === y.name && (v.hiredAt ?? '') === (y.hiredAt ?? ''));
-      ((same && $(`#body [data-memory="${CSS.escape(y.name)}"] button`)) || $('#body .needs-you-page h1'))?.focus();
+    if (needsYouScope() === asked && focusIsFree(y.name)) {
+      ($(`#needs-you [data-memory="${CSS.escape(y.name)}"] button`) || $('#needs-you .needs-you-heading'))?.focus();
     }
   }
 }
 
-// needsYouPageKey names the Needs you page shown: every yesman's, or one's
-// (by name and hire); null when another view is shown.
-function needsYouPageKey() {
-  const v = state.view;
-  return v.kind === 'needs-you' ? JSON.stringify([v.yesman ?? '', v.hiredAt ?? '']) : null;
-}
-
 // focusIsFree reports whether focus is on nothing the user chose: nowhere,
 // left in a closed dialog (WebKit keeps it on the confirmation a click
-// closed), the page's heading, or this yesman's request memory.
+// closed), the pane's heading, or this yesman's request memory.
 function focusIsFree(name) {
   const a = document.activeElement;
   const dialog = a?.closest('dialog');
-  return !a || a === document.body || (dialog && !dialog.open) || a.matches('.needs-you-page h1') || !!a.closest(`#body [data-memory="${CSS.escape(name)}"]`);
-}
-
-function requestCard(item) {
-  const text = requestSummary(item.summary);
-  return h('button', { class: 'needs-you-card', type: 'button', 'data-request': item.key, 'data-type': item.type, onclick: () => openRequest(item) },
-    h('span', { class: 'needs-you-type' }, requestIcon(item), t(typeLabel(item))),
-    h('span', { class: 'needs-you-title' }, requestWhat(item)),
-    text ? h('span', { class: 'needs-you-summary' }, text) : null,
-    h('span', { class: 'needs-you-meta' },
-      h('span', null, t('From {from}', { from: requestFrom(item) })),
-      item.since ? h('span', null, t('Waiting'), ' ', h('span', { 'data-elapsed': item.since }, elapsed(item.since))) : null,
-      item.timeout ? h('span', null, t('Goes on without you after {time}', { time: span(Math.round(item.timeout / 1000)) })) : null));
+  return !a || a === document.body || (dialog && !dialog.open) || a.matches('#needs-you .needs-you-heading') || !!a.closest(`#needs-you [data-memory="${CSS.escape(name)}"]`);
 }
 
 // The handoffs of a lead's yesman, in its conversation, the one being opened
@@ -1488,7 +1726,7 @@ function handoffEls(a) {
   if (focus && !shown.includes(focus)) shown = [focus, ...shown.slice(0, 2)];
   const els = shown.map((item) => handoffEl(a, y, item));
   if (items.length > shown.length) {
-    els.push(h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-more', type: 'button', onclick: () => showNeedsYou() },
+    els.push(h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-more', type: 'button', onclick: () => showNeedsYou(items.find((item) => !shown.includes(item))?.key) },
       t('{n} more under Needs You', { n: formatNumber(items.length - shown.length) })));
   }
   return els;
@@ -1543,33 +1781,36 @@ function locateRequest(dock, a) {
       r.pending = false;
       dock.prepend(h('div', { class: 'mds-notice needs-you-gone', role: 'status' }, h('div', null,
         h('p', null, t('This request is no longer open: it was answered, cancelled or timed out.')),
-        r.back ? backToNeedsYou(r.key, r.back) : null)));
+        backToNeedsYou(r.key))));
     }
     return;
   }
   target.classList.add('needs-you-target');
-  if (r.back) target.append(backToNeedsYou(r.key, r.back));
+  target.append(backToNeedsYou(r.key));
   if (!r.pending) return;
   r.pending = false;
   target.scrollIntoView({ block: 'nearest' });
   target.querySelector('input, textarea, button')?.focus({ preventScroll: true });
 }
 
-const backToNeedsYou = (key, scope) => h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-back', type: 'button', onclick: () => showNeedsYou(key, scope) },
+// Back to the request in the Needs you pane, opening it if it was closed.
+const backToNeedsYou = (key) => h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-back', type: 'button', onclick: () => showNeedsYou(key) },
   icon('arrowLeft'), t('Back to Needs You'));
-
-// backToConversation goes back to the conversation Needs you was opened
-// from, to the entry that opened it when the info panel shows.
-function backToConversation(id) {
-  selectAgent(id);
-  $('#yesman-info [data-info-entry="needs-you"]')?.focus();
-}
 
 // showToolCall finds the lead's tool call that registered a handoff in the
 // folded work log of its conversation, when the loaded history has it.
 async function showToolCall(a, id) {
   const c = convo(a);
-  const find = () => project(c, a).find((r) => r.type === 'work' && r.items.some((item) => item.type === 'tool' && item.block?.id === id));
+  // The call's work row may be one of the failed runs folded together.
+  const has = (r) => r?.type === 'work' && r.items.some((item) => item.type === 'tool' && item.block?.id === id);
+  const find = () => {
+    for (const r of project(c, a)) {
+      if (has(r)) return { row: r, work: r };
+      const run = r.type === 'failures' ? r.runs.find((x) => has(x.work)) : null;
+      if (run) return { row: r, work: run.work };
+    }
+    return null;
+  };
   if (c.loading) await c.loading.catch(() => {});
   // A window can hold an older copy of the history: read it again once.
   if (!find() && !c.loading) {
@@ -1577,17 +1818,23 @@ async function showToolCall(a, id) {
     await c.loading;
   }
   if (selectedAgent()?.id !== a.id) return;
-  const row = find();
-  const rowEl = row && $(`#thread [data-row="${CSS.escape(row.key)}"]`);
+  const found = find();
+  const open = async (el) => {
+    if (el.open) return;
+    const opened = new Promise((resolve) => el.addEventListener('toggle', resolve, { once: true }));
+    el.open = true;
+    await opened;
+  };
+  let rowEl = found && $(`#thread [data-row="${CSS.escape(found.row.key)}"]`);
+  if (rowEl && found.work !== found.row) {
+    await open(rowEl);
+    rowEl = rowEl.querySelector(`[data-run="${CSS.escape(found.work.key)}"] > .work`);
+  }
   if (!rowEl) {
     toast(t('Where it was asked is not in the loaded conversation.'));
     return;
   }
-  if (!rowEl.open) {
-    const opened = new Promise((resolve) => rowEl.addEventListener('toggle', resolve, { once: true }));
-    rowEl.open = true;
-    await opened;
-  }
+  await open(rowEl);
   const el = rowEl.querySelector(`[data-tool="${CSS.escape(id)}"]`);
   if (!el) {
     toast(t('Where it was asked is not in the loaded conversation.'));
@@ -1617,8 +1864,6 @@ function renderBar() {
   if (state.view.kind === 'settings') {
     const page = SETTINGS.find((s) => s.page === state.view.page);
     crumbs.replaceChildren(h('span', null, t('Settings')), sep(), h('span', { 'aria-current': 'page' }, t(page.label)));
-  } else if (state.view.kind === 'needs-you') {
-    crumbs.replaceChildren(h('span', { 'aria-current': 'page' }, t('Needs You')));
   } else if (a) {
     const y = yesmanOf(a.id);
     const here = h('span', { 'aria-current': 'page', title: y?.path ?? '' }, a.role === 'lead' ? yesmanLabel(a.yesman) : a.name);
@@ -1644,6 +1889,7 @@ function renderBarActions() {
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
     a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }, 'pane.info') : null,
     a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }, 'pane.board') : null,
+    a ? button('topics', state.pane === 'topics' ? t('Hide the topics') : t('Show the topics'), () => togglePane('topics'), { 'aria-pressed': String(state.pane === 'topics') }, 'pane.topics') : null,
     a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }, 'pane.files') : null,
   ].filter(Boolean));
 }
@@ -1841,10 +2087,6 @@ function renderBody() {
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
   const held = requestFocus($('#dock'));
-  const cards = [...body.querySelectorAll('.needs-you-card')];
-  const cardAt = cards.indexOf(active?.closest?.('.needs-you-card'));
-  const nav = active?.closest?.('[data-needs-you-nav]')?.dataset.needsYouNav;
-  const page = active?.closest?.('.needs-you-page')?.dataset.page;
   contextViewer.close();
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
@@ -1856,29 +2098,6 @@ function renderBody() {
       again.focus();
       if (['INPUT', 'TEXTAREA'].includes(again.tagName) && again.type !== 'password') again.setSelectionRange(active.selectionStart, active.selectionEnd);
     }
-    return;
-  }
-  if (state.view.kind === 'needs-you') {
-    renderNeedsYou(body);
-    // A refresh keeps focus on the request it was on, or, when that one is
-    // gone, on the one now in its place, or the page's heading; and on a
-    // yesman's request memory, or the heading once it is gone; and on the
-    // page's own Show every yesman or Back to the conversation while the page
-    // is still the one it was (the same view, opener and hire), or else, the
-    // control gone with it, the heading.
-    const key = active?.closest?.('[data-request]')?.dataset.request;
-    const again = key && body.querySelector(`[data-request="${CSS.escape(key)}"]`);
-    const memory = active?.closest?.('[data-memory]')?.dataset.memory;
-    if (again) again.focus();
-    else if (cardAt >= 0) {
-      const now = body.querySelectorAll('.needs-you-card');
-      (now[Math.min(cardAt, now.length - 1)] ?? body.querySelector('.needs-you-page h1'))?.focus();
-    } else if (memory !== undefined) {
-      (body.querySelector(`[data-memory="${CSS.escape(memory)}"] button`) ?? body.querySelector('.needs-you-page h1'))?.focus();
-    } else if (nav !== undefined) {
-      const same = page === body.querySelector('.needs-you-page')?.dataset.page;
-      ((same && body.querySelector(`[data-needs-you-nav="${CSS.escape(nav)}"]`)) || body.querySelector('.needs-you-page h1'))?.focus();
-    } else if (active?.matches?.('.needs-you-page h1')) body.querySelector('.needs-you-page h1')?.focus();
     return;
   }
   const a = selectedAgent();
@@ -1911,6 +2130,9 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   const a = selectedAgent();
   const keep = dock?.querySelector('textarea');
   const focused = keep && document.activeElement === keep;
+  // Focus on the Needs you pane beside stays there when the conversation is
+  // drawn again; opening a request from it moves focus to the request.
+  const beside = !!document.activeElement?.closest?.('#needs-you');
   const actionFocused = dock?.querySelector('.composer-action') === document.activeElement;
   const caret = focused ? [keep.selectionStart, keep.selectionEnd, keep.selectionDirection] : null;
   const control = dock?.contains(document.activeElement) && document.activeElement.getAttribute('role') === 'combobox'
@@ -1973,7 +2195,7 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   const textarea = h('textarea', {
     // Read-only keeps the caret/focus while RPC acceptance is pending. A
     // disabled textarea would drop focus to BODY before the next render.
-    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending || attachments.recalling,
+    rows: 1, 'aria-label': t('Message'), readonly: attachments.sending || attachments.recalling, 'data-paste-images': true,
     title: working ? t('Enter to send after the current step; Shift+Enter for a new line') : '',
     placeholder: a.role === 'lead' ? t('Message {name}…', { name: yesmanLabel(a.yesman) }) : t('Message worker {name}…', { name: a.name }),
   });
@@ -2025,7 +2247,7 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   const nextControl = composerSelects.find((select) => select.trigger.getAttribute('aria-label') === control);
   if (nextControl && !nextControl.trigger.disabled) nextControl.trigger.focus({ preventScroll: true });
   else if (actionFocused && !focusComposer && !action.disabled) action.focus({ preventScroll: true });
-  else if (focusComposer || focused || actionFocused || !keep) {
+  else if (focusComposer || focused || actionFocused || (!keep && !beside)) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
   }
@@ -2076,9 +2298,6 @@ function letGo(c) {
   for (const id of [...c.sent.keys()]) if (id !== c.lastSent && canReleaseSent(c.deliveries.get(id))) c.sent.delete(id);
 }
 
-const sameSubmissionImages = (left, right) => left.length === right.length && left.every((image, i) =>
-  image.type === right[i].type && image.mimeType === right[i].mimeType && image.data === right[i].data);
-
 async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
@@ -2095,7 +2314,7 @@ async function sendMessage(a, textarea, submitter = null) {
       attachments.submission = null;
     }
   }
-  const messageID = attachments.submissionID ?? Date.now().toString(16).padStart(12, '0') + [...crypto.getRandomValues(new Uint8Array(18))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const messageID = attachments.submissionID ?? newSubmissionID();
   {
     attachments.submissionID = messageID;
     attachments.submission ??= { text, images };
@@ -2217,6 +2436,7 @@ const SETTINGS = [
   { page: 'yesman', label: 'yesman', icon: 'users' },
   { page: 'usage', label: 'Model usage', icon: 'chart' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
+  { page: 'github-app', label: 'GitHub App', icon: 'pullRequest' },
   { page: 'secrets', label: 'Secrets', icon: 'lock' },
   { page: 'variables', label: 'Variables', icon: 'code' },
   { page: 'storage', label: 'Storage', icon: 'folder' },
@@ -2273,6 +2493,7 @@ async function loadSettingsPage(page) {
     else if (page === 'yesman') { await crewPage.load(); return; }
     else if (page === 'usage') { usagePage.load(); return; }
     else if (page === 'secrets') { await secretsPage.load(); return; }
+    else if (page === 'github-app') { await githubAppPage.load(); return; }
     else if (page === 'variables') { await variablesPage.load(); return; }
   } catch (err) {
     fail(err);
@@ -2292,6 +2513,7 @@ function renderSettings(body) {
   else if (state.view.page === 'yesman') crewPage.renderPage(inner);
   else if (state.view.page === 'usage') usagePage.render(inner);
   else if (state.view.page === 'secrets') secretsPage.render(inner);
+  else if (state.view.page === 'github-app') githubAppPage.render(inner);
   else if (state.view.page === 'variables') variablesPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
   else if (state.view.page === 'about') renderAbout(inner);
@@ -2379,6 +2601,10 @@ const envPage = (kind) => createEnvPage(kind, {
 });
 const secretsPage = envPage('secrets');
 const variablesPage = envPage('variables');
+const githubAppPage = createGitHubAppPage({
+  call, shown: () => state.view.kind === 'settings' && state.view.page === 'github-app',
+  rerender: () => renderBody(), preferenceRow, settingsSection,
+});
 
 function renderGeneral(inner) {
   const v = state.settings;
@@ -2596,7 +2822,7 @@ function renderAbout(inner) {
     build = [v.version || t('Development build'), detail ? faint(` ${detail}`) : null];
   }
   inner.append(
-    settingsSection('yesman', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
+    settingsSection('Yes Man', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
       row(t('Build'), build),
       row(t('Updates'), updateStatus()),
       row(!v ? 'pi' : v.piManaged ? t('Managed pi') : t('External pi'), v ? (v.pi || (v.piState && v.piState !== 'failed' ? t({ preparing: 'Preparing…', unprepared: 'Not prepared', closed: 'Stopped.' }[v.piState] || 'Version unknown') : h('span', { class: 'danger' }, v.piError || t('Version unknown')))) : checking()),
@@ -3255,6 +3481,7 @@ const files = createFiles({
     return a ? yesmanOf(a.id) : null;
   },
   isOpen: () => state.pane === 'files',
+  selectWorkspace: (name) => { if (agentById(`${name}/lead`)) selectAgent(`${name}/lead`); },
   setOpen: (on) => setPane(on ? 'files' : state.pane === 'files' ? null : state.pane),
   checkout: (y) => openCheckout(y),
   dismiss: (name) => dismiss(name),
@@ -3279,14 +3506,23 @@ const info = createInfo({
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
-  // The same requests as Needs you shows, of this yesman only.
-  needsYou: (y) => ({
-    count: needsYouItems(state.snap).filter((item) => item.yesman === y.name).length,
-    error: state.snap.yesmen.find((v) => v.name === y.name)?.handoffsError ?? '',
-    // New requests are refused until the user starts a new memory.
-    refused: ['full', 'blocked', 'legacy-full'].includes(state.snap.yesmen.find((v) => v.name === y.name)?.callMemory?.state),
-  }),
-  openNeedsYou: (y) => showNeedsYou(null, { yesman: y.name, hiredAt: y.hiredAt ?? '', from: state.view.kind === 'agent' ? state.view.id : null }),
+  openTasks: () => togglePane('tasks'),
+  tasksOpen: () => state.pane === 'tasks',
+  tasksSummary: (y) => schedules.summary(y),
+  // The same requests as the Needs you pane shows for this yesman.
+  needsYou: (y) => {
+    const v = state.snap.yesmen.find((v) => v.name === y.name);
+    return {
+      count: v ? needsYouOf(v).length : 0,
+      error: v?.handoffsError ?? '',
+      // New requests are refused until the user starts a new memory.
+      refused: ['full', 'blocked', 'legacy-full'].includes(v?.callMemory?.state),
+      open: state.pane === 'needs-you',
+    };
+  },
+  openNeedsYou: () => showNeedsYou(),
+  pane: () => state.pane,
+  openTopics: () => setPane('topics'),
   openWorktree: (dir, show) => files.openWorktree(dir, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
@@ -3312,12 +3548,163 @@ const board = createBoard({
   setOpen: (on) => setPane(on ? 'board' : state.pane === 'board' ? null : state.pane),
   agent: (id) => agentById(id),
   openAgent: (id) => selectAgent(id),
+  openPlan: (plan) => {
+    const y = selectedAgent() ? yesmanOf(selectedAgent().id) : null;
+    if (y) schedules.open(y.name, plan);
+  },
 });
 
+// ---------- Tasks pane ----------
+
+// Scheduled tasks share the place beside the conversation too.
+const schedules = createSchedules({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.pane === 'tasks',
+  setOpen: (on) => setPane(on ? 'tasks' : state.pane === 'tasks' ? null : state.pane),
+  openBoardTask: (id) => {
+    setPane('board');
+    board.reveal(id);
+  },
+  openLead: () => {
+    const a = selectedAgent();
+    if (a) selectAgent(`${a.yesman}/lead`);
+  },
+  openTaskLog: () => files.openTaskLog(),
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  changed: () => info.render(),
+});
+
+// ---------- Topics pane ----------
+
+// The topics share the place beside the conversation with the board and the
+// files. A topic's messages go to its yesman's lead, into its conversation.
+const leadOf = (y) => y && agentById(`${y.name}/lead`);
+const topics = createTopics({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.pane === 'topics',
+  setOpen: (on) => setPane(on ? 'topics' : state.pane === 'topics' ? null : state.pane),
+  lead: (y) => leadOf(y),
+  leadConvo: (y) => {
+    const lead = leadOf(y);
+    const c = lead && state.convos.get(keyOf(lead));
+    return c?.loaded ? c : null;
+  },
+  openLead: (y) => { const lead = leadOf(y); if (lead) selectAgent(lead.id); },
+  showMessage: (y, source) => showMessage(y, source),
+  agent: (id) => agentById(id),
+  openAgent: (id) => selectAgent(id),
+  openBoard: () => setPane('board'),
+  openKnowledge: (path) => {
+    const y = selectedAgent() && yesmanOf(selectedAgent().id);
+    if (path && y && files.openPath(`${y.path}/.yesman/knowledge/${path}`)) return;
+    files.openKnowledge();
+  },
+  openURL: (url) => call('OpenURL', url).catch(fail),
+  track: (y, id, text, imageCount, topic) => {
+    const lead = leadOf(y);
+    if (!lead) return;
+    // The app ties the submission to its topic before sending it, so its
+    // receipt names the topic before the topic's record is read again.
+    if (topic) {
+      topicSends.set(`${y.name}@${y.hiredAt ?? ''}/${id}`, topic);
+      if (topicSends.size > 256) topicSends.delete(topicSends.keys().next().value);
+    }
+    const c = convo(lead);
+    if (!c.deliveries.has(id)) {
+      // Keep the whole topic line, so the receipt shows its chip, and clip
+      // only the user's text after it, as the composer's receipts do.
+      const head = topic?.context && text.startsWith(topic.context) ? topic.context : '';
+      const preview = head + Array.from(text.slice(head.length)).slice(0, 128).join('');
+      c.deliveries.set(id, { id, revision: 0, state: 'sending', text: preview, imageCount, preview: preview !== text });
+    }
+    if (c.loaded) schedulePatch(c);
+  },
+  // Topics read again can tie more of the conversation's messages to them.
+  changed: (y) => {
+    const lead = leadOf(y);
+    const now = lead && yesmanOf(lead.id);
+    if (!now || (now.hiredAt ?? '') !== (y.hiredAt ?? '')) return;
+    const c = state.convos.get(keyOf(lead));
+    if (c?.loaded) schedulePatch(c);
+  },
+  receipt: (y, d, id) => {
+    const lead = leadOf(y);
+    if (!lead) return;
+    const c = convo(lead);
+    if (d) updateDelivery(c, d);
+    else if (id && c.deliveries.get(id)?.revision === 0) c.deliveries.get(id).state = 'unconfirmed';
+    if (c.loaded) schedulePatch(c);
+  },
+});
+
+// showMessage shows one message of a yesman's lead conversation, found by
+// its exact role and pi timestamp, and says whether it did.
+async function showMessage(y, source) {
+  const lead = leadOf(y);
+  if (!lead || (source.agent && source.agent !== 'lead')) return 'other';
+  if (source.since && lead.since && source.since !== lead.since) return 'other';
+  selectAgent(lead.id);
+  const c = convo(lead);
+  await c.loading;
+  // A source names a message by its role and pi timestamp; its row is keyed
+  // by its submission when it has one (conversation.js).
+  const matches = c.messages.filter((m) => m?.role === source.role && m?.timestamp === source.timestamp);
+  if (matches.length !== 1) return matches.length ? 'ambiguous' : 'missing';
+  const key = messageKey(matches[0]);
+  // A person's message is one row; a reply is a row per text block.
+  const el = $(`#thread [data-row="${CSS.escape(key)}"]`) ?? $(`#thread [data-row^="${CSS.escape(`${key}:`)}"]`);
+  if (!el) return 'missing';
+  $('#scroll') && ($('#scroll').dataset.stick = 'false');
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('msg-found');
+  setTimeout(() => el.classList.remove('msg-found'), 2400);
+  return 'shown';
+}
+
+// Where focus was when opening a pane hid it (an info panel row, in a
+// narrow window), to go back to when the pane closes.
+let paneFocusFrom = null;
+
 function setPane(pane) {
+  const had = document.activeElement;
+  const shown = (el) => !!el?.isConnected && el.getClientRects().length > 0;
+  const visible = had && had !== document.body && shown(had);
+  const inPane = !!had?.closest?.('#board, #schedules, #needs-you, #topics, #files');
+  const entry = had?.closest?.('#yesman-info [data-info-entry]')?.dataset.infoEntry;
   state.pane = pane;
   renderInfo();
   renderBarActions();
+  // Only focus this change hid moves: to the pane opened, or, once it
+  // closes, back to where it was or to the message box. Focus the user can
+  // still see stays where it is.
+  const now = document.activeElement;
+  if (!visible || (now && now !== document.body && shown(now))) {
+    if (!pane) paneFocusFrom = null;
+    return;
+  }
+  let target = null;
+  if (pane) {
+    target = pane === 'needs-you' ? $('#needs-you .needs-you-heading') : pane === 'board' ? $('#board .files-head-actions button')
+      : pane === 'topics' ? $('#topics .topics-search') ?? $('#topics .files-head-actions button')
+      : pane === 'tasks' ? $('#schedules .files-head-actions button') : null;
+    if (target && !inPane) paneFocusFrom = entry ? { entry } : had;
+  } else {
+    const from = paneFocusFrom;
+    paneFocusFrom = null;
+    target = (from?.entry ? $(`#yesman-info [data-info-entry="${CSS.escape(from.entry)}"]`) : from) ?? null;
+    if (!shown(target)) target = $('#dock textarea');
+  }
+  if (shown(target)) target.focus({ preventScroll: true });
 }
 
 function togglePane(pane) {
@@ -3327,6 +3714,10 @@ function togglePane(pane) {
 function renderInfo() {
   files.render();
   board.render();
+  schedules.render();
+  renderNeedsYouPane();
+  topics.render();
+  info.render();
 }
 
 async function openCheckout(y) {
@@ -3487,13 +3878,8 @@ const actionHost = {
   entries: sidebarAgents,
   leads: () => state.snap.yesmen.map((y) => agentById(`${y.name}/lead`)).filter(Boolean),
   needsYou: () => state.snap.agents.find((a) => a.role === 'lead' && a.status === 'waiting') ?? null,
-  // Needs You, every yesman's requests; focus goes to its heading when the
-  // control that had it was drawn away.
-  showNeedsYou() {
-    showNeedsYou();
-    const now = document.activeElement;
-    if (!now || now === document.body) $('#body .needs-you-page h1')?.focus({ preventScroll: true });
-  },
+  // The Needs you pane of the yesman shown, with focus on its heading.
+  showNeedsYou: () => showNeedsYou(),
   step(by) {
     const list = sidebarAgents();
     const at = list.findIndex((a) => a.id === state.view.id);
@@ -3584,7 +3970,9 @@ async function refreshState() {
   pruneCaches();
   if (state.view.kind === 'agent' && !agentById(state.view.id)) state.view = { kind: 'none' };
   if (state.view.kind === 'none' && state.snap.yesmen.length) {
-    state.view = { kind: 'agent', id: `${state.snap.yesmen[0].name}/lead` };
+    const route = logRoute();
+    const name = state.snap.yesmen.some((y) => y.name === route?.name) ? route.name : state.snap.yesmen[0].name;
+    state.view = { kind: 'agent', id: `${name}/lead` };
     selectAgent(state.view.id);
     return;
   }
@@ -3604,12 +3992,12 @@ function onAgents(agents) {
   pruneCaches();
   renderSidebar();
   palette.refresh();
-  if (needsYouItems(state.snap).map((item) => item.key).join() !== requests) {
-    if (state.view.kind === 'needs-you') renderBody();
-    info.render(); // its Needs you row counts them
-  }
-  // The board links a task's owner while it is one of the agents.
+  const changed = needsYouItems(state.snap).map((item) => item.key).join() !== requests;
+  if (changed) info.render(); // its Needs you row counts them
+  // The board links a task's owner while it is one of the agents, and so
+  // does Needs you who asks.
   if (state.pane === 'board' && agents.map((a) => a.id).join() !== ids) board.render();
+  if (state.pane === 'needs-you' && (changed || agents.map((a) => a.id).join() !== ids)) renderNeedsYouPane();
   piPage.onAgents();
   const after = selectedAgent();
   // The work row or the line at the foot says what the agent does now.
@@ -3649,12 +4037,15 @@ async function start() {
   setLocale(mygo?.locale ?? navigator.language);
   translatePage();
   if (!mygo) {
-    document.body.replaceChildren(h('div', { class: 'welcome' }, h('h1', { class: 'mds-title' }, 'yesman'), h('p', null, t('Open this page in the yesman app.'))));
+    document.body.replaceChildren(h('div', { class: 'welcome' }, h('h1', { class: 'mds-title' }, 'Yes Man'), h('p', null, t('Open this page in the yesman app.'))));
     return;
   }
   buildSideFoot();
   buildRepoDialog();
   started = true;
+  // yesman answers every context menu: the rows' own, or the page's
+  // (contextmenu.js), never the web view's.
+  createContextMenu({ call, fail, platform: detectPlatform(mygo), editorOf: editorViewOf }).install();
   mygo.on('mygo:locale', (e) => onLocale(e.locale));
   document.addEventListener('click', (e) => {
     const link = e.target.closest('a[href]');
@@ -3675,7 +4066,9 @@ async function start() {
   mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
-  mygo.on('board', (yesman) => board.onChange(yesman));
+  mygo.on('board', (yesman) => { board.onChange(yesman); schedules.onBoard(yesman); });
+  mygo.on('schedules', (yesman) => schedules.onChange(yesman));
+  mygo.on('topics', (yesman) => { topics.onChange(yesman); info.onTopics(yesman); });
   document.addEventListener('keydown', (e) => files.onKey(e));
   // After the files pane's ⌘S, which keeps its key.
   shortcuts.listen();

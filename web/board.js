@@ -34,6 +34,7 @@ function updated(iso) {
 //   isOpen(), setOpen(on)   whether the pane shows
 //   agent(id)               an agent, to link a task's owner to it
 //   openAgent(id)           shows an agent's conversation
+//   openPlan(id)            shows the scheduled task a task is a run of
 export function createBoard(host) {
   const boards = new Map(); // yesman name -> { tasks, error }
   const expanded = new Set(); // `${yesman}/${task id}`
@@ -61,7 +62,10 @@ export function createBoard(host) {
     }
     loading.delete(name);
     if (entry.again) return load(name);
-    if (current()?.name === name) render();
+    if (current()?.name === name) {
+      render();
+      afterRender();
+    }
   }
 
   function render() {
@@ -78,6 +82,9 @@ export function createBoard(host) {
     const closed = tasks.filter((t) => !isOpen(t));
     const scroll = $('.board-body', aside)?.scrollTop ?? 0;
     const focused = document.activeElement?.closest?.('#board [data-key]')?.dataset.key;
+    // The close button keeps focus when the board is drawn again, say once it
+    // has loaded.
+    const onClose = !!document.activeElement?.closest?.('#board .files-head-actions');
 
     const count = b ? (open.length ? t('{n} open', { n: formatNumber(open.length) }) : '') : '';
     const body = h('div', { class: 'board-body' });
@@ -94,6 +101,8 @@ export function createBoard(host) {
         ? h('ol', { class: 'board-list', 'aria-label': t('Open tasks') }, open.map((task) => row(y, task)))
         : h('p', { class: 'board-empty' }, t('Nothing open.')));
       if (closed.length) {
+        // A finished task being revealed shows: its section opens for it.
+        if (revealing && closed.some((task) => `${y.name}/${task.id}` === revealing)) doneOpen = true;
         const done = h('details', { class: 'board-done', open: doneOpen },
           h('summary', null, icon('chevron', 'mds-icon board-fold'), t('Done {n}', { n: formatNumber(closed.length) })),
           h('ol', { class: 'board-list' }, closed.map((task) => row(y, task))));
@@ -111,6 +120,7 @@ export function createBoard(host) {
       body);
     body.scrollTop = scroll;
     if (focused) $(`#board [data-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+    else if (onClose) $('#board .files-head-actions button')?.focus({ preventScroll: true });
   }
 
   function row(y, task) {
@@ -123,6 +133,10 @@ export function createBoard(host) {
         ? h('button', { class: 'board-owner', type: 'button', title: t('{name}: open its conversation', { name: task.owner }), onclick: () => host.openAgent(owner.id) }, owner.number ? `a${owner.number}` : task.owner)
         : h('span', { class: 'board-owner', 'data-gone': 'true', title: t('{name} is not one of {yesman}\'s agents now', { name: task.owner, yesman: y.displayName || y.name }) }, task.owner);
     const inline = task.status === 'blocked' && task.note && !isExpanded ? h('p', { class: 'board-inline' }, task.note.split('\n')[0]) : null;
+    // A run of a scheduled task says so, from the board's own link to it.
+    const scheduled = task.schedule?.plan
+      ? h('button', { class: 'board-owner board-scheduled', type: 'button', title: t('A run of scheduled task {id}: open it in Tasks', { id: task.schedule.plan }), onclick: () => host.openPlan?.(task.schedule.plan) }, icon('clock', 'mds-icon board-scheduled-mark'), h('span', null, t('Scheduled')))
+      : null;
     const details = isExpanded
       ? h('div', { class: 'board-details' },
         task.detail ? h('div', { class: 'md', html: renderMarkdown(task.detail) }) : null,
@@ -139,7 +153,7 @@ export function createBoard(host) {
           render();
         },
       }, mark(task.status), h('span', { class: 'board-title' }, task.title)),
-      ownerEl, inline, details);
+      scheduled || ownerEl ? h('span', { class: 'board-tags' }, scheduled, ownerEl) : null, inline, details);
   }
 
   // onChange follows a board the agents changed.
@@ -147,5 +161,27 @@ export function createBoard(host) {
     if (boards.has(name) || current()?.name === name) load(name);
   }
 
-  return { render, onChange };
+  // reveal expands a task and brings it into view, once the board shows.
+  let revealing = null;
+  function reveal(id) {
+    const y = current();
+    if (!y) return;
+    expanded.add(`${y.name}/${id}`);
+    revealing = `${y.name}/${id}`;
+    render();
+    afterRender();
+  }
+  // afterRender brings a task being revealed into view and focus, once it
+  // shows; until the board has it (it may still load), it waits.
+  const afterRender = () => {
+    if (!revealing) return;
+    const el = $(`#board [data-key="${CSS.escape(revealing)}"]`);
+    if (el && el.getClientRects().length) {
+      el.scrollIntoView({ block: 'nearest' });
+      el.focus({ preventScroll: true });
+      revealing = null;
+    }
+  };
+
+  return { render: () => { render(); afterRender(); }, onChange, reveal };
 }

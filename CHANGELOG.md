@@ -2,6 +2,53 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.42
+
+- Add Tasks for requests scheduled once, daily, weekly or at an interval in a chosen time zone. Plans run while Yes Man is open and the computer is awake; missed times appear together for a manual catch-up instead of replaying automatically.
+- Show Tasks as a fifth Info entry with the enabled count, next time and attention state. Create, edit, turn off and archive plans, inspect run history, and follow links between a run, its Board task and the lead conversation.
+- Send each run to the lead as an ordinary follow-up, preserving a reply in progress. Skip automatic overlaps while the previous run is being delivered or its Board task remains open; explicit Run now and catch-up actions ask for confirmation when work overlaps.
+- Keep run and submission identities through supported retry, restart and workspace lifecycle paths. Delivery states follow pi's receipt or native queue evidence; uncertain delivery is shown as unknown and is never automatically resent as a new request. These records do not guarantee exactly-once execution.
+- Show the Board task's recorded status and note as the outcome. The lead is asked to record results in Working log; the scheduler keeps its own run records and does not write that log. Lead-created plans stay off until the user turns them on.
+
+## 0.1.41
+
+- Add Topics to keep questions and discussions, with summaries, confirmed conclusions, open questions and linked sources. Search, filter, edit, resolve, archive and restore topics in their own pane.
+- Send text and images from a topic into the yesman's existing lead conversation, preserving the original images and topic association through the supported queue, retry and restart paths. Association follows recorded submission identity; pasted topic labels and messages with missing provenance remain unassociated.
+- Bring Knowledge, Working Logs, Needs You and Topics together as four Info entries with their actual counts and errors. Keep the conversation usable beside Topics in narrow windows, with drafts and keyboard focus preserved.
+- Protect topic edits from conflicting revisions and delayed requests from a retired lead or workspace. Conclusions stay explicitly recorded; Topics does not invent answers or call a model in the background.
+
+## 0.1.40
+
+- Add a compact Working log contents page and separate records for each task, pull request or release. Open records on demand in a read-only view, then return to Contents or your previous reading position.
+- Keep lasting guidance in Knowledge and detailed task and release history in Working log. Existing log paths and links remain compatible, and legacy single-file logs stay readable.
+- Provide an explicit offline migration utility that preserves the complete original history and links, with verification and recovery support. Existing logs are never migrated automatically.
+
+## 0.1.39
+
+- Display the desktop application and its main process as Yes Man on macOS, Windows and Linux, including the window, native application metadata and new installer shortcuts.
+- Keep the existing installation locations, bundle identifier, update feeds and signing key, workspace identities and user data paths. The `yesman` command and older executable paths remain compatible; Windows command-line calls retain their arguments, streams and exit status.
+- Preserve automatic updates from the previous application name, including restart through the legacy entry points, subsequent updates and failure recovery. Existing user-created shortcuts and pins keep their paths; the new Windows installer refreshes its standard shortcuts.
+
+## 0.1.38
+
+- Add optional Settings › GitHub App configuration for agent-created pull requests, with a separate encrypted key vault and explicit repository and workspace selection. App identity starts disabled when no App configuration exists.
+- Configure your own App, test the current connection and scope, then explicitly enable App identity. Saving a changed key or scope disables it until a fresh connection test and explicit enablement.
+- Route supported PR creation in selected workspaces through the configured App identity. Git pushes and other GitHub operations keep their existing credentials; unavailable keys, services or installations in App mode stop creation without silently switching to a personal author. Keep App credentials out of agents and managed runtime dependency installation.
+- The actual idy/yesman installation's Bot author, avatar and PR events have not yet been verified; this release does not mean that account is connected. Users can configure and explicitly enable their own App, while this feature's compatibility with the real GitHub service remains unverified.
+
+## 0.1.37
+
+- Open Needs You beside the conversation as a Board-style pane for the yesman shown and its current hire. Use the Info card or command palette to view its requests; the global sidebar entry and all-yesmen page are removed. Opening a request goes to its agent and question without answering it, while preserving unsent drafts and images. Request-memory notices, unreadable-file errors and recently handled requests stay available in the pane.
+- Keep room for the message box beside Board or Needs You: the Info panel steps aside in narrow windows and returns when the pane closes. Preserve focus when opening, closing and refreshing the pane.
+- Show an X on the queued message's Cancel and edit button, keeping its labels and existing cancellation and full text-and-image restore behavior.
+- Use the application's context menus throughout the window, retaining existing row menus and offering selection, link and text-editing actions for their targets. On macOS, Control-click opens only the menu; editor Find fields keep their own editing actions. Menu Paste can attach PNG images in the message box within the existing limits, and a clipboard with nothing usable pastes nothing. Passwords and secret values remain protected.
+
+## 0.1.36
+
+- Fold consecutive runs that end only with a model error into one closed row that shows the count and the error text. Expand it to see each distinct error with its provider, model and count, copy the error text, and open each run's time and original work. A person's message, a reply, a partial reply or a stop ends the fold, and text that only mentions an error never counts as one. History and submission records are unchanged.
+- Mark an agent whose last finished run ended with a model error with a red exclamation mark, a label and a tooltip in the sidebar and header; a yesman's entry follows its lead's own state. Working, waiting, Needs You and asking keep their own marks. Stopping the run, or a later run that ends any other way, clears the mark while the conversation keeps its error rows. The mark is not kept across an app restart. A crashed agent process shows the same red mark.
+- Show an error recorded without a message as "The model returned an error without a message." and fold such errors together.
+
 ## 0.1.35
 
 - Add a global Needs You inbox for explicit requests that need human action across yesmen and agents. Ordinary worker questions stay with their lead; blocked Board tasks and queued messages do not add inbox items.

@@ -49,7 +49,7 @@ export async function appendPatch(patch, core, app) {
  });
  await patch(core+'agent.d.ts',(change)=>{
   change('export interface HostInputIdentity { submissionId?: string;', 'export interface HostInputIdentity { submissionId?: string; segments?: string[];');
-  change('origin?: { source: "user"|"lead"|"yesman"; kind?: string; worker?: string };', 'origin?: { source: "user"|"lead"|"yesman"; kind?: string; worker?: string; context?: string };');
+  change('origin?: { source: "user"|"lead"|"yesman"|"schedule"; kind?: string; worker?: string; plan?: string; run?: string };', 'origin?: { source: "user"|"lead"|"yesman"|"schedule"; kind?: string; worker?: string; plan?: string; run?: string; context?: string };');
   change('export interface PendingQueueItem { queueId: string; kind: "steer" | "followUp"; submissionId?: string; itemRevision: number; }', `export interface PendingQueueItem { queueId: string; kind: "steer" | "followUp"; submissionId?: string; itemRevision: number; segments?: string[]; preparing?: boolean; }
 export interface PendingAppendTarget { epoch: string; queueId: string; expectedRevision: number; controlGeneration: number; }
 export interface PendingAppendResult { outcome: "appended" | "already_appended" | "duplicate" | "stale" | "not_pending" | "preparing" | "stale_item" | "stale_control" | "kind_mismatch" | "not_latest" | "ineligible" | "limit" | "budget"; queueId?: string; itemRevision?: number; enqueued?: boolean; }`);

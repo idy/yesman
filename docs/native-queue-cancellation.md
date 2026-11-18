@@ -26,7 +26,11 @@ directory. It uses `npm ci --ignore-scripts --no-audit --no-fund`: every transit
 version and tarball integrity is fixed by the lockfile, lifecycle scripts do not
 run, and npm's download cache remains under the application's runtime directory.
 The first preparation needs a network connection; a verified installed cache
-needs only Node. Failed preparation is reported and can be retried.
+needs only Node. Failed preparation is reported and can be retried. The pinned
+installer inherits only OS paths and registry/proxy/CA settings; model keys,
+GitHub credentials, agent API credentials and Node loader hooks are excluded.
+This filter applies only to dependency installation: pi and explicit wrappers
+retain their existing environment contract.
 
 Every patched input/output is SHA256 checked. The complete embedded assets,
 patched source, queue module and ready manifest are verified before atomic

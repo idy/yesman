@@ -176,6 +176,8 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
           case "Settings": return { appearance: "system", locale: "en" };
           case "Context": return { available: false };
           case "NeedsYou": return { items: [] };
+          // Lead conversations read their yesman's topics, to name messages sent from one.
+          case "Topics": return [];
           case "Update": return {};
           case "TakeFocus": return "";
           case "Shortcuts": return {};

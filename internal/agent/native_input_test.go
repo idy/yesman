@@ -15,7 +15,7 @@ func TestManagedInputIdentityAndIdleResume(t *testing.T) {
 	defer cancel()
 	ids := []string{deliveryTestID(63001), deliveryTestID(63002)}
 	for _, id := range ids {
-		if _, err := f.m.submit(ctx, f.info.ID, id, "same", nil, "followUp", f.info.Since); err != nil {
+		if _, err := f.m.submit(ctx, f.info.ID, id, "same", nil, "followUp", nil, f.info.Since); err != nil {
 			t.Fatal(err)
 		}
 	}

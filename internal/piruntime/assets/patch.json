@@ -91,7 +91,7 @@
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.d.ts",
       "before": "05968f90cf20eec86cfd352c6a87dff94f7e177d8579c3864697e8a7bb773ace",
-      "after": "6445a5158a25cb45856a945582d25a34ef32648276fec10e6029feeba5d2e003",
+      "after": "8835720618427297f04d453bd282d373ded91ee07d6dc9ed74c2463059c765bd",
       "edits": [
         {
           "before": "export declare class Agent {",
@@ -107,7 +107,7 @@
         },
         {
           "before": "export interface PendingQueueItem {",
-          "after": "export interface HostInputIdentity { submissionId?: string; origin?: { source: \"user\"|\"lead\"|\"yesman\"; kind?: string; worker?: string }; epoch?: string; queueId?: string; }\nexport interface HostInputRef { native: true; identity: HostInputIdentity|null; entryId?: string; }\nexport declare function bindInputTrigger<T extends object>(trigger:T,metadata:unknown):T;\nexport declare function triggerIdentity(trigger:object):HostInputIdentity|undefined;\nexport declare function bindInputBatch<T>(messages:T[],identities:(HostInputIdentity|undefined|null)[]):T[];\nexport declare function copyInputRefs<T>(source:T[],target:T[],insert?:number):T[];\nexport declare function joinInputBatches<T>(...batches:T[][]):T[];\nexport declare function inputRefAt<T>(messages:T[],index:number):HostInputIdentity|null;\nexport declare function recordedInputRef<T>(messages:T[],index:number,entryId:string):void;\nexport declare function hostInputRefs<T>(messages:T[]):(HostInputRef|null)[];\nexport declare function bindProjectedInputs(projection:any,branch:any[]):any[];\nexport declare function recordedInputs(branch:any[]):Map<string,HostInputRef>;\nexport declare function persistInputIdentity(identity:HostInputIdentity|null):HostInputIdentity|null;\nexport declare function publicInputEntry(entry:any):any;\nexport declare const INPUT_ENTRY: string;\nexport interface PendingQueueItem {"
+          "after": "export interface HostInputIdentity { submissionId?: string; origin?: { source: \"user\"|\"lead\"|\"yesman\"|\"schedule\"; kind?: string; worker?: string; plan?: string; run?: string }; epoch?: string; queueId?: string; }\nexport interface HostInputRef { native: true; identity: HostInputIdentity|null; entryId?: string; }\nexport declare function bindInputTrigger<T extends object>(trigger:T,metadata:unknown):T;\nexport declare function triggerIdentity(trigger:object):HostInputIdentity|undefined;\nexport declare function bindInputBatch<T>(messages:T[],identities:(HostInputIdentity|undefined|null)[]):T[];\nexport declare function copyInputRefs<T>(source:T[],target:T[],insert?:number):T[];\nexport declare function joinInputBatches<T>(...batches:T[][]):T[];\nexport declare function inputRefAt<T>(messages:T[],index:number):HostInputIdentity|null;\nexport declare function recordedInputRef<T>(messages:T[],index:number,entryId:string):void;\nexport declare function hostInputRefs<T>(messages:T[]):(HostInputRef|null)[];\nexport declare function bindProjectedInputs(projection:any,branch:any[]):any[];\nexport declare function recordedInputs(branch:any[]):Map<string,HostInputRef>;\nexport declare function persistInputIdentity(identity:HostInputIdentity|null):HostInputIdentity|null;\nexport declare function publicInputEntry(entry:any):any;\nexport declare const INPUT_ENTRY: string;\nexport interface PendingQueueItem {"
         },
         {
           "before": "capability: 2;",
@@ -130,8 +130,8 @@
           "after": "export interface HostInputIdentity { submissionId?: string; segments?: string[];"
         },
         {
-          "before": "origin?: { source: \"user\"|\"lead\"|\"yesman\"; kind?: string; worker?: string };",
-          "after": "origin?: { source: \"user\"|\"lead\"|\"yesman\"; kind?: string; worker?: string; context?: string };"
+          "before": "origin?: { source: \"user\"|\"lead\"|\"yesman\"|\"schedule\"; kind?: string; worker?: string; plan?: string; run?: string };",
+          "after": "origin?: { source: \"user\"|\"lead\"|\"yesman\"|\"schedule\"; kind?: string; worker?: string; plan?: string; run?: string; context?: string };"
         },
         {
           "before": "export interface PendingQueueItem { queueId: string; kind: \"steer\" | \"followUp\"; submissionId?: string; itemRevision: number; }",

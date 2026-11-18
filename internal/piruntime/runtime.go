@@ -277,7 +277,7 @@ func (r *Runtime) prepare(ctx context.Context) error {
 	// No user model credentials are needed for dependency installation. npm's
 	// normal proxy/certificate configuration still works through the environment.
 	cmd.Dir = staging
-	cmd.Env = append(os.Environ(), "YESMAN_RUNTIME_NPM="+r.npm, "npm_config_cache="+filepath.Join(parent, "npm-cache"))
+	cmd.Env = append(installerEnvironment(os.Environ()), "YESMAN_RUNTIME_NPM="+r.npm, "npm_config_cache="+filepath.Join(parent, "npm-cache"))
 	var output bytes.Buffer
 	cmd.Stderr = &output
 	if err = cmd.Run(); err != nil {

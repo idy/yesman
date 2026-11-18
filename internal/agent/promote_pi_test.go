@@ -162,7 +162,7 @@ func TestPromoteWithManagedPi(t *testing.T) {
 		if n == 0 || n == 4 {
 			kind = "steer"
 		}
-		if _, err := f.m.submit(ctx, f.info.ID, id, text, images, kind, f.info.Since); err != nil {
+		if _, err := f.m.submit(ctx, f.info.ID, id, text, images, kind, nil, f.info.Since); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -259,7 +259,7 @@ func TestPromoteStopAndRestartDoNotResume(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	id := deliveryTestID(61001)
-	if _, err := f.m.submit(ctx, f.info.ID, id, "pending", nil, "followUp", f.info.Since); err != nil {
+	if _, err := f.m.submit(ctx, f.info.ID, id, "pending", nil, "followUp", nil, f.info.Since); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.m.PromoteSubmission(ctx, f.info.ID, id, f.info.Since); err != nil {
