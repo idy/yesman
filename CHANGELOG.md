@@ -2,6 +2,14 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.49
+
+- Add Restart and continue in Settings › About, the command palette and the tray. Restart to update uses the same recovery path.
+- Continue eligible interrupted agents from their existing sessions and Board goals after an explicit restart, while keeping stopped, sleeping and human-waiting agents paused and checking workspace and worker identities before recovery.
+- Reconcile workers' reports across the restart: hand on a report known not sent, preserve reports already accepted, and show uncertain delivery without sending it again. Original user messages and images are never automatically resent.
+- Show the last restart's outcomes in About, including unfinished or failed recovery that needs an explicit message. Preserve those holds on later ordinary opens.
+- Keep ordinary Quit separate from explicit restart recovery. Updating from an earlier version without this feature has no restart checkpoint to restore; existing bounded task-continuation checks still apply. Recovery does not guarantee exactly-once effects outside the app.
+
 ## 0.1.48
 
 - Browse Files, Knowledge, Working log, Topics and Needs You with content on the left and navigation on the right. Narrow panes switch between navigation and the selected detail with a Back control.
