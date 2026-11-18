@@ -2,6 +2,14 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.48
+
+- Browse Files, Knowledge, Working log, Topics and Needs You with content on the left and navigation on the right. Narrow panes switch between navigation and the selected detail with a Back control.
+- Navigate Knowledge notes and their headings in a tree. Topics are grouped by Open, Resolved and Archived, with branches for each topic's summary, conclusions, questions, sources and conversation.
+- Browse Working log records by day, newest day first, keeping the TOC's order within each day. Dates come from the TOC or file names; undated records have their own group, and records open individually as needed.
+- Answer a Needs You question or mark a handoff done or not needed directly in its detail pane. Open in the conversation takes you to where the request was raised.
+- Keep an active Needs You answer and its text selection visible when narrowing the window. Show unavailable-workspace errors in narrow panes and provide a keyboard-accessible way back to the conversation.
+
 ## 0.1.47
 
 - Default agents' temporary files, command-output files and Go/npm caches to the current workspace's `.yesman/tmp`, with retained verification evidence under `.yesman/evidence`.
