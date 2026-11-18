@@ -17,7 +17,7 @@ export { bindInputTrigger, triggerIdentity, bindInputBatch, copyInputRefs, joinI
   change('    return [...pendingMessages.slice(0, index), update, ...pendingMessages.slice(index)];','    return copyInputRefs(pendingMessages, [...pendingMessages.slice(0, index), update, ...pendingMessages.slice(index)], index);');
  });
  await patch(core+'agent.d.ts',(change)=>{
-  change('export interface PendingQueueItem {',`export interface HostInputIdentity { submissionId?: string; origin?: { source: "user"|"lead"|"yesman"; kind?: string; worker?: string }; epoch?: string; queueId?: string; }
+  change('export interface PendingQueueItem {',`export interface HostInputIdentity { submissionId?: string; origin?: { source: "user"|"lead"|"yesman"|"schedule"; kind?: string; worker?: string; plan?: string; run?: string }; epoch?: string; queueId?: string; }
 export interface HostInputRef { native: true; identity: HostInputIdentity|null; entryId?: string; }
 export declare function bindInputTrigger<T extends object>(trigger:T,metadata:unknown):T;
 export declare function triggerIdentity(trigger:object):HostInputIdentity|undefined;

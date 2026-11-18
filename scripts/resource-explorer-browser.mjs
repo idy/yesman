@@ -4,7 +4,7 @@
 // is answered here or recorded as unmocked, which fails the run.
 //
 // YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs \
-//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize \
+//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks \
 //   EXPLORER_SHOTS=/path/for/screenshots node scripts/resource-explorer-browser.mjs
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -16,7 +16,7 @@ const root = fileURLToPath(new URL('../web/', import.meta.url));
 const shots = process.env.EXPLORER_SHOTS;
 if (shots) await mkdir(shots, { recursive: true });
 const engines = (process.env.EXPLORER_ENGINES || 'chromium,webkit').split(',');
-const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize').split(','));
+const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks').split(','));
 
 const bridge = `<script>
 window.calls=[];window.unmocked=[];window.delayed={};window.releases={};
@@ -72,6 +72,7 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
  case 'TakeFocus':return '';case 'Update':return {enabled:false};
  case 'Messages':return {messages:[]};case 'Models':return {models:[],agent:fixtureState.agents.find(a=>a.id===args[0])};
  case 'Info':return {knowledge:{notes:2,index:true},worktrees:[]};case 'Board':return {tasks:[]};
+ case 'Schedules':return {plans:[]};
  case 'WatchFiles':case 'Reveal':case 'OpenURL':return;
  case 'FilesMenu':return '';
  case 'ReadFile':{const [name,path]=args;await wait(name+':ReadFile:'+path);const text=filesFixture[name]?.[path];if(text===undefined)throw Error('no such file: '+path);return {path,kind:'text',text,size:text.length,hash:'h'+text.length,truncated:false};}
@@ -702,7 +703,40 @@ async function resizePart(page, engine) {
   assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'focus let go of is not taken back');
 }
 
-const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart };
+// Intervening Tasks shares the pane slot and current workspace with the
+// explorer. Moving through it must retain topic and Needs You drafts.
+async function tasksPart(page, engine) {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  const entries = ['knowledge', 'working-logs', 'needs-you', 'topics', 'tasks'];
+  assert.deepEqual(await page.locator('[data-info-entry]').evaluateAll((es) => es.map((e) => e.dataset.infoEntry)), entries);
+  await page.locator('[data-info-entry="topics"]').click();
+  await page.locator('#topics [data-key="topic-tp1"] > .explorer-line').click();
+  await page.locator('#topics [data-key="compose-tp1"]').fill('Topic draft through Tasks');
+  await page.locator('[data-info-entry="needs-you"]').click();
+  await page.locator('#needs-you [data-detail-control="answer-text"]').fill('Answer draft through Tasks');
+  const openTasks = async (name, hiredAt) => {
+    await page.locator('[data-info-entry="tasks"]').focus();
+    await page.keyboard.press('Enter');
+    await page.locator('#schedules').waitFor();
+    assert.equal(await page.locator('#topics').isVisible(), false);
+    assert.equal(await page.locator('#needs-you').isVisible(), false);
+    assert.equal(await page.locator('[data-info-entry="tasks"]').getAttribute('aria-current'), 'page');
+    assert.ok(await page.evaluate(([name, at]) => calls.some((c) => c[0] === 'Schedules' && c[1] === name && c[2] === at), [name, hiredAt]), 'Tasks loads only the chosen hire');
+  };
+  await openTasks('alice', '2026-03-01T08:00:00Z');
+  await shot(page, `${engine}-tasks-entry`);
+  await page.locator('[data-agent="bob/lead"]').first().click();
+  await page.locator('#schedules').waitFor();
+  await page.waitForFunction(() => calls.some((c) => c[0] === 'Schedules' && c[1] === 'bob' && c[2] === '2026-03-02T08:00:00Z'));
+  await page.locator('[data-agent="alice/lead"]').first().click();
+  await page.locator('[data-info-entry="topics"]').click();
+  assert.equal(await page.locator('#topics [data-key="compose-tp1"]').inputValue(), 'Topic draft through Tasks');
+  await page.locator('[data-info-entry="needs-you"]').click();
+  assert.equal(await page.locator('#needs-you [data-detail-control="answer-text"]').inputValue(), 'Answer draft through Tasks');
+  assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'ResolveHandoff', 'SubmitTopic', 'SaveSchedule', 'RunSchedule'].includes(c[0])).length), 0, 'navigation never performs an action');
+}
+
+const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart, tasks: tasksPart };
 try {
   for (const name of engines) {
     const browser = await pw[name].launch({ headless: true });

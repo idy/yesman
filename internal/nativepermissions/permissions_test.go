@@ -3,7 +3,9 @@ package nativepermissions
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -18,12 +20,24 @@ type fakeAdapter struct {
 	started         chan struct{}
 	release         chan struct{}
 	requests, opens int
+	app             *App
+	identities      int
+	byID            map[ID]Item
 }
 
 func (f *fakeAdapter) query(ctx context.Context, id ID) (Item, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if item, ok := f.byID[id]; ok {
+		return item, f.queryErr
+	}
 	return f.item, f.queryErr
+}
+func (f *fakeAdapter) identity() *App {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.identities++
+	return f.app
 }
 func (f *fakeAdapter) request(ctx context.Context, id ID) error {
 	f.mu.Lock()
@@ -193,7 +207,98 @@ func TestSettingsDestinations(t *testing.T) {
 			}
 		}
 	}
-	if !reflect.DeepEqual(ids, [...]ID{Bluetooth, Notifications, FullDisk, Microphone, Camera, Accessibility, Screen, Input, Automation}) {
+	if !reflect.DeepEqual(ids, [...]ID{Bluetooth, Notifications, FullDisk, Microphone, Camera, Accessibility, Screen, SystemAudio, Input, Automation}) {
 		t.Fatal("native ABI order changed")
+	}
+	// System Audio Recording Only is a list in the Screen & System Audio
+	// Recording pane; there is no separate public anchor.
+	if settingsURL("darwin", SystemAudio) != settingsURL("darwin", Screen) || settingsURL("windows", SystemAudio) != "" {
+		t.Fatal(settingsURL("darwin", SystemAudio))
+	}
+}
+
+// An ad-hoc signed build is bound to its exact code hash. A false Boolean for
+// it keeps its honest state but explains a grant left for an earlier build.
+func TestAdhocBuildDetail(t *testing.T) {
+	for _, tc := range []struct {
+		name, signing, state string
+		id                   ID
+		err                  error
+		want                 string
+	}{
+		{"accessibility", "adhoc", "not-granted", Accessibility, nil, "adhoc-build"},
+		{"screen", "adhoc", "not-granted", Screen, nil, "adhoc-build"},
+		{"input", "adhoc", "not-granted", Input, nil, "adhoc-build"},
+		{"granted", "adhoc", "granted", Accessibility, nil, "boolean-status"},
+		{"certificate", "signed", "not-granted", Accessibility, nil, "boolean-status"},
+		{"no-identity", "", "not-granted", Accessibility, nil, "boolean-status"},
+		{"camera", "adhoc", "not-determined", Camera, nil, "boolean-status"},
+		{"query-error", "adhoc", "not-granted", Accessibility, errors.New("query failed"), "boolean-status"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeAdapter{item: Item{State: tc.state, Detail: "boolean-status", Request: true, Settings: true}, queryErr: tc.err}
+			if tc.signing != "" {
+				f.app = &App{Path: "/Applications/yesman.app", Signing: tc.signing}
+			}
+			m := manager(f)
+			item := m.read(context.Background(), tc.id)
+			if item.Detail != tc.want || (tc.err == nil && item.State != tc.state) {
+				t.Fatalf("%+v", item)
+			}
+			if tc.err == nil && item.State == "not-granted" && !item.Request {
+				t.Fatal("explanation removed the explicit request")
+			}
+			v := m.List(context.Background())
+			if (tc.signing == "") != (v.App == nil) || f.identities != 1 || f.requests != 0 || f.opens != 0 {
+				t.Fatalf("%+v %+v", v.App, f)
+			}
+		})
+	}
+}
+
+// System audio has no public query: manual guidance, Settings, never Request.
+func TestSystemAudioIsManual(t *testing.T) {
+	f := &fakeAdapter{item: Item{State: "granted", Settings: true}, byID: map[ID]Item{
+		SystemAudio: {State: "manual", Detail: "system-audio-manual", Request: true, Settings: true},
+	}}
+	m := manager(f)
+	item := m.read(context.Background(), SystemAudio)
+	if item.State != "manual" || item.Request || !item.Settings {
+		t.Fatal(item)
+	}
+	if _, err := m.Act(context.Background(), SystemAudio, "request"); err == nil || f.requests != 0 {
+		t.Fatal("system audio request reached the native adapter", err)
+	}
+	result, err := m.Act(context.Background(), SystemAudio, "settings")
+	if err != nil || result.Outcome != "settings-opened" || result.Item.State != "manual" || f.opens != 1 {
+		t.Fatal(result, err)
+	}
+	// Before macOS 14.2 there is no such permission, and no Settings list.
+	f.byID[SystemAudio] = Item{State: "not-applicable", Detail: "system-audio-os", Settings: true}
+	if item := m.read(context.Background(), SystemAudio); item.Settings || item.Request {
+		t.Fatal(item)
+	}
+	if _, err := m.Act(context.Background(), SystemAudio, "settings"); err == nil || f.opens != 1 {
+		t.Fatal("settings opened for an inapplicable permission")
+	}
+}
+
+// The page names every permission this package lists, in the same order, so
+// no row is dropped and release smoke counts follow the source.
+func TestFrontendNamesEveryPermission(t *testing.T) {
+	source, err := os.ReadFile("../../web/grants.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := regexp.MustCompile(`(?s)const PERMISSIONS = \{(.*?)\n\};`).FindSubmatch(source)
+	if block == nil {
+		t.Fatal("PERMISSIONS not found")
+	}
+	var names []ID
+	for _, m := range regexp.MustCompile(`(?m)^  '?([a-z-]+)'?: \[`).FindAllSubmatch(block[1], -1) {
+		names = append(names, ID(m[1]))
+	}
+	if !reflect.DeepEqual(names, ids[:]) {
+		t.Fatal(names)
 	}
 }

@@ -29,11 +29,11 @@ func TestIdlePreparationBeyondAdmissionDeadline(t *testing.T) {
 				survivors = []string{deliveryTestID(73001), deliveryTestID(73002)}
 			}
 			for _, other := range survivors {
-				if _, err := f.m.submit(ctx, f.info.ID, other, "other queued input", nil, "followUp", f.info.Since); err != nil {
+				if _, err := f.m.submit(ctx, f.info.ID, other, "other queued input", nil, "followUp", nil, f.info.Since); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if _, err := f.m.submit(ctx, f.info.ID, id, text, images, "followUp", f.info.Since); err != nil {
+			if _, err := f.m.submit(ctx, f.info.ID, id, text, images, "followUp", nil, f.info.Since); err != nil {
 				t.Fatal(err)
 			}
 			if err := f.m.Abort(ctx, f.info.ID); err != nil {

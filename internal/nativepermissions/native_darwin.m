@@ -6,13 +6,16 @@
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <UserNotifications/UserNotifications.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import <Security/Security.h>
 #include <stdint.h>
+#include <string.h>
 
 extern int goPermissionActive(uint64_t token);
 extern void goPermissionDone(uint64_t token, int state, int busy, int request, char *detail, char *failure);
 
-enum { Unknown, NotDetermined, Restricted, Denied, Granted, NotGranted, Limited, Manual, Unavailable };
-enum { Bluetooth, Notifications, FullDisk, Microphone, Camera, Accessibility, Screen, Input, Automation, Count };
+enum { Unknown, NotDetermined, Restricted, Denied, Granted, NotGranted, Limited, Manual, Unavailable, NotApplicable };
+// Same order as ids in permissions.go.
+enum { Bluetooth, Notifications, FullDisk, Microphone, Camera, Accessibility, Screen, SystemAudio, Input, Automation, Count };
 // Accessed only on the main queue, including asynchronous completion handlers.
 static BOOL pending[Count];
 static BOOL requested[Count];
@@ -68,7 +71,18 @@ static int status(int permission) {
         default: return Unknown;
     }
 }
+static BOOL manualOnly(int permission) {
+    return permission == FullDisk || permission == SystemAudio || permission == Automation;
+}
 static void query(uint64_t token, int permission) {
+    if (permission == SystemAudio) {
+        // Core Audio process taps (macOS 14.2+) have no public status or
+        // request call: macOS asks when a tap first records. Never create one
+        // to probe. Screen Recording's preflight is a different permission.
+        if (@available(macOS 14.2, *)) finish(token, Manual, NO, NO, @"system-audio-manual", nil);
+        else finish(token, NotApplicable, NO, NO, @"system-audio-os", nil);
+        return;
+    }
     if (permission == FullDisk || permission == Automation) {
         finish(token, Manual, NO, NO, permission == FullDisk ? @"full-disk-manual" : @"automation-manual", nil);
         return;
@@ -124,7 +138,7 @@ static void pollBluetooth(uint64_t token, int remaining) {
 }
 static void request(uint64_t token, int permission) {
     if (!bundled()) { finish(token, Unavailable, NO, NO, nil, @"Open the packaged yesman app to request its permissions."); return; }
-    if (permission == FullDisk || permission == Automation) { finish(token, Manual, NO, NO, nil, @"Manage this permission in System Settings."); return; }
+    if (manualOnly(permission)) { finish(token, Manual, NO, NO, nil, @"Manage this permission in System Settings."); return; }
     for (int i = 0; i < Count; i++) {
         if (pending[i]) { finish(token, Unknown, YES, NO, nil, @"A system permission request is still pending."); return; }
     }
@@ -173,6 +187,37 @@ static void request(uint64_t token, int permission) {
         default: break;
     }
     completeRequest(token, permission, nil);
+}
+
+// Reads this process's own code signature; it does not contact TCC.
+// 0 unknown, 1 unsigned, 2 ad-hoc, 3 certificate signed.
+int ym_permission_signing(void) {
+    int signing = 0;
+    @autoreleasepool {
+        SecCodeRef code = NULL;
+        SecStaticCodeRef disk = NULL;
+        CFDictionaryRef info = NULL;
+        OSStatus status = SecCodeCopySelf(kSecCSDefaultFlags, &code);
+        if (status == errSecSuccess) status = SecCodeCopyStaticCode(code, kSecCSDefaultFlags, &disk);
+        if (status == errSecSuccess) status = SecCodeCopySigningInformation(disk, kSecCSSigningInformation, &info);
+        if (status == errSecCSUnsigned) signing = 1;
+        else if (status == errSecSuccess && info) {
+            NSDictionary *values = (NSDictionary *)info;
+            NSNumber *flags = values[(NSString *)kSecCodeInfoFlags];
+            if (!values[(NSString *)kSecCodeInfoUnique]) signing = 1;
+            else if ([flags isKindOfClass:NSNumber.class]) signing = (flags.unsignedIntValue & kSecCodeSignatureAdhoc) ? 2 : 3;
+        }
+        if (info) CFRelease(info);
+        if (disk) CFRelease(disk);
+        if (code) CFRelease(code);
+    }
+    return signing;
+}
+// The packaged app's path (caller frees), or NULL for any other copy.
+char *ym_permission_bundle(void) {
+    @autoreleasepool {
+        return bundled() ? strdup(NSBundle.mainBundle.bundlePath.fileSystemRepresentation) : NULL;
+    }
 }
 
 void ym_permission_start(uint64_t token, int permission, int action, const char *url) {

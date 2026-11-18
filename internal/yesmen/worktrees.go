@@ -26,6 +26,19 @@ type WorktreeRecord struct {
 	Attempts      []WorktreeAttempt   `json:"attempts,omitempty"`
 	Removed       bool                `json:"removed,omitempty"`
 	RetiredReason string              `json:"retiredReason,omitempty"`
+	// Root identifies the checkout's directory as yesman created it. It is
+	// written once, with the record, and never filled in later: records
+	// without it (older ones, or a file system with no creation time) get
+	// no write/edit grant through the managed entry.
+	Root *WorktreeRoot `json:"root,omitempty"`
+}
+
+// WorktreeRoot is a checkout directory's inode number (file index on
+// Windows) and creation time in nanoseconds, measured through a handle of
+// the directory right after the pool created it.
+type WorktreeRoot struct {
+	Ino   uint64 `json:"ino,string"`
+	Birth int64  `json:"birthNs,string"`
 }
 
 // WorktreeAttempt keeps rejected author/release evidence without granting

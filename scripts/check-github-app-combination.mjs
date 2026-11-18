@@ -34,6 +34,7 @@ try{for(const [name,engine] of Object.entries({chromium,webkit})){
     const method=full.replace('Yesman.','');window.bridgeCalls.push({method,args});
     if(real.has(method)){const r=await fetch('/fixture/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method,args})});if(!r.ok)throw Error('fixture HTTP '+r.status);const v=await r.json();if(v.error)throw Error(v.error);return v.value;}
     if(method==='Clones')return[];
+    if(method==='Schedules')return{plans:[]}; // the info panel's Tasks row: no scheduled tasks
     if(method==='Fetches')return{fetching:[],errors:{}};
     if(method==='Update')return{enabled:false};
     if(method==='Grants')return{platform:'darwin',items:['bluetooth','notifications','full-disk','microphone','camera','accessibility','screen','input','automation'].map(id=>({id,state:'manual',settings:true}))};
@@ -43,7 +44,7 @@ try{for(const [name,engine] of Object.entries({chromium,webkit})){
   await page.goto(url);await page.locator('[data-agent="alice/lead"]').first().click();
   if(!await page.locator('#yesman-info [data-info-entry]').count())await page.getByRole('button',{name:'Show the info',exact:true}).click();
   await page.locator('#yesman-info [data-info-entry="needs-you"]').waitFor();
-  assert.deepEqual(await page.locator('#yesman-info [data-info-entry]').evaluateAll(es=>es.map(e=>e.dataset.infoEntry)),['knowledge','working-logs','needs-you','topics']);
+  assert.deepEqual(await page.locator('#yesman-info [data-info-entry]').evaluateAll(es=>es.map(e=>e.dataset.infoEntry)),['knowledge','working-logs','needs-you','topics','tasks']);
   await page.locator('#settings-button').click();
   await page.locator('#settings-nav [data-page="github-app"]').click();
   const pane=page.locator('#github-app-page');await pane.waitFor();

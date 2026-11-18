@@ -108,6 +108,8 @@ type piFixture struct {
 	bodies  []string
 	settles map[string]int
 	events  map[string][]json.RawMessage
+	// hook, when set, also gets every event, as the app's other listeners do.
+	hook func(agent.Event)
 }
 
 // startPiFixture starts the app. reply answers a model request with pi-messages
@@ -122,6 +124,31 @@ func startPiFixture(t *testing.T, reply func(body string) []any, extensions ...s
 	if err != nil {
 		t.Skip("pi is not installed")
 	}
+	return startPiFixtureWith(t, piPath, nil, reply, extensions...)
+}
+
+// startManagedPiFixture is startPiFixture with the pinned runtime the app
+// runs by default, prepared as CI prepares it (go run ./tools/pi-runtime
+// <cache>, its root in YESMAN_TEST_RUNTIME), instead of an installed pi.
+func startManagedPiFixture(t *testing.T, reply func(body string) []any) *piFixture {
+	t.Helper()
+	root := os.Getenv("YESMAN_TEST_RUNTIME")
+	if root == "" {
+		t.Skip("set YESMAN_TEST_RUNTIME to a runtime prepared with go run ./tools/pi-runtime <cache>")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli := filepath.Join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js")
+	if _, err := os.Stat(cli); err != nil {
+		t.Fatalf("YESMAN_TEST_RUNTIME is not a prepared runtime: %v", err)
+	}
+	return startPiFixtureWith(t, node, func(context.Context) (string, []string, error) { return node, []string{cli}, nil }, reply)
+}
+
+func startPiFixtureWith(t *testing.T, piPath string, command func(context.Context) (string, []string, error), reply func(body string) []any, extensions ...string) *piFixture {
+	t.Helper()
 	ext, err := filepath.Abs("../../pi/yesman.ts")
 	if err != nil {
 		t.Fatal(err)
@@ -191,6 +218,7 @@ func startPiFixture(t *testing.T, reply func(body string) []any, extensions ...s
 	}
 	f.m = agent.New(agent.Config{
 		Pi:        piPath,
+		Command:   command,
 		Extension: ext,
 		Env: []string{"YESMAN_API=" + f.srv.URL(), "YESMAN_HOME=" + f.tmp, "PI_CODING_AGENT_DIR=" + config,
 			"FIXTURE_TRACE=" + filepath.Join(f.tmp, "trace.jsonl"), "FIXTURE_IMAGE=" + fixtureImage},
@@ -205,7 +233,11 @@ func startPiFixture(t *testing.T, reply func(body string) []any, extensions ...s
 			if head.Type == "agent_settled" {
 				f.settles[e.Agent]++
 			}
+			hook := f.hook
 			f.mu.Unlock()
+			if hook != nil {
+				hook(e)
+			}
 		},
 	})
 	f.srv.Agents = f.m
