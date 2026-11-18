@@ -36,8 +36,10 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
     refreshing = refresh;
     const readRevision = revision;
     const p = call(refresh ? 'RefreshCrew' : 'Crew').then((v) => {
-      if (loading === p && revision === readRevision) view = v;
-    }, fail).finally(() => {
+      if (!busy && loading === p && revision === readRevision) view = v;
+    }, (err) => {
+      if (!busy && loading === p && revision === readRevision) fail(err);
+    }).finally(() => {
       if (loading === p) { loading = null; refreshing = false; }
       if (shown()) rerender();
     });
@@ -46,27 +48,34 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
     return p;
   }
 
-  // Invalidate reads both before and after saving: a pending catalog refresh
-  // must not restore a removed option or an earlier estimate.
-  async function save(method, ...args) {
+  // One operation owns the view until its response settles, even if its
+  // dialog is dismissed. Fence reads on both success and failure, including
+  // reads started while saving; they may describe an intermediate state.
+  async function saving(action) {
+    if (busy) return false;
+    busy = true;
     revision++;
-    const next = await call(method, ...args);
-    revision++;
-    view = next;
+    if (shown()) rerender();
+    try {
+      await action();
+      return true;
+    } finally {
+      revision++;
+      busy = false;
+      if (shown()) rerender();
+    }
+  }
+
+  function save(method, ...args) {
+    return saving(async () => { view = await call(method, ...args); });
   }
 
   async function change(method, ...args) {
-    busy = true;
-    if (shown()) rerender();
     try {
-      await save(method, ...args);
-      return true;
+      return await save(method, ...args);
     } catch (err) {
       fail(err);
       return false;
-    } finally {
-      busy = false;
-      if (shown()) rerender();
     }
   }
 
@@ -113,6 +122,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
   // openOption adds an option to the crew, or, given a member, changes the
   // user's own scores for it.
   async function openOption(member) {
+    if (busy) return;
     const dialog = $('#crew-dialog');
     const scores = scoreFields(member?.source === 'patch' ? member.estimate : member?.score);
     const error = h('p', { class: 'danger', role: 'alert', hidden: true });
@@ -172,18 +182,26 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
     const form = h('form', {
       onsubmit: async (e) => {
         e.preventDefault();
+        if (busy) return;
+        const focused = document.activeElement;
+        const editing = [...form.querySelectorAll('input:enabled, select:enabled')];
+        for (const input of editing) input.disabled = true;
         submit.disabled = true;
         error.hidden = true;
         try {
           const score = scores.el.hidden ? null : scores.read();
           if (member) await save('SetCrewScore', member.key, score);
           else await save('AddCrewOption', pick.m.provider, pick.m.id, pick.effort, score);
-          dialog.close('ok');
-          if (shown()) rerender();
+          if (dialog.open && form.parentNode === dialog) dialog.close('ok');
         } catch (err) {
-          error.textContent = errorText(err);
-          error.hidden = false;
+          if (dialog.open && form.parentNode === dialog) {
+            error.textContent = errorText(err);
+            error.hidden = false;
+          } else fail(err);
+        } finally {
+          for (const input of editing) input.disabled = false;
           submit.disabled = false;
+          if (dialog.open && form.parentNode === dialog && [document.body, dialog].includes(document.activeElement)) focused?.focus({ preventScroll: true });
         }
       },
     },
@@ -237,17 +255,14 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
 
   async function patchAction(action, method, ...args) {
     if (busy) return;
-    busy = true;
     patchError = '';
     patchExport = '';
-    if (shown()) rerender();
     try {
-      if (method === 'ExportScorePatch') patchExport = await call(method, ...args);
+      if (method === 'ExportScorePatch') await saving(async () => { patchExport = await call(method, ...args); });
       else await save(method, ...args);
     } catch (err) {
       patchError = errorText(err);
     } finally {
-      busy = false;
       if (shown()) {
         rerender();
         if (document.activeElement === document.body) document.querySelector(`[data-score-action="${action}"]`)?.focus({ preventScroll: true });

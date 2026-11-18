@@ -36,6 +36,10 @@ try {
       const page = await browser.newPage({ viewport: { width: 1180, height: 900 } });
       const errors = []; page.on('pageerror', (e) => errors.push(e.message));
       await page.addInitScript(() => {
+        window.scoreCalls = [];
+        window.scoreControls = {};
+        window.scorePending = {};
+        window.scoreFinished = {};
         window.fixtureCall = async (method, ...args) => {
           const res = await fetch('/fixture/call', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ method, args }) });
           const body = await res.json(); if (body.error) throw Error(body.error); return body.value;
@@ -43,7 +47,18 @@ try {
         window.mygo = { locale: localStorage.getItem('fixture.locale') || 'en', on() {}, async call(method, ...args) {
           const m = method.replace('Yesman.', '');
           if (['Crew', 'RefreshCrew', 'ImportScorePatch', 'ExportScorePatch', 'SetScorePatchEnabled', 'AddCrewOption', 'SetCrewScore', 'RemoveCrewOption', 'SetYesmanModel'].includes(m)) {
+            window.scoreCalls.push(m);
+            const control = window.scoreControls[m];
+            delete window.scoreControls[m];
+            const pause = async () => {
+              await new Promise((resolve) => { window.scorePending[m] = resolve; });
+              delete window.scorePending[m];
+              window.scoreFinished[m] = true;
+              if (control.reject) throw Error(control.message || 'Synthetic score save failure');
+            };
+            if (control?.before) await pause();
             const v = await fixtureCall(m, ...args);
+            if (control && !control.before) await pause();
             if (m === 'RefreshCrew' && window.holdRefresh) await new Promise((resolve) => { window.releaseRefresh = resolve; });
             return v;
           }
@@ -123,6 +138,117 @@ try {
       assert.equal(await dialog.locator('input[name=speed]').inputValue(), '');
       await dialog.getByText('Edit the fallback estimate. Nonempty fields in your CSV still take precedence.', { exact: true }).waitFor();
       await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      // A dismissed form still owns its pending mutation. Delay responses after
+      // the real Go save/DTO, exactly as the independent stale-estimate oracle.
+      const hold = (method, control = {}) => page.evaluate(({ method, control }) => {
+        window.scoreControls[method] = control;
+        delete window.scoreFinished[method];
+      }, { method, control });
+      const pending = (method) => page.waitForFunction((m) => !!window.scorePending[m], method);
+      const release = async (method) => {
+        await page.evaluate((m) => window.scorePending[m](), method);
+        await page.waitForFunction((m) => window.scoreFinished[m], method);
+      };
+      const replaceButton = () => patch.getByRole('button', { name: 'Replace CSV…', exact: true });
+      const ready = () => page.waitForFunction(() => !document.querySelector('[data-score-action="import"]').disabled);
+      const blocked = async () => {
+        assert.equal(await replaceButton().isDisabled(), true);
+        assert.equal(await page.getByRole('button', { name: 'Add a model', exact: true }).isDisabled(), true);
+        assert.equal(await page.getByRole('button', { name: 'Read pi’s models again', exact: true }).isDisabled(), true);
+        assert.equal(await page.getByRole('combobox', { name: 'New yesmen run as' }).isDisabled(), true);
+        assert.equal(await patch.getByRole('combobox', { name: 'Use score patch' }).isDisabled(), true);
+        assert.equal(await rows.getByRole('button', { name: /^Remove / }).first().isDisabled(), true);
+      };
+      const replaceSpeed = async (speed) => {
+        await page.evaluate((csv) => fixtureCall('FixtureCSV', csv), csv.replace('123.4', String(speed)));
+        await replaceButton().click();
+        await ready();
+        assert.match(await rows.nth(1).innerText(), new RegExp(`${speed === 37.125 ? '37.13' : speed} tok/s · Your CSV`));
+        assert.equal((await page.evaluate(() => fixtureCall('Crew'))).members[1].score.speed, speed);
+      };
+      await hold('SetCrewScore');
+      await rows.nth(1).getByRole('button', { name: /^Fallback estimate for/ }).click();
+      await dialog.locator('input[name=intelligence]').fill('33');
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await pending('SetCrewScore');
+      assert.equal(await dialog.locator('input[name=intelligence]').isDisabled(), true);
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await blocked();
+      await snapshot('pending-estimate-dismissed');
+      // Settings navigation may start a read during the outstanding mutation.
+      await hold('Crew');
+      await page.locator('#settings-nav [data-page="general"]').click();
+      await page.locator('#settings-nav [data-page="yesman"]').click();
+      await pending('Crew');
+      await blocked();
+      await release('SetCrewScore');
+      await ready();
+      assert.match(await rows.nth(1).innerText(), /33 · Inherited estimate/);
+      await replaceSpeed(37.125);
+      await release('Crew');
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      assert.match(await rows.nth(1).innerText(), /37.13 tok\/s · Your CSV/);
+      assert.match(await page.evaluate(() => fixtureCall('FixtureContext')), /speed 37.12 tok\/s \(user CSV\)/);
+      await snapshot('replacement-after-estimate');
+      // Add shares that ownership, including Escape dismissal and later import.
+      await hold('AddCrewOption');
+      await page.getByRole('button', { name: 'Add a model', exact: true }).click();
+      await dialog.locator('select[name=model]').selectOption('0');
+      await dialog.locator('select[name=effort]').selectOption('low');
+      await dialog.getByRole('button', { name: 'Add', exact: true }).press('Enter');
+      await pending('AddCrewOption');
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'hidden' });
+      await blocked();
+      await release('AddCrewOption');
+      await ready();
+      assert.equal(await rows.count(), 3);
+      await replaceSpeed(81.25);
+      await rows.nth(2).getByRole('button', { name: /^Remove / }).click();
+      await ready();
+      assert.equal(await rows.count(), 2);
+      // A real failed response before commit preserves the draft and restores
+      // editable fields/Enter retry. Repeated Enter while pending sends once.
+      await hold('SetCrewScore', { before: true, reject: true });
+      await rows.nth(1).getByRole('button', { name: /^Fallback estimate for/ }).click();
+      const intelligence = dialog.locator('input[name=intelligence]');
+      await intelligence.fill('34');
+      const callsBefore = await page.evaluate(() => scoreCalls.filter((m) => m === 'SetCrewScore').length);
+      await intelligence.press('Enter');
+      await pending('SetCrewScore');
+      await page.keyboard.press('Enter');
+      assert.equal(await page.evaluate(() => scoreCalls.filter((m) => m === 'SetCrewScore').length), callsBefore + 1);
+      await release('SetCrewScore');
+      await dialog.getByRole('alert').filter({ hasText: 'Synthetic score save failure' }).waitFor();
+      assert.equal(await intelligence.inputValue(), '34');
+      assert.equal(await intelligence.isDisabled(), false);
+      assert.equal(await intelligence.evaluate((el) => document.activeElement === el), true);
+      await intelligence.press('Enter');
+      await dialog.waitFor({ state: 'hidden' });
+      await ready();
+      assert.match(await rows.nth(1).innerText(), /34 · Inherited estimate/);
+      // A failure after dismissal is reported on the page, and unlocks all
+      // actions. Its pending read still cannot overwrite a later replacement.
+      await hold('SetCrewScore', { before: true, reject: true });
+      await rows.nth(1).getByRole('button', { name: /^Fallback estimate for/ }).click();
+      await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+      await pending('SetCrewScore');
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await blocked();
+      await release('SetCrewScore');
+      await ready();
+      await page.getByText('Synthetic score save failure', { exact: true }).filter({ visible: true }).waitFor();
+      await replaceSpeed(37.125);
+      // A stale read error is also superseded by an acknowledged replacement.
+      await hold('RefreshCrew', { reject: true, message: 'Synthetic superseded catalog read' });
+      await page.getByRole('button', { name: 'Read pi’s models again', exact: true }).click();
+      await pending('RefreshCrew');
+      await replaceSpeed(81.25);
+      await release('RefreshCrew');
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      assert.match(await rows.nth(1).innerText(), /81.25 tok\/s · Your CSV/);
+      assert.equal(await page.getByText('Synthetic superseded catalog read', { exact: true }).filter({ visible: true }).count(), 0);
+      console.log(`${name}: pending estimate/add cancellation, shared busy recovery, reads during saves, failed draft/Enter retry and late read error PASS`);
       // A stale catalog response cannot restore scores from before the patch update.
       await page.evaluate(() => { window.holdRefresh = true; });
       await page.getByRole('button', { name: 'Read pi’s models again', exact: true }).click();
