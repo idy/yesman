@@ -259,7 +259,7 @@ class Producer(unittest.TestCase):
         self.assertEqual(restart_step, step)
         self.assertIn('    needs: restart-download\n', restart)
         restart_download = text.split('\n  restart-download:\n', 1)[1].split('\n  restart-public-npm:\n', 1)[0]
-        self.assertIn('    if: inputs.restart_qa_commit == github.sha\n', restart_download)
+        self.assertIn('    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1\n', restart_download)
         for native in (text.split('\n  native:\n', 1)[1].split('\n  restart-download:\n', 1)[0], text.split('\n  restart-native:\n', 1)[1]):
             self.assertNotIn('secrets.', native)
             self.assertNotIn('GH_TOKEN:', native)

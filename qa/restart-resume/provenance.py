@@ -23,6 +23,11 @@ def receipt(binding):
     return json.loads(raw)
 
 
+def first_attempt():
+    """This dedicated route supports new run IDs, never partial/full reruns."""
+    need(os.environ.get('GITHUB_RUN_ATTEMPT') == '1', 'restart QA requires attempt 1; failures need a separately authorized new run')
+
+
 def verify_contract(c, plan, plan_path, run_id):
     a = receipt(c['hostedHandoff'])
     need(a['repository'] == REPOSITORY and a['workflow'] == WORKFLOW and a['workflowCommit'] == os.environ['GITHUB_SHA'], 'selected repository/workflow/commit differs')

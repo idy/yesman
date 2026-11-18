@@ -1,5 +1,13 @@
 # QA-only successor for t214 rereview
 
+## Bounded QA049 follow-up
+
+The dedicated restart route accepts **attempt 1 only**. All five restart jobs check `github.run_attempt == 1` before checkout or other steps; the download, public npm, transfer/bind, native and attachment command entries repeat the guard before their effects. The narrow producer also asserts attempt 1 before its subprocess admission. Partial/full Actions reruns are unsupported. After a failure or unknown episode, preserve its evidence and obtain a separately authorized **new run ID** after disposition; neither this guard nor a previous handoff permits a redispatch. Producer attempt fields describe this restricted first attempt, not general cross-attempt provenance.
+
+The exact S checkout fetches depth 2 with persisted credentials disabled. Before any helper/build/sign step, the producer explicitly requires the known integration-parent commit object, the sole parent of S, and the unchanged two-path metadata-only diff.
+
+At each signed-input/npm transfer boundary, validate upload-artifact's bare 64-hex digest, normalize it once to canonical lowercase `sha256:<hex>`, validate the REST digest in that canonical format and compare both against the computed ZIP hash. Receipts keep the original action SHA and computed ZIP SHA separately, alongside the canonical API digest and actual selected IDs. `test_release_route.py` contains only benign normal contracts for these three fixes. The earlier standard/security/native results remain prior evidence; this follow-up does not rerun them.
+
 This branch contains only acceptance tooling. Product source, `mygo.json`, `CHANGELOG.md`, release tag and published history are unchanged. The release is immutable S `v0.1.49` / `e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0`. Approved product PR100 is `cfaaeec242a7d372669b5e39739b71bbd15ad646`, tree `c7b0c06488b613c56dd0e52ceba98e343a4e0369`; integration `077b642022eff788f41c6e2cc530551f3518a919` has that exact tree. The successor downloads the two REST trees and requires S's sole parent to be that integration and its only different entries to be `CHANGELOG.md` and `mygo.json`.
 
 The parent attachment seal `868f18261fcc37488e3352b598c7f0dea410d151d12395585e2798b124f63dc9` remains unchanged in workspace evidence. Three dependency packets are transported byte-for-byte and verified before import. The attachment under `runner-attachment-f48/` is deliberately a successor implementation; its old transport hash in `packet-binding.json` documents the predecessor, not its current identity. `successor-manifest.json` binds this successor and the two changed runner/producer/workflow files. Verify it with `python3 qa/restart-resume/verify.py ROOT`.

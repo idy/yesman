@@ -249,7 +249,7 @@ jobs:
           if-no-files-found: error
 
   restart-download:
-    if: inputs.restart_qa_commit == github.sha
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -271,7 +271,7 @@ jobs:
           path: ${{ runner.temp }}/released-inputs
           if-no-files-found: error
   restart-public-npm:
-    if: inputs.restart_qa_commit == github.sha
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -299,6 +299,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
   restart-sign-qa:
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1
     needs: restart-download
     runs-on: macos-latest
     timeout-minutes: 30
@@ -309,6 +310,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0
+          fetch-depth: 2 # S plus its exact integration parent for metadata-only admission.
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -347,6 +349,7 @@ jobs:
             ${{ runner.temp }}/gate-inputs/qa-build-*.log
           if-no-files-found: error
   restart-bind:
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1
     needs: [restart-sign-qa, restart-public-npm]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -376,6 +379,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
   restart-native:
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1
     needs: restart-bind
     runs-on: macos-latest
     timeout-minutes: 25

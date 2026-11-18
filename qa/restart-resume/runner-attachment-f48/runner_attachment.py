@@ -630,6 +630,7 @@ class Host:
 
 
 def run(stack, runner, plan_path, evidence_path, contract_path):
+    provenance.first_attempt()
     packet = Path(__file__).resolve().parent
     bindings = obj(packet / 'source-binding.json')
     need(sha(read(runner.__file__)) == bindings['patchedRunnerSHA256'], 'runner overlay changed')

@@ -24,6 +24,8 @@ class Composition(unittest.TestCase):
                     args=list(map(str,args));env=kw.get('env',os.environ);calls.append((args,'MYGO_UPDATER_PRIVATE_KEY'in env))
                     if args[:2]==['go','env']:return {'GOOS':b'darwin','GOARCH':b'arm64'}[args[2]]
                     if args[:2]==['git','rev-parse']:return RELEASE.encode()
+                    if args[:2]==['git','cat-file']:
+                        self.assertEqual(args[2:],['-e',INTEGRATION+'^{commit}']);return b''
                     if args[:2]==['git','show']:return INTEGRATION.encode()
                     if args[:2]==['git','diff']:return b'CHANGELOG.md\nmygo.json\n'
                     if args[:2]==['git','archive']:return buf.getvalue()

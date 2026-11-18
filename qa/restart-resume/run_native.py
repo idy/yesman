@@ -2,8 +2,10 @@
 import hashlib,json,os,subprocess,sys
 from pathlib import Path
 from verify import verify
+from provenance import first_attempt
 
 def main():
+    first_attempt()
     repo=Path(__file__).resolve().parents[2];verify(repo)
     if any(os.environ.get(k)for k in('GH_TOKEN','GITHUB_TOKEN','MYGO_UPDATER_PRIVATE_KEY')):raise ValueError('native credentials refused')
     root=Path(sys.argv[1]).resolve();rows=json.loads((root/'transfer-files.json').read_bytes())

@@ -14,10 +14,15 @@ def get(endpoint,raw=False):
     q=subprocess.run(args,capture_output=True,timeout=120);need(q.returncode==0,'GET failed: '+endpoint)
     return q.stdout if raw else json.loads(q.stdout)
 def transfer(artifact_id,digest,out):
+    p.first_attempt()
+    # upload-artifact emits bare hex; REST and durable receipts use sha256:hex.
+    need(isinstance(digest,str) and re.fullmatch('[0-9a-fA-F]{64}',digest),'upload action must supply a bare SHA256 digest')
+    upload_sha256=digest.lower();digest='sha256:'+upload_sha256
     a=get('repos/idy/yesman/actions/artifacts/'+str(artifact_id));run=get('repos/idy/yesman/actions/runs/'+os.environ['GITHUB_RUN_ID'])
+    need(isinstance(a.get('digest'),str) and re.fullmatch('sha256:[0-9a-f]{64}',a['digest']),'artifact REST digest must be canonical SHA256')
     need(a['id']==artifact_id and not a['expired']and a['digest']==digest and a['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID']),'selected artifact API identity differs')
     need(run['head_sha']==os.environ['GITHUB_SHA'] and run['run_attempt']==int(os.environ['GITHUB_RUN_ATTEMPT']) and run['path']==p.WORKFLOW,'selected workflow run differs')
-    raw=get('repos/idy/yesman/actions/artifacts/'+str(artifact_id)+'/zip',True);need('sha256:'+sha(raw)==digest,'actual transfer ZIP digest differs')
+    raw=get('repos/idy/yesman/actions/artifacts/'+str(artifact_id)+'/zip',True);zip_sha256=sha(raw);need('sha256:'+zip_sha256==digest==a['digest'],'actual transfer ZIP digest differs')
     out.mkdir(parents=True);total=0
     with zipfile.ZipFile(io.BytesIO(raw))as z:
         need(len(z.infolist())<=10000,'transfer member budget')
@@ -25,7 +30,7 @@ def transfer(artifact_id,digest,out):
             rel=PurePosixPath(member.filename);need(not rel.is_absolute()and'..'not in rel.parts and '\\'not in member.filename and not stat.S_ISLNK(member.external_attr>>16),'transfer path/link refused')
             if member.is_dir():continue
             total+=member.file_size;need(total<=2<<30,'transfer byte budget');dest=out.joinpath(*rel.parts);need(not dest.exists(),'duplicate transfer member');dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(z.read(member))
-    return {'repository':p.REPOSITORY,'workflow':p.WORKFLOW,'workflowCommit':os.environ['GITHUB_SHA'],'runID':os.environ['GITHUB_RUN_ID'],'runAttempt':int(os.environ['GITHUB_RUN_ATTEMPT']),'sourceCommit':p.RELEASE,'artifactID':artifact_id,'artifactDigest':digest,'zipDigestVerified':True,'artifactAPI':a,'runAPI':run}
+    return {'repository':p.REPOSITORY,'workflow':p.WORKFLOW,'workflowCommit':os.environ['GITHUB_SHA'],'runID':os.environ['GITHUB_RUN_ID'],'runAttempt':int(os.environ['GITHUB_RUN_ATTEMPT']),'sourceCommit':p.RELEASE,'artifactID':artifact_id,'artifactDigest':digest,'uploadActionSHA256':upload_sha256,'zipSHA256':zip_sha256,'firstAttemptOnly':True,'zipDigestVerified':True,'artifactAPI':a,'runAPI':run}
 def inventory(archive):
     rows={}
     with tarfile.open(archive)as t:
@@ -37,6 +42,7 @@ def inventory(archive):
             else:need(m.isfile(),'archive special member');raw=t.extractfile(m).read();rows[name]={'sha256':sha(raw),'bytes':len(raw),'mode':m.mode&0o7777}
     need('Contents/MacOS/Yes Man'in rows,'archive main missing');return sha(json.dumps(rows,sort_keys=True).encode())
 def main():
+    p.first_attempt()
     out=Path(sys.argv[1]).absolute();need(not out.exists(),'new bound output');out.mkdir(parents=True)
     transfer_receipt=transfer(int(os.environ['QA_ARTIFACT_ID']),os.environ['QA_ARTIFACT_DIGEST'],out/'inputs')
     cache_receipt=transfer(int(os.environ['NPM_ARTIFACT_ID']),os.environ['NPM_ARTIFACT_DIGEST'],out/'npm')

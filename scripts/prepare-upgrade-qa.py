@@ -452,12 +452,15 @@ def _produce(key):
             if STOP.signum is not None:raise SystemExit(128+STOP.signum)
 
 def _successors(group,key,inputs,out,meta):
+    restart=meta.get('restartAcceptance')
+    if restart is not None:
+        assert os.environ.get('GITHUB_RUN_ATTEMPT')=='1','restart QA requires attempt 1; failures need a separately authorized new run'
     target=group.run(['go','env','GOOS'],capture=True).decode().strip()+'-'+group.run(['go','env','GOARCH'],capture=True).decode().strip()
     source=group.run(['git','rev-parse','HEAD'],capture=True).decode().strip()
-    restart=meta.get('restartAcceptance')
     if restart is not None:
         assert restart=={'candidate':'cfaaeec242a7d372669b5e39739b71bbd15ad646','tree':'c7b0c06488b613c56dd0e52ceba98e343a4e0369','productIntegration':'077b642022eff788f41c6e2cc530551f3518a919'},'unexpected restart QA source binding'
         assert target=='darwin-arm64' and source==meta['refs']['v0.1.49'],'one exact ARM64 release candidate only'
+        group.run(['git','cat-file','-e',restart['productIntegration']+'^{commit}'])
         assert group.run(['git','show','-s','--format=%P',source],capture=True).decode().strip()==restart['productIntegration'],'S must be the metadata-only release child'
         assert set(group.run(['git','diff','--name-only',restart['productIntegration'],source],capture=True).decode().splitlines())=={'mygo.json','CHANGELOG.md'},'S includes unreviewed product changes'
         candidate_tag='v0.1.49';official_tags=('v0.1.48','v0.1.49');private_versions=('0.1.900001',)

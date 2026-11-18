@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 from urllib.parse import urlsplit
+from provenance import first_attempt
 
 LOCK='805dadc8e1468ae4f0d72fac3936e7a1fc9a97ac3e7b23ab1e3fc18d1e1f5569'
 PACKAGE='ebe3b8eab26c2007d69658c6c42b53ddd29351b805c326777eaf4692d3369626'
@@ -62,6 +63,7 @@ def bootstrap(cache,data,lock):
 
 
 def acquire(source,out):
+    first_attempt()
     source,out=Path(source).resolve(),Path(out).absolute();need(not out.exists(),'new public cache output required')
     lock=(source/'internal/piruntime/assets/package-lock.json').read_bytes();package=(source/'internal/piruntime/assets/package.json').read_bytes();need(sha(package)==PACKAGE,'pinned package changed');selected(lock)
     need(os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted','keyless hosted acquisition only')

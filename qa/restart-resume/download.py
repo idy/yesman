@@ -2,7 +2,7 @@
 import hashlib,io,json,os,re,subprocess,sys,tarfile
 from pathlib import Path,PurePosixPath
 from urllib.parse import urlsplit,unquote
-from provenance import CANDIDATE,TREE,INTEGRATION,RELEASE,RELEASE_TREE,PREDECESSOR
+from provenance import CANDIDATE,TREE,INTEGRATION,RELEASE,RELEASE_TREE,PREDECESSOR,first_attempt
 
 def need(ok,why):
     if not ok:raise ValueError(why)
@@ -27,6 +27,7 @@ def source_mapping():
     changed=sorted(k for k in rows[0].keys()|rows[1].keys()if rows[0].get(k)!=rows[1].get(k));need(changed==['CHANGELOG.md','mygo.json'],'release product differs')
     return {'passed':True,'candidate':CANDIDATE,'candidateTree':TREE,'integration':INTEGRATION,'integrationTree':TREE,'releaseSourceCommit':RELEASE,'releaseTree':RELEASE_TREE,'releaseParents':[INTEGRATION],'changedPaths':changed,'nonMetadataEntriesIdentical':True,'restTrees':rows}
 def main():
+    first_attempt()
     need(os.environ['GITHUB_REPOSITORY']=='idy/yesman','repository differs')
     out=Path(sys.argv[1]).absolute();need(not out.exists(),'new download destination required');out.mkdir(parents=True)
     releases=pages('repos/idy/yesman/releases');meta={'kind':'downloaded-release-and-draft','refs':{'v0.1.48':PREDECESSOR,'v0.1.49':RELEASE},'releases':[],'stages':{},'restartAcceptance':{'candidate':CANDIDATE,'tree':TREE,'productIntegration':INTEGRATION}}

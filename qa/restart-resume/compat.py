@@ -13,6 +13,7 @@ def module(name,path):
     spec=importlib.util.spec_from_file_location(name,path);value=importlib.util.module_from_spec(spec);spec.loader.exec_module(value);return value
 
 def run(stack,runner,plan_path,evidence_path,contract_path):
+    p.first_attempt()
     plan_path=Path(plan_path).resolve();plan=json.loads(plan_path.read_bytes());contract=json.loads(Path(contract_path).read_bytes());authority=p.receipt(contract['hostedHandoff'])
     need(authority['workflowCommit']==os.environ['GITHUB_SHA']and authority['runID']==os.environ['GITHUB_RUN_ID']and authority['runAttempt']==int(os.environ['GITHUB_RUN_ATTEMPT']),'compat hosted identity differs')
     need(authority['compatPlanSHA256']==sha(plan_path.read_bytes())and plan['Target']=='darwin-arm64'and len(plan['Stages'])==2,'one exact compatible edge required')
