@@ -131,6 +131,8 @@ func TestBoardResponsesCarryWaits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Git may check out the expected fixture with CRLF on Windows.
+	saved = bytes.ReplaceAll(saved, []byte("\r\n"), []byte("\n"))
 	if !bytes.Equal(saved, pretty.Bytes()) {
 		t.Fatalf("%s is not what the API answers now; YESMAN_UPDATE_FIXTURES=1 writes it again:\n%s", boardPayloadFixture, pretty.Bytes())
 	}
