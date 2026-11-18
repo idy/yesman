@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.43
+
+- Combine consecutive messages sent from the composer while its latest message is still waiting for pi, updating the same conversation bubble in submission order.
+- Preserve the original text and image order, highlight appended content briefly, and let Cancel and edit restore the combined pending message.
+- Keep later messages separate once pi starts preparing or takes the pending input, when the queue lane changes or combining would exceed message limits, and for Topics, scheduled runs and worker reports.
+- Include managed pi 1.5.2-yesman.5 for pending-input append support. External runtimes without that support continue sending each input separately.
+
 ## 0.1.42
 
 - Add Tasks for requests scheduled once, daily, weekly or at an interval in a chosen time zone. Plans run while Yes Man is open and the computer is awake; missed times appear together for a manual catch-up instead of replaying automatically.
