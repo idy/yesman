@@ -7,6 +7,9 @@ import compatibility_reuse
 
 def main():
     first_attempt()
+    if len(sys.argv) == 3 and sys.argv[2] == '--reuse-r5':
+        from run_consumer_native import run
+        return run(sys.argv[1])
     repo=Path(__file__).resolve().parents[2];verify(repo)
     if any(os.environ.get(k)for k in('GH_TOKEN','GITHUB_TOKEN','MYGO_UPDATER_PRIVATE_KEY')):raise ValueError('native credentials refused')
     root=Path(sys.argv[1]).resolve();rows=json.loads((root/'transfer-files.json').read_bytes())

@@ -13,11 +13,14 @@ on:
       restart_qa_commit:
         description: Exact independently reviewed QA-only commit; selects the separate .49 restart jobs
         required: false
+      restart_native_from:
+        description: Explicit native-only consumption of independently accepted R5 preparation (r5-44399948584)
+        required: false
 permissions:
   contents: read
 jobs:
   download:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.restart_native_from == ''
     runs-on: ubuntu-latest
     permissions:
       contents: write # GitHub requires push visibility for draft GET/download
@@ -249,7 +252,7 @@ jobs:
           if-no-files-found: error
 
   restart-download:
-    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1 && inputs.restart_native_from == ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -280,7 +283,7 @@ jobs:
           path: ${{ runner.temp }}/released-inputs
           if-no-files-found: error
   restart-public-npm:
-    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1 && inputs.restart_native_from == ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -315,7 +318,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
   restart-sign-qa:
-    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1 && inputs.restart_native_from == ''
     needs: restart-download
     runs-on: macos-latest
     timeout-minutes: 30
@@ -365,7 +368,7 @@ jobs:
             ${{ runner.temp }}/gate-inputs/qa-build-*.log
           if-no-files-found: error
   restart-bind:
-    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1 && inputs.restart_native_from == ''
     needs: [restart-sign-qa, restart-public-npm]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -402,7 +405,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
   restart-native:
-    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1 && inputs.restart_native_from == ''
     needs: restart-bind
     runs-on: macos-latest
     timeout-minutes: 25
@@ -426,16 +429,103 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           APPROVED_QA_COMMIT: ${{ inputs.restart_qa_commit }}
         run: python3 qa/restart-resume/run_native.py "$RUNNER_TEMP/bound-restart"
+      - name: Freeze small native diagnostics independently of profile bulk
+        if: always()
+        run: python3 qa/restart-resume/freeze_native_diagnostics.py "$RUNNER_TEMP/restart-evidence" "$RUNNER_TEMP/restart-diagnostics"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: restart-native-diagnostics
+          path: ${{ runner.temp }}/restart-diagnostics
+          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: restart-native-proof
-          path: |
-            ${{ runner.temp }}/restart-evidence
-            ${{ runner.temp }}/t199-attachment-*
-            ${{ runner.temp }}/t199-compat-*
-            ${{ runner.temp }}/bound-restart/inputs/receipts
-            ~/yesman
-            ~/.pi/agent
+          path: ${{ runner.temp }}/restart-evidence
+          include-hidden-files: true
+          if-no-files-found: warn
+
+  restart-consumer-download:
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1 && inputs.restart_native_from == 'r5-44399948584'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # GET-only draft visibility, never supplied to native execution
+      actions: read
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+      envelope: ${{ steps.acquire.outputs.envelope_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify reviewed consumer source before any credentialed acquisition
+        run: python3 qa/restart-resume/verify.py "$GITHUB_WORKSPACE"
+      - name: GET pinned prior producer artifact and still-current official identities
+        id: acquire
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVED_QA_COMMIT: ${{ inputs.restart_qa_commit }}
+          RESTART_NATIVE_FROM: ${{ inputs.restart_native_from }}
+          RESTART_PREDECESSOR: ${{ inputs.predecessor }}
+          RESTART_CANDIDATE: ${{ inputs.candidate }}
+        run: python3 qa/restart-resume/consume_r5.py "$RUNNER_TEMP/restart-consumer"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        id: upload
+        with:
+          name: restart-consumer-inputs
+          path: ${{ runner.temp }}/restart-consumer
+          include-hidden-files: true
+          if-no-files-found: error
+
+  restart-consumer-native:
+    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1 && inputs.restart_native_from == 'r5-44399948584'
+    needs: restart-consumer-download
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24.22.1'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.restart-consumer-download.outputs.artifact }}
+          path: ${{ runner.temp }}/restart-consumer
+          merge-multiple: true
+      - name: Run fresh isolated native scenarios with honest prior producer provenance
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          CONSUMER_ENVELOPE_SHA256: ${{ needs.restart-consumer-download.outputs.envelope }}
+          CONSUMER_TRANSFER_ARTIFACT_ID: ${{ needs.restart-consumer-download.outputs.artifact }}
+          CONSUMER_TRANSFER_SHA256: ${{ needs.restart-consumer-download.outputs.digest }}
+          APPROVED_QA_COMMIT: ${{ inputs.restart_qa_commit }}
+          RESTART_NATIVE_FROM: ${{ inputs.restart_native_from }}
+          RESTART_PREDECESSOR: ${{ inputs.predecessor }}
+          RESTART_CANDIDATE: ${{ inputs.candidate }}
+        run: python3 qa/restart-resume/run_native.py "$RUNNER_TEMP/restart-consumer" --reuse-r5
+      - name: Freeze small native diagnostics independently of profile bulk
+        if: always()
+        run: python3 qa/restart-resume/freeze_native_diagnostics.py "$RUNNER_TEMP/restart-evidence" "$RUNNER_TEMP/restart-diagnostics"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: restart-consumer-native-diagnostics
+          path: ${{ runner.temp }}/restart-diagnostics
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: restart-consumer-native-proof
+          path: ${{ runner.temp }}/restart-evidence
           include-hidden-files: true
           if-no-files-found: warn

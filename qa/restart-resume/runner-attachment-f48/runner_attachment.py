@@ -24,11 +24,12 @@ import uuid
 
 QA = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(QA))
-from guards import Owned, ProviderLedger
+from guards import Owned, ProviderLedger, identity
 import public_npm_cache
 import provenance
 import image_proof
 import process_proof
+import native_diagnostics
 
 HEAD = 'cfaaeec242a7d372669b5e39739b71bbd15ad646'
 TREE = 'c7b0c06488b613c56dd0e52ceba98e343a4e0369'
@@ -109,7 +110,7 @@ def tree_hashes(root):
     return rows
 
 
-def preflight(contract, plan, source_root, bindings, plan_path, run_id):
+def preflight(contract, plan, source_root, bindings, plan_path, run_id, execution=None):
     """Before CA, socket, profile, compiler or app effects. Receipts are supplied
     through the Lead handoff; hashes bind them, they are not attestations."""
     need(contract.get('schema') == 1 and contract.get('candidate') == HEAD and contract.get('candidateTree') == TREE, 'wrong candidate contract')
@@ -123,9 +124,14 @@ def preflight(contract, plan, source_root, bindings, plan_path, run_id):
     gates = receipt(contract.get('sourceGates'))
     need(gates.get('candidate') == HEAD and gates.get('tree') == TREE and gates.get('sourceAccepted') is True and gates.get('currentGatesAccepted') is True, 'independent exact-head source/current gates not accepted')
     authority = receipt(contract.get('hostedHandoff'))
-    need(authority.get('task') == 't199' and authority.get('candidate') == HEAD and authority.get('tree') == TREE and authority.get('authorized') is True and authority.get('runID') == run_id and authority.get('scenarios') == contract['scenarios'], 'specific hosted handoff missing/wrong run')
+    authority_run = str(execution['producer']['runID']) if execution else run_id
+    need(authority.get('task') == 't199' and authority.get('candidate') == HEAD and authority.get('tree') == TREE and authority.get('authorized') is True and authority.get('runID') == authority_run and authority.get('scenarios') == contract['scenarios'], 'specific hosted handoff missing/wrong run')
     need(plan.get('sourceSHA') == contract.get('releaseSourceCommit'), 'actual S release source missing/mismatched')
-    provenance.verify_contract(contract, plan, plan_path, run_id)
+    if execution is None:
+        provenance.verify_contract(contract, plan, plan_path, run_id)
+    else:
+        import consume_r5
+        consume_r5.verify_original_contract(contract, plan, plan_path, run_id, execution)
     public_npm_cache.verify(contract['publicNpmCache'], read(QA / '../../internal/piruntime/assets/package-lock.json'))
     need(plan.get('PublicKey') == bindings['mygoConfig']['updates']['publicKey'], 'compiled updater public key mismatch')
     need(contract.get('helperLiteralSHA256') == bindings['mygoUpdater']['helperLiteralSHA256'], 'helper changed')
@@ -303,7 +309,7 @@ class Host:
         self.temp = root / 'app temp'; self.temp.mkdir()
         self.bundle = self.install / 'yesman.app'; self.main = self.bundle / 'Contents/MacOS/Yes Man'
         self.data, self.config = Path.home() / 'yesman', Path.home() / '.pi/agent'
-        self.process_observer = process_proof.Processes(self.data)
+        self.process_observer = process_proof.Processes(self.data, observe=self.observe_owned)
         self.process = self.controller = self.feed = self.server = self.watcher = None
         self.expect_exit = False; self.command_results = {}; self.events = collections.deque(maxlen=4000)
         self.submissions = {}; self.before = {}; self.old_page = None; self.arm_plan = None; self.final = None
@@ -311,6 +317,9 @@ class Host:
         self.staging_attempted = False; self.helper_ownership = None
         self.image_index = 0
         self.image_diagnostics = image_proof.Diagnostics(evidence / 'image-diagnostics.json')
+        self.phase = 'initialization'
+        self.diagnostic_owners = []
+        self.diagnostics = native_diagnostics.Journal(evidence / 'diagnostics')
         self.timer = Deadline(self.health)
         self.log = (evidence / 'app.log').open('ab', buffering=0)
     def note(self, kind, **fields):
@@ -329,11 +338,14 @@ class Host:
         self.checked(['codesign', '--verify', '--deep', '--strict', str(self.bundle)], 'codesign')
         return inventory
     def checked(self, argv, label, seconds=30, env=None):
+        self.diagnostics.emit('subprocess', self.phase, operation=label, status='started')
         try:
             value = subprocess.run(argv, capture_output=True, timeout=seconds, env=env)
         except subprocess.TimeoutExpired as e:
+            self.diagnostics.emit('subprocess', self.phase, operation=label, status='timeout', exitCode=None)
             self.note('command-timeout', label=label, stdout=(e.stdout or b'')[-4096:].decode(errors='replace'), stderr=(e.stderr or b'')[-4096:].decode(errors='replace'))
             raise
+        self.diagnostics.emit('subprocess', self.phase, operation=label, status='completed', exitCode=value.returncode)
         self.note('external-command', label=label, exit=value.returncode, stdout=value.stdout[-4096:].decode(errors='replace'), stderr=value.stderr[-4096:].decode(errors='replace'))
         need(value.returncode == 0, label + ' failed')
         return value
@@ -351,15 +363,31 @@ class Host:
         path.write_text(inject_page(original, driver))
         self.note('normal-page-plus-observer', stage=index, originalSHA256=sha(original.encode()), driverSHA256=sha(driver.encode()))
     def launch(self, index):
+        self.phase = 'launch'
         self.image_index = index
         self.switch_web(index)
         self.env = self.core.app_environment(os.environ, self.data, self.config, self.web, self.temp, self.plan['Feed'])
         self.env.update(NPM_CONFIG_USERCONFIG=str(self.data / '.runtime/pi-managed/npm-public-cache.ini'), NPM_CONFIG_GLOBALCONFIG=os.devnull, NPM_CONFIG_REGISTRY='https://registry.npmjs.org')
         child = subprocess.Popen([str(self.main)], cwd=self.root, env=self.env, stdin=subprocess.DEVNULL, stdout=self.log, stderr=self.log)
-        self.process = Owned(child.pid, self.main, child=child)
+        self.process = self.owned(child.pid, child=child)
         self.process_observer.register(self.process)
         self.expect_exit = False
         self.note('explicit-verified-main-launch', stage=index, pid=self.process.pid)
+    def observe_owned(self, pid):
+        # Use the same bound alias observation for registered main roots.
+        # Other descendants retain raw kernel identity and no signalling.
+        for owned in self.diagnostic_owners:
+            if owned.pid == pid:
+                return owned.observe(pid)
+        return identity(pid)
+    def owned(self, pid, child=None):
+        value = native_diagnostics.DiagnosticOwned(pid, self.main, child=child,
+            journal=self.diagnostics, phase=lambda: self.phase,
+            role='initial-S-main' if self.image_index == 0 else 'successor-Q-main',
+            shim=self.data / '.runtime/github-app-gh/bin/gh',
+            expected_sha256=self.stages[self.image_index]['mainSHA256'])
+        self.diagnostic_owners.append(value)
+        return value
     def start(self):
         c = self.contract; scenario = 'failed-launch-recovery' if self.failed else 'update'
         runtime = {'schema': 1, 'run': uuid.uuid4().hex, 'target': 'darwin-arm64', 'scenario': scenario,
@@ -394,9 +422,11 @@ class Host:
         with tarfile.open(self.plan['Stages'][0]['Archive']) as tar:
             tar.extractall(self.install, filter='data')
         self.image(self.stages[0]); self.launch(0)
+        self.phase = 'initial-inspect'
         self.bound['before'] = self.inspect(0, initial=True)
         self.controller.select_page(self.page)
         self.wait_runtime()
+        self.phase = 'actors'
         for name in ('active', 'paused'):
             hired = self.command('HireNamed', [name]); need(hired['name'] == name and hired['hiredAt'], 'unexpected synthetic hire')
             self.submissions[name] = self.a.submit_command(name + '/lead', hired['hiredAt'], runtime['run'], int(time.time() * 1000), uuid.uuid4().hex + uuid.uuid4().hex[:4])
@@ -416,6 +446,8 @@ class Host:
         self.note('bound-native-page', page=self.page, native=info, binding=bound, observation=value)
         return bound
     def wait_runtime(self):
+        self.phase = 'runtime-ready'
+        self.diagnostics.emit('phase', self.phase, status='entered')
         # Observe ordinary startup to ready before any fixture actor/mutation.
         # Cache bootstrap is not production installer/readiness proof.
         def ready():
@@ -430,6 +462,7 @@ class Host:
         self.timer.wait('mutation outcome unknown: ' + method, lambda: ident in self.command_results, 15)
         return self.command_results[ident]
     def prepare_update(self):
+        self.phase = 'update'
         self.staging_attempted = True
         self.command('CheckForUpdates', [])
         def ready():
@@ -447,6 +480,7 @@ class Host:
         with self.ledger.lock:
             return [e for e in self.ledger.requests if e['agent'] == actor and e['action'] == action]
     def seed(self):
+        self.phase = 'seed'
         for name in ('paused', 'active'):
             self.command('Submit', self.submissions[name]['args'])
             self.timer.wait('real managed-pi held request missing', lambda: self.provider(name + '/lead', 'hold'))
@@ -460,6 +494,7 @@ class Host:
         save(self.evidence / label / 'runtime.json', capture_runtime(self.a, self.data, self.bindings, self.contract['runtimeSHA256']))
         return proof
     def capture_before(self):
+        self.phase = 'capture'
         self.bound['before'] = self.inspect(0)  # real managed pi is ready after the seed
         self.capture('before')
         self.before = {name: self.a.capture_actor(self.data, name, self.runtime['run']) for name in ('active', 'paused')}
@@ -474,6 +509,7 @@ class Host:
         self.arm_plan = self.f.obstruction_plan(self.install, self.staged, self.runtime['run'], self.stages[1]['mainSHA256'])
         self.note('launch-obstruction', receipt=self.f.arm(self.arm_plan), plan=self.arm_plan)
     def restart_once(self):
+        self.phase = 'restart'
         self.old_page = self.controller.page; self.switch_web(1)
         self.restart_id = self.controller.issue('RestartToUpdate', [])
         self.expect_exit = True; self.note('restart-issued-once', id=self.restart_id)
@@ -519,10 +555,11 @@ class Host:
             self.controller.confirm_restart_departure(self.restart_id)
         self.controller.select_page(self.page)
         if self.process.pid != self.bound['after']['pid']:
-            self.process = Owned(self.bound['after']['pid'], self.main)
+            self.process = self.owned(self.bound['after']['pid'])
             self.process_observer.register(self.process)
         self.expect_exit = False
     def verify_resumption(self):
+        self.phase = 'resumption'
         self.timer.wait('one real provider continuation missing', lambda: len(self.provider('active/lead', 'continue')) == 1)
         self.timer.wait('provider continuation did not finish', lambda: any(e['kind'] == 'provider-continued' and e.get('agent') == 'active/lead' for e in self.events))
         self.timer.wait('recovered lead did not settle', lambda: any(a['id'] == 'active/lead' and a['status'] == 'idle' for a in self.controller.reports[self.page]['state']['agents']))
@@ -542,10 +579,12 @@ class Host:
         self.capture('after')
         need(any(r['stage'] == 1 and r['file'] == Path(self.plan['Stages'][1]['Archive']).name for r in self.feed.requests), 'production archive download not observed')
     def ordinary_quit(self):
+        self.phase = 'quit'
         self.expect_exit = True
         self.process.send_signal(signal.SIGTERM); result = self.process.wait(timeout=20)
         self.note('ordinary-quit', **ordinary_exit(result)); self.process = None
     def reopen(self):
+        self.phase = 'reopen'
         self.old_page = self.page; self.launch(1); self.bound['reopen'] = self.inspect(1)
     def verify_no_replay(self):
         # Bounded quiet observation, after a new normal page has actually loaded.
@@ -613,7 +652,7 @@ class Host:
                 need(self.watcher.poll(), 'staged helper unresolved; retain profile/root')
                 owners.append({'helper': self.helper_ownership, 'kernelEvents': self.watcher.events, 'drained': True, 'signals': []})
             for pid in self.runner.find(self.main):
-                owners.append(Owned(pid, self.main).drain())
+                owners.append(self.owned(pid).drain())
             need(not self.runner.find(self.main), 'owned main still running at teardown')
         except Exception as e:
             errors.append('ownership/drain unresolved: ' + str(e))
@@ -680,9 +719,22 @@ def run(stack, runner, plan_path, evidence_path, contract_path):
         for field in ('Archive', 'Manifest', 'Web'):
             if not Path(s[field]).is_absolute():
                 s[field] = str(plan_path.parent / s[field])
+    contract_path = Path(contract_path).resolve()
     contract = obj(contract_path)
+    execution = None
+    if contract.get('schema') == 2:
+        import consume_r5
+        consumer_root = contract_path.parent
+        need(contract == {'schema': 2, 'kind': 'fresh-consumer-contract',
+             'originalContract': 'original/inputs/contract.json',
+             'executionEnvelope': 'consumer-envelope.json',
+             'executionEnvelopeSHA256': sha(read(consumer_root / 'consumer-envelope.json'))},
+             'consumer contract shape/binding differs')
+        need(plan_path == consumer_root / 'original/inputs/plan.json', 'consumer plan path differs')
+        execution = consume_r5.envelope(consumer_root)
+        contract = obj(consumer_root / contract['originalContract'])
     source_root = Path(runner.__file__).resolve().parent.parent
-    stages = preflight(contract, plan, source_root, bindings, plan_path, os.environ.get('GITHUB_RUN_ID'))
+    stages = preflight(contract, plan, source_root, bindings, plan_path, os.environ.get('GITHUB_RUN_ID'), execution)
     adapter, fixture, core, collectors = dependencies(packet.parent)
     fixture.hosted_arm64(); runner.naming.hosted()
     need(not (Path.home() / '.pi/agent').exists(), 'VM already has pi configuration')
@@ -715,17 +767,5 @@ def run(stack, runner, plan_path, evidence_path, contract_path):
         episode_root = root / scenario; episode_root.mkdir()
         episode_out = evidence / scenario; episode_out.mkdir()
         host = Host(runner, adapter, fixture, core, collectors, plan, contract, stages, episode_root, episode_out, tls, helper, bindings, scenario == 'failed-launch-recovery')
-        try:
-            sequence(host, scenario == 'failed-launch-recovery')
-            host.close(True)
-        except BaseException as error:
-            try:
-                host.snapshot_failure(error)
-            except Exception as capture_error:
-                save(episode_out / 'capture-error.json', {'error': str(error), 'captureError': str(capture_error), 'rootRetained': str(episode_root)})
-            try:
-                host.close(False)
-            except Exception as close_error:
-                save(episode_out / 'close-error.json', {'error': str(error), 'closeError': str(close_error)})
-            raise
+        native_diagnostics.execute_episode(host, scenario == 'failed-launch-recovery', sequence)
     save(evidence / 'attachment-result.json', {'contractPassed': True, 'nativeAcceptance': False, 'independentReviewRequired': True, 'candidate': HEAD, 'tree': TREE, 'scenarios': contract['scenarios']})

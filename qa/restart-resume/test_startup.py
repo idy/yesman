@@ -236,6 +236,7 @@ class RuntimeOrdering(unittest.TestCase):
         host.controller = SimpleNamespace(lock=threading.RLock(), reports={'first-page': {'about': {'piState': state, 'piError': error}}})
         host.a, host.data, host.bindings, host.contract = None, Path('/synthetic-data'), {}, {'runtimeSHA256': 'a' * 64}
         host.command = lambda *_: self.fail('readiness must not publish a mutation')
+        host.diagnostics = SimpleNamespace(emit=lambda *_args, **_kwargs: None)
         return host
 
     def test_actual_readiness_entry_waits_then_captures_verified_runtime(self):

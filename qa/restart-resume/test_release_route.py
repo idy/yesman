@@ -16,7 +16,7 @@ import provenance as p
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / p.WORKFLOW
-GUARD = '    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1\n'
+GUARD = "    if: inputs.restart_qa_commit == github.sha && github.run_attempt == 1 && inputs.restart_native_from == ''\n"
 
 
 class NormalRoute(unittest.TestCase):
