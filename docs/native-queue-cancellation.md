@@ -183,14 +183,21 @@ enqueue it. The input is appended to that occurrence when every condition holds:
 - the Session's control generation matches, and the Session is neither stopping nor settling;
 - it is in the same lane (steer/follow-up);
 - it is the newest pending occurrence in either lane;
-- both inputs carry a 48-hex submission ID and the same host origin, and the origin is the user;
-- fewer than 16 segments exist.
+- both inputs carry a 48-hex submission ID and the same host origin, and the origin is the user
+  (a scheduled run's `schedule` origin is never joined);
+- both inputs have the same trusted conversation `context` in their host origin, or neither has
+  one (a topic's messages carry `topic:<id>`, so they never share an occurrence with the
+  composer's or another topic's);
+- fewer than 15 inputs have been appended (at most 16 members: the primary input plus 15);
+- the final combination, after both inputs' hooks, fits one message: at most 4 images, each at
+  most 5 MiB and together at most 10 MiB, decoded.
 
 Otherwise the input is enqueued as a new occurrence in that same step, so it is
 never lost or processed twice. The reply is `{disposition:"queued", append:{outcome,
 queueId, itemRevision, enqueued?}}`. Possible outcomes are `appended`, `already_appended`,
 `duplicate`, `stale`, `not_pending`, `preparing`, `stale_item`, `stale_control`,
-`kind_mismatch`, `not_latest`, `ineligible` and `limit`.
+`kind_mismatch`, `not_latest`, `ineligible`, `limit` and `budget` (the final combination would
+exceed the image limits above).
 
 A repeated append of a submission ID that is already a segment, a pending primary or
 recently retired (1024 bound) changes nothing and enqueues nothing.
@@ -217,6 +224,14 @@ when the preparation commits or ends without intake.
 `Agent.appendQueuedMessage`, `PromptOptions.appendTo` and `RpcClient.promptAppend`.
 Hosts never send `appendTo` to capability ≤3 runtimes. With those runtimes a later
 input simply remains its own message.
+
+yesman proposes a target only for the composer's own submissions
+(`Manager.SubmitCoalescing`), and only an occurrence that is itself a composer
+submission of the same agent generation and session (its receipt's private `coalesce`
+fact, never restored after a restart). A scheduled run (`SubmitFollowUp`), a topic's
+message (`SubmitInContext`), a plain `Submit`, a worker report or a lead's message is
+never a target, and is never appended into one. pi's own checks above apply
+independently.
 
 ## Protocol and atomicity
 
