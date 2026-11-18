@@ -75,7 +75,7 @@
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.d.ts",
       "before": "05968f90cf20eec86cfd352c6a87dff94f7e177d8579c3864697e8a7bb773ace",
-      "after": "4ea33b4e0fa70d68c9c081bc1351b9432c26423a3b1cc28af6519fe80702ae38",
+      "after": "91a107543925b6fdc8c8a8ba58d05c4e16c1f4623b91e94018e8b629b9e9a392",
       "edits": [
         {
           "before": "export declare class Agent {",
@@ -91,7 +91,7 @@
         },
         {
           "before": "export interface PendingQueueItem {",
-          "after": "export interface HostInputIdentity { submissionId?: string; origin?: { source: \"user\"|\"lead\"|\"yesman\"; kind?: string; worker?: string }; epoch?: string; queueId?: string; }\nexport interface HostInputRef { native: true; identity: HostInputIdentity|null; entryId?: string; }\nexport declare function bindInputTrigger<T extends object>(trigger:T,metadata:unknown):T;\nexport declare function triggerIdentity(trigger:object):HostInputIdentity|undefined;\nexport declare function bindInputBatch<T>(messages:T[],identities:(HostInputIdentity|undefined|null)[]):T[];\nexport declare function copyInputRefs<T>(source:T[],target:T[],insert?:number):T[];\nexport declare function joinInputBatches<T>(...batches:T[][]):T[];\nexport declare function inputRefAt<T>(messages:T[],index:number):HostInputIdentity|null;\nexport declare function recordedInputRef<T>(messages:T[],index:number,entryId:string):void;\nexport declare function hostInputRefs<T>(messages:T[]):(HostInputRef|null)[];\nexport declare function bindProjectedInputs(projection:any,branch:any[]):any[];\nexport declare function recordedInputs(branch:any[]):Map<string,HostInputRef>;\nexport declare function persistInputIdentity(identity:HostInputIdentity|null):HostInputIdentity|null;\nexport declare function publicInputEntry(entry:any):any;\nexport declare const INPUT_ENTRY: string;\nexport interface PendingQueueItem {"
+          "after": "export interface HostInputIdentity { submissionId?: string; origin?: { source: \"user\"|\"lead\"|\"yesman\"|\"schedule\"; kind?: string; worker?: string; plan?: string; run?: string }; epoch?: string; queueId?: string; }\nexport interface HostInputRef { native: true; identity: HostInputIdentity|null; entryId?: string; }\nexport declare function bindInputTrigger<T extends object>(trigger:T,metadata:unknown):T;\nexport declare function triggerIdentity(trigger:object):HostInputIdentity|undefined;\nexport declare function bindInputBatch<T>(messages:T[],identities:(HostInputIdentity|undefined|null)[]):T[];\nexport declare function copyInputRefs<T>(source:T[],target:T[],insert?:number):T[];\nexport declare function joinInputBatches<T>(...batches:T[][]):T[];\nexport declare function inputRefAt<T>(messages:T[],index:number):HostInputIdentity|null;\nexport declare function recordedInputRef<T>(messages:T[],index:number,entryId:string):void;\nexport declare function hostInputRefs<T>(messages:T[]):(HostInputRef|null)[];\nexport declare function bindProjectedInputs(projection:any,branch:any[]):any[];\nexport declare function recordedInputs(branch:any[]):Map<string,HostInputRef>;\nexport declare function persistInputIdentity(identity:HostInputIdentity|null):HostInputIdentity|null;\nexport declare function publicInputEntry(entry:any):any;\nexport declare const INPUT_ENTRY: string;\nexport interface PendingQueueItem {"
         },
         {
           "before": "capability: 2;",

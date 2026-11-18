@@ -91,7 +91,7 @@ func TestQueueActionsBrowserBridge(t *testing.T) {
 			var images []Image
 			json.Unmarshal(req.Args[3], &images)
 			if req.Method == "FixtureFollowUp" {
-				value, err = f.m.submit(r.Context(), text(0), text(1), text(2), images, "followUp", since(4))
+				value, err = f.m.submit(r.Context(), text(0), text(1), text(2), images, "followUp", nil, since(4))
 			} else {
 				value, err = f.m.Submit(r.Context(), text(0), text(1), text(2), images, since(4))
 			}

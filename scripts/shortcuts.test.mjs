@@ -360,7 +360,7 @@ test('the action table registers stable IDs Go accepts, with usable, distinct de
   for (const platform of ['mac', 'windows', 'linux']) {
     const s = actionTable(platform);
     const ids = s.actions().map((a) => a.id);
-    assert.equal(ids.length, 38, platform); // 36 actions (including contextual recall and Topics) and two Settings pages here
+    assert.equal(ids.length, 39, platform); // 37 actions (including contextual recall, Topics and Tasks) and two Settings pages here
     for (const id of ids) assert.ok(idRE.test(id) && id.length <= 64, id);
     // The IDs settings.json keeps: the three renamed ones, and none in camelCase.
     for (const id of ['agent.needs-you', 'files.task-log', 'repos.fetch-all']) assert.ok(ids.includes(id), id);

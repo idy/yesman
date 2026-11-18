@@ -156,6 +156,14 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .receipts-body { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; min-width: 0; margin: 4px 0 2px; padding-right: 12px; border-right: 2px solid var(--mds-line); }
 .receipts-body > .msg-delivery { max-width: 100%; }
 .note--lead > .md { margin-top: 6px; }
+.note--scheduled { display: grid; gap: 4px; }
+.scheduled-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.scheduled-head strong { font-family: var(--mds-font-heading); font-weight: 400; color: var(--mds-ink); }
+.scheduled-mark { width: 14px; height: 14px; font-size: 14px; color: var(--mds-accent); }
+.scheduled-open { margin-left: auto; font-size: var(--mds-text-caption); }
+.scheduled-request > summary { color: var(--mds-muted); font-size: var(--mds-text-caption); cursor: default; }
+.scheduled-request > .md { margin-top: 6px; font-size: var(--mds-text-note); }
+.note--scheduled .delivery-status { padding-inline: 0; }
 .msg-assistant { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 
 .md { font-size: var(--mds-text-body); line-height: 1.7; color: var(--mds-ink); overflow-wrap: anywhere; }
@@ -1015,15 +1023,15 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 /* Board: the yesman's task list, beside the conversation in place of the
    files. Rows keep their place; a finished task folds into Done. */
 .board { grid-column: 4; grid-row: 1 / -1; display: flex; flex-direction: column; width: clamp(240px, calc(100vw - var(--side-width) - var(--info-beside) - 280px), var(--board-width, 340px)); max-width: calc(100vw - 320px); min-width: 0; min-height: 0; border-left: 1px solid var(--mds-line); background: var(--app-pane); }
-/* The place the board, Needs you and Topics share leaves the conversation 280px:
+/* The place the board, Needs you, Topics and Tasks share leaves the conversation 280px:
    beside the info panel it narrows, down to 240px; once even that does not
    fit (264 + 288 + 240 + 280 = 1072px), the info panel makes way for it, as
    it does for a wide file, and shows again when the pane closes. */
 :root { --info-beside: 0px; }
 :root[data-info="open"] { --info-beside: var(--info-width); }
 @media (max-width: 1071px) {
-  :root:is([data-board="open"], [data-needs-you="open"], [data-topics="open"]) { --info-beside: 0px; }
-  :root:is([data-board="open"], [data-needs-you="open"], [data-topics="open"]) .info-panel { display: none; }
+  :root:is([data-board="open"], [data-needs-you="open"], [data-topics="open"], [data-tasks="open"]) { --info-beside: 0px; }
+  :root:is([data-board="open"], [data-needs-you="open"], [data-topics="open"], [data-tasks="open"]) .info-panel { display: none; }
 }
 .board .files-title { flex: 0 0 auto; }
 .board-count { color: var(--mds-muted); font-size: var(--mds-text-caption); white-space: nowrap; }
@@ -1063,6 +1071,88 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 .board-empty strong { display: block; margin-bottom: 4px; color: var(--mds-ink); font-family: var(--mds-font-heading); font-weight: 400; }
 .board-empty[data-tone="error"] { color: var(--mds-error); }
 @media (prefers-reduced-motion: reduce) { .board-fold { transition: none; } }
+
+/* Tasks: scheduled tasks, beside the conversation like the board. */
+:root[data-tasks="open"] .titlebar-content { padding-right: 16px; }
+.board-tags { display: inline-flex; align-items: start; gap: 4px; min-width: 0; }
+.board-scheduled { display: inline-flex; align-items: center; gap: 3px; font-family: var(--mds-font); }
+.board-scheduled-mark { width: 11px; height: 11px; font-size: 11px; }
+.sched-heading { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.sched-heading .files-title { flex: 0 0 auto; }
+.sched-subtitle { overflow: hidden; color: var(--mds-muted); font-size: var(--mds-text-caption); text-overflow: ellipsis; white-space: nowrap; }
+.sched-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 8px 24px; }
+.sched-list, .sched-runs { margin: 0; padding: 0; list-style: none; }
+.sched-plan { padding: 2px 0; border-radius: var(--mds-radius-sm); }
+.sched-plan + .sched-plan { border-top: 1px solid var(--mds-line); }
+.sched-row { display: flex; flex-wrap: wrap; align-items: center; column-gap: 8px; border-radius: var(--mds-radius-sm); }
+/* In a narrow pane (down to 240px, as the board's) the last run's chip and the
+   actions go under the title rather than squeeze it to nothing. */
+.sched-row > .sched-toggle { flex: 1 1 8em; }
+.sched-row:hover { background: var(--mds-hover); }
+.sched-toggle { display: grid; grid-template-columns: 16px minmax(0, 1fr); grid-template-areas: "mark title" ". when" ". next"; column-gap: 8px; row-gap: 1px; min-width: 0; padding: 7px 0 7px 8px; border: 0; background: none; color: var(--mds-ink); font: inherit; font-size: var(--mds-text-note); line-height: 1.45; text-align: left; cursor: default; }
+.sched-toggle:focus-visible { outline: 2px solid var(--app-focus); outline-offset: -2px; border-radius: var(--mds-radius-sm); }
+.sched-mark { grid-area: mark; width: 14px; height: 14px; margin-top: 2px; font-size: 14px; color: var(--mds-faint); }
+.sched-plan[data-state="on"] .sched-mark { color: var(--mds-accent); }
+.sched-title { grid-area: title; overflow-wrap: anywhere; }
+.sched-when, .sched-next { color: var(--mds-muted); font-size: var(--mds-text-caption); overflow-wrap: anywhere; }
+.sched-when { grid-area: when; }
+.sched-next { grid-area: next; font-variant-numeric: tabular-nums; }
+.sched-next[data-state="invalid"] { color: var(--mds-error); }
+.sched-plan:is([data-state="off"], [data-state="finished"], [data-state="archived"]) .sched-title { color: var(--mds-muted); }
+.sched-row-side { display: flex; align-items: center; gap: 6px; margin-left: auto; padding-right: 6px; }
+.sched-chip { padding: 1px 6px; border-radius: var(--mds-radius-xs); background: var(--app-quiet); color: var(--mds-ink-secondary); font-size: var(--mds-text-caption); white-space: nowrap; }
+.sched-row-side .sched-chip { max-width: 112px; overflow: hidden; text-overflow: ellipsis; }
+.sched-chip[data-tone="good"] { color: var(--mds-good); }
+.sched-chip[data-tone="accent"] { color: var(--mds-accent-ink); }
+.sched-chip[data-tone="warn"] { color: var(--mds-warn); }
+.sched-chip[data-tone="error"] { color: var(--mds-error); }
+.sched-chip[data-tone="quiet"] { color: var(--mds-muted); }
+.sched-problem { margin: 0 8px 6px 32px; color: var(--mds-error); font-size: var(--mds-text-caption); }
+.sched-details { display: grid; gap: 8px; margin: 0 6px 8px 32px; font-size: var(--mds-text-note); }
+.sched-instructions { display: grid; gap: 2px; }
+.sched-instructions p { max-height: calc(1.6em * 8); margin: 0; overflow-y: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; border-radius: var(--mds-radius-xs); }
+.sched-instructions p:focus-visible { outline: 2px solid var(--app-focus); outline-offset: 2px; }
+.sched-hint, .sched-empty, .sched-foot { margin: 0; color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; }
+.sched-foot { margin: 16px 8px 0; }
+.sched-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.sched-actions .mds-button { display: inline-flex; align-items: center; gap: 4px; }
+.sched-history { display: grid; gap: 4px; }
+.sched-run { display: grid; gap: 2px; padding: 5px 0; border-top: 1px solid var(--mds-line); }
+.sched-run-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.sched-run-time { color: var(--mds-ink); font-variant-numeric: tabular-nums; }
+.sched-run-kind { color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.sched-run-reason { margin: 0; color: var(--mds-muted); font-size: var(--mds-text-caption); overflow-wrap: anywhere; }
+.sched-run-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.sched-run-actions .board-owner { margin-top: 0; }
+.sched-run-action { display: inline-flex; align-items: center; gap: 4px; font-size: var(--mds-text-caption); }
+.sched-run-action .mds-icon { width: 12px; height: 12px; font-size: 12px; }
+.sched-notice { display: flex; align-items: start; gap: 6px; margin: 4px 6px 10px; padding: 8px 10px; border-radius: var(--mds-radius-sm); background: var(--app-quiet); color: var(--mds-ink-secondary); font-size: var(--mds-text-caption); line-height: 1.5; }
+.sched-notice .mds-icon { flex: 0 0 auto; width: 14px; height: 14px; margin-top: 1px; font-size: 14px; }
+.sched-notice[data-tone="error"] { color: var(--mds-error); }
+.info-attention { display: inline-flex; color: var(--mds-warn); }
+.info-attention .mds-icon { width: 13px; height: 13px; font-size: 13px; }
+
+.mds-dialog.schedule-dialog { width: min(560px, calc(100vw - 32px)); }
+.sched-form { display: grid; gap: 12px; }
+.mds-dialog.schedule-dialog .sched-form .field { min-width: 0; margin: 0; } /* the grid spaces every field */
+.sched-form .field > span:first-child, .sched-form-days > span:first-child { color: var(--mds-ink); font-size: var(--mds-text-note); }
+.sched-form .dialog-hint { margin: 2px 0 0; }
+.sched-when-fields { display: grid; gap: 12px; }
+.sched-form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.sched-form-days { display: grid; gap: 6px; }
+.sched-days { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.sched-every { display: grid; grid-template-columns: minmax(0, 110px) minmax(0, 160px); gap: 8px; }
+.sched-enabled { color: var(--mds-ink); }
+.sched-error { margin: 0; color: var(--mds-error); }
+.sched-error[hidden] { display: none; }
+.sched-saved { margin: 0; color: var(--mds-ink-secondary); }
+.sched-saved[hidden] { display: none; }
+@media (max-width: 560px) {
+  .sched-form-row, .sched-every { grid-template-columns: minmax(0, 1fr); }
+}
+@media (pointer: coarse) { .sched-toggle { min-height: 44px; } .sched-run-action { min-height: 32px; } }
+.sched-row-side [aria-disabled="true"], .sched-run-action[aria-disabled="true"] { opacity: .55; cursor: default; }
+.mds-switch:has(input[aria-disabled="true"]) { opacity: .55; }
 
 /* GitHub App: public identity and scope only; key import stays in native Go. */
 .github-app-page .mds-row-label { min-width: 0; }

@@ -9,15 +9,19 @@
 // message: a message without the field, such as one from before it existed,
 // is shown as it was written, as a person's.
 
-const SOURCES = new Set(['user', 'lead', 'yesman']);
+const SOURCES = new Set(['user', 'lead', 'yesman', 'schedule']);
 const SUBMISSION = /^[a-f0-9]{48}$/;
+const PLAN = /^s[1-9][0-9]{0,5}$/;
 
 // originOf returns a message's recorded origin, or null when it has none.
 export function originOf(m) {
   const o = m?.role === 'user' ? m.yesman : null;
   if (!o || typeof o !== 'object' || !SOURCES.has(o.source)) return null;
   const word = (s) => (typeof s === 'string' ? s : '');
-  return { source: o.source, kind: word(o.kind), worker: word(o.worker), submission: SUBMISSION.test(o.submission ?? '') ? o.submission : '' };
+  return {
+    source: o.source, kind: word(o.kind), worker: word(o.worker), submission: SUBMISSION.test(o.submission ?? '') ? o.submission : '',
+    plan: o.source === 'schedule' && PLAN.test(o.plan ?? '') ? o.plan : '',
+  };
 }
 
 const textOf = (content) =>
@@ -27,6 +31,7 @@ const textOf = (content) =>
 //
 //   user     a person's message, with its receipt when the message is bound to one
 //   lead     a worker's task or a message from its lead
+//   scheduled  a scheduled task's run, sent for the user (the plan it is of)
 //   text     one text block of the agent's, shown as it is written
 //   note     an error (blank when pi recorded no message for it), a stop, a
 //            summary of earlier conversation, an extension's message
@@ -75,6 +80,12 @@ export function project(convo, agent = {}) {
         }
         if (origin?.source === 'yesman') step({ type: 'notice', key, message: m, origin });
         else if (origin?.source === 'lead') main({ type: 'lead', key, message: m, origin });
+        else if (origin?.source === 'schedule') {
+          // A scheduled task's run: the request the user saved, sent for them.
+          const delivery = origin.submission ? convo.deliveries?.get(origin.submission) : undefined;
+          if (delivery) bound.add(delivery.id);
+          main({ type: 'scheduled', key, message: m, origin, delivery });
+        }
         else {
           const delivery = origin?.submission ? convo.deliveries?.get(origin.submission) : undefined;
           if (delivery) bound.add(delivery.id);

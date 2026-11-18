@@ -15,6 +15,7 @@ import { createFiles } from './files.js';
 import { logRoute } from './task-log.js';
 import { createInfo } from './info.js';
 import { createBoard } from './board.js';
+import { createSchedules } from './schedules.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
@@ -77,7 +78,7 @@ const state = {
   drafts: new Map(),
   attachments: new Map(),
   modelOptions: new Map(),
-  pane: null, // the pane beside the conversation: 'files', 'board', 'needs-you', 'topics' or null
+  pane: null, // the pane beside the conversation: 'files', 'board', 'needs-you', 'topics', 'tasks' or null
   hideDone: new Set(JSON.parse(localStorage.getItem('yesman.hideDone') ?? '[]')), // yesmen whose done workers are hidden
   // The info panel between the conversation and the files, open unless
   // closed, as it was last.
@@ -303,13 +304,19 @@ const receiptForm = (d, sent, line) => `${line ? 'line' : sent ? 'sent' : 'kept'
 
 // A receipt the app recorded as sent from a topic names the topic, as its
 // message will once pi takes it; its form changes when that becomes known.
-const receiptVariant = (c, d, sent, line) => `${receiptForm(d, sent, line)}:${line ? '' : topicKey(topicOfSubmission(c, d.id))}`;
+const receiptVariant = (c, d, sent, line) => `${!line && d.origin?.source === 'schedule' ? 'scheduled:' : ''}${receiptForm(d, sent, line)}:${line ? '' : topicKey(topicOfSubmission(c, d.id))}`;
 
 // What copying a topic's message copies: the person's text, without the line
 // the app sent before it.
 const ownText = (text, topic) => (topic && typeof text === 'string' ? withoutLine(text, topic.context) : text);
 
 function receiptEl(c, d, { sent, line = false } = {}) {
+  // A scheduled run is never shown as something a person typed.
+  if (!line && d.origin?.source === 'schedule') {
+    const el = scheduledEl({ plan: d.origin.plan, preview: d.text ? (d.preview ? `${d.text}…` : d.text) : '', delivery: d, bound: false });
+    el._variant = receiptVariant(c, d, sent, line);
+    return el;
+  }
   const topic = line ? null : topicOfSubmission(c, d.id);
   const el = line ? receiptLine(d) : receiptBody(d, sent, topic);
   if (!line) {
@@ -660,6 +667,30 @@ function userRowEl(row, c) {
     h('div', { class: 'message-footer' }, deliveryStatus(row.delivery, true), copyActions(text)));
 }
 
+// scheduledEl shows a scheduled task's run: the request the user saved in
+// Tasks, sent for them. Its origin, recorded beside the message, says so;
+// the text is never read to decide it.
+function scheduledEl({ plan, text, preview, delivery, bound }) {
+  const yesman = selectedAgent()?.yesman;
+  const label = plan ? t('Scheduled task {id}', { id: plan }) : t('Scheduled task');
+  let body = null;
+  if (text) {
+    body = h('details', { class: 'scheduled-request' }, h('summary', null, t('The request it sent')));
+    body.addEventListener('toggle', () => { if (body.open && !body.querySelector('.md')) body.append(md(text)); });
+  } else if (preview) {
+    body = h('div', { class: 'delivery-compact', title: preview }, preview.replace(/\s+/g, ' ').slice(0, 120));
+  }
+  return h('div', { class: 'note note--scheduled', 'data-delivery': delivery?.id ?? null },
+    h('div', { class: 'scheduled-head' }, icon('clock', 'mds-icon scheduled-mark'), h('strong', null, label),
+      plan && yesman ? h('button', { class: 'mds-link-button scheduled-open', type: 'button', onclick: () => schedules.open(yesman, plan) }, t('Open in Tasks')) : null),
+    body,
+    delivery ? deliveryStatus(delivery, bound) : null);
+}
+
+function scheduledRowEl(row) {
+  return scheduledEl({ plan: row.origin.plan, text: textOf(row.message.content), delivery: row.delivery, bound: true });
+}
+
 function leadRowEl(row) {
   const text = textOf(row.message.content);
   return h('div', { class: 'note note--lead' }, h('strong', null, t('From the lead')),
@@ -899,6 +930,7 @@ function rowEl(c, row) {
   switch (row.type) {
     case 'user': return userRowEl(row, c);
     case 'lead': return leadRowEl(row);
+    case 'scheduled': return scheduledRowEl(row);
     case 'text': return h('div', { class: 'msg-assistant' }, md(row.text));
     case 'note': return noteRowEl(row);
     case 'work': return workEl(c, row);
@@ -912,6 +944,7 @@ function rowEl(c, row) {
 function rowSig(c, row) {
   switch (row.type) {
     case 'user': return `${row.delivery ? `bound:${row.delivery.id}:${row.delivery.revision}` : ''}|${row.origin?.source === 'user' ? topicKey(topicOfSubmission(c, row.origin.submission)) : ''}`;
+    case 'scheduled': return `${row.origin.plan}:${row.delivery ? `${row.delivery.id}:${row.delivery.revision}` : ''}`;
     case 'text': return row.live ? `l:${row.text}` : 'f';
     case 'receipt': return `${receiptSig(row.delivery, row.sent)}|${topicKey(topicOfSubmission(c, row.delivery.id))}`;
     default: return 'f';
@@ -3384,6 +3417,9 @@ const info = createInfo({
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
+  openTasks: () => togglePane('tasks'),
+  tasksOpen: () => state.pane === 'tasks',
+  tasksSummary: (y) => schedules.summary(y),
   // The same requests as the Needs you pane shows for this yesman.
   needsYou: (y) => {
     const v = state.snap.yesmen.find((v) => v.name === y.name);
@@ -3423,6 +3459,35 @@ const board = createBoard({
   setOpen: (on) => setPane(on ? 'board' : state.pane === 'board' ? null : state.pane),
   agent: (id) => agentById(id),
   openAgent: (id) => selectAgent(id),
+  openPlan: (plan) => {
+    const y = selectedAgent() ? yesmanOf(selectedAgent().id) : null;
+    if (y) schedules.open(y.name, plan);
+  },
+});
+
+// ---------- Tasks pane ----------
+
+// Scheduled tasks share the place beside the conversation too.
+const schedules = createSchedules({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.pane === 'tasks',
+  setOpen: (on) => setPane(on ? 'tasks' : state.pane === 'tasks' ? null : state.pane),
+  openBoardTask: (id) => {
+    setPane('board');
+    board.reveal(id);
+  },
+  openLead: () => {
+    const a = selectedAgent();
+    if (a) selectAgent(`${a.yesman}/lead`);
+  },
+  openTaskLog: () => files.openTaskLog(),
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  changed: () => info.render(),
 });
 
 // ---------- Topics pane ----------
@@ -3525,7 +3590,7 @@ function setPane(pane) {
   const had = document.activeElement;
   const shown = (el) => !!el?.isConnected && el.getClientRects().length > 0;
   const visible = had && had !== document.body && shown(had);
-  const inPane = !!had?.closest?.('#board, #needs-you, #topics, #files');
+  const inPane = !!had?.closest?.('#board, #schedules, #needs-you, #topics, #files');
   const entry = had?.closest?.('#yesman-info [data-info-entry]')?.dataset.infoEntry;
   state.pane = pane;
   renderInfo();
@@ -3541,7 +3606,8 @@ function setPane(pane) {
   let target = null;
   if (pane) {
     target = pane === 'needs-you' ? $('#needs-you .needs-you-heading') : pane === 'board' ? $('#board .files-head-actions button')
-      : pane === 'topics' ? $('#topics .topics-search') ?? $('#topics .files-head-actions button') : null;
+      : pane === 'topics' ? $('#topics .topics-search') ?? $('#topics .files-head-actions button')
+      : pane === 'tasks' ? $('#schedules .files-head-actions button') : null;
     if (target && !inPane) paneFocusFrom = entry ? { entry } : had;
   } else {
     const from = paneFocusFrom;
@@ -3559,6 +3625,7 @@ function togglePane(pane) {
 function renderInfo() {
   files.render();
   board.render();
+  schedules.render();
   renderNeedsYouPane();
   topics.render();
   info.render();
@@ -3910,7 +3977,8 @@ async function start() {
   mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
-  mygo.on('board', (yesman) => board.onChange(yesman));
+  mygo.on('board', (yesman) => { board.onChange(yesman); schedules.onBoard(yesman); });
+  mygo.on('schedules', (yesman) => schedules.onChange(yesman));
   mygo.on('topics', (yesman) => { topics.onChange(yesman); info.onTopics(yesman); });
   document.addEventListener('keydown', (e) => files.onKey(e));
   // After the files pane's ⌘S, which keeps its key.

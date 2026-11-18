@@ -15,23 +15,30 @@ import (
 // Therefore no receipt claims that its message was consumed. Native transcript
 // messages remain independent, including transformed inputs and identical text.
 type Delivery struct {
-	ID                  string    `json:"id"`
-	Session             string    `json:"session"`
-	Revision            uint64    `json:"revision"`
-	State               string    `json:"state"`
-	Text                string    `json:"text"`
-	Images              []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
-	ImageCount          int       `json:"imageCount"`
-	Preview             bool      `json:"preview,omitempty"`
-	Error               string    `json:"error,omitempty"`
-	Order               uint64    `json:"order"`
-	AgentSince          time.Time `json:"agentSince,omitzero"`
-	CanCancel           bool      `json:"canCancel,omitempty"` // view only; never persisted as authority
-	CanRestore          bool      `json:"canRestore,omitempty"`
-	OriginalText        bool      `json:"originalText,omitempty"`
-	OriginalPayload     bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
-	NativePending       bool      `json:"nativePending,omitempty"`
-	CanPromote          bool      `json:"canPromote,omitempty"` // live native membership/admission only
+	ID              string    `json:"id"`
+	Session         string    `json:"session"`
+	Revision        uint64    `json:"revision"`
+	State           string    `json:"state"`
+	Text            string    `json:"text"`
+	Images          []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
+	ImageCount      int       `json:"imageCount"`
+	Preview         bool      `json:"preview,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	Order           uint64    `json:"order"`
+	AgentSince      time.Time `json:"agentSince,omitzero"`
+	CanCancel       bool      `json:"canCancel,omitempty"` // view only; never persisted as authority
+	CanRestore      bool      `json:"canRestore,omitempty"`
+	OriginalText    bool      `json:"originalText,omitempty"`
+	OriginalPayload bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
+	NativePending   bool      `json:"nativePending,omitempty"`
+	CanPromote      bool      `json:"canPromote,omitempty"` // live native membership/admission only
+	// Ack is how pi's answer accepted it (accepted, queued, steering or
+	// handled); empty until pi answered, or when it refused. It stays when
+	// the state later turns unconfirmed or interrupted.
+	Ack string `json:"ack,omitempty"`
+	// Origin marks a submission the app made for the user, a scheduled
+	// task's run; nil for what a person typed.
+	Origin              *Origin `json:"origin,omitempty"`
 	queueRevision       uint64
 	queueID, queueEpoch string
 	boundSeq            uint64
@@ -102,7 +109,7 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 // Submit registers a stable client ID before dispatch. Repeating an uncertain
 // bridge call returns its existing receipt and never sends the prompt twice.
 func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
-	d, err := m.submit(ctx, id, messageID, text, images, "steer", expectedSince...)
+	d, err := m.submit(ctx, id, messageID, text, images, "steer", nil, expectedSince...)
 	m.mu.Lock()
 	if a := m.agents[id]; a != nil && a.info.Since.Equal(d.AgentSince) {
 		if current, ok := a.deliveries[d.ID]; ok {
@@ -113,12 +120,15 @@ func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images
 	m.mu.Unlock()
 	return d, err
 }
-func (m *Manager) submit(ctx context.Context, id, messageID, text string, images []Image, behavior string, expectedSince ...time.Time) (Delivery, error) {
+func (m *Manager) submit(ctx context.Context, id, messageID, text string, images []Image, behavior string, origin *Origin, expectedSince ...time.Time) (Delivery, error) {
 	if err := ctx.Err(); err != nil {
 		return Delivery{}, err
 	}
 	if !deliveryID.MatchString(messageID) {
 		return Delivery{}, errors.New("invalid message ID")
+	}
+	if !receiptOrigin(origin) {
+		return Delivery{}, errors.New("invalid submission origin")
 	}
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return Delivery{}, errors.New("empty message")
@@ -222,9 +232,13 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	}
 	preview, truncated := deliveryClip(text, maxDeliveryPreview)
 	a.deliveryOrder++
-	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, fingerprint: fingerprint, created: deliveryTimestamp(messageID)}
+	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, Origin: origin, fingerprint: fingerprint, created: deliveryTimestamp(messageID)}
 	a.deliveries[messageID] = d
-	m.retainRecallLocked(a, messageID, text, images)
+	// Only what a person typed can be recalled, edited or shown again in
+	// full: a scheduled run's request is the plan's, never the user's draft.
+	if origin == nil {
+		m.retainRecallLocked(a, messageID, text, images)
+	}
 	ev := m.deliveryLocked(a, d)
 	registered := a.deliveryVersion
 	d = a.deliveries[messageID]
@@ -244,7 +258,13 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	m.mu.Unlock()
 	// Only the private receipt ID crosses this Go call. The pi command and
 	// user text remain byte-for-byte the same as the original submission path.
-	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, Origin{Source: OriginUser, Submission: messageID}, images...)
+	// Who wrote it is decided from pi's records of this prompt and kept
+	// beside the message (originTracker); a scheduled run says so.
+	written := Origin{Source: OriginUser, Submission: messageID}
+	if origin != nil {
+		written = Origin{Source: origin.Source, Plan: origin.Plan, Run: origin.Run, Submission: messageID}
+	}
+	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, written, images...)
 	m.mu.Lock()
 	current := a.deliveries[messageID]
 	if !a.deliverySealed && err != nil && (current.State == "sending" || current.State == "interrupted" && current.Session == "") {
@@ -312,7 +332,7 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 	}
 	m.mu.Lock()
 	d, ok := a.deliveries[id]
-	if !ok || a.retiring || a.proc != p || d.Session != p.deliverySession() || d.State != "sending" {
+	if !ok || a.retiring || a.proc != p || d.Session != p.deliverySession() {
 		m.mu.Unlock()
 		return
 	}
@@ -320,6 +340,35 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 		Disposition string `json:"disposition"`
 	}
 	_ = json.Unmarshal(r.Data, &data)
+	ack := ""
+	if r.Success {
+		// pi's answer is the one fact of acceptance a receipt has; a later
+		// settle or queue snapshot leaves it standing but proves nothing more.
+		ack = "accepted"
+		switch {
+		case data.Disposition == "handled":
+			ack = "handled"
+		case data.Disposition == "queued" && behavior == "followUp":
+			ack = "queued"
+		case data.Disposition == "queued":
+			ack = "steering"
+		}
+	}
+	if d.State != "sending" {
+		// pi's own queue reported this very submission before pi answered
+		// the command (native queue identity): the answer still records
+		// the acceptance, beside the state its queue reported, which stays.
+		if ack == "" || d.Ack != "" || !nativeIntake(d.State) {
+			m.mu.Unlock()
+			return
+		}
+		d.Ack = ack
+		ev := m.deliveryLocked(a, d)
+		m.mu.Unlock()
+		m.cfg.OnEvent(ev)
+		return
+	}
+	d.Ack = ack
 	switch {
 	case !r.Success:
 		d.State, d.Error = "failed", r.Error
@@ -341,6 +390,12 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 	ev := m.deliveryLocked(a, d)
 	m.mu.Unlock()
 	m.cfg.OnEvent(ev)
+}
+
+// nativeIntake reports whether a receipt's state came from pi's own queue
+// identifying it: in the queue, taken from it, or taken out of it.
+func nativeIntake(state string) bool {
+	return state == "queued" || state == "steering" || state == "dispatched" || state == "cancelled"
 }
 
 // observeDelivery never matches user content to receipts. queue_update is a

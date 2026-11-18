@@ -24,6 +24,7 @@ import (
 	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -52,6 +53,9 @@ type Server struct {
 	// Secrets and Variables, when set, are set in agents' commands.
 	Secrets   *secrets.Vault
 	Variables *secrets.Variables
+	// Schedules, when set, are the scheduled tasks a lead hears of and can
+	// list or, when the user asks it, draft.
+	Schedules Schedules
 	// GitHubApp is a backend-only vault/broker, separate from command secrets.
 	GitHubApp *githubapp.Manager
 
@@ -60,12 +64,17 @@ type Server struct {
 	worktreeLocks map[string]*sync.Mutex // serialize lifecycle operations per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
+	// beginChange replaces Agents.BeginChange in tests that run no agent.
+	beginChange func(token string, y yesmen.Yesman) (func(), error)
 	// beforeBoardChange, set only by tests, runs once a board change was
 	// admitted, just before it is written.
 	beforeBoardChange func()
 	// beforeTopicChange, set only by tests, runs as beforeBoardChange does,
 	// once a topic change from an agent was admitted.
 	beforeTopicChange func()
+	// beforeScheduleChange, set only by tests, runs once a lead's draft was
+	// admitted, before the plan is saved.
+	beforeScheduleChange func()
 }
 
 // Start listens on a loopback port and serves in the background.
@@ -103,11 +112,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/origin", s.origin)
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
+	mux.HandleFunc("GET /v1/schedules", s.handle(s.schedules))
+	mux.HandleFunc("POST /v1/schedules/draft", s.handle(s.draftSchedule))
 	mux.HandleFunc("GET /v1/needs-you", s.handle(s.needsYou))
 	mux.HandleFunc("POST /v1/needs-you", s.handle(s.changeNeedsYou))
 	mux.HandleFunc("GET /v1/topics", s.handle(s.topics))
 	mux.HandleFunc("POST /v1/topics", s.handle(s.changeTopics))
 	return mux
+}
+
+// Schedules is what a lead may do with the user's scheduled tasks: read
+// them, and draft one that stays off until the user turns it on.
+type Schedules interface {
+	LeadContext(yesman string) string
+	ListText(yesman string) (string, error)
+	// Draft saves a draft for the lead of the workspace generation since,
+	// once admit admitted it: admit is asked with the workspace held, before
+	// anything is changed, and what it admitted is held until the plan is
+	// saved.
+	Draft(yesman string, since time.Time, admit schedule.Admit, in schedule.PlanInput) (schedule.Plan, error)
 }
 
 // caller is the agent a request comes from, as it was when the request
@@ -119,6 +142,21 @@ type caller struct {
 	// token is checked again before mutation by BeginChange, CallerOperation
 	// or the cancellable App BeginOperation. It never leaves this server.
 	token string
+}
+
+// current reports whether the caller is still the running agent it
+// authenticated as.
+// admit admits a change by caller c to its workspace, held as y: y must be
+// the generation c's request came from, and c's process must still run
+// there. Until release, that process cannot finish stopping.
+func (s *Server) admit(c caller, y yesmen.Yesman) (func(), error) {
+	if !y.HiredAt.Equal(c.yesman.HiredAt) {
+		return nil, agent.ErrRetired
+	}
+	if s.beginChange != nil {
+		return s.beginChange(c.token, y)
+	}
+	return s.Agents.BeginChange(c.token, y)
 }
 
 type handlerFunc func(ctx context.Context, c caller, r *http.Request) (any, error)
@@ -495,7 +533,49 @@ func (s *Server) removeWorker(_ context.Context, c caller, r *http.Request) (any
 // board returns the caller's yesman's board. Every agent of the yesman reads
 // and keeps it, so that the lead can hand keeping it to a worker.
 func (s *Server) board(_ context.Context, c caller, _ *http.Request) (any, error) {
-	return s.Yesmen.Board(c.yesman.Name)
+	b, err := s.Yesmen.Board(c.yesman.Name)
+	if err != nil {
+		return nil, err
+	}
+	return agentBoardOf(b), nil
+}
+
+// agentBoard is the board as an agent's tools return it, field by field: a
+// task that tracks a scheduled run names its scheduled task (plan), which
+// the lead's messages name too, and not the scheduler's run handle, which
+// stays between the app and its window. A field the board gains is not
+// shown to agents until it is added here.
+type agentBoard struct {
+	Tasks []agentTask `json:"tasks"`
+	Next  int         `json:"next"`
+}
+
+type agentTask struct {
+	ID        string         `json:"id"`
+	Title     string         `json:"title"`
+	Status    string         `json:"status"`
+	Owner     string         `json:"owner,omitempty"`
+	Detail    string         `json:"detail,omitempty"`
+	Note      string         `json:"note,omitempty"`
+	CreatedAt time.Time      `json:"createdAt"`
+	UpdatedAt time.Time      `json:"updatedAt"`
+	Schedule  *agentSchedule `json:"schedule,omitempty"`
+}
+
+type agentSchedule struct {
+	Plan string `json:"plan"`
+}
+
+func agentBoardOf(b yesmen.Board) agentBoard {
+	out := agentBoard{Tasks: make([]agentTask, 0, len(b.Tasks)), Next: b.Next}
+	for _, t := range b.Tasks {
+		at := agentTask{ID: t.ID, Title: t.Title, Status: t.Status, Owner: t.Owner, Detail: t.Detail, Note: t.Note, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt}
+		if t.Schedule != nil {
+			at.Schedule = &agentSchedule{Plan: t.Schedule.Plan}
+		}
+		out.Tasks = append(out.Tasks, at)
+	}
+	return out
 }
 
 // changeBoard changes the caller's yesman's board, unless the caller was
@@ -510,7 +590,7 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 		return nil, err
 	}
 	if change.Empty() {
-		return s.Yesmen.Board(c.yesman.Name)
+		return s.board(context.Background(), c, r)
 	}
 	var b yesmen.Board
 	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
@@ -533,7 +613,7 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 	if s.BoardChanged != nil {
 		s.BoardChanged(c.yesman.Name)
 	}
-	return b, nil
+	return agentBoardOf(b), nil
 }
 
 func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, error) {
@@ -549,10 +629,68 @@ func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, e
 	if c.agent.Role == agent.RoleLead && s.Crew != nil {
 		text += CrewContext(s.Crew(ctx), c.agent)
 	}
+	if c.agent.Role == agent.RoleLead && s.Schedules != nil {
+		text += s.Schedules.LeadContext(c.yesman.Name)
+	}
 	if c.agent.Role == agent.RoleLead {
 		text += s.needsYouContext(c)
 	}
 	return text, nil
+}
+
+var errLeadSchedules = errors.New("only the yesman's lead reads or drafts scheduled tasks")
+
+// schedules lists the user's scheduled tasks and their recent runs.
+func (s *Server) schedules(_ context.Context, c caller, _ *http.Request) (any, error) {
+	if c.agent.Role != agent.RoleLead {
+		return nil, errLeadSchedules
+	}
+	if s.Schedules == nil {
+		return "Scheduled tasks are not available.", nil
+	}
+	return s.Schedules.ListText(c.yesman.Name)
+}
+
+// draftSchedule saves a plan the user asked the lead for. It is always
+// saved off: only the user turns a scheduled task on, in Tasks.
+func (s *Server) draftSchedule(_ context.Context, c caller, r *http.Request) (any, error) {
+	if c.agent.Role != agent.RoleLead {
+		return nil, errLeadSchedules
+	}
+	if s.Schedules == nil {
+		return nil, errors.New("scheduled tasks are not available")
+	}
+	var req struct {
+		Title        string `json:"title"`
+		Instructions string `json:"instructions"`
+		Kind         string `json:"kind"`
+		Date         string `json:"date"`
+		Time         string `json:"time"`
+		Days         []int  `json:"days"`
+		Every        int    `json:"every"`
+		Timezone     string `json:"timezone"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	// The body arrived after authentication: the plan is saved only if the
+	// caller is still the lead of the same workspace generation, and its
+	// process cannot finish stopping until the plan was saved.
+	admit := func(y yesmen.Yesman) (func(), error) {
+		release, err := s.admit(c, y)
+		if err == nil && s.beforeScheduleChange != nil {
+			s.beforeScheduleChange()
+		}
+		return release, err
+	}
+	p, err := s.Schedules.Draft(c.yesman.Name, c.yesman.HiredAt, admit, schedule.PlanInput{
+		Title: req.Title, Instructions: req.Instructions, Timezone: req.Timezone,
+		Schedule: schedule.Spec{Kind: req.Kind, Date: req.Date, Time: req.Time, Days: req.Days, Every: req.Every},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return fmt.Sprintf("Drafted scheduled task %s %q: %s (%s). It is off: tell the user to review it and turn it on in Tasks when they want it to run.", p.ID, p.Title, p.Schedule.Describe(), p.Timezone), nil
 }
 
 const crewLimit = 40
@@ -785,6 +923,9 @@ func writeBoard(b *strings.Builder, board yesmen.Board) {
 		fmt.Fprintf(b, "- %s [%s] %s", t.ID, t.Status, oneLine(t.Title, 200))
 		if t.Owner != "" {
 			fmt.Fprintf(b, " (owner %s)", t.Owner)
+		}
+		if t.Schedule != nil {
+			fmt.Fprintf(b, " (a run of scheduled task %s)", t.Schedule.Plan)
 		}
 		if t.Note != "" {
 			fmt.Fprintf(b, ": %s", oneLine(t.Note, 160))
