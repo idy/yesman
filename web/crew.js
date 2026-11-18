@@ -28,6 +28,8 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
   let refreshing = false;
   let busy = false; // a change is being saved
   let revision = 0; // a saved change makes an earlier read obsolete
+  let patchError = '';
+  let patchExport = '';
 
   function load(refresh = false) {
     if (loading && !refresh) return loading;
@@ -112,14 +114,16 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
   // user's own scores for it.
   async function openOption(member) {
     const dialog = $('#crew-dialog');
-    const scores = scoreFields(member?.score);
+    const scores = scoreFields(member?.source === 'patch' ? member.estimate : member?.score);
     const error = h('p', { class: 'danger', role: 'alert', hidden: true });
     const submit = h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, member ? t('Save') : t('Add'));
     const lead = h('p', { class: 'dialog-hint' });
     let pick = null; // the model and effort chosen, when adding
     const body = [];
     if (member) {
-      lead.textContent = t('Artificial Analysis has no record of {model}. Give your own estimate, so the lead can weigh it against the rest.', { model: optionName(member) });
+      lead.textContent = member.source === 'patch'
+        ? t('Edit the fallback estimate. Nonempty fields in your CSV still take precedence.')
+        : t('Artificial Analysis has no record of {model}. Give your own estimate, so the lead can weigh it against the rest.', { model: optionName(member) });
       scores.need(true);
     } else {
       const inCrew = new Set(view.members.map((m) => m.key));
@@ -141,7 +145,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
         const need = !!effort.value && !m.scored.includes(effort.value);
         lead.textContent = need
           ? t('Artificial Analysis has no record of this model at this effort. Give your own estimate, so the lead can weigh it against the rest.')
-          : t('Its lead weighs Artificial Analysis’s scores for it when it chooses a model for a worker.');
+          : t('The lead weighs the available scores for this model when choosing a worker.');
         scores.need(need);
         submit.disabled = !effort.value;
         pick = { m, effort: effort.value };
@@ -183,7 +187,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
         }
       },
     },
-    h('h2', { class: 'mds-heading' }, member ? t('Your scores') : t('Add a model')),
+    h('h2', { class: 'mds-heading' }, member ? t(member.source === 'patch' ? 'Fallback estimate' : 'Your scores') : t('Add a model')),
     lead, ...body, scores.el, error,
     h('div', { class: 'mds-dialog-actions' },
       h('button', { class: 'mds-button', type: 'button', onclick: () => dialog.close('cancel') }, t('Cancel')), submit));
@@ -199,12 +203,15 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
     if (!m.score) return null;
     return h('dl', { class: 'crew-metrics', role: 'group', 'aria-label': t('Scores for {model}', { model: optionName(m) }) }, FIELDS.map((f) => {
       const value = m.score[f.key];
-      const available = typeof value === 'number' && Number.isFinite(value);
+      const available = !(f.key === 'intelligence' && m.score.intelligenceMissing) && typeof value === 'number' && Number.isFinite(value);
+      const origin = m.source === 'patch' ? m.fieldSources?.[f.key] : m.source;
       const formatted = available ? `${formatNumber(value, { maximumSignificantDigits: 4 })}${f.unit ? ` ${f.unit}` : ''}` : null;
       // The source records a zero, but carries no confirmation of actual zero elapsed time.
-      const sourceZeroTime = m.source === 'aa' && f.key === 'minutesPerTask' && value === 0;
+      const sourceZeroTime = origin === 'aa' && f.key === 'minutesPerTask' && value === 0;
+      const provenance = m.source === 'patch' && available ? ({ patch: 'Your CSV', aa: 'Inherited from AA', user: 'Inherited estimate' })[origin] : null;
       return h('div', null, h('dt', null, t(f.label)), h('dd', null, available
-        ? sourceZeroTime ? t('{value} (source record; actual time unverified)', { value: formatted }) : formatted
+        ? [sourceZeroTime ? t('{value} (source record; actual time unverified)', { value: formatted }) : formatted,
+          provenance ? h('span', { class: 'crew-metric-source' }, ` · ${t(provenance)}`) : null]
         : [h('span', { 'aria-hidden': 'true' }, '—'), h('span', { class: 'mds-visually-hidden' }, t('Not available'))]));
     }));
   }
@@ -213,18 +220,74 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
     let status;
     if (m.source === 'aa') status = t('Scored by Artificial Analysis');
     else if (m.source === 'user') status = t('Your estimate');
+    else if (m.source === 'patch') status = t('User CSV patch');
     else status = h('span', { class: 'danger' }, t('No scores: give yours'));
     const name = optionName(m);
     return h('div', { class: 'card-row crew-row' },
       h('div', { class: 'card-row-text' }, h('strong', { title: m.key }, name),
         h('span', null, `${m.provider}/${m.model} · `, status,
-          m.source === 'aa' && m.score && !m.score.effort ? ` · ${t('Effort not specified by source')}` : null,
+          (m.source === 'aa' || Object.values(m.fieldSources ?? {}).includes('aa')) && m.score && !m.score.effort ? ` · ${t('Effort not specified by source')}` : null,
           m.missing ? h('span', { class: 'danger' }, ` · ${t('pi no longer has this model at this effort')}`) : null)),
       m.key === view.yesman ? h('span', { class: 'mds-pill crew-default' }, t('New yesmen')) : h('span'),
       h('div', { class: 'card-row-actions' },
-        m.source !== 'aa' ? h('button', { class: 'mds-icon-button', type: 'button', disabled: busy, title: t('Your scores'), 'aria-label': t('Your scores for {model}', { model: name }), onclick: () => openOption(m) }, icon('sliders')) : null,
+        m.source !== 'aa' && m.fallbackSource !== 'aa' ? h('button', { class: 'mds-icon-button', type: 'button', disabled: busy, title: t(m.source === 'patch' ? 'Fallback estimate' : 'Your scores'), 'aria-label': t(m.source === 'patch' ? 'Fallback estimate for {model}' : 'Your scores for {model}', { model: name }), onclick: () => openOption(m) }, icon('sliders')) : null,
         h('button', { class: 'mds-icon-button', type: 'button', disabled: busy, title: t('Remove'), 'aria-label': t('Remove {model}', { model: name }), onclick: () => change('RemoveCrewOption', m.key) }, icon('trash'))),
       memberScores(m));
+  }
+
+  async function patchAction(action, method, ...args) {
+    if (busy) return;
+    busy = true;
+    patchError = '';
+    patchExport = '';
+    if (shown()) rerender();
+    try {
+      if (method === 'ExportScorePatch') patchExport = await call(method, ...args);
+      else await save(method, ...args);
+    } catch (err) {
+      patchError = errorText(err);
+    } finally {
+      busy = false;
+      if (shown()) {
+        rerender();
+        if (document.activeElement === document.body) document.querySelector(`[data-score-action="${action}"]`)?.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  function patchSection() {
+    const p = view.patch;
+    if (!p) return null;
+    const action = (id, label, method, ...args) => h('button', {
+      class: 'mds-button mds-button--small', type: 'button', disabled: busy,
+      'data-score-action': id, onclick: () => patchAction(id, method, ...args),
+    }, t(label));
+    const enabled = h('select', {
+      class: 'mds-select', 'aria-label': t('Use score patch'), disabled: busy || !p.rows,
+      'data-score-action': 'enabled', onchange: () => patchAction('enabled', 'SetScorePatchEnabled', enabled.value === 'on'),
+    }, h('option', { value: 'on', selected: p.enabled }, t('Enabled')), h('option', { value: 'off', selected: !p.enabled }, t('Disabled')));
+    const status = p.rows ? t(p.rows === 1 ? '1 score row · {state}' : '{count} score rows · {state}', { count: p.rows, state: t(p.enabled ? 'Enabled' : 'Disabled') }) : t('No score overrides');
+    return h('section', { class: 'settings-section score-patch', 'aria-busy': String(busy) },
+      h('div', { class: 'mds-section-heading' }, h('h2', null, t('Score CSV patch')),
+        h('p', null, t('Add or override scores with your own CSV. It stays in your data folder across app updates; blank cells inherit the current scores.'))),
+      h('div', { class: 'mds-group' }, preferenceRow(t('Use score patch'),
+        h('p', { role: 'status', title: p.path }, status), enabled)),
+      h('div', { class: 'storage-actions score-patch-actions' },
+        action('import', p.rows ? 'Replace CSV…' : 'Import CSV…', 'ImportScorePatch'),
+        p.rows ? action('export', 'Export current…', 'ExportScorePatch', false) : null,
+        action('template', 'Blank template…', 'ExportScorePatch', true)),
+      patchError || p.error ? h('p', { class: 'danger', role: 'alert' }, patchError || p.error) : null,
+      patchExport ? h('p', { class: 'mds-hint', role: 'status' }, t('Exported to {path}', { path: patchExport })) : null,
+      h('details', { class: 'score-patch-format' }, h('summary', null, t('CSV format and units')),
+        h('p', null, t('Use the blank template’s headers. Match provider, model_id (the full ID) and effort exactly, including case. Use default only for an unspecified effort; it does not match off or any named effort.')),
+        h('p', null, t('Nonempty numbers override only their fields; 0 is zero. Blank cells inherit the current AA record, or your existing estimate when no AA record matches, otherwise they stay unavailable.')),
+        h('dl', { class: 'score-patch-columns' }, [
+          ['intelligence_index', 'Intelligence Index (0–100)'], ['tok_per_s', 'Output tokens per second'],
+          ['coding_mean_pct', 'Coding percentage (0–100)'], ['cost_per_task_usd', 'USD per Intelligence Index task'],
+          ['time_min_per_task', 'Minutes per Intelligence Index task'],
+        ].map(([key, label]) => h('div', null, h('dt', null, h('code', null, key)), h('dd', null, t(label))))),
+        h('p', null, t('UTF-8 CSV, up to 1 MiB and 2,000 rows. Duplicate keys and invalid numbers are rejected before saving. Import replaces the whole patch and leaves the source file untouched. Export a copy before replacing. Disable to keep the file without applying it.')),
+        h('p', null, t('The patch supplies scores only. Configure models in pi and add them to Models separately.'))));
   }
 
   function renderPage(inner) {
@@ -256,11 +319,12 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
         h('div', { class: 'mds-toolbar crew-toolbar' }, h('div', { class: 'mds-toolbar-actions' }, refresh, add)),
         h('div', { class: 'card-list', 'aria-busy': String(busy) }, view.members.length ? view.members.map(memberRow)
           : h('div', { class: 'card-empty' }, h('strong', null, t('No models yet')), h('span', null, t('Add the models agents may run as. Until there is one, no yesman can be hired and no worker started.'))))),
-      h('p', { class: 'crew-source' }, tNodes('Scores from {source}, {date}, found by each model’s name.', { source, date }), ' ',
+      h('p', { class: 'crew-source' }, tNodes('Built-in scores from {source}, {date}, found by each model’s name.', { source, date }), ' ',
         t('Intelligence is Artificial Analysis’s Intelligence Index; coding is the mean of its coding evaluations. Cost and time are per task of that index. Missing figures are shown as —.'), ' ',
         tNodes('These are benchmark scores, not measured here: what your agents actually used is in {usage}.', {
           usage: h('button', { class: 'mds-link-button inline-link', type: 'button', onclick: openUsage }, t('Model usage')),
         })),
+      patchSection(),
     ));
   }
 

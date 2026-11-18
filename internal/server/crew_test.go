@@ -32,8 +32,8 @@ func TestCrewContext(t *testing.T) {
 		"## Crew",
 		"crew parameter of yesman_worker_start",
 		"a worker runs as your own model, magpie/auto/claude-opus-5-5:high.",
-		"- magpie/auto/claude-opus-5-5:high: Claude Opus 5.5 at high effort, intelligence 52.3, 82 tok/s, coding 50.2%, $3.10 per task, 12 min per task\n" +
-			"- magpie/kimi:high: Kimi K3.1 Pro at high effort, intelligence 40.0 (the user's estimate)\n" +
+		"- magpie/auto/claude-opus-5-5:high: Claude Opus 5.5 at high effort, intelligence 52.34, speed 81.6 tok/s, coding 50.25%, cost 3.1 USD per task, time 12.4 min per task (AA effort not specified by source)\n" +
+			"- magpie/kimi:high: Kimi K3.1 Pro at high effort, intelligence 40, speed unavailable, coding unavailable, cost unavailable, time unavailable (the user's estimate)\n" +
 			"- magpie/odd:low: odd at low effort (no scores)\n",
 	} {
 		if !strings.Contains(text, want) {

@@ -471,7 +471,16 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .crew-metrics { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; font-size: var(--mds-text-caption); }
 .crew-metrics > div { display: flex; flex-wrap: wrap; gap: 4px 6px; }
 .crew-metrics dt { color: var(--mds-muted); }
-.crew-metrics dd { margin: 0; color: var(--mds-ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.crew-metrics dd { margin: 0; color: var(--mds-ink); font-variant-numeric: tabular-nums; }
+.crew-metric-source { color: var(--mds-muted); }
+.score-patch-actions { margin-top: 10px; flex-wrap: wrap; }
+.score-patch > :is(.danger, .mds-hint) { overflow-wrap: anywhere; }
+.score-patch-format { margin-top: 12px; font-size: var(--mds-text-note); color: var(--mds-muted); }
+.score-patch-format summary { cursor: pointer; color: var(--mds-ink); }
+.score-patch-format p { max-width: 70ch; }
+.score-patch-columns { display: grid; gap: 6px; }
+.score-patch-columns > div { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.score-patch-columns dd { margin: 0; }
 .crew-default { flex: none; }
 .crew-source { margin: 0; color: var(--mds-muted); font-size: var(--mds-text-caption); }
 .inline-link { min-height: 0; padding: 0; border: 0; color: var(--mds-ink); font: inherit; text-decoration: underline; text-underline-offset: 2px; }

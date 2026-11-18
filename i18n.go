@@ -153,6 +153,8 @@ var zhHans = map[string]string{
 	// Dialogs
 	"Choose a yesman folder":      "选择 yesman 文件夹",
 	"Choose folder":               "选择文件夹",
+	"Import score patch":          "导入评分补丁",
+	"Export score CSV":            "导出评分 CSV",
 	"Export yesman configuration": "导出 yesman 配置",
 	"Import yesman configuration": "导入 yesman 配置",
 	"yesman configuration":        "yesman 配置",

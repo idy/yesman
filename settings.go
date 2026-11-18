@@ -33,6 +33,8 @@ type Settings struct {
 	// Crew matches pi's models to Artificial Analysis's, and chooses the
 	// crew and what new agents start as.
 	Crew crew.Config `json:"crew,omitzero"`
+	// Disabling preserves the CSV for later re-enabling and exporting.
+	ScorePatchDisabled bool `json:"scorePatchDisabled,omitempty"`
 	// Shortcuts are the keys chosen in Settings › Shortcuts instead of an
 	// action's defaults (shortcuts.go).
 	Shortcuts Shortcuts `json:"shortcuts,omitempty"`

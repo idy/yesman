@@ -292,9 +292,9 @@ func readConfig(path string) (config, error) {
 func (c config) settings(current Settings, mode importMode) Settings {
 	next := current
 	if mode == importReplace {
-		// The file does not carry the crew, so replacing keeps it, and the
-		// shortcuts unless it has them, and settings a newer yesman keeps.
-		next = Settings{Appearance: mygo.ThemeSystem, Crew: current.Crew, Shortcuts: current.Shortcuts, extra: current.extra}
+		// This file does not carry the crew or score patch, so replacing
+		// keeps them, shortcuts unless supplied, and unknown settings.
+		next = Settings{Appearance: mygo.ThemeSystem, Crew: current.Crew, ScorePatchDisabled: current.ScorePatchDisabled, Shortcuts: current.Shortcuts, extra: current.extra}
 	}
 	if c.appearance != nil {
 		next.Appearance = *c.appearance

@@ -12,6 +12,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/crew"
 	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/home"
 	"github.com/idy/yesman/internal/nativepermissions"
@@ -67,7 +68,12 @@ type app struct {
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs
 	// catalog is pi's catalog of models, for the crew.
-	catalog *catalog
+	catalog         *catalog
+	scorePatchOnce  sync.Once
+	scorePatchMu    sync.Mutex
+	scorePatch      crew.Patch
+	scorePatchData  []byte
+	scorePatchError string
 	// usage is what Settings › Model usage read of agents' session logs.
 	usageOnce sync.Once
 	usage     *usageIndex

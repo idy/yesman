@@ -111,7 +111,8 @@ func (a *app) crewConfig() crew.Config {
 // crew is the crew, with what pi's catalog says of it.
 func (a *app) crew(ctx context.Context) ([]crew.Member, error) {
 	models, _, err := a.catalog.get(ctx, false)
-	return crew.Members(a.crewConfig(), models, crew.Embedded()), err
+	patch, _ := a.effectiveScorePatch()
+	return crew.Resolve(a.crewConfig(), models, crew.Embedded(), patch), err
 }
 
 // leadCrew is the crew a lead starts its workers as.
@@ -134,6 +135,7 @@ func (a *app) yesmanModel(ctx context.Context) (string, error) {
 
 // CrewView is what Settings › yesman shows.
 type CrewView struct {
+	Patch ScorePatchView `json:"patch"`
 	// Date is the day of the Artificial Analysis scores, and Source where
 	// they come from.
 	Date   string `json:"date"`
@@ -156,8 +158,8 @@ type CrewView struct {
 type CrewModel struct {
 	crew.Model
 	Key string `json:"key"`
-	// Scored are the levels Artificial Analysis has scores for. An option
-	// at another level needs the user's own.
+	// Scored are the levels with AA or user CSV scores. A level without
+	// either asks for the user's existing estimate.
 	Scored []string `json:"scored"`
 }
 
@@ -173,11 +175,14 @@ func (a *app) crewView(ctx context.Context, refresh bool) CrewView {
 	}
 	c := a.crewConfig()
 	v.ReadAt, v.Yesman = at, c.Yesman
-	v.Members = crew.Members(c, models, snap)
+	patch, status := a.effectiveScorePatch()
+	v.Patch = status
+	v.Members = crew.Resolve(c, models, snap, patch)
 	for _, m := range models {
 		cm := CrewModel{Model: m, Key: m.Key(), Scored: []string{}}
 		for _, l := range m.Levels {
-			if _, ok := snap.Lookup(m, l); ok {
+			resolved := crew.Resolve(crew.Config{Options: []crew.Option{{Provider: m.Provider, Model: m.ID, Effort: l}}}, []crew.Model{m}, snap, patch)
+			if resolved[0].Score != nil {
 				cm.Scored = append(cm.Scored, l)
 			}
 		}
@@ -225,7 +230,9 @@ func (s *service) AddCrewOption(ctx context.Context, provider, model, effort str
 		return CrewView{}, errors.New(tr("%s does not take the %s effort", crew.ShortName(models[i].Name, model), effort))
 	}
 	o := crew.Option{Provider: provider, Model: model, Effort: effort}
-	if _, ok := crew.Embedded().Lookup(models[i], effort); !ok {
+	patch, _ := s.app.effectiveScorePatch()
+	resolved := crew.Resolve(crew.Config{Options: []crew.Option{o}}, models, crew.Embedded(), patch)
+	if resolved[0].Score == nil {
 		if score == nil {
 			return CrewView{}, errors.New(tr("Artificial Analysis has no scores for %s at this effort: give your own", crew.ShortName(models[i].Name, model)))
 		}
