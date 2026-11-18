@@ -1,7 +1,10 @@
 """Trusted GET-only transfer validator, before the credential-free native job."""
-import hashlib,io,json,os,re,shutil,stat,subprocess,sys,tarfile,zipfile
+import hashlib,io,json,os,re,shutil,stat,subprocess,sys,tarfile,time,zipfile
 from pathlib import Path,PurePosixPath
 import provenance as p
+from acquisition_diagnostics import Diagnostic,transfer_result
+
+DIAGNOSTIC=None
 
 def need(ok,why):
     if not ok:raise ValueError(why)
@@ -10,9 +13,35 @@ def save(path,value):
     path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(value,indent=2)+'\n')
 def get(endpoint,raw=False):
     args=['gh','api','--method','GET',endpoint]
-    if raw:args+=['-H','Accept: application/octet-stream']
-    q=subprocess.run(args,capture_output=True,timeout=120);need(q.returncode==0,'GET failed: '+endpoint)
-    return q.stdout if raw else json.loads(q.stdout)
+    if not raw:
+        if DIAGNOSTIC:DIAGNOSTIC.phase('transfer-metadata')
+        q=subprocess.run(args,capture_output=True,timeout=120)
+        if DIAGNOSTIC:DIAGNOSTIC.command(q)
+        need(q.returncode==0,'transfer metadata GET failed')
+        return json.loads(q.stdout)
+    match=re.fullmatch(r'repos/idy/yesman/actions/artifacts/([1-9][0-9]*)/zip',endpoint)
+    need(match is not None,'exact artifact ZIP endpoint required')
+    artifact_id=int(match[1])
+    # Match the repository's existing raw artifact collectors. gh follows the
+    # supported ZIP redirect; capture raw binary stdout without a media override,
+    # formatting, headers or verbose output. Never print or retain redirect URLs.
+    args+=['--allow-escape-sequences']
+    if DIAGNOSTIC:DIAGNOSTIC.phase('transfer-zip')
+    for attempt in (1,2):
+        try:q=subprocess.run(args,capture_output=True,timeout=120)
+        except subprocess.TimeoutExpired as error:
+            if DIAGNOSTIC:DIAGNOSTIC.transfer_attempt(artifact_id,attempt,timeout=error)
+            raise
+        row=transfer_result(q)
+        if DIAGNOSTIC:DIAGNOSTIC.transfer_attempt(artifact_id,attempt,result=q)
+        if q.returncode==0:return q.stdout
+        transient=(row['httpStatus']in(408,500,502,503,504)or
+                   row['httpStatus']is None and row['detailCode']=='transport-failed')
+        need(attempt==1 and transient,'artifact ZIP GET failed; no further attempt')
+        # Exactly one same-ID GET retry before any hashing/extraction. Permanent,
+        # unclassified and timeout failures stop; a checksum mismatch never retries.
+        time.sleep(1)
+    raise ValueError('artifact ZIP GET attempt budget')
 def transfer(artifact_id,digest,out):
     p.first_attempt()
     # upload-artifact emits bare hex; REST and durable receipts use sha256:hex.
@@ -22,7 +51,11 @@ def transfer(artifact_id,digest,out):
     need(isinstance(a.get('digest'),str) and re.fullmatch('sha256:[0-9a-f]{64}',a['digest']),'artifact REST digest must be canonical SHA256')
     need(a['id']==artifact_id and not a['expired']and a['digest']==digest and a['workflow_run']['id']==int(os.environ['GITHUB_RUN_ID']),'selected artifact API identity differs')
     need(run['head_sha']==os.environ['GITHUB_SHA'] and run['run_attempt']==int(os.environ['GITHUB_RUN_ATTEMPT']) and run['path']==p.WORKFLOW,'selected workflow run differs')
-    raw=get('repos/idy/yesman/actions/artifacts/'+str(artifact_id)+'/zip',True);zip_sha256=sha(raw);need('sha256:'+zip_sha256==digest==a['digest'],'actual transfer ZIP digest differs')
+    raw=get('repos/idy/yesman/actions/artifacts/'+str(artifact_id)+'/zip',True);zip_sha256=sha(raw)
+    if DIAGNOSTIC:DIAGNOSTIC.phase('transfer-integrity')
+    if 'sha256:'+zip_sha256!=digest or digest!=a['digest']:
+        if DIAGNOSTIC:DIAGNOSTIC.failure('integrity-failed')
+    need('sha256:'+zip_sha256==digest==a['digest'],'actual transfer ZIP digest differs')
     out.mkdir(parents=True);total=0
     with zipfile.ZipFile(io.BytesIO(raw))as z:
         need(len(z.infolist())<=10000,'transfer member budget')
@@ -41,12 +74,12 @@ def inventory(archive):
             if m.issym():need(not Path(m.linkname).is_absolute()and'..'not in Path(m.linkname).parts,'bundle external link');rows[name]={'link':m.linkname}
             else:need(m.isfile(),'archive special member');raw=t.extractfile(m).read();rows[name]={'sha256':sha(raw),'bytes':len(raw),'mode':m.mode&0o7777}
     need('Contents/MacOS/Yes Man'in rows,'archive main missing');return sha(json.dumps(rows,sort_keys=True).encode())
-def main():
-    p.first_attempt()
+def _bind():
     out=Path(sys.argv[1]).absolute();need(not out.exists(),'new bound output');out.mkdir(parents=True)
     transfer_receipt=transfer(int(os.environ['QA_ARTIFACT_ID']),os.environ['QA_ARTIFACT_DIGEST'],out/'inputs')
     cache_receipt=transfer(int(os.environ['NPM_ARTIFACT_ID']),os.environ['NPM_ARTIFACT_DIGEST'],out/'npm')
     # The artifact ZIPs are verified before any payload can be imported/run.
+    if DIAGNOSTIC:DIAGNOSTIC.phase('bind-contract')
     base=out/'inputs';plan=json.loads((base/'plan.json').read_bytes());meta=json.loads((base/'release-inputs.json').read_bytes());validation=json.loads((base/'producer-validation.json').read_bytes())
     need(validation['sourceCommit']==p.RELEASE and validation['sourceFilesVerified']is True and validation['archiveAndDeltaSignaturesVerified']is True and validation['signingCredentialIncluded']is False,'producer validation differs')
     need(validation['planSHA256']==sha((base/'plan.json').read_bytes())and validation['compatPlanSHA256']==sha((base/'compat-plan.json').read_bytes()),'producer plan bytes differ')
@@ -83,4 +116,14 @@ def main():
     # in the native job before import; API receipts identify the selected ZIPs.
     rows={x.relative_to(out).as_posix():sha(x.read_bytes())for x in out.rglob('*')if x.is_file()};save(out/'transfer-files.json',rows)
     print('PASS: actual same-run repository/workflow/attempt/artifact ZIP digests joined to original manifests, exact S/Q source, plan and receipts')
+def main():
+    p.first_attempt()
+    global DIAGNOSTIC
+    try:
+        with Diagnostic('bind')as diagnostic:
+            DIAGNOSTIC=diagnostic
+            _bind()
+    except Exception:
+        raise SystemExit('t199 transfer binding failed; see sanitized T199_TRANSFER_STATUS and bind diagnostics artifact')from None
+    finally:DIAGNOSTIC=None
 if __name__=='__main__':main()

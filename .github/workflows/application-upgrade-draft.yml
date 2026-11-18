@@ -388,6 +388,13 @@ jobs:
           NPM_ARTIFACT_DIGEST: ${{ needs.restart-public-npm.outputs.digest }}
           APPROVED_QA_COMMIT: ${{ inputs.restart_qa_commit }}
         run: python3 qa/restart-resume/bind.py "$RUNNER_TEMP/bound-restart"
+      - name: Retain sanitized artifact transfer diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: restart-bind-diagnostics
+          path: ${{ runner.temp }}/t199-bind-diagnostics.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: restart-bound-inputs

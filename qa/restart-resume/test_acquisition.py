@@ -220,15 +220,17 @@ class AcquisitionContracts(unittest.TestCase):
             self.assertNotIn(b'innocuous-hidden',raw);self.assertNotIn('normal-fixture',capture.getvalue())
             self.assertLess(len(raw),2048)
 
-    def test_workflow_always_retains_only_two_fixed_diagnostic_files(self):
+    def test_workflow_always_retains_only_fixed_diagnostic_files(self):
         text=(ROOT/p.WORKFLOW).read_text()
-        for role,name in [('download','restart-download-diagnostics'),('public-npm','restart-public-npm-diagnostics')]:
+        for role,name in [('download','restart-download-diagnostics'),('public-npm','restart-public-npm-diagnostics'),('bind','restart-bind-diagnostics')]:
             marker='          name: '+name+'\n';position=text.index(marker);block=text[:position].rsplit('      - name:',1)[1]+text[position:].split('      - uses:',1)[0]
             self.assertIn('        if: always()\n',block)
             self.assertIn('          path: ${{ runner.temp }}/t199-'+role+'-diagnostics.json\n',block)
             self.assertNotIn('include-hidden-files',block)
         self.assertNotIn("(out/'acquisition.log')",(ROOT/'qa/restart-resume/public_npm_cache.py').read_text())
-        for name in ['bind.py','run_native.py']:
-            self.assertNotIn('diagnostics',(ROOT/'qa/restart-resume'/name).read_text())
+        self.assertNotIn('diagnostics',(ROOT/'qa/restart-resume/run_native.py').read_text())
+        binder=(ROOT/'qa/restart-resume/bind.py').read_text()
+        for name in ('restart-download-diagnostics','restart-public-npm-diagnostics','restart-bind-diagnostics'):
+            self.assertNotIn(name,binder)  # no diagnostic artifact is a bind input
 
 if __name__=='__main__':unittest.main()

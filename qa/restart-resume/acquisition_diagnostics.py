@@ -1,5 +1,5 @@
 """Small acquisition status only; never retain child text, URLs, env or files.
-The two fixed diagnostics artifacts are never inputs to signing/binding/native.
+The three fixed diagnostics artifacts are never inputs to signing/binding/native.
 """
 import json
 import datetime
@@ -13,7 +13,8 @@ import subprocess
 from urllib.error import URLError
 
 PHASES = {'start', 'tool-version', 'metadata', 'asset', 'source-P', 'source-S', 'verify-source-P',
-          'verify-source-S', 'npm-config', 'npm-ci', 'npm-integrity', 'finish'}
+          'verify-source-S', 'npm-config', 'npm-ci', 'npm-integrity', 'finish',
+          'transfer-metadata', 'transfer-zip', 'transfer-integrity', 'bind-contract'}
 DETAILS = {'none', 'validation-failed', 'command-failed', 'command-timeout',
            'http-failed', 'transport-failed', 'config-double-load',
            'cli-output-guard', 'tls-failed', 'integrity-failed', 'npm-engine',
@@ -22,7 +23,9 @@ RESOURCES = {'start':'entry', 'tool-version':'installed-tool-version', 'metadata
              'asset':'github-api-release-asset', 'source-P':'sealed-P-data', 'source-S':'fixed-S-codeload',
              'verify-source-P':'sealed-P-data', 'verify-source-S':'fixed-S-Git-objects',
              'npm-config':'private-empty-configs', 'npm-ci':'lock-pinned-public-npm',
-             'npm-integrity':'lock-pinned-SHA512-content', 'finish':'complete'}
+             'npm-integrity':'lock-pinned-SHA512-content', 'finish':'complete',
+             'transfer-metadata':'selected-artifact-metadata', 'transfer-zip':'selected-artifact-zip',
+             'transfer-integrity':'selected-artifact-SHA256', 'bind-contract':'verified-package-contract'}
 def now():return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
@@ -45,9 +48,25 @@ def http_status(stderr):
     return int(match[1]) if match else None
 
 
+def transfer_result(result=None, timeout=None):
+    """Parse only bounded status tokens/counts from gh; no arbitrary text."""
+    if result is None:
+        return {'exitCode':None,'httpStatus':None,'detailCode':'command-timeout',
+                'stdoutBytes':len(timeout.output or b''),'stderrBytes':len(timeout.stderr or b'')}
+    code=result.returncode
+    code=code if type(code) is int and -255 <= code <= 255 else None
+    match=re.search(rb'\(HTTP ([1-5][0-9]{2})\)\s*$',result.stderr[:65536])
+    status=int(match[1]) if match else None
+    detail='none' if result.returncode==0 else command_detail(result.stderr)
+    if result.returncode!=0 and status is not None:detail='http-failed'
+    if result.returncode!=0 and status is None and re.search(rb': (?:unexpected )?EOF\s*$|connection reset by peer\s*$|i/o timeout\s*$',result.stderr[:65536],re.I):detail='transport-failed'
+    return {'exitCode':code,'httpStatus':status,'detailCode':detail,
+            'stdoutBytes':len(result.stdout),'stderrBytes':len(result.stderr)}
+
+
 class Diagnostic:
     def __init__(self, role):
-        if role not in {'download', 'public-npm'}: raise ValueError('unknown acquisition role')
+        if role not in {'download', 'public-npm', 'bind'}: raise ValueError('unknown acquisition role')
         root = Path(os.environ['RUNNER_TEMP'])
         if not root.is_absolute() or not root.is_dir() or root.is_symlink(): raise ValueError('ordinary runner temp required')
         self.path = root / ('t199-' + role + '-diagnostics.json')
@@ -89,6 +108,22 @@ class Diagnostic:
                         httpStatus=http_status(result.stderr),
                         detailCode='none' if result.returncode == 0 else command_detail(result.stderr))
         self.write()
+
+    def transfer_attempt(self, artifact_id, attempt, result=None, timeout=None):
+        """At most two fixed-ID GET outcomes; keep no headers/body/child text."""
+        if self.row['role'] != 'bind' or type(artifact_id) is not int or artifact_id <= 0 or attempt not in (1,2):
+            raise ValueError('invalid transfer diagnostic identity')
+        row={'artifactID':artifact_id,'attempt':attempt,**transfer_result(result,timeout)}
+        attempts=self.row.setdefault('transferAttempts',[])
+        if len(attempts)>=4:raise ValueError('transfer diagnostic attempt budget')
+        attempts.append(row);self.row.update({k:row[k]for k in ('exitCode','httpStatus','detailCode','stdoutBytes','stderrBytes')})
+        self.write()
+        print('T199_TRANSFER_STATUS '+json.dumps(row,sort_keys=True),flush=True)
+        return row
+
+    def failure(self, detail):
+        if detail not in DETAILS:raise ValueError('unknown diagnostic code')
+        self.row['detailCode']=detail;self.write()
 
     def version(self,tool,raw):
         if tool not in {'gh','npm'}:raise ValueError('unknown acquisition tool')
