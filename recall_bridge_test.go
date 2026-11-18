@@ -124,7 +124,7 @@ func TestRecallBrowserBridge(t *testing.T) {
 			value, callErr = svc.Messages(r.Context(), text(0))
 		case "Models":
 			value, callErr = svc.Models(r.Context(), text(0))
-		case "Submit":
+		case "Submit", "SubmitCoalescing":
 			mu.Lock()
 			submitCalls++
 			mu.Unlock()
@@ -132,7 +132,11 @@ func TestRecallBrowserBridge(t *testing.T) {
 			var since time.Time
 			_ = json.Unmarshal(req.Args[3], &images)
 			_ = json.Unmarshal(req.Args[4], &since)
-			value, callErr = svc.Submit(r.Context(), text(0), text(1), text(2), images, since)
+			if strings.HasSuffix(req.Method, "SubmitCoalescing") {
+				value, callErr = svc.SubmitCoalescing(r.Context(), text(0), text(1), text(2), images, since)
+			} else {
+				value, callErr = svc.Submit(r.Context(), text(0), text(1), text(2), images, since)
+			}
 		case "CancelSubmission":
 			mu.Lock()
 			cancelCalls++

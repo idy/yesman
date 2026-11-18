@@ -2,8 +2,8 @@
 // (`pi -e`), with the address of its local API in the environment.
 //
 // It gives the agent its yesman's context before every run (workspace,
-// worktrees, the repo pool, Knowledge, the task-log path, the board and other
-// agents)
+// worktrees, the repo pool, Knowledge, the task-log path, the board, other
+// agents and, for a lead, the scheduled tasks)
 // and tools to check repositories out of the pool, keep the board and, for
 // a lead, to run workers and hand the user what only they can do (Needs you). Its shell tool sets the user's secrets and
 // variables in every command, asking the app for them each time, and what
@@ -12,7 +12,7 @@
 // Everything is done by the yesman app; this file only forwards.
 //
 // A lead delegates, so that it is always free to talk: it has no shell and
-// writes only Knowledge notes and the task log. Its tools are narrowed when
+// writes only Knowledge notes and the working log. Its tools are narrowed when
 // its session starts, and any call outside them is refused.
 import { createHash } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
@@ -32,39 +32,58 @@ const LEAD_DENIED = ["bash"];
 const LEAD_WRITES = ["edit", "write"]; // allowed only for shared documents
 const LEAD_ADDED = ["grep", "find", "ls"];
 
-// writableTaskLog checks the new exception's actual file boundary. A linked
-// .yesman directory or task-log file could otherwise write code or another
-// workspace. Resolve the workspace itself (for paths such as /tmp on macOS),
-// then accept only ordinary directories and an unaliased regular file, or a
-// missing path that write may create. Existing user links stay untouched.
-function writableTaskLog(): boolean {
-	if (!WORKSPACE) return false;
+// writableTaskLog checks only the TOC and flat Markdown records. The workspace
+// itself may be an alias; metadata/record parents and files must be ordinary.
+// This is a pi tool hook, not an OS sandbox or a grant to other plugin tools.
+function writableTaskLog(path: string): boolean {
+	if (!WORKSPACE || path.split(/[\\/]/).includes("..")) return false;
 	try {
 		const workspace = realpathSync(WORKSPACE);
-		const meta = resolve(workspace, ".yesman");
-		let parent;
-		try {
-			parent = lstatSync(meta);
-		} catch (err) {
-			return (err as NodeJS.ErrnoException).code === "ENOENT";
+		const target = resolve(WORKSPACE, path);
+		const roots = [resolve(WORKSPACE), workspace];
+		const fold = (s: string) => process.platform === "win32" ? s.toLowerCase() : s;
+		// Absolute paths may spell the workspace through an OS alias (/var,
+		// /tmp, drive casing or a workspace junction). Resolve only that prefix,
+		// then validate .yesman/task-log parents below the canonical root.
+		const alias = target.match(/^(.*)[\\/]\.yesman[\\/](?:task-log\.md|task-log[\\/][^\\/]+)$/i);
+		if (alias && fold(realpathSync(alias[1])) === fold(workspace)) roots.push(alias[1]);
+		let rel: string | undefined;
+		for (const root of roots) {
+			const candidate = relative(fold(root), fold(target)).replace(/\\/g, "/");
+			const name = candidate.slice(".yesman/task-log/".length);
+			const frozen = /^legacy-[0-9a-f]{64}-(?:original|[0-9]{4}|index-[0-9]{4})\.md$/i.test(name);
+			const record = candidate.startsWith(".yesman/task-log/") && /^[a-z0-9][a-z0-9._-]*\.md$/i.test(name) && !frozen && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
+			if (candidate === ".yesman/task-log.md" || record) {
+				rel = relative(root, target).replace(/\\/g, "/");
+				break;
+			}
 		}
-		if (!parent.isDirectory() || parent.isSymbolicLink()) return false;
-		try {
-			const file = lstatSync(resolve(meta, "task-log.md"));
-			return file.isFile() && !file.isSymbolicLink() && file.nlink === 1;
-		} catch (err) {
-			return (err as NodeJS.ErrnoException).code === "ENOENT";
+		if (!rel) return false;
+		const parts = rel.split("/");
+		let current = workspace;
+		for (let i = 0; i < parts.length; i++) {
+			current = resolve(current, parts[i]);
+			try {
+				const st = lstatSync(current);
+				if (st.isSymbolicLink()) return false;
+				if (i < parts.length - 1 ? !st.isDirectory() : !st.isFile() || st.nlink !== 1) return false;
+			} catch (err) {
+				// Only the preselected .yesman and task-log parents may be created.
+				return (err as NodeJS.ErrnoException).code === "ENOENT";
+			}
 		}
+		return true;
 	} catch {
 		return false;
 	}
 }
 
-// sharedDocumentPath allows Knowledge notes and the single task-log file.
+// The Knowledge exception is unchanged. The working log has a narrower file set.
 function sharedDocumentPath(path: unknown): boolean {
 	if (typeof path !== "string" || !path || !WORKSPACE) return false;
-	const target = resolve(WORKSPACE, path.replace(/^@/, ""));
-	if (target === resolve(WORKSPACE, ".yesman", "task-log.md")) return writableTaskLog();
+	const input = path.replace(/^@/, "");
+	if (writableTaskLog(input)) return true;
+	const target = resolve(WORKSPACE, input);
 	const dir = resolve(WORKSPACE, ".yesman", "knowledge");
 	const rel = relative(dir, target);
 	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
@@ -157,6 +176,41 @@ async function commandEnv(signal?: AbortSignal): Promise<{ env: Record<string, s
 	}
 }
 
+// shellEnvironment preserves configured variables but reserves the local broker
+// identity and prefixes only command PATH. The wrapper remains present when the
+// env endpoint is unavailable, so PR creation cannot silently become personal.
+function shellEnvironment(base: Record<string, string>, injected: Record<string, string>): Record<string, string> {
+	const env = { ...base, ...injected };
+	const shim = process.env.YESMAN_GH_SHIM;
+	if (!shim) return env;
+	const pathOf = (source: Record<string, string>) => Object.entries(source).find(([name]) => name.toUpperCase() === "PATH")?.[1];
+	const path = pathOf(injected) ?? pathOf(base) ?? "";
+	for (const name of Object.keys(env)) if (name.toUpperCase() === "PATH") delete env[name];
+	const separator = process.platform === "win32" ? ";" : ":";
+	env.PATH = [shim, ...path.split(separator).filter((part) => part !== shim)].join(separator);
+	env.YESMAN_GH_REAL = process.env.YESMAN_GH_REAL ?? "";
+	env.YESMAN_API = API!;
+	env.YESMAN_TOKEN = TOKEN!;
+	return env;
+}
+
+// A saved App mode cannot fall back to an unwrapped gh if startup could not
+// install the wrapper (for example an orphan holds it open on Windows). The
+// desktop stays usable; only enabled/unknown scopes fail closed until repaired
+// or explicitly disabled. This flag is fixed for the current app instance.
+async function requireGitHubRouting(signal?: AbortSignal): Promise<void> {
+	if (process.env.YESMAN_GH_REQUIRED !== "1" || process.env.YESMAN_GH_SHIM) return;
+	let mode;
+	try {
+		const deadline = AbortSignal.timeout(5000);
+		mode = await call("GET", "/v1/github-app/mode", undefined, signal ? AbortSignal.any([signal, deadline]) : deadline);
+	} catch (err) {
+		if (signal?.aborted) throw err;
+		throw new Error("GitHub App routing is unavailable and its mode could not be verified. No command ran with fallback credentials; repair the runtime wrapper or disable App identity in Settings.");
+	}
+	if (mode?.mode !== "personal") throw new Error("GitHub App routing is unavailable for this workspace. Repair the runtime wrapper and restart, or explicitly disable App identity in Settings; no command ran with fallback credentials.");
+}
+
 // refreshHidden asks the app for the secrets' values to hide, keeping
 // those remembered when it does not answer.
 async function refreshHidden(signal?: AbortSignal) {
@@ -165,12 +219,54 @@ async function refreshHidden(signal?: AbortSignal) {
 	} catch {}
 }
 
+// waitText says what a blocked task waits for (Wait in internal/yesmen).
+function waitText(w: any): string {
+	let s = String(w.kind);
+	if (w.tasks?.length) s += ` ${w.tasks.join(", ")}`;
+	if (w.handoff) s += ` ${w.handoff}`;
+	if (w.reason) s += `: ${String(w.reason).replace(/\n/g, " ")}`;
+	return s;
+}
+
+// publicBoard keeps of a board what the tool shows the model, as text and
+// as details: a task's own fields, what a blocked task waits for and, for one
+// that tracks a scheduled run, its scheduled task (plan). The app's API
+// already leaves the scheduler's run handle out; this keeps any other field
+// it might add out of the model's context as well.
+function publicBoard(board: any): { tasks: any[]; next?: number } {
+	const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+	const tasks = (Array.isArray(board?.tasks) ? board.tasks : []).map((t: any) => {
+		const out: Record<string, unknown> = {};
+		for (const k of ["id", "title", "status", "owner", "detail", "note", "createdAt", "updatedAt"]) {
+			const v = str(t?.[k]);
+			if (v !== undefined) out[k] = v;
+		}
+		const plan = str(t?.schedule?.plan);
+		if (plan && /^s[1-9][0-9]{0,5}$/.test(plan)) out.schedule = { plan };
+		const kind = str(t?.wait?.kind);
+		if (kind) {
+			const wait: Record<string, unknown> = { kind };
+			const ids = Array.isArray(t.wait.tasks) ? t.wait.tasks.filter((id: unknown) => typeof id === "string") : [];
+			if (ids.length) wait.tasks = ids;
+			for (const k of ["handoff", "reason", "since"]) {
+				const v = str(t.wait[k]);
+				if (v !== undefined) wait[k] = v;
+			}
+			out.wait = wait;
+		}
+		return out;
+	});
+	return typeof board?.next === "number" ? { tasks, next: board.next } : { tasks };
+}
+
 function boardText(board: any): string {
 	const tasks: any[] = board?.tasks ?? [];
 	if (!tasks.length) return "The board is empty.";
 	const line = (t: any) => {
 		let s = `- ${t.id} [${t.status}] ${t.title}`;
 		if (t.owner) s += ` (owner ${t.owner})`;
+		if (t.schedule?.plan) s += ` (a run of scheduled task ${t.schedule.plan})`;
+		if (t.wait) s += `\n  wait: ${waitText(t.wait)}`;
 		if (t.note) s += `\n  note: ${String(t.note).replace(/\n/g, "\n  ")}`;
 		if (t.detail) s += `\n  detail: ${String(t.detail).replace(/\n/g, "\n  ")}`;
 		return s;
@@ -182,11 +278,62 @@ function boardText(board: any): string {
 	return parts.join("\n\n");
 }
 
-// Who wrote a user message: the user, the agent's lead, or yesman telling a
-// lead about its workers. See Origin in internal/agent/origin.go.
-type Origin = { source: "user" | "lead" | "yesman"; kind?: string; worker?: string; submission?: string };
+// A topic's source as the model reads it. A submission source names no
+// submission: its ID stays in the app; the API already leaves it out.
+function topicSource(s: any) {
+	const view: any = { id: s.id, kind: s.kind };
+	if (s.kind !== "submission" && s.ref) view.ref = s.ref;
+	if (s.agent) view.agent = s.agent;
+	if (s.role) view.role = s.role;
+	if (s.timestamp) view.timestamp = s.timestamp;
+	view.label = s.kind === "submission" ? s.label || "a message the user sent from this topic" : s.label;
+	return view;
+}
 
-const SOURCES = new Set(["user", "lead", "yesman"]);
+function topicText(t: any): string {
+	const lines = [`${t.id} [${t.status}] ${t.title} (revision ${t.revision}, updated ${t.updatedAt}${t.updatedBy ? ` by ${t.updatedBy}` : ""})`];
+	if (t.summary) lines.push(`Summary:\n  ${String(t.summary).replace(/\n/g, "\n  ")}`);
+	const items = (label: string, list: any[]) => lines.push(`${label} (${list?.length ?? 0}):${list?.length ? "\n" + list.map((i) => `- ${i.id} ${String(i.text).replace(/\n/g, "\n  ")}`).join("\n") : " none"}`);
+	items("Confirmed conclusions", t.conclusions);
+	items("Open questions", t.questions);
+	const sources = (t.sources ?? []).map(topicSource);
+	if (sources.length) {
+		lines.push("Sources:\n" + sources.map((s: any) => `- ${s.id} ${s.kind}${s.ref ? ` ${s.ref}` : ""}${s.agent ? ` ${s.agent}` : ""}${s.role ? ` ${s.role} message` : ""}${s.label ? ` (${s.label})` : ""}`).join("\n"));
+	}
+	if (t.sendCount) lines.push(`Messages the user sent from this topic: ${t.sendCount}${t.lastSentAt ? `, the last at ${t.lastSentAt}` : ""}. They are in your conversation.`);
+	return lines.join("\n");
+}
+
+// What a tool result keeps of one topic: its content, never the app's records
+// of submissions (their IDs and receipts are not for the model or other hooks).
+function topicDetails(t: any) {
+	if (!t || typeof t !== "object") return {};
+	const items = (list: any[]) => (list ?? []).map((i) => ({ id: i.id, text: i.text }));
+	return {
+		id: t.id, title: t.title, status: t.status, summary: t.summary ?? "", revision: t.revision, updatedAt: t.updatedAt, updatedBy: t.updatedBy,
+		conclusions: items(t.conclusions), questions: items(t.questions),
+		sources: (t.sources ?? []).map(topicSource),
+		sendCount: typeof t.sendCount === "number" ? t.sendCount : 0,
+	};
+}
+
+// A list is an index: which topics there are, none of their content. A topic
+// is read in full with action read.
+function topicEntry(t: any) {
+	return { id: t.id, title: t.title, status: t.status, revision: t.revision, updatedAt: t.updatedAt, conclusions: Number(t.conclusions) || 0, questions: Number(t.questions) || 0 };
+}
+
+function topicIndex(topics: any[]): string {
+	if (!topics.length) return "No topics yet.";
+	return topics.map((t) => `- ${t.id} [${t.status}] ${t.title} (revision ${t.revision}${t.questions ? `, ${t.questions} open question${t.questions === 1 ? "" : "s"}` : ""})`).join("\n");
+}
+
+// Who wrote a user message: the user, the agent's lead, yesman telling a
+// lead about its workers, or a scheduled task's run (with its plan and run).
+// See Origin in internal/agent/origin.go.
+type Origin = { source: "user" | "lead" | "yesman" | "schedule"; kind?: string; worker?: string; submission?: string; plan?: string; run?: string };
+
+const SOURCES = new Set(["user", "lead", "yesman", "schedule"]);
 // The custom entry type origins are recorded under (originEntry in Go).
 const ORIGIN_ENTRY = "yesman-origin";
 
@@ -200,6 +347,9 @@ function validOrigin(o: any): Origin | undefined {
 	if (kind) out.kind = kind;
 	if (worker) out.worker = worker;
 	if (typeof o.submission === "string" && /^[a-f0-9]{48}$/.test(o.submission)) out.submission = o.submission;
+	// A scheduled run's plan and run IDs, as internal/schedule makes them.
+	const plan = match(o.plan, /^s[1-9][0-9]{0,5}$/), run = match(o.run, /^s[1-9][0-9]{0,5}-[a-z0-9-]{1,80}$/);
+	if (o.source === "schedule" && plan && run) Object.assign(out, { plan, run });
 	return out;
 }
 
@@ -248,7 +398,7 @@ export default function yesman(pi: ExtensionAPI) {
 				return { block: true, reason: "The lead has no shell, to stay free for the user. Hand this to a worker with yesman_worker_start." };
 			}
 			if (LEAD_WRITES.includes(event.toolName) && !sharedDocumentPath((event.input as { path?: unknown } | undefined)?.path)) {
-				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/ and a regular task log at .yesman/task-log.md in this workspace; task-log aliases are not writable. Hand code and other changes to a worker with yesman_worker_start." };
+				return { block: true, reason: "The lead writes only Knowledge notes under .yesman/knowledge/, the Working log TOC .yesman/task-log.md and flat Markdown records .yesman/task-log/<name>.md in this workspace; linked Working log files or parents and frozen legacy snapshots are not writable. Hand code and other changes to a worker with yesman_worker_start." };
 			}
 		});
 	}
@@ -276,8 +426,9 @@ export default function yesman(pi: ExtensionAPI) {
 			...base,
 			defaultActive: false,
 			async execute(id, params, signal, onUpdate, ctx) {
+				await requireGitHubRouting(signal);
 				const { env, note } = await commandEnv(signal);
-				const tool = make(ctx.cwd, { spawnHook: (c) => ({ ...c, env: { ...c.env, ...env } }) });
+				const tool = make(ctx.cwd, { spawnHook: (c) => ({ ...c, env: shellEnvironment(c.env, env) }) });
 				const update: typeof onUpdate = onUpdate && ((partial) => onUpdate({ ...partial, content: hideContent(partial.content ?? []) }));
 				let out;
 				try {
@@ -403,7 +554,7 @@ export default function yesman(pi: ExtensionAPI) {
 				head: Type.String({ description: "Exact full HEAD; review must match the original checkout" }),
 				outcome: Type.String({ description: "pass, findings-handed-off, waiting-release, audit-complete; or done for a finished author/release task" }),
 				ref: Type.String({ description: "Reviewed PR/ref; author/release cleanup requires the merged https://github.com/owner/repo/pull/number URL" }),
-				evidence: Type.String({ description: "Saved conclusion/handoff and evidence outside this tree (board/session/task log), including reconstruction details" }),
+				evidence: Type.String({ description: "Saved conclusion/handoff and evidence outside this tree (board/session/Working log), including reconstruction details" }),
 				unused: Type.Boolean({ description: "True after stopping tree processes and confirming no other agent/task uses it" }),
 			})),
 			handoff: Type.Optional(Type.String({ description: "Lead only: name of the cleanup worker to delegate this verified resource to; saves permission without removal" })),
@@ -431,6 +582,23 @@ export default function yesman(pi: ExtensionAPI) {
 		owner: Type.Optional(Type.String({ description: "The agent the task is handed to, usually a worker's name; empty to clear" })),
 		detail: Type.Optional(Type.String({ description: "What the task is, in Markdown" })),
 		note: Type.Optional(Type.String({ description: "Where it stands: why it is blocked, or its result with links (branch, PR)" })),
+		wait: Type.Optional(
+			Type.Object(
+				{
+					kind: Type.String({
+						description:
+							"tasks: until the tasks listed are done; user: until the user acts on an open Needs you request for this task; external: something outside yesman, such as CI or another party; paused: the user paused it (lead only; it stays paused until the user says otherwise). Empty to clear.",
+					}),
+					tasks: Type.Optional(Type.Array(Type.String(), { description: "For kind tasks: the IDs of the tasks it waits for" })),
+					handoff: Type.Optional(Type.String({ description: "For kind user: the Needs you request, such as n3, if it is not linked to this task" })),
+					reason: Type.Optional(Type.String({ description: "What it waits for and what lets it go on; required for external and paused" })),
+				},
+				{
+					description:
+						"What a blocked task waits for; setting it makes the task blocked, and any other status clears it. yesman tells the lead when a task's wait is over, and of open tasks no running worker carries.",
+				},
+			),
+		),
 	};
 	pi.registerTool({
 		name: "yesman_board",
@@ -448,11 +616,70 @@ export default function yesman(pi: ExtensionAPI) {
 			const board = Object.keys(change).length
 				? await call("POST", "/v1/board", change, signal)
 				: await call("GET", "/v1/board", undefined, signal);
-			return result(boardText(board), board);
+			const view = publicBoard(board);
+			return result(boardText(view), view);
 		},
 	});
 
 	if (ROLE !== "lead") return;
+
+
+	const itemEdits = Type.Array(Type.Object({ id: Type.String({ description: "The item's ID, such as c2 or q3" }), text: Type.String() }));
+	pi.registerTool({
+		name: "yesman_topics",
+		label: "yesman: topics",
+		description:
+			"Read or keep this yesman's topics: the user's questions and discussions worth finding again, each with a summary, the conclusions the user confirmed, the questions still open and its sources. action list (default) lists them, read shows one, create adds one, update changes one at its current revision (only the fields given change; archive or restore it). A conclusion is only what the user agreed; put unconfirmed suggestions under questions or the summary. Not for task status (board), history (Working Logs) or rules (Knowledge), and not for every notification or report.",
+		parameters: Type.Object({
+			action: Type.Optional(Type.String({ description: "list, read, create or update" })),
+			id: Type.Optional(Type.String({ description: "The topic's ID, such as tp3, for read and update" })),
+			revision: Type.Optional(Type.Number({ description: "For update: the revision you read. If the topic changed since, nothing is saved: read it again and apply your change to that" })),
+			title: Type.Optional(Type.String({ description: "A short title, up to 120 characters" })),
+			summary: Type.Optional(Type.String({ description: "What the question or discussion is about, in Markdown, up to 4000 characters" })),
+			status: Type.Optional(Type.String({ description: "open or resolved" })),
+			addConclusions: Type.Optional(Type.Array(Type.String(), { description: "Conclusions the user confirmed" })),
+			updateConclusions: Type.Optional(itemEdits),
+			removeConclusions: Type.Optional(Type.Array(Type.String(), { description: "IDs of conclusions to remove" })),
+			addQuestions: Type.Optional(Type.Array(Type.String(), { description: "Questions still open" })),
+			updateQuestions: Type.Optional(itemEdits),
+			removeQuestions: Type.Optional(Type.Array(Type.String(), { description: "IDs of questions to remove, such as one now answered" })),
+			addSources: Type.Optional(Type.Array(Type.Object({
+				kind: Type.String({ description: "task (ref t3), knowledge (ref a note's path under .yesman/knowledge), link (ref an http(s) URL), worker (agent: a worker whose report it came from), or conversation (this conversation, when no exact message is known)" }),
+				ref: Type.Optional(Type.String()),
+				agent: Type.Optional(Type.String({ description: "An agent's name, for worker and conversation" })),
+				label: Type.Optional(Type.String({ description: "A few words shown with it" })),
+			}))),
+			removeSources: Type.Optional(Type.Array(Type.String(), { description: "IDs of sources to remove" })),
+			archive: Type.Optional(Type.Boolean({ description: "Archive the topic; it can be restored" })),
+			restore: Type.Optional(Type.Boolean({ description: "Restore an archived topic" })),
+		}),
+		async execute(_id, params, signal) {
+			const action = (params.action ?? (params.id ? (params.revision === undefined ? "read" : "update") : "list")).toLowerCase();
+			if (action === "list") {
+				const r = await call("GET", "/v1/topics", undefined, signal);
+				const topics = (r.topics ?? []).map(topicEntry);
+				return result(`${topicIndex(topics)}${topics.length ? "\n\nRead one with action read and its id." : ""}`, { topics });
+			}
+			if (action === "read") {
+				if (!params.id) throw new Error("read needs id");
+				const t = await call("GET", `/v1/topics?id=${encodeURIComponent(params.id)}`, undefined, signal);
+				return result(topicText(t), topicDetails(t));
+			}
+			const { action: _a, id, revision, ...fields } = params as any;
+			const set = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined && !(Array.isArray(v) && !v.length)));
+			if (action === "create") {
+				const create = { title: set.title ?? "", summary: set.summary, status: set.status, conclusions: set.addConclusions, questions: set.addQuestions, sources: set.addSources };
+				const t = await call("POST", "/v1/topics", { create }, signal);
+				return result(`Created ${t.id}.\n\n${topicText(t)}`, topicDetails(t));
+			}
+			if (action === "update") {
+				if (!id || typeof revision !== "number") throw new Error("update needs id and the revision you read");
+				const t = await call("POST", "/v1/topics", { id, patch: { revision, ...set } }, signal);
+				return result(`Saved ${t.id} at revision ${t.revision}.\n\n${topicText(t)}`, topicDetails(t));
+			}
+			throw new Error(`unknown action ${action}: use list, read, create or update`);
+		},
+	});
 
 	pi.registerTool({
 		name: "yesman_worker_start",
@@ -562,6 +789,34 @@ export default function yesman(pi: ExtensionAPI) {
 				...view.questions.map((q: any) => `- worker ${q.worker}'s question ${JSON.stringify(q.requestId)}: ${q.title}, since ${q.since}`),
 			];
 			return result(memory + (lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user."), {});
+		},
+	});
+
+	pi.registerTool({
+		name: "yesman_schedules",
+		label: "yesman: scheduled tasks",
+		description:
+			"List this yesman's scheduled tasks: requests the user saved in Tasks that come due at their times, with their recent runs and board tasks. A due run reaches you by itself as a [yesman] Scheduled task message naming its board task. Only when the user explicitly asks you to schedule something, give draft to save it as a plan; it is saved turned off, and runs only once the user reviews it and turns it on in Tasks. Never draft one on your own initiative, or to get work done now.",
+		parameters: Type.Object({
+			draft: Type.Optional(
+				Type.Object(
+					{
+						title: Type.String({ description: "A short title, up to 120 characters" }),
+						instructions: Type.String({ description: "What to ask each time, in the user's words, up to 4000 characters" }),
+						kind: Type.String({ description: "once, daily, weekly or interval" }),
+						date: Type.Optional(Type.String({ description: "once: the date, YYYY-MM-DD" })),
+						time: Type.Optional(Type.String({ description: "once, daily, weekly: the time, HH:MM, 24-hour, in timezone" })),
+						days: Type.Optional(Type.Array(Type.Integer(), { description: "weekly: days, 0 Sunday to 6 Saturday" })),
+						every: Type.Optional(Type.Integer({ description: "interval: minutes, 15 to 10080" })),
+						timezone: Type.String({ description: "The IANA time zone the user means, such as Asia/Shanghai; ask if unclear" }),
+					},
+					{ description: "A plan the user asked for, saved turned off for them to review" },
+				),
+			),
+		}),
+		async execute(_id, params, signal) {
+			const text = params.draft ? await call("POST", "/v1/schedules/draft", params.draft, signal) : await call("GET", "/v1/schedules", undefined, signal);
+			return result(String(text));
 		},
 	});
 

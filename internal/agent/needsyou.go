@@ -135,5 +135,13 @@ func (m *Manager) expireDialog(a *agent, p *proc, requestID string) {
 func (m *Manager) TellLeadAboutUser(ctx context.Context, yesman string, since time.Time, msg string) error {
 	lead := ID(yesman, yesmen.LeadName)
 	m.unnudge(lead)
-	return m.promptDelivery(ctx, lead, msg, "followUp", "", nil, &since, Origin{Source: OriginYesman, Kind: "needs-you"})
+	err := m.promptDelivery(ctx, lead, msg, "followUp", "", nil, &since, Origin{Source: OriginYesman, Kind: "needs-you"})
+	if errors.Is(err, errLeadPaused) && m.deferForLead(yesman, since, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = m.TellLeadAboutUser(ctx, yesman, since, msg)
+	}) {
+		return nil // kept for when the user writes to the lead they stopped
+	}
+	return err
 }

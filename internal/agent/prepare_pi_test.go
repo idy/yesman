@@ -112,7 +112,7 @@ func TestIdlePrepareProductionContextPreservesOriginal(t *testing.T) {
 			y.Data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 			images := []Image{y, x}
 			for _, id := range []string{first, target, last} {
-				if _, err := f.m.submit(ctx, f.info.ID, id, text, images, "followUp", f.info.Since); err != nil {
+				if _, err := f.m.submit(ctx, f.info.ID, id, text, images, "followUp", nil, f.info.Since); err != nil {
 					t.Fatal(err)
 				}
 			}

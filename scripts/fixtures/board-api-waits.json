@@ -1,0 +1,76 @@
+{
+  "tasks": [
+    {
+      "id": "t1",
+      "title": "Morning check",
+      "status": "blocked",
+      "detail": "detail",
+      "createdAt": "2026-11-18T09:00:00Z",
+      "updatedAt": "2026-11-18T09:00:00Z",
+      "schedule": {
+        "plan": "s1"
+      },
+      "wait": {
+        "kind": "tasks",
+        "tasks": [
+          "t2"
+        ],
+        "reason": "after the build",
+        "since": "2026-11-18T09:00:00Z"
+      }
+    },
+    {
+      "id": "t2",
+      "title": "Build",
+      "status": "doing",
+      "owner": "w1",
+      "createdAt": "2026-11-18T09:00:00Z",
+      "updatedAt": "2026-11-18T09:00:00Z"
+    },
+    {
+      "id": "t3",
+      "title": "Sign off",
+      "status": "blocked",
+      "createdAt": "2026-11-18T09:00:00Z",
+      "updatedAt": "2026-11-18T09:00:00Z",
+      "wait": {
+        "kind": "user",
+        "handoff": "n3",
+        "reason": "the user signs the release",
+        "since": "2026-11-18T09:00:00Z"
+      }
+    },
+    {
+      "id": "t4",
+      "title": "History fix",
+      "status": "blocked",
+      "createdAt": "2026-11-18T09:00:00Z",
+      "updatedAt": "2026-11-18T09:00:00Z",
+      "wait": {
+        "kind": "paused",
+        "reason": "the user asked to stop",
+        "since": "2026-11-18T09:00:00Z"
+      }
+    },
+    {
+      "id": "t5",
+      "title": "Publish",
+      "status": "blocked",
+      "createdAt": "2026-11-18T09:00:00Z",
+      "updatedAt": "2026-11-18T09:00:00Z",
+      "wait": {
+        "kind": "external",
+        "reason": "CI on the release tag",
+        "since": "2026-11-18T09:00:00Z"
+      }
+    },
+    {
+      "id": "t6",
+      "title": "Old",
+      "status": "done",
+      "createdAt": "2026-11-18T09:00:00Z",
+      "updatedAt": "2026-11-18T09:00:00Z"
+    }
+  ],
+  "next": 6
+}

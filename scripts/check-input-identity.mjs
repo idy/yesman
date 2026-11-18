@@ -34,7 +34,7 @@ async function call(cmd){const id=`identity-${++sequence}`;child.stdin.write(JSO
 const promote=(q,item)=>call({type:'promote_queued_message',epoch:q.epoch,queueId:item.queueId,expectedRevision:item.itemRevision,controlGeneration:q.controlGeneration});
 try{
  await writeFile(`${temp}/provider`,'release');
- const state=await launch();assert.equal(state.pendingQueue.capability,3);assert.equal(state.pendingQueue.idleResume,true);
+ const state=await launch();assert.equal(state.pendingQueue.capability,4);assert.equal(state.pendingQueue.idleResume,true);
  // Completely empty transcript: run the queued occurrence, no fabricated prompt.
  await call({type:'follow_up',message:'empty-start',submissionId:ids[0],hostOrigin:{source:'user'}});
  let q=await call({type:'get_pending_queue'});assert.equal(q.promoteAllowed,true);

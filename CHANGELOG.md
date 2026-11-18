@@ -2,6 +2,61 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.45
+
+- Keep an unfinished Board goal distinct from a worker finishing its run. Check tasks individually after reports, failures, Board changes, startup and the lead settling, and notify the lead when no running worker carries the work, even while other workers are active.
+- Record why a blocked task waits: other tasks, a Needs You request, an external condition or an explicit user pause. Notify the lead when a recorded wait is ready; leave older blocked tasks with no recorded wait for the lead to assess.
+- Preserve explicit lead and worker Stops across app restarts, report pause-save failures, and fence delayed reports and writes against newer user actions or replacement workers and workspaces. Resuming still requires an explicit message or authorized action.
+- Keep reminder deduplication and finite retry and no-progress budgets across restarts. Notices ask the lead to continue authorized work; they do not complete tasks, start workers themselves, grant approvals or replay earlier user input or uncertain external effects.
+
+## 0.1.44
+
+- Show the macOS app copy and signing type checked by Settings › Grant, with clearer guidance when an ad-hoc build reports no Accessibility, Screen Recording or Input Monitoring access. Keep the reported state unchanged: replacing a build can invalidate an older grant, and the check cannot determine why access is missing.
+- Add a separate System Audio Recording Only row, independent of Microphone and Screen Recording. On macOS 14.2 or later it shows Manual · cannot detect and opens the relevant System Settings pane; earlier versions show Not applicable. The row performs no recording and requests no access; macOS asks when a recording task actually uses that permission.
+- Wrap long app paths within Grant so the full path and permission controls remain accessible, and keep English and Simplified Chinese category names and Settings action labels consistent.
+- Full Disk Access still requires manual verification, and Automation remains specific to each target app. Opening System Settings does not establish authorization. This update does not reset or repair macOS permission records, change certificate signing, or establish that desktop automation access has recovered.
+
+## 0.1.43
+
+- Combine consecutive messages sent from the composer while its latest message is still waiting for pi, updating the same conversation bubble in submission order.
+- Preserve the original text and image order, highlight appended content briefly, and let Cancel and edit restore the combined pending message.
+- Keep later messages separate once pi starts preparing or takes the pending input, when the queue lane changes or combining would exceed message limits, and for Topics, scheduled runs and worker reports.
+- Include managed pi 1.5.2-yesman.5 for pending-input append support. External runtimes without that support continue sending each input separately.
+
+## 0.1.42
+
+- Add Tasks for requests scheduled once, daily, weekly or at an interval in a chosen time zone. Plans run while Yes Man is open and the computer is awake; missed times appear together for a manual catch-up instead of replaying automatically.
+- Show Tasks as a fifth Info entry with the enabled count, next time and attention state. Create, edit, turn off and archive plans, inspect run history, and follow links between a run, its Board task and the lead conversation.
+- Send each run to the lead as an ordinary follow-up, preserving a reply in progress. Skip automatic overlaps while the previous run is being delivered or its Board task remains open; explicit Run now and catch-up actions ask for confirmation when work overlaps.
+- Keep run and submission identities through supported retry, restart and workspace lifecycle paths. Delivery states follow pi's receipt or native queue evidence; uncertain delivery is shown as unknown and is never automatically resent as a new request. These records do not guarantee exactly-once execution.
+- Show the Board task's recorded status and note as the outcome. The lead is asked to record results in Working log; the scheduler keeps its own run records and does not write that log. Lead-created plans stay off until the user turns them on.
+
+## 0.1.41
+
+- Add Topics to keep questions and discussions, with summaries, confirmed conclusions, open questions and linked sources. Search, filter, edit, resolve, archive and restore topics in their own pane.
+- Send text and images from a topic into the yesman's existing lead conversation, preserving the original images and topic association through the supported queue, retry and restart paths. Association follows recorded submission identity; pasted topic labels and messages with missing provenance remain unassociated.
+- Bring Knowledge, Working Logs, Needs You and Topics together as four Info entries with their actual counts and errors. Keep the conversation usable beside Topics in narrow windows, with drafts and keyboard focus preserved.
+- Protect topic edits from conflicting revisions and delayed requests from a retired lead or workspace. Conclusions stay explicitly recorded; Topics does not invent answers or call a model in the background.
+
+## 0.1.40
+
+- Add a compact Working log contents page and separate records for each task, pull request or release. Open records on demand in a read-only view, then return to Contents or your previous reading position.
+- Keep lasting guidance in Knowledge and detailed task and release history in Working log. Existing log paths and links remain compatible, and legacy single-file logs stay readable.
+- Provide an explicit offline migration utility that preserves the complete original history and links, with verification and recovery support. Existing logs are never migrated automatically.
+
+## 0.1.39
+
+- Display the desktop application and its main process as Yes Man on macOS, Windows and Linux, including the window, native application metadata and new installer shortcuts.
+- Keep the existing installation locations, bundle identifier, update feeds and signing key, workspace identities and user data paths. The `yesman` command and older executable paths remain compatible; Windows command-line calls retain their arguments, streams and exit status.
+- Preserve automatic updates from the previous application name, including restart through the legacy entry points, subsequent updates and failure recovery. Existing user-created shortcuts and pins keep their paths; the new Windows installer refreshes its standard shortcuts.
+
+## 0.1.38
+
+- Add optional Settings › GitHub App configuration for agent-created pull requests, with a separate encrypted key vault and explicit repository and workspace selection. App identity starts disabled when no App configuration exists.
+- Configure your own App, test the current connection and scope, then explicitly enable App identity. Saving a changed key or scope disables it until a fresh connection test and explicit enablement.
+- Route supported PR creation in selected workspaces through the configured App identity. Git pushes and other GitHub operations keep their existing credentials; unavailable keys, services or installations in App mode stop creation without silently switching to a personal author. Keep App credentials out of agents and managed runtime dependency installation.
+- The actual idy/yesman installation's Bot author, avatar and PR events have not yet been verified; this release does not mean that account is connected. Users can configure and explicitly enable their own App, while this feature's compatibility with the real GitHub service remains unverified.
+
 ## 0.1.37
 
 - Open Needs You beside the conversation as a Board-style pane for the yesman shown and its current hire. Use the Info card or command palette to view its requests; the global sidebar entry and all-yesmen page are removed. Opening a request goes to its agent and question without answering it, while preserving unsent drafts and images. Request-memory notices, unreadable-file errors and recently handled requests stay available in the pane.

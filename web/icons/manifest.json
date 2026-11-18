@@ -251,6 +251,34 @@
       "name": "pencil-simple",
       "codepoint": "e3b4"
     },
+    "clock": {
+      "name": "clock",
+      "codepoint": "e19a"
+    },
+    "play": {
+      "name": "play",
+      "codepoint": "e3d0"
+    },
+    "archive": {
+      "name": "archive",
+      "codepoint": "e00c"
+      },
+    "topics": {
+      "name": "chats-circle",
+      "codepoint": "e17e"
+    },
+    "archive": {
+      "name": "archive",
+      "codepoint": "e00c"
+    },
+    "undo": {
+      "name": "arrow-counter-clockwise",
+      "codepoint": "e038"
+    },
+    "question": {
+      "name": "question",
+      "codepoint": "e3e8"
+    },
     "keyboard": {
       "name": "keyboard",
       "codepoint": "e2d8"
@@ -258,6 +286,10 @@
     "chart": {
       "name": "chart-bar",
       "codepoint": "e150"
+    },
+    "speaker": {
+      "name": "speaker-high",
+      "codepoint": "e44a"
     }
   },
   "fonts": {

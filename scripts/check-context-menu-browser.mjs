@@ -74,6 +74,7 @@ try {
               case 'PageMenu': case 'AgentMenu': case 'FileMenu': return window.fixture.next.shift() ?? (name === 'PageMenu' ? { action: '' } : '');
               case 'CopyValue': window.fixture.copied.push(args[0]); return null;
               case 'Crew': return { members: [], options: [] };
+              case 'Schedules': return { plans: [] }; // the info panel's Tasks row: no scheduled tasks
               case 'TakeFocus': return '';
               default: return {};
             }
@@ -93,7 +94,7 @@ try {
             menus: window.fixture.calls.slice(m.calls).filter((c) => ['PageMenu', 'AgentMenu', 'FileMenu'].includes(c.method)),
             copied: window.fixture.copied.slice(m.copied),
             opened: window.fixture.calls.slice(m.calls).filter((c) => c.method === 'OpenURL' || c.method === 'Reveal'),
-            submits: window.fixture.calls.slice(m.calls).filter((c) => c.method === 'Submit').length,
+            submits: window.fixture.calls.slice(m.calls).filter((c) => c.method === 'Submit' || c.method === 'SubmitCoalescing').length,
           }), m);
         };
         const next = (choice) => page.evaluate((c) => window.fixture.next.push(c), choice);

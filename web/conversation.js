@@ -9,15 +9,19 @@
 // message: a message without the field, such as one from before it existed,
 // is shown as it was written, as a person's.
 
-const SOURCES = new Set(['user', 'lead', 'yesman']);
+const SOURCES = new Set(['user', 'lead', 'yesman', 'schedule']);
 const SUBMISSION = /^[a-f0-9]{48}$/;
+const PLAN = /^s[1-9][0-9]{0,5}$/;
 
 // originOf returns a message's recorded origin, or null when it has none.
 export function originOf(m) {
   const o = m?.role === 'user' ? m.yesman : null;
   if (!o || typeof o !== 'object' || !SOURCES.has(o.source)) return null;
   const word = (s) => (typeof s === 'string' ? s : '');
-  return { source: o.source, kind: word(o.kind), worker: word(o.worker), submission: SUBMISSION.test(o.submission ?? '') ? o.submission : '' };
+  return {
+    source: o.source, kind: word(o.kind), worker: word(o.worker), submission: SUBMISSION.test(o.submission ?? '') ? o.submission : '',
+    plan: o.source === 'schedule' && PLAN.test(o.plan ?? '') ? o.plan : '',
+  };
 }
 
 const textOf = (content) =>
@@ -27,13 +31,14 @@ const textOf = (content) =>
 //
 //   user     a person's message, with its receipt when the message is bound to one
 //   lead     a worker's task or a message from its lead
+//   scheduled  a scheduled task's run, sent for the user (the plan it is of)
 //   text     one text block of the agent's, shown as it is written
 //   note     an error (blank when pi recorded no message for it), a stop, a
 //            summary of earlier conversation, an extension's message
 //   work     the work between those: thinking, tool calls and yesman's notices to a lead
 //   failures runs in a row that ended on nothing but an error, folded (see foldFailures)
-//   receipt  a submission the conversation does not show and that is still open,
-//            as the person's message (see open below)
+//   receipt  a submission still open, as the person's message (see open below);
+//            inputs pi appended into one pending occurrence show as that one message
 //
 // Every row and item has a key that stays the same while the conversation
 // grows, from history or live, so the page can keep what is open.
@@ -48,6 +53,9 @@ export function project(convo, agent = {}) {
   const rows = [];
   const seen = new Map();
   const bound = new Set();
+  // An input pi appended into another's pending occurrence is part of that
+  // message, never a message of its own, as soon as its receipt says so.
+  const appended = (d) => !!d?.mergedInto && !convo.deliveries?.get(d.mergedInto)?.mergedInto && convo.deliveries?.has(d.mergedInto);
   const submissions = new Set();
   let work = null;
   const keyFor = (m) => {
@@ -76,9 +84,15 @@ export function project(convo, agent = {}) {
         }
         if (origin?.source === 'yesman') step({ type: 'notice', key, message: m, origin });
         else if (origin?.source === 'lead') main({ type: 'lead', key, message: m, origin });
+        else if (origin?.source === 'schedule') {
+          // A scheduled task's run: the request the user saved, sent for them.
+          const delivery = origin.submission ? convo.deliveries?.get(origin.submission) : undefined;
+          if (delivery) bound.add(delivery.id);
+          main({ type: 'scheduled', key, message: m, origin, delivery });
+        }
         else {
           const delivery = origin?.submission ? convo.deliveries?.get(origin.submission) : undefined;
-          if (delivery) bound.add(delivery.id);
+          if (delivery) for (const id of familyOf(convo, delivery)) bound.add(id);
           main({ type: 'user', key, message: m, origin, delivery });
         }
         return;
@@ -169,7 +183,7 @@ export function project(convo, agent = {}) {
   // its message's place there (a summary replaced it, or it is from before
   // messages were tied to receipts) is not a second copy of it. What this
   // window sent only decides what a row shows, never whether it shows.
-  const all = [...(convo.deliveries?.values() ?? [])];
+  const all = [...(convo.deliveries?.values() ?? [])].filter((d) => !appended(d));
   // A receipt the server has not answered for yet has no order: the one this
   // window sent last is the latest; an earlier one never is.
   const order = (d) => (d.revision > 0 ? (d.order ?? 0) : d.id === convo.lastSent ? Infinity : -Infinity);
@@ -187,8 +201,47 @@ export function project(convo, agent = {}) {
   // here says a message was taken, and nothing replays it.
   const open = (d) => !dismissible(d) || !convo.handled?.has(d.id) &&
     (problem(d) || d.state === 'unconfirmed' && d === latest);
-  for (const d of receipts) if (open(d)) rows.push({ type: 'receipt', key: `d:${d.id}`, delivery: d, sent: convo.sent?.get(d.id) });
+  for (const d of receipts) {
+    if (!open(d)) continue;
+    const members = familyOf(convo, d);
+    rows.push({ type: 'receipt', key: `d:${d.id}`, delivery: d, members, sent: sentOf(convo, members) });
+  }
   return rows;
+}
+
+// familyOf lists the inputs one occurrence's message is made of, its primary
+// input first: those pi reported in order, then any whose own receipt names
+// the occurrence before the occurrence's receipt catches up.
+export function familyOf(convo, root) {
+  const ids = [root.id, ...(Array.isArray(root.merged) ? root.merged : [])];
+  const late = [...(convo.deliveries?.values() ?? [])]
+    .filter((d) => d.mergedInto === root.id && !ids.includes(d.id))
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  return [...ids, ...late.map((d) => d.id)];
+}
+
+// joinText is pi's merge of two inputs' text: one newline between them, each
+// kept verbatim, none when either has no text (an image-only input).
+export const joinText = (a, b) => (a === '' ? b : b === '' ? a : `${a}\n${b}`);
+
+// joinInputs is the whole message several inputs make: their text joined in
+// order, then all their images in order.
+export function joinInputs(parts) {
+  let text = '';
+  const images = [];
+  for (const part of parts) {
+    text = joinText(text, part.text ?? '');
+    images.push(...(part.images ?? []));
+  }
+  return { text, images };
+}
+
+// sentOf is the whole message, exactly as this window sent each of its
+// inputs, or nothing when it did not send (or no longer holds) every one.
+export function sentOf(convo, members) {
+  const parts = members.map((id) => convo.sent?.get(id));
+  if (parts.some((part) => !part)) return undefined;
+  return members.length === 1 ? parts[0] : joinInputs(parts);
 }
 
 // foldFailures folds runs in a row that ended on nothing but an error into

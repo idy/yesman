@@ -162,7 +162,8 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
                 agent: agents.find((a) => a.id === args[0]),
                 models: [{ id: "m", provider: "p", name: "Model" }],
               };
-            case "Submit": {
+            case "Submit":
+            case "SubmitCoalescing": {
               window.sent.push({ method, args });
               const [agent, id, text, images] = args;
               saved.receipts[agent] ??= {};
@@ -208,7 +209,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     const idAt = async (i) =>
       page.evaluate(
         (i) =>
-          window.sent.filter((s) => s.method === "Yesman.Submit")[i].args[1],
+          window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method))[i].args[1],
         i,
       );
     const row = (id) => page.locator(`[data-delivery="${id}"]`);
@@ -323,7 +324,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await input.press("Enter");
     await page.waitForFunction(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").length === 1,
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).length === 1,
     );
     const imageID = await idAt(0);
     // What this window sent shows as sent: its images, not a count of them.
@@ -345,7 +346,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await input.press("Enter");
     await page.waitForFunction(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").length === 2,
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).length === 2,
     );
     const retryID = await idAt(1);
     await page.evaluate((id) => window.fixture.reject(id), retryID);
@@ -357,7 +358,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await input.press("Enter");
     await page.waitForFunction(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").length === 3,
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).length === 3,
     );
     await page.waitForFunction(
       () => !document.querySelector(".composer textarea").readOnly,
@@ -405,7 +406,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     );
     const rejectedID = await page.evaluate(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").at(-1).args[1],
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1).args[1],
     );
     await ack(rejectedID, "failed");
     assert.equal(await input.inputValue(), "known rejection");
@@ -417,7 +418,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     );
     const newID = await page.evaluate(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").at(-1).args[1],
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1).args[1],
     );
     assert.notEqual(newID, rejectedID);
     await ack(newID);
@@ -461,7 +462,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     );
     const unknownID = await page.evaluate(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").at(-1).args[1],
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1).args[1],
     );
     const nativeBefore = await page.locator("#thread > .msg-user").count();
     await page.evaluate((id) => {

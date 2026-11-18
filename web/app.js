@@ -9,11 +9,13 @@ import { needsYouItems, requestsOf, closedHandoffs, summary as requestSummary, t
 import { messageActions, messageText, receiptText } from './message-actions.js';
 import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
 import { renderMarkdown } from './markdown.js';
-import { project, originOf, FINISHED, dismissible } from './conversation.js';
+import { project, originOf, FINISHED, dismissible, familyOf, joinInputs } from './conversation.js';
 import { $, h, icon, openModal } from './dom.js';
 import { createFiles } from './files.js';
+import { logRoute } from './task-log.js';
 import { createInfo } from './info.js';
 import { createBoard } from './board.js';
+import { createSchedules } from './schedules.js';
 import { createContextViewer } from './context.js';
 import { createModelPicker } from './models.js';
 import { createPiPage } from './pi.js';
@@ -21,8 +23,11 @@ import { createCrew } from './crew.js';
 import { createGrants } from './grants.js';
 import { createUsagePage } from './usage.js';
 import { createEnvPage } from './env.js';
+import { createGitHubAppPage } from './github-app.js';
 import { formatSize } from './diff.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
+import { DELIVERY_LABELS, deliveryLabel, newSubmissionID, sameSubmissionImages, withoutLine } from './submission.js';
+import { createTopics } from './topics.js';
 import { detectPlatform } from './keys.js';
 import { createShortcuts } from './shortcuts.js';
 import { createContextMenu } from './contextmenu.js';
@@ -73,7 +78,7 @@ const state = {
   drafts: new Map(),
   attachments: new Map(),
   modelOptions: new Map(),
-  pane: null, // the pane beside the conversation: 'files', 'board', 'needs-you' or null
+  pane: null, // the pane beside the conversation: 'files', 'board', 'needs-you', 'topics', 'tasks' or null
   hideDone: new Set(JSON.parse(localStorage.getItem('yesman.hideDone') ?? '[]')), // yesmen whose done workers are hidden
   // The info panel between the conversation and the files, open unless
   // closed, as it was last.
@@ -199,12 +204,7 @@ function pruneCaches() {
 // progress keeps streaming and none shows twice.
 const messageKey = (m) => originOf(m)?.submission ? `submission:${originOf(m).submission}` : `${m?.role}:${m?.timestamp}`;
 
-const DELIVERY_LABELS = {
-  sending: 'Sending…', accepted: 'Accepted · delivery unconfirmed',
-  steering: 'Accepted for steering · delivery unconfirmed', queued: 'Accepted for follow-up · delivery unconfirmed',
-  unconfirmed: 'Delivery unconfirmed', failed: 'Not sent', interrupted: 'Delivery interrupted', cancelled: 'Recalled',
-};
-const deliveryLabel = (d) => d.nativePending ? (d.state === 'queued' ? 'Waiting · follow-up' : 'Steering · waiting for input checkpoint') : DELIVERY_LABELS[d.state];
+
 
 function pruneDeliveryRows(c, ids) {
   let changed = false, handled = false;
@@ -255,6 +255,7 @@ function copyActions(text, c = null, d = null) {
     busy: c?.actions.has(d?.id), dismiss: c && d && dismissible(d) ? () => dismissReceipt(c, d.id) : null });
   actions._copyText = text;
   actions._recall = `${!!d?.canCancel}:${!!d?.canRestore}:${!!d?.originalText}`;
+  actions._state = `${eligible}:${!!(d?.canPromote && d.nativePending && d.state === 'queued')}:${!!c?.actions.has(d?.id)}:${!!(c && d && dismissible(d))}`;
   return actions;
 }
 
@@ -346,10 +347,10 @@ async function recallMessage(c, id) {
 // deliveryStatus is the state of a submission still open, lightly, under it.
 function deliveryStatus(d) {
   const label = deliveryLabel(d);
-  const title = d.nativePending ? (d.state === 'queued' ? t('This input is still in pi’s follow-up queue.') : t('Steering is read at the next eligible input checkpoint, after the current response and tool batch.'))
+  const title = d.nativePending ? (d.preparing ? t('pi has claimed this input for its next turn and is preparing it. It has not been taken yet and can still be recalled.') : d.state === 'queued' ? t('This input is still in pi’s follow-up queue.') : t('Steering is read at the next eligible input checkpoint, after the current response and tool batch.'))
     : d.state === 'cancelled' ? t('This input was removed from the queue.')
       : d.error || (d.state === 'sending' ? null : t('pi has not reported whether this particular message was taken for processing.'));
-  return h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite', 'data-state': d.state,
+  return h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite', 'data-state': d.state, 'data-preparing': d.preparing ? 'true' : null,
     hidden: !label, title },
   label ? t(label) : '');
 }
@@ -357,61 +358,146 @@ function deliveryStatus(d) {
 // receiptEl shows a submission the conversation does not show yet as the
 // person's message, with its state under it: exactly as this window sent it
 // when it has that, or else what the receipt keeps (a preview and the number
-// of images), never a guess at the original.
-const receiptForm = (d, sent) => `${sent ? 'sent' : 'kept'}:${d.text ?? ''}:${d.imageCount ?? 0}`;
+// of images), never a guess at the original. Inputs pi appended into one
+// pending occurrence are one message: its row shows them in the same element.
+const receiptVariant = (c, d) => `${d.origin?.source === 'schedule' ? 'scheduled:' : 'bubble:'}${topicKey(topicOfSubmission(c, d.id))}`;
 
-function receiptEl(c, d, { sent } = {}) {
-  const el = receiptBody(d, sent);
-  const status = el.querySelector('.delivery-status');
-  status.remove();
-  el.append(h('div', { class: 'message-footer' }, status, copyActions(sent?.text ?? receiptText(d), c, d)));
-  if (!sent && d.originalPayload) hydrateReceipt(c, el, d);
-  el._variant = receiptForm(d, sent);
+// What copying a topic's message copies: the person's text, without the line
+// the app sent before it.
+const ownText = (text, topic) => (topic && typeof text === 'string' ? withoutLine(text, topic.context) : text);
+
+function receiptEl(c, d, { sent, members } = {}) {
+  // A scheduled run is never shown as something a person typed.
+  if (d.origin?.source === 'schedule') {
+    const el = scheduledEl({ plan: d.origin.plan, preview: d.text ? (d.preview ? `${d.text}…` : d.text) : '', delivery: d });
+    el._variant = receiptVariant(c, d);
+    return el;
+  }
+  const el = h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(d.state === 'sending') },
+    h('div', { class: 'msg-user' }),
+    h('div', { class: 'message-footer' }, deliveryStatus(d), h('div', { class: 'message-actions' })));
+  el._variant = receiptVariant(c, d);
+  return updateBubble(c, el, d, { sent, members });
+}
+
+const sameIDs = (a, b) => a.length === b.length && a.every((id, i) => id === b[i]);
+const startsWithIDs = (ids, prefix) => prefix.length <= ids.length && prefix.every((id, i) => id === ids[i]);
+
+// What a receipt row can show of its whole message: all of it, as this
+// window sent each input or as the Manager returned the occurrence, or the
+// kept preview. A complete message is never replaced by a shorter one.
+function receiptContent(c, el, d, sent, members) {
+  if (sent && !d.images?.length) return { full: true, members, text: sent.text, images: sent.images };
+  const known = el._full;
+  if (known && startsWithIDs(known.members, members)) return { full: true, ...known };
+  if (known && startsWithIDs(members, known.members)) {
+    const rest = members.slice(known.members.length).map((id) => c.sent.get(id));
+    if (rest.every(Boolean)) return { full: true, ...joinInputs([known, ...rest]), members };
+  }
+  const images = (d.images ?? []).filter((image) => imageURL(image));
+  return { full: false, members, text: d.text ? (d.preview ? `${d.text}…` : d.text) : '', images, imageCount: d.imageCount ?? d.images?.length ?? 0 };
+}
+
+// The text and images of a receipt's message, as one bubble: replacing its
+// content keeps the element, and so its place, focus and what surrounds it.
+// A topic's message (never more than one input) is drawn as the topic's.
+function fillBubble(el, content, topic = null) {
+  let bubble = el.querySelector('.msg-user');
+  const images = content.images.filter((image) => imageURL(image));
+  if (topic) {
+    const drawn = userBubble({ role: 'user', content: [{ type: 'text', text: content.text }, ...images] }, topic);
+    bubble.replaceWith(drawn);
+    bubble = drawn;
+  } else {
+    bubble.replaceChildren(content.text || (content.imageCount && !images.length ? t('Attached images') : ''),
+      ...(images.length ? [h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' })))] : []));
+  }
+  el.querySelector(':scope > .delivery-image-count')?.remove();
+  if (!images.length && content.imageCount) bubble.after(imageNote(content.imageCount));
+}
+
+// updateBubble brings a receipt's message up to date in its own element:
+// state, actions and, when its inputs changed, what it shows.
+function updateBubble(c, el, d, { sent, members = [d.id] }) {
+  el._options = { sent, members };
+  el.dataset.sending = String(d.state === 'sending');
+  const topic = topicOfSubmission(c, d.id);
+  let content = receiptContent(c, el, d, sent, members);
+  if (content.full && !sent) el.dataset.original = 'true';
+  if (content.full) el._full = { members: content.members, text: content.text, images: content.images };
+  const shown = el._shown;
+  // While the complete message is fetched, keep the last complete one rather
+  // than drop back to a preview of it.
+  const fetching = !content.full && d.originalPayload && el._failed !== content.members.join(',');
+  if (fetching && shown?.full && startsWithIDs(content.members, shown.members)) content = null;
+  if (content) {
+    const sig = `${content.full}:${content.members.join(',')}:${content.text}:${content.images.length}:${content.imageCount ?? 0}`;
+    if (shown?.sig !== sig) {
+      fillBubble(el, content, topic);
+      el._shown = { sig, full: content.full, members: content.members, text: content.text, images: content.images };
+    }
+  }
+  el.querySelector('.message-footer > .delivery-status').replaceWith(deliveryStatus(d));
+  const full = el._shown?.full && startsWithIDs(el._shown.members, members) ? el._shown.text : null;
+  // A receipt whose occurrence has not caught up with its appended inputs
+  // keeps an older preview: only the Manager's whole message is copied then.
+  const current = members.length === 1 + (d.merged?.length ?? 0);
+  const actions = copyActions(ownText(full ?? (current ? receiptText(d) : null), topic), c, d);
+  const old = el.querySelector('.message-footer > .message-actions');
+  if (old._copyText !== actions._copyText || old._recall !== actions._recall || old._state !== actions._state) {
+    const focused = old.contains(document.activeElement) ? [...old.children].indexOf(document.activeElement) : -1;
+    old.replaceWith(actions);
+    if (focused >= 0) (actions.children[focused] ?? actions.firstElementChild)?.focus({ preventScroll: true });
+  }
+  if (!content?.full && d.originalPayload) hydrateReceipt(c, el, d, members);
   return el;
 }
 
 // A visible row can retrieve originals from the Manager's bounded memory.
 // Keep them only in this row, never another persistent or conversation cache.
-async function hydrateReceipt(c, el, d) {
-  el._hydration = true;
+// A request for an occurrence's earlier inputs never shows over a later one.
+async function hydrateReceipt(c, el, d, members) {
+  const key = members.join(',');
+  if (el._hydrating === key || el._failed === key) return;
+  el._hydrating = key;
   try {
     const payload = await call('SubmissionPayload', c.id, d.id, d.agentSince);
     const current = c.deliveries.get(d.id);
-    if (!el.isConnected || state.convos.get(c.key) !== c || keyOf(selectedAgent() ?? {}) !== c.key || !current?.originalPayload || typeof payload?.text !== 'string' || !Array.isArray(payload.images)) return;
-    el._payload = payload;
-    el.querySelector('.msg-user').replaceWith(userBubble({ content: [{ type: 'text', text: payload.text }, ...payload.images] }));
-    el.querySelector('.delivery-image-count')?.remove();
-    el.querySelector('.message-actions')?.replaceWith(copyActions(payload.text, c, current));
-    el.dataset.original = 'true';
-  } catch { /* Missing after intake/retirement stays an honest bounded preview. */ }
+    if (el._hydrating !== key || !el.isConnected || state.convos.get(c.key) !== c || keyOf(selectedAgent() ?? {}) !== c.key || !current?.originalPayload || typeof payload?.text !== 'string' || !Array.isArray(payload.images)) return;
+    const ids = Array.isArray(payload.members) && payload.members[0] === d.id ? payload.members : [d.id];
+    if (el._full && !startsWithIDs(ids, el._full.members)) return;
+    el._full = { members: ids, text: payload.text, images: payload.images };
+    el._hydrating = null;
+    updateBubble(c, el, current, el._options);
+  } catch {
+    // Missing after intake/retirement stays an honest bounded preview.
+    if (el._hydrating === key) {
+      el._failed = key;
+      el._hydrating = null;
+      const current = c.deliveries.get(d.id);
+      if (current && el.isConnected) updateBubble(c, el, current, el._options);
+    }
+  } finally {
+    if (el._hydrating === key) el._hydrating = null;
+  }
 }
 
 const imageNote = (n) => h('div', { class: 'delivery-image-count' }, tn(n, '{n} image submitted', '{n} images submitted'));
 
-function receiptBody(d, sent) {
-  const imageCount = d.imageCount ?? d.images?.length ?? 0;
-  const text = sent ? sent.text : d.text ? (d.preview ? `${d.text}…` : d.text) : '';
-  const images = (sent ? sent.images : d.images ?? []).filter((image) => imageURL(image));
-  return h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(d.state === 'sending') },
-    h('div', { class: 'msg-user' }, text || (imageCount && !images.length ? t('Attached images') : ''),
-      images.length ? h('div', { class: 'message-images' }, images.map((image) => h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null),
-    !images.length && imageCount ? imageNote(imageCount) : null, deliveryStatus(d));
-}
 
 // receiptEl brought up to date: a receipt changing state keeps its element
 // (and what is selected in it) unless it changes form.
 function updateReceipt(c, el, d, options = {}) {
-  if (el._variant === receiptForm(d, options.sent) && !d.images?.length) {
-    el.dataset.sending = String(d.state === 'sending');
+  if (el._variant === receiptVariant(c, d)) {
+    if (d.origin?.source !== 'schedule') return updateBubble(c, el, d, options);
+    // A scheduled run's receipt: its plan's request, never recalled or joined.
     el.querySelector('.delivery-status').replaceWith(deliveryStatus(d));
-    el.querySelector('.message-actions')?.replaceWith(copyActions(el._payload?.text ?? options.sent?.text ?? receiptText(d), c, d));
-    if (!options.sent && d.originalPayload && !el._hydration) hydrateReceipt(c, el, d);
     return el;
   }
   return receiptEl(c, d, options);
 }
 
-const receiptSig = (d, sent) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}:${!!d.originalPayload}:${!!d.canPromote}:${!!d.canCancel}:${!!d.canRestore}`;
+const receiptSig = (d, sent, members = []) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}:${!!d.originalPayload}:${!!d.canPromote}:${!!d.canCancel}:${!!d.canRestore}:${!!d.preparing}:${members.join(',')}`;
 
 function renderQueue(c) {
   const thread = $('#thread');
@@ -478,6 +564,17 @@ async function loadConvo(c) {
   c.queue = null;
   const a = selectedAgent();
   if (a && keyOf(a) === c.key) renderThread();
+  // The topics pane lists the lead's messages about the topic shown, live or
+  // read with the history.
+  topicsFollow(c);
+}
+
+// topicsFollow redraws the topics pane when it shows the yesman whose
+// current lead conversation c is.
+function topicsFollow(c) {
+  const a = c && agentById(c.id);
+  if (state.pane !== 'topics' || a?.role !== 'lead' || keyOf(a) !== c.key) return;
+  topics.refresh(yesmanOf(a.id));
 }
 
 const textOf = messageText;
@@ -492,7 +589,10 @@ function indexTool(c, block) {
 function indexMessage(c, message) {
   // A message tied to a submission shows it from here on.
   const submission = originOf(message)?.submission;
-  if (submission) c.sent.delete(submission);
+  if (submission) {
+    const d = c.deliveries.get(submission);
+    for (const id of d ? familyOf(c, d) : [submission]) c.sent.delete(id);
+  }
   if (message.role === 'assistant') {
     for (const block of message.content ?? []) {
       if (block.type === 'toolCall') indexTool(c, block);
@@ -584,8 +684,37 @@ function legacyNoteEl(text) {
   return null;
 }
 
-function userBubble(m) {
+// topicOfSubmission is the topic the app recorded a submission of
+// conversation c as sent from: { id, title, context }, or null. Only a lead's
+// conversation has them, and only the app's own record says so: what a
+// message's text says is never evidence of where it came from.
+const topicSends = new Map(); // `${yesman}@${hiredAt}/${submission}` -> topic, before the topic's record is read
+function topicOfSubmission(c, id) {
+  const a = c && agentById(c.id);
+  if (!id || a?.role !== 'lead' || `${c.id}@${a.since ?? ''}` !== c.key) return null;
+  const y = yesmanOf(a.id);
+  if (!y) return null;
+  return topics.bySubmission(y, id) ?? topicSends.get(`${y.name}@${y.hiredAt ?? ''}/${id}`) ?? null;
+}
+const topicKey = (topic) => (topic ? `${topic.id}:${topic.title}:${topic.context}` : '');
+
+function userBubble(m, topic = null) {
   const images = Array.isArray(m.content) ? m.content.filter((b) => b.type === 'image' && imageURL(b)) : [];
+  // A message the app recorded as sent from a topic is drawn with a chip that
+  // opens the topic, and without the line it was sent with. A message whose
+  // text only looks like one is shown as it is.
+  if (topic) {
+    const a = selectedAgent();
+    const y = a && yesmanOf(a.id);
+    const text = withoutLine(textOf(m.content), topic.context);
+    const title = (y && topics.title(y, topic.id)) || topic.title;
+    return h('div', { class: 'msg-user msg-user--topic' },
+      h('button', { class: 'topic-chip', type: 'button', title: t('Open topic {id}', { id: topic.id }),
+        onclick: () => y && topics.open(y, topic.id) }, icon('topics', 'mds-icon topic-chip-mark'), h('span', null, t('Topic {id}', { id: topic.id })), h('span', { class: 'topic-chip-title' }, title)),
+      text ? h('div', { class: 'msg-user-text' }, text) : null,
+      images.length ? h('div', { class: 'message-images' }, images.map((image) =>
+        h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
+  }
   return h('div', { class: 'msg-user' }, textOf(m.content),
     images.length ? h('div', { class: 'message-images' }, images.map((image) =>
       h('img', { src: imageURL(image), alt: t('Attached image'), loading: 'lazy' }))) : null);
@@ -597,10 +726,34 @@ function userRowEl(row, c) {
   const images = Array.isArray(row.message.content) && row.message.content.some((b) => b?.type === 'image');
   const legacy = !row.origin && !images && legacyNoteEl(textOf(row.message.content));
   if (legacy) return legacy;
-  const bubble = userBubble(row.message);
-  bubble.append(copyActions(textOf(row.message.content)));
+  // A message the app recorded as sent from a topic keeps its topic's chip.
+  const topic = row.origin?.source === 'user' ? topicOfSubmission(c, row.origin.submission) : null;
+  const bubble = userBubble(row.message, topic);
+  bubble.append(copyActions(ownText(textOf(row.message.content), topic)));
   // Tied to its submission: pi has it, so it reads as any message, without a status.
   return row.delivery ? h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble) : bubble;
+}
+
+// A scheduled task stays separate from a person's input, with its saved request.
+function scheduledEl({ plan, text, preview, delivery, bound = false }) {
+  const yesman = selectedAgent()?.yesman;
+  const label = plan ? t('Scheduled task {id}', { id: plan }) : t('Scheduled task');
+  let body = null;
+  if (text) {
+    body = h('details', { class: 'scheduled-request' }, h('summary', null, t('The request it sent')));
+    body.addEventListener('toggle', () => { if (body.open && !body.querySelector('.md')) body.append(md(text)); });
+  } else if (preview) {
+    body = h('div', { class: 'delivery-compact', title: preview }, preview.replace(/\s+/g, ' ').slice(0, 120));
+  }
+  return h('div', { class: 'note note--scheduled', 'data-delivery': delivery?.id ?? null },
+    h('div', { class: 'scheduled-head' }, icon('clock', 'mds-icon scheduled-mark'), h('strong', null, label),
+      plan && yesman ? h('button', { class: 'mds-link-button scheduled-open', type: 'button', onclick: () => schedules.open(yesman, plan) }, t('Open in Tasks')) : null),
+    body,
+    delivery && !bound ? deliveryStatus(delivery) : null);
+}
+
+function scheduledRowEl(row) {
+  return scheduledEl({ plan: row.origin.plan, text: textOf(row.message.content), delivery: row.delivery, bound: true });
 }
 
 function leadRowEl(row) {
@@ -842,20 +995,22 @@ function rowEl(c, row) {
   switch (row.type) {
     case 'user': return userRowEl(row, c);
     case 'lead': return leadRowEl(row);
+    case 'scheduled': return scheduledRowEl(row);
     case 'text': return h('div', { class: 'msg-assistant' }, md(row.text));
     case 'note': return noteRowEl(row);
     case 'work': return workEl(c, row);
     case 'failures': return failuresEl(c, row);
-    case 'receipt': return receiptEl(c, row.delivery, { sent: row.sent });
+    case 'receipt': return receiptEl(c, row.delivery, { sent: row.sent, members: row.members });
     default: return h('div');
   }
 }
 
-function rowSig(row) {
+function rowSig(c, row) {
   switch (row.type) {
-    case 'user': return row.delivery ? `bound:${row.delivery.id}` : '';
+    case 'user': return `${row.delivery ? `bound:${row.delivery.id}` : ''}|${row.origin?.source === 'user' ? topicKey(topicOfSubmission(c, row.origin.submission)) : ''}`;
+    case 'scheduled': return row.origin.plan;
     case 'text': return row.live ? `l:${row.text}` : 'f';
-    case 'receipt': return receiptSig(row.delivery, row.sent);
+    case 'receipt': return `${receiptSig(row.delivery, row.sent, row.members)}|${topicKey(topicOfSubmission(c, row.delivery.id))}`;
     default: return 'f';
   }
 }
@@ -881,7 +1036,7 @@ function patchThread(c) {
   if (rows.length) thread.querySelector('.thread-empty')?.remove();
   patchChildren(thread, 'data-row', rows, {
     make: (row) => rowEl(c, row),
-    sig: (row) => `${rowSig(row)}:${c.actions.has(row.delivery?.id)}`,
+    sig: (row) => `${rowSig(c, row)}:${c.actions.has(row.delivery?.id)}`,
     update: (el, row) => {
       if (row.type === 'work') return updateWork(c, el, row);
       if (row.type === 'failures') return updateFailures(c, el, row);
@@ -889,7 +1044,7 @@ function patchThread(c) {
         el.firstElementChild.innerHTML = renderMarkdown(row.text);
         return el;
       }
-      if (row.type === 'receipt') return updateReceipt(c, el, row.delivery, { sent: row.sent });
+      if (row.type === 'receipt') return updateReceipt(c, el, row.delivery, { sent: row.sent, members: row.members });
       return rowEl(c, row);
     },
   });
@@ -994,6 +1149,10 @@ function workingLabel(a) {
   return `${label}${parallel}…`;
 }
 
+// pi's own queue snapshot: whole-queue counts, by message (an occurrence
+// holding appended inputs counts once).
+const nativeQueueStatus = (e) => ({ known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: supportsRecall(e.pending?.capability) });
+
 // Live records from an agent's pi process.
 function onAgentEvent(ev) {
   const { agent: id, data: e } = ev;
@@ -1021,7 +1180,7 @@ function onAgentEvent(ev) {
   if (e.type === 'queue_update' || e.type === 'delivery_queue') {
     if (ev.seq <= c.queueSeq) return;
     c.queueSeq = ev.seq;
-    c.piQueue = e.type === 'delivery_queue' ? e.queue : { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: supportsRecall(e.pending?.capability) };
+    c.piQueue = e.type === 'delivery_queue' ? e.queue : nativeQueueStatus(e);
     if (keyOf(selectedAgent() ?? {}) === c.key) {
       const scroller = $('#scroll');
       if (scroller) scroller.dataset.stick = atBottom(scroller) ? 'true' : 'false';
@@ -1032,10 +1191,13 @@ function onAgentEvent(ev) {
   }
   if (e.type === 'delivery_update' || e.type === 'delivery_retained') {
     applyDeliveryReceipt(c,e,ev.seq);
+    topicsFollow(c);
     schedulePatch(c);
     return;
   }
   applyEvent(c, e, false);
+  // The topics pane lists the lead's messages about the topic shown.
+  if (e.type === 'message_end' && e.message?.role === 'user') topicsFollow(c);
 }
 
 // applyEvent updates a conversation with one record, and the thread when it
@@ -1048,7 +1210,7 @@ function applyEvent(c, e, replaying,seq = 0) {
       if (visible) renderQueue(c);
       return;
     case 'queue_update':
-      c.piQueue = { known: true, steering: e.steering?.length ?? 0, followUp: e.followUp?.length ?? 0, recallSupported: supportsRecall(e.pending?.capability) };
+      c.piQueue = nativeQueueStatus(e);
       if (visible) renderQueue(c);
       return;
     case 'delivery_retained':
@@ -1707,6 +1869,7 @@ function renderBarActions() {
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
     a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }, 'pane.info') : null,
     a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }, 'pane.board') : null,
+    a ? button('topics', state.pane === 'topics' ? t('Hide the topics') : t('Show the topics'), () => togglePane('topics'), { 'aria-pressed': String(state.pane === 'topics') }, 'pane.topics') : null,
     a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }, 'pane.files') : null,
   ].filter(Boolean));
 }
@@ -2115,9 +2278,6 @@ function letGo(c) {
   for (const id of [...c.sent.keys()]) if (id !== c.lastSent && canReleaseSent(c.deliveries.get(id))) c.sent.delete(id);
 }
 
-const sameSubmissionImages = (left, right) => left.length === right.length && left.every((image, i) =>
-  image.type === right[i].type && image.mimeType === right[i].mimeType && image.data === right[i].data);
-
 async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
@@ -2140,7 +2300,7 @@ async function sendMessage(a, textarea, submitter = null) {
   const retry = attachments.retryOf;
   if (retry && (retry.text !== text || !sameSubmissionImages(retry.images, images))) attachments.retryOf = null;
   const retried = attachments.retryOf?.id ?? null;
-  const messageID = attachments.submissionID ?? Date.now().toString(16).padStart(12, '0') + [...crypto.getRandomValues(new Uint8Array(18))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const messageID = attachments.submissionID ?? newSubmissionID();
   {
     // Sending a hidden submission's draft again is a new attempt the person
     // asked for: what comes of it shows, even if it fails again.
@@ -2166,7 +2326,9 @@ async function sendMessage(a, textarea, submitter = null) {
   attachments.sending = true;
   renderDock({ focusComposer });
   try {
-    const receipt = await call('Submit', a.id, messageID, text, images, a.since);
+    // A composer input may join the newest still-pending human message; pi
+    // decides at its own enqueue point and the receipt says which it did.
+    const receipt = await call('SubmitCoalescing', a.id, messageID, text, images, a.since);
     updateDelivery(c, receipt);
     if (retried && receipt?.id === messageID && receipt.revision > 0) {
       if (attachments.retryOf?.id === retried) attachments.retryOf = null;
@@ -2271,6 +2433,7 @@ const SETTINGS = [
   { page: 'yesman', label: 'yesman', icon: 'users' },
   { page: 'usage', label: 'Model usage', icon: 'chart' },
   { page: 'repositories', label: 'Repositories', icon: 'branch' },
+  { page: 'github-app', label: 'GitHub App', icon: 'pullRequest' },
   { page: 'secrets', label: 'Secrets', icon: 'lock' },
   { page: 'variables', label: 'Variables', icon: 'code' },
   { page: 'storage', label: 'Storage', icon: 'folder' },
@@ -2327,6 +2490,7 @@ async function loadSettingsPage(page) {
     else if (page === 'yesman') { await crewPage.load(); return; }
     else if (page === 'usage') { usagePage.load(); return; }
     else if (page === 'secrets') { await secretsPage.load(); return; }
+    else if (page === 'github-app') { await githubAppPage.load(); return; }
     else if (page === 'variables') { await variablesPage.load(); return; }
   } catch (err) {
     fail(err);
@@ -2346,6 +2510,7 @@ function renderSettings(body) {
   else if (state.view.page === 'yesman') crewPage.renderPage(inner);
   else if (state.view.page === 'usage') usagePage.render(inner);
   else if (state.view.page === 'secrets') secretsPage.render(inner);
+  else if (state.view.page === 'github-app') githubAppPage.render(inner);
   else if (state.view.page === 'variables') variablesPage.render(inner);
   else if (state.view.page === 'config') renderConfig(inner);
   else if (state.view.page === 'about') renderAbout(inner);
@@ -2433,6 +2598,10 @@ const envPage = (kind) => createEnvPage(kind, {
 });
 const secretsPage = envPage('secrets');
 const variablesPage = envPage('variables');
+const githubAppPage = createGitHubAppPage({
+  call, shown: () => state.view.kind === 'settings' && state.view.page === 'github-app',
+  rerender: () => renderBody(), preferenceRow, settingsSection,
+});
 
 function renderGeneral(inner) {
   const v = state.settings;
@@ -2650,7 +2819,7 @@ function renderAbout(inner) {
     build = [v.version || t('Development build'), detail ? faint(` ${detail}`) : null];
   }
   inner.append(
-    settingsSection('yesman', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
+    settingsSection('Yes Man', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
       row(t('Build'), build),
       row(t('Updates'), updateStatus()),
       row(!v ? 'pi' : v.piManaged ? t('Managed pi') : t('External pi'), v ? (v.pi || (v.piState && v.piState !== 'failed' ? t({ preparing: 'Preparing…', unprepared: 'Not prepared', closed: 'Stopped.' }[v.piState] || 'Version unknown') : h('span', { class: 'danger' }, v.piError || t('Version unknown')))) : checking()),
@@ -3309,6 +3478,7 @@ const files = createFiles({
     return a ? yesmanOf(a.id) : null;
   },
   isOpen: () => state.pane === 'files',
+  selectWorkspace: (name) => { if (agentById(`${name}/lead`)) selectAgent(`${name}/lead`); },
   setOpen: (on) => setPane(on ? 'files' : state.pane === 'files' ? null : state.pane),
   checkout: (y) => openCheckout(y),
   dismiss: (name) => dismiss(name),
@@ -3333,6 +3503,9 @@ const info = createInfo({
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
+  openTasks: () => togglePane('tasks'),
+  tasksOpen: () => state.pane === 'tasks',
+  tasksSummary: (y) => schedules.summary(y),
   // The same requests as the Needs you pane shows for this yesman.
   needsYou: (y) => {
     const v = state.snap.yesmen.find((v) => v.name === y.name);
@@ -3345,6 +3518,8 @@ const info = createInfo({
     };
   },
   openNeedsYou: () => showNeedsYou(),
+  pane: () => state.pane,
+  openTopics: () => setPane('topics'),
   openWorktree: (dir, show) => files.openWorktree(dir, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
@@ -3370,7 +3545,128 @@ const board = createBoard({
   setOpen: (on) => setPane(on ? 'board' : state.pane === 'board' ? null : state.pane),
   agent: (id) => agentById(id),
   openAgent: (id) => selectAgent(id),
+  openPlan: (plan) => {
+    const y = selectedAgent() ? yesmanOf(selectedAgent().id) : null;
+    if (y) schedules.open(y.name, plan);
+  },
 });
+
+// ---------- Tasks pane ----------
+
+// Scheduled tasks share the place beside the conversation too.
+const schedules = createSchedules({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.pane === 'tasks',
+  setOpen: (on) => setPane(on ? 'tasks' : state.pane === 'tasks' ? null : state.pane),
+  openBoardTask: (id) => {
+    setPane('board');
+    board.reveal(id);
+  },
+  openLead: () => {
+    const a = selectedAgent();
+    if (a) selectAgent(`${a.yesman}/lead`);
+  },
+  openTaskLog: () => files.openTaskLog(),
+  confirm: (title, body, ok) => confirmAction(title, body, ok),
+  changed: () => info.render(),
+});
+
+// ---------- Topics pane ----------
+
+// The topics share the place beside the conversation with the board and the
+// files. A topic's messages go to its yesman's lead, into its conversation.
+const leadOf = (y) => y && agentById(`${y.name}/lead`);
+const topics = createTopics({
+  call,
+  fail,
+  yesman: () => {
+    const a = selectedAgent();
+    return a ? yesmanOf(a.id) : null;
+  },
+  isOpen: () => state.pane === 'topics',
+  setOpen: (on) => setPane(on ? 'topics' : state.pane === 'topics' ? null : state.pane),
+  lead: (y) => leadOf(y),
+  leadConvo: (y) => {
+    const lead = leadOf(y);
+    const c = lead && state.convos.get(keyOf(lead));
+    return c?.loaded ? c : null;
+  },
+  openLead: (y) => { const lead = leadOf(y); if (lead) selectAgent(lead.id); },
+  showMessage: (y, source) => showMessage(y, source),
+  agent: (id) => agentById(id),
+  openAgent: (id) => selectAgent(id),
+  openBoard: () => setPane('board'),
+  openKnowledge: (path) => {
+    const y = selectedAgent() && yesmanOf(selectedAgent().id);
+    if (path && y && files.openPath(`${y.path}/.yesman/knowledge/${path}`)) return;
+    files.openKnowledge();
+  },
+  openURL: (url) => call('OpenURL', url).catch(fail),
+  track: (y, id, text, imageCount, topic) => {
+    const lead = leadOf(y);
+    if (!lead) return;
+    // The app ties the submission to its topic before sending it, so its
+    // receipt names the topic before the topic's record is read again.
+    if (topic) {
+      topicSends.set(`${y.name}@${y.hiredAt ?? ''}/${id}`, topic);
+      if (topicSends.size > 256) topicSends.delete(topicSends.keys().next().value);
+    }
+    const c = convo(lead);
+    if (!c.deliveries.has(id)) {
+      // Keep the whole topic line, so the receipt shows its chip, and clip
+      // only the user's text after it, as the composer's receipts do.
+      const head = topic?.context && text.startsWith(topic.context) ? topic.context : '';
+      const preview = head + Array.from(text.slice(head.length)).slice(0, 128).join('');
+      c.deliveries.set(id, { id, revision: 0, state: 'sending', text: preview, imageCount, preview: preview !== text });
+    }
+    if (c.loaded) schedulePatch(c);
+  },
+  // Topics read again can tie more of the conversation's messages to them.
+  changed: (y) => {
+    const lead = leadOf(y);
+    const now = lead && yesmanOf(lead.id);
+    if (!now || (now.hiredAt ?? '') !== (y.hiredAt ?? '')) return;
+    const c = state.convos.get(keyOf(lead));
+    if (c?.loaded) schedulePatch(c);
+  },
+  receipt: (y, d, id) => {
+    const lead = leadOf(y);
+    if (!lead) return;
+    const c = convo(lead);
+    if (d) updateDelivery(c, d);
+    else if (id && c.deliveries.get(id)?.revision === 0) c.deliveries.get(id).state = 'unconfirmed';
+    if (c.loaded) schedulePatch(c);
+  },
+});
+
+// showMessage shows one message of a yesman's lead conversation, found by
+// its exact role and pi timestamp, and says whether it did.
+async function showMessage(y, source) {
+  const lead = leadOf(y);
+  if (!lead || (source.agent && source.agent !== 'lead')) return 'other';
+  if (source.since && lead.since && source.since !== lead.since) return 'other';
+  selectAgent(lead.id);
+  const c = convo(lead);
+  await c.loading;
+  // A source names a message by its role and pi timestamp; its row is keyed
+  // by its submission when it has one (conversation.js).
+  const matches = c.messages.filter((m) => m?.role === source.role && m?.timestamp === source.timestamp);
+  if (matches.length !== 1) return matches.length ? 'ambiguous' : 'missing';
+  const key = messageKey(matches[0]);
+  // A person's message is one row; a reply is a row per text block.
+  const el = $(`#thread [data-row="${CSS.escape(key)}"]`) ?? $(`#thread [data-row^="${CSS.escape(`${key}:`)}"]`);
+  if (!el) return 'missing';
+  $('#scroll') && ($('#scroll').dataset.stick = 'false');
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('msg-found');
+  setTimeout(() => el.classList.remove('msg-found'), 2400);
+  return 'shown';
+}
 
 // Where focus was when opening a pane hid it (an info panel row, in a
 // narrow window), to go back to when the pane closes.
@@ -3380,7 +3676,7 @@ function setPane(pane) {
   const had = document.activeElement;
   const shown = (el) => !!el?.isConnected && el.getClientRects().length > 0;
   const visible = had && had !== document.body && shown(had);
-  const inPane = !!had?.closest?.('#board, #needs-you, #files');
+  const inPane = !!had?.closest?.('#board, #schedules, #needs-you, #topics, #files');
   const entry = had?.closest?.('#yesman-info [data-info-entry]')?.dataset.infoEntry;
   state.pane = pane;
   renderInfo();
@@ -3395,7 +3691,9 @@ function setPane(pane) {
   }
   let target = null;
   if (pane) {
-    target = pane === 'needs-you' ? $('#needs-you .needs-you-heading') : pane === 'board' ? $('#board .files-head-actions button') : null;
+    target = pane === 'needs-you' ? $('#needs-you .needs-you-heading') : pane === 'board' ? $('#board .files-head-actions button')
+      : pane === 'topics' ? $('#topics .topics-search') ?? $('#topics .files-head-actions button')
+      : pane === 'tasks' ? $('#schedules .files-head-actions button') : null;
     if (target && !inPane) paneFocusFrom = entry ? { entry } : had;
   } else {
     const from = paneFocusFrom;
@@ -3413,7 +3711,10 @@ function togglePane(pane) {
 function renderInfo() {
   files.render();
   board.render();
+  schedules.render();
   renderNeedsYouPane();
+  topics.render();
+  info.render();
 }
 
 async function openCheckout(y) {
@@ -3561,7 +3862,7 @@ function latestRecallCandidate() {
   const textarea = state.view.kind === 'agent' ? $('.composer textarea') : null;
   if (!a || !mayRecallInComposer(textarea, state.attachments.get(keyOf(a)))) return null;
   const c = convo(a);
-  const delivery = [...c.deliveries.values()].filter(d => d.canCancel && !c.recalled.has(d.id) && !c.actions.has(d.id)).sort((a,b) => b.order - a.order)[0];
+  const delivery = [...c.deliveries.values()].filter(d => d.canCancel && !d.mergedInto && !c.recalled.has(d.id) && !c.actions.has(d.id)).sort((a,b) => b.order - a.order)[0];
   return delivery ? { c, delivery } : null;
 }
 
@@ -3666,7 +3967,9 @@ async function refreshState() {
   pruneCaches();
   if (state.view.kind === 'agent' && !agentById(state.view.id)) state.view = { kind: 'none' };
   if (state.view.kind === 'none' && state.snap.yesmen.length) {
-    state.view = { kind: 'agent', id: `${state.snap.yesmen[0].name}/lead` };
+    const route = logRoute();
+    const name = state.snap.yesmen.some((y) => y.name === route?.name) ? route.name : state.snap.yesmen[0].name;
+    state.view = { kind: 'agent', id: `${name}/lead` };
     selectAgent(state.view.id);
     return;
   }
@@ -3731,7 +4034,7 @@ async function start() {
   setLocale(mygo?.locale ?? navigator.language);
   translatePage();
   if (!mygo) {
-    document.body.replaceChildren(h('div', { class: 'welcome' }, h('h1', { class: 'mds-title' }, 'yesman'), h('p', null, t('Open this page in the yesman app.'))));
+    document.body.replaceChildren(h('div', { class: 'welcome' }, h('h1', { class: 'mds-title' }, 'Yes Man'), h('p', null, t('Open this page in the yesman app.'))));
     return;
   }
   buildSideFoot();
@@ -3760,7 +4063,9 @@ async function start() {
   mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
-  mygo.on('board', (yesman) => board.onChange(yesman));
+  mygo.on('board', (yesman) => { board.onChange(yesman); schedules.onBoard(yesman); });
+  mygo.on('schedules', (yesman) => schedules.onChange(yesman));
+  mygo.on('topics', (yesman) => { topics.onChange(yesman); info.onTopics(yesman); });
   document.addEventListener('keydown', (e) => files.onKey(e));
   // After the files pane's ⌘S, which keeps its key.
   shortcuts.listen();

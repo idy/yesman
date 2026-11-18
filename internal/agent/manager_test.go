@@ -127,6 +127,12 @@ func fakePi() {
 				write(map[string]any{"type": "test_report_waiting"})
 				continue
 			}
+		case "test_release_one_report":
+			if len(heldReports) > 0 {
+				id := heldReports[0]
+				heldReports = heldReports[1:]
+				write(map[string]any{"type": "response", "id": id, "command": "get_last_assistant_text", "success": true, "data": map[string]any{"text": "first run report"}})
+			}
 		case "test_release_reports":
 			for _, id := range heldReports {
 				write(map[string]any{"type": "response", "id": id, "command": "get_last_assistant_text", "success": true, "data": map[string]any{"text": "done"}})
@@ -255,8 +261,10 @@ func newTestManager(t *testing.T, delay time.Duration, env ...string) (*Manager,
 	m := New(Config{
 		Pi:        exe,
 		Extension: filepath.Join(tmp, "none.ts"),
-		Env:       append([]string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=" + delay.String()}, env...),
-		Yesmen:    store,
+		// A race-built fake pi otherwise sleeps a second as it exits, which
+		// every Stop would wait for (as in the server's Board fixture).
+		Env:    append([]string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=" + delay.String(), "GORACE=atexit_sleep_ms=0"}, env...),
+		Yesmen: store,
 	})
 	t.Cleanup(m.StopAll)
 	return m, store
@@ -669,8 +677,34 @@ func TestSleepIfIdle(t *testing.T) {
 func TestSleepIfIdleLeavesPromptsAlone(t *testing.T) {
 	m, _ := newTestManager(t, 0, "FAKE_PI_HOLD_PROMPTS=1")
 	id := ID("alice", yesmen.LeadName)
+	promptReceived := make(chan struct{}, 1)
+	onEvent := m.cfg.OnEvent
+	m.cfg.OnEvent = func(ev Event) {
+		onEvent(ev)
+		var msg struct {
+			Type string `json:"type"`
+		}
+		if ev.Agent == id && json.Unmarshal(ev.Data, &msg) == nil && msg.Type == "test_prompt_received" {
+			select {
+			case promptReceived <- struct{}{}:
+			default:
+			}
+		}
+	}
 	errc := make(chan error, 1)
-	go func() { errc <- m.Prompt(context.Background(), id, "hi") }()
+	promptDone := make(chan struct{})
+	t.Cleanup(func() {
+		m.StopAll()
+		select {
+		case <-promptDone:
+		case <-time.After(10 * time.Second):
+			t.Error("the prompt did not end after stopping its fixture")
+		}
+	})
+	go func() {
+		defer close(promptDone)
+		errc <- m.Prompt(context.Background(), id, "hi")
+	}()
 	// The prompt is registered and pi has not answered it: the agent may
 	// still read Idle, but a message is on its way.
 	deadline := time.Now().Add(10 * time.Second)
@@ -694,12 +728,26 @@ func TestSleepIfIdleLeavesPromptsAlone(t *testing.T) {
 	if m.SleepIfIdle(id, time.Now().Add(time.Hour)) {
 		t.Fatal("slept an agent with a message on its way")
 	}
-	p := m.running(id)
-	if _, err := p.call(context.Background(), map[string]any{"type": "test_release_prompts"}); err != nil {
-		t.Fatal(err)
+	// Registration precedes dispatch. Wait for the fake to receive the prompt
+	// before releasing it; the fake handles that release after installing its hold.
+	select {
+	case <-promptReceived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the fake never received the registered prompt")
 	}
-	if err := <-errc; err != nil {
-		t.Fatal(err)
+	p := m.running(id)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := p.call(ctx, map[string]any{"type": "test_release_prompts"}); err != nil {
+		t.Fatalf("releasing the held prompt: %v", err)
+	}
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the prompt did not complete after the fake released it")
 	}
 }
 

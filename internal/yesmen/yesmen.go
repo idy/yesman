@@ -9,8 +9,10 @@
 //	    workers.json       the workers its lead started
 //	    worker-starts.json when each worker started, removed ones too
 //	    board.json         the task board its agents keep
+//	    topics.json        questions and discussions worth keeping (topics.go)
 //	    knowledge/         durable guidance shared by every agent; INDEX.md lists it
-//	    task-log.md        task and PR history, maintained by the lead
+//	    task-log.md        short history TOC, maintained by the lead
+//	    task-log/          dated per-task/PR/release Markdown details
 //	    needs-you.json     what the lead handed to the user to do (Needs you)
 //	    sessions/<agent>/  each agent's pi session log
 //	  <repo>--<topic>/     worktrees
@@ -27,10 +29,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/idy/yesman/internal/tasklog"
 )
 
 // LeadName is the agent name of every yesman's lead.
@@ -94,6 +98,11 @@ type Worker struct {
 	// FinishedAt is when its last run's report reached its lead, after
 	// which its process was closed; zero while it has work.
 	FinishedAt time.Time `json:"finishedAt,omitzero"`
+	// PausedAt is when the user stopped it or its run, zero once it is
+	// given work again. yesman never starts a paused worker by itself.
+	PausedAt time.Time `json:"pausedAt,omitzero"`
+	// FailedAt is when its process last ended unexpectedly.
+	FailedAt time.Time `json:"failedAt,omitzero"`
 }
 
 // Subject names a worker's work for the user: its title, else the title of
@@ -128,9 +137,36 @@ type Store struct {
 	metaMu        sync.Mutex // serialize metadata reads with atomic replacement on Windows
 
 	lmu    sync.Mutex
-	locks  map[string]*sync.RWMutex // per yesman: Use reads, Archive writes
-	hlocks map[string]*sync.Mutex   // per yesman: its handoffs, in turn
+	locks  map[string]*sync.RWMutex  // per yesman: Use reads, Archive writes
+	hlocks map[string]*sync.Mutex    // per yesman: its handoffs, in turn
+	clocks map[string]*sync.Mutex    // per yesman: its continuation record, in turn
+	revs   map[string]*atomic.Uint64 // per yesman: changes to its board, workers and handoffs
+	// topicLocks serialize each workspace's topic file; guarded by lmu.
+	topicLocks map[string]chan struct{}
 }
+
+// Revision counts the changes to a yesman's board, workers and handoffs
+// made through this Store. Each change counts before it is written, so one
+// who read the same revision before and after reading them read no change
+// that a later write overtook.
+func (s *Store) Revision(name string) uint64 { return s.rev(name).Load() }
+
+func (s *Store) rev(name string) *atomic.Uint64 {
+	s.lmu.Lock()
+	defer s.lmu.Unlock()
+	if s.revs == nil {
+		s.revs = map[string]*atomic.Uint64{}
+	}
+	r := s.revs[name]
+	if r == nil {
+		r = &atomic.Uint64{}
+		s.revs[name] = r
+	}
+	return r
+}
+
+// changing counts a change to a yesman's tasks, workers or handoffs.
+func (s *Store) changing(name string) { s.rev(name).Add(1) }
 
 // New returns the store of workspaces under root, archiving into archive.
 func New(root, archive string) *Store {
@@ -190,63 +226,21 @@ is not a reason to add a note.
 Good notes: "Use the project's Phosphor icon helper and local font assets";
 "Keep stable internal IDs when display names change."
 Task and PR history, commit/head hashes, CI and validation results, release
-timelines and temporary blockers belong in the task log or board, not here.
-The task log is separate from this index at ` + "`.yesman/task-log.md`" + `.
+timelines and temporary blockers belong in the working log or board, not here.
+The working log's short TOC is separate from this index at ` + "`.yesman/task-log.md`" + `,
+linking to per-task/PR/release details in ` + "`.yesman/task-log/`" + `.
+Read only relevant detail files on demand; the lead alone maintains history.
 `
 
-const taskLogTemplate = `# Task log
-
-Entries are appended below; a new workspace starts without task history.
-
-The lead appends dated entries here from worker reports; workers keep their
-board tasks current and report results to the lead instead of rewriting this
-shared file. Record historical facts, not current instructions. Consult the
-board for current status and Knowledge for reusable rules. Keep secrets out.
-
-Entry template (copy for each task; omit fields that do not apply):
-
-` + "```markdown" + `
-## YYYY-MM-DD — Task title (board ID)
-
-- Task: goal and relevant task/issue links.
-- Changes: what changed and why.
-- PR: repository, branch, PR link and commit/head, when applicable.
-- Validation: checks run and their results.
-- Outcome: result, including release date/version when applicable.
-- Follow-up: remaining work or blockers at the time, or none.
-` + "```" + `
-`
-
-// taskLogPathOccupied recognizes an exclusive-create collision. Go on Windows
-// reports EISDIR for a write open of an existing directory, even with O_EXCL.
-// Verify that path without following links; permission and I/O errors must
-// still reach the caller, even when something occupies the path.
-func taskLogPathOccupied(path string, err error) bool {
-	if errors.Is(err, os.ErrExist) {
-		return true
-	}
-	if !errors.Is(err, syscall.EISDIR) {
-		return false
-	}
-	info, statErr := os.Lstat(path)
-	return statErr == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0)
-}
+const taskLogTemplate = tasklog.Template
 
 // ensureTaskLog creates only a missing log. Exclusive creation also leaves
 // user-owned files, directories and symbolic links at this path untouched.
 func ensureTaskLog(y Yesman) error {
-	f, err := os.OpenFile(y.TaskLogPath(), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if taskLogPathOccupied(y.TaskLogPath(), err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	_, err = f.WriteString(taskLogTemplate)
-	return errors.Join(err, f.Close())
+	return tasklog.Bootstrap(y.Path)
 }
 
-// EnsureTaskLogs adds the task log to existing workspaces on app startup.
+// EnsureTaskLogs adds the working log to existing workspaces on app startup.
 // It never rewrites Knowledge or other metadata, and repeated calls are safe.
 func (s *Store) EnsureTaskLogs() error {
 	ys, err := s.List()
@@ -260,7 +254,7 @@ func (s *Store) EnsureTaskLogs() error {
 	}
 	for _, y := range ys {
 		if err := s.Use(y.Name, ensureTaskLog); err != nil {
-			errs = append(errs, fmt.Errorf("%s task log: %w", y.Name, err))
+			errs = append(errs, fmt.Errorf("%s working log: %w", y.Name, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -475,6 +469,7 @@ func (s *Store) AddWorker(name string, w Worker) error {
 	}
 	y, _ := s.Get(name)
 	ws = append(ws, w)
+	s.changing(name)
 	if err := writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws); err != nil {
 		return err
 	}
@@ -491,16 +486,111 @@ func (s *Store) FinishWorker(name, worker string, at time.Time) error {
 	return err
 }
 
-// ReopenWorker records that a finished worker has work again. It reports
-// whether the worker was finished.
-func (s *Store) ReopenWorker(name, worker string) (bool, error) {
-	return s.updateWorker(name, worker, func(w *Worker) bool {
-		if w.FinishedAt.IsZero() {
+// FinishWorkerOf is FinishWorker for the worker started at since only: a
+// worker of the same name started later is left alone.
+func (s *Store) FinishWorkerOf(name, worker string, since, at time.Time) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if !w.StartedAt.Equal(since) {
 			return false
 		}
-		w.FinishedAt = time.Time{}
+		w.FinishedAt = at
 		return true
 	})
+	return err
+}
+
+// ReopenWorker records that a worker was given work again: it is neither
+// finished, paused nor failed any more. It reports whether the worker was finished.
+func (s *Store) ReopenWorker(name, worker string) (bool, error) {
+	var reopened bool
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		reopened = !w.FinishedAt.IsZero()
+		if !reopened && w.PausedAt.IsZero() && w.FailedAt.IsZero() {
+			return false
+		}
+		w.FinishedAt, w.PausedAt, w.FailedAt = time.Time{}, time.Time{}, time.Time{}
+		return true
+	})
+	return reopened, err
+}
+
+// ReopenWorkerIf is ReopenWorker for the worker started at since only: a
+// worker of the same name started later is left wholly alone. Its pause is
+// cleared only if unpause, called under the lock PauseWorkerIf writes under,
+// reports so for the record: a Stop made since the worker was given work
+// stays.
+func (s *Store) ReopenWorkerIf(name, worker string, since time.Time, unpause func(Worker) bool) (bool, error) {
+	var reopened bool
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if !w.StartedAt.Equal(since) {
+			return false // another worker of that name
+		}
+		reopened = !w.FinishedAt.IsZero()
+		clear := !w.PausedAt.IsZero() && unpause(*w)
+		if !reopened && w.FailedAt.IsZero() && !clear {
+			return false
+		}
+		w.FinishedAt, w.FailedAt = time.Time{}, time.Time{}
+		if clear {
+			w.PausedAt = time.Time{}
+		}
+		return true
+	})
+	return reopened, err
+}
+
+// ResumeWorkerIf clears the user's pause of the worker started at since, if
+// current reports true when the record is written, under the lock
+// PauseWorkerIf writes under. It changes nothing else.
+func (s *Store) ResumeWorkerIf(name, worker string, since time.Time, current func() bool) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if w.PausedAt.IsZero() || !w.StartedAt.Equal(since) || !current() {
+			return false
+		}
+		w.PausedAt = time.Time{}
+		return true
+	})
+	return err
+}
+
+// PauseWorker records that the user stopped the worker started at since,
+// and FailWorker that its process ended unexpectedly. A worker of another
+// generation, hired again under the same name, is left alone.
+func (s *Store) PauseWorker(name, worker string, since, at time.Time) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if !w.StartedAt.Equal(since) {
+			return false
+		}
+		w.PausedAt = at
+		return true
+	})
+	return err
+}
+
+// PauseWorkerIf is PauseWorker, made only if current reports true when
+// the record is written, under the lock ReopenWorker writes under: a pause
+// decided before the worker was given work again is not written after.
+func (s *Store) PauseWorkerIf(name, worker string, since, at time.Time, current func() bool) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if !w.StartedAt.Equal(since) || !current() {
+			return false
+		}
+		w.PausedAt = at
+		return true
+	})
+	return err
+}
+
+// FailWorker: see PauseWorker.
+func (s *Store) FailWorker(name, worker string, since, at time.Time) error {
+	_, err := s.updateWorker(name, worker, func(w *Worker) bool {
+		if !w.StartedAt.Equal(since) {
+			return false
+		}
+		w.FailedAt = at
+		return true
+	})
+	return err
 }
 
 // updateWorker changes a worker's record, writing it only when fn reports a
@@ -517,6 +607,7 @@ func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, 
 		return false, nil
 	}
 	y, _ := s.Get(name)
+	s.changing(name)
 	return true, writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws)
 }
 
@@ -531,7 +622,29 @@ func (s *Store) RemoveWorker(name, worker string) error {
 	}
 	y, _ := s.Get(name)
 	s.noteStarts(y, ws)
+	// Its tasks stay its own: a worker of the same name hired later does
+	// not own them, whatever it works on. Bound first, under the same lock,
+	// so that no reader sees the name free with its tasks unbound.
+	if i := slices.IndexFunc(ws, func(x Worker) bool { return x.Name == worker }); i >= 0 {
+		b, err := s.board(name)
+		if err != nil {
+			return err
+		}
+		bound := false
+		for j := range b.Tasks {
+			if t := &b.Tasks[j]; t.Owner == worker && t.OwnerSince.IsZero() {
+				t.OwnerSince, bound = ws[i].StartedAt, true
+			}
+		}
+		if bound {
+			s.changing(name)
+			if err := writeJSON(y.BoardFile(), b); err != nil {
+				return err
+			}
+		}
+	}
 	ws = slices.DeleteFunc(ws, func(x Worker) bool { return x.Name == worker })
+	s.changing(name)
 	return writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws)
 }
 
