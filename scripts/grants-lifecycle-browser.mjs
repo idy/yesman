@@ -4,14 +4,16 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { permissionIds } from './grant-ids.mjs';
 const { chromium, webkit } = await import(process.env.YESMAN_PLAYWRIGHT || 'playwright');
 const root = process.env.YESMAN_TEST_WEB_DIR || fileURLToPath(new URL('../web/', import.meta.url));
 const out = process.env.YESMAN_GRANT_EVIDENCE || '/tmp/yesman-grants-lifecycle';
 await mkdir(out, { recursive: true });
-const ids = ['bluetooth','notifications','full-disk','microphone','camera','accessibility','screen','input','automation'];
+const ids = permissionIds();
+const manual = ['full-disk','system-audio','automation'];
 let data, reads, actions, heldReads, pending, holdReads;
 function reset() {
-  data = { platform: 'darwin', items: ids.map(id => ({ id, state: ['full-disk','automation'].includes(id) ? 'manual' : 'not-determined', request: !['full-disk','automation'].includes(id), settings: true, busy: false })) };
+  data = { platform: 'darwin', items: ids.map(id => ({ id, state: manual.includes(id) ? 'manual' : 'not-determined', request: !manual.includes(id), settings: true, busy: false })) };
   reads = 0; actions = []; heldReads = []; pending = null; holdReads = false;
 }
 async function bridge(method, args) {
@@ -96,7 +98,7 @@ try {
       await page.waitForTimeout(250);
       const returnState={rows:await page.locator('[data-permission]').count(),refreshDisabled:await refresh().getAttribute('aria-disabled')};
       await page.screenshot({path:out+'/'+engineName+'-return-pending.png'});
-      assert.equal(returnState.rows,9,'return during a pending action must read and display all permissions');
+      assert.equal(returnState.rows,ids.length,'return during a pending action must read and display all permissions');
       await ready();assert.equal(await camera().locator('.grant-pending').count(),1);
       assert.equal(await request().getAttribute('aria-disabled'),'true');
       await request().click({force:true});assert.equal(actions.length,1);

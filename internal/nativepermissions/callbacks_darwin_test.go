@@ -4,12 +4,13 @@ package nativepermissions
 
 import (
 	"context"
+	"runtime"
 	"testing"
 )
 
 // Exercise the actual callback boundary without invoking OS request APIs.
 func TestNativeCallbackStateAndRetirement(t *testing.T) {
-	states := []string{"unknown", "not-determined", "restricted", "denied", "granted", "not-granted", "limited", "manual", "unavailable"}
+	states := []string{"unknown", "not-determined", "restricted", "denied", "granted", "not-granted", "limited", "manual", "unavailable", "not-applicable"}
 	for i, want := range states {
 		done := make(chan nativeReply, 1)
 		callbacks.Store(uint64(7), nativeWaiter{ctx: context.Background(), done: done})
@@ -33,6 +34,8 @@ func TestNativeCallbackStateAndRetirement(t *testing.T) {
 			goPermissionDone(7, 7, 0, 0, nil, nil)
 		case 8:
 			goPermissionDone(7, 8, 0, 0, nil, nil)
+		case 9:
+			goPermissionDone(7, 9, 0, 0, nil, nil)
 		}
 		if got := (<-done).item.State; got != want {
 			t.Fatalf("%s != %s", got, want)
@@ -63,5 +66,20 @@ func TestNativeCallbackStateAndRetirement(t *testing.T) {
 	case <-done:
 		t.Fatal("late callback wrote to retired page")
 	default:
+	}
+}
+
+// The real public Security call on this test binary, which Go's linker signs
+// ad hoc on Apple silicon. An unbundled binary never reports an app identity.
+func TestSelfSigningAndBundleGuard(t *testing.T) {
+	got := selfSigning()
+	if got == "" {
+		t.Fatal("own code signature unreadable")
+	}
+	if runtime.GOARCH == "arm64" && got != "adhoc" {
+		t.Fatal(got)
+	}
+	if app := (macAdapter{}).identity(); app != nil {
+		t.Fatal("test binary reported as the packaged app", app)
 	}
 }

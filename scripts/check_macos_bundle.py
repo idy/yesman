@@ -52,7 +52,7 @@ def inspect(app, tag=None, arch=None, source=None):
     assert info['LSMinimumSystemVersion'] == '13.0', 'Unexpected deployment target'
     assert minos == ['13.0'] and sdk, (minos, sdk, info)
     libraries = output('otool', '-L', str(binary))
-    for name in ('Foundation', 'AppKit', 'AVFoundation', 'CoreBluetooth', 'UserNotifications', 'ApplicationServices'):
+    for name in ('Foundation', 'AppKit', 'AVFoundation', 'CoreBluetooth', 'UserNotifications', 'ApplicationServices', 'Security'):
         assert name + '.framework' in libraries, name
     build = output('go', 'version', '-m', str(binary))
     assert 'CGO_ENABLED=1' in build and 'mygo_noinspector' in build, build

@@ -7,7 +7,7 @@ func systemItem(platform string, id ID) Item {
 	if platform == "windows" {
 		item.Detail = "windows-system"
 		item.Settings = settingsURL(platform, id) != ""
-		if id == FullDisk || id == Accessibility || id == Screen || id == Input || id == Automation {
+		if id == FullDisk || id == Accessibility || id == Screen || id == SystemAudio || id == Input || id == Automation {
 			item.State, item.Detail = "not-applicable", "windows-no-tcc"
 		}
 	} else if platform == "darwin" {

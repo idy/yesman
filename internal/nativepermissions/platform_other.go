@@ -29,3 +29,4 @@ func (systemAdapter) open(ctx context.Context, id ID) error {
 	}
 	return mygo.Shell.OpenExternal(url)
 }
+func (systemAdapter) identity() *App { return nil }
