@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.45
+
+- Keep an unfinished Board goal distinct from a worker finishing its run. Check tasks individually after reports, failures, Board changes, startup and the lead settling, and notify the lead when no running worker carries the work, even while other workers are active.
+- Record why a blocked task waits: other tasks, a Needs You request, an external condition or an explicit user pause. Notify the lead when a recorded wait is ready; leave older blocked tasks with no recorded wait for the lead to assess.
+- Preserve explicit lead and worker Stops across app restarts, report pause-save failures, and fence delayed reports and writes against newer user actions or replacement workers and workspaces. Resuming still requires an explicit message or authorized action.
+- Keep reminder deduplication and finite retry and no-progress budgets across restarts. Notices ask the lead to continue authorized work; they do not complete tasks, start workers themselves, grant approvals or replay earlier user input or uncertain external effects.
+
 ## 0.1.44
 
 - Show the macOS app copy and signing type checked by Settings › Grant, with clearer guidance when an ad-hoc build reports no Accessibility, Screen Recording or Input Monitoring access. Keep the reported state unchanged: replacing a build can invalidate an older grant, and the check cannot determine why access is missing.
