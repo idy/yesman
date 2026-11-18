@@ -246,7 +246,7 @@ async function run(engineName, engine) {
     if (native) {
       // pi took both: each is its native message, tied to its submission.
       await page.waitForFunction(() => [...document.querySelectorAll('#thread .msg-delivery[data-bound="true"]')].filter((el) => el.querySelector('.topic-chip') &&
-        el.querySelector('.delivery-status')?.textContent === 'Taken by pi').length === 2, null, { timeout: 30000 });
+        !el.querySelector('.delivery-status')).length === 2, null, { timeout: 30000 });
     }
 
     // After a reload the native history still names each topic; a chip opens it.

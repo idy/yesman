@@ -37,9 +37,8 @@ const textOf = (content) =>
 //            summary of earlier conversation, an extension's message
 //   work     the work between those: thinking, tool calls and yesman's notices to a lead
 //   failures runs in a row that ended on nothing but an error, folded (see foldFailures)
-//   receipt  a submission the conversation does not show yet, as the person's message;
+//   receipt  a submission still open, as the person's message (see open below);
 //            inputs pi appended into one pending occurrence show as that one message
-//   receipts earlier submissions not tied to a message that need nothing more, folded
 //
 // Every row and item has a key that stays the same while the conversation
 // grows, from history or live, so the page can keep what is open.
@@ -47,7 +46,8 @@ const textOf = (content) =>
 // convo: { messages, live: message being written or null, tools: Map(id -> {status}),
 //          deliveries: Map(id -> receipt), sent: Map(id -> { text, images }) of what
 //          this window submitted and has not seen tied to a message yet,
-//          lastSent: the ID this window submitted last }
+//          lastSent: the ID this window submitted last,
+//          handled: Set of IDs the person dismissed or resent unchanged }
 // agent: { status } — working, waiting, failed... of the agent shown.
 export function project(convo, agent = {}) {
   const rows = [];
@@ -176,13 +176,13 @@ export function project(convo, agent = {}) {
 
   rows.splice(0, rows.length, ...foldFailures(rows));
 
-  // Submissions not tied to a message come last, in the order they were made.
-  // One still to be known about reads as the person's message, from what this
-  // window sent when it has that, with its state under it. A receipt also
-  // outlives its message's place in the conversation: one from before
-  // messages were tied to receipts, or whose message a summary replaced,
-  // stays for as long as yesman keeps receipts. Those that need nothing more,
-  // and failures a later submission has superseded, fold into one row.
+  // A submission not tied to a message shows at the foot, in the order it was
+  // made, as the person's message with its state, only while it is open (see
+  // open). One pi took, an extension handled or the person recalled shows
+  // nothing more: the conversation is pi's messages, and a receipt outliving
+  // its message's place there (a summary replaced it, or it is from before
+  // messages were tied to receipts) is not a second copy of it. What this
+  // window sent only decides what a row shows, never whether it shows.
   const all = [...(convo.deliveries?.values() ?? [])].filter((d) => !appended(d));
   // A receipt the server has not answered for yet has no order: the one this
   // window sent last is the latest; an earlier one never is.
@@ -191,16 +191,18 @@ export function project(convo, agent = {}) {
   // Those the server has not answered for yet were sent after all it has.
   const made = (d) => (d.revision > 0 ? (d.order ?? 0) : Infinity);
   const receipts = all.filter((d) => !bound.has(d.id)).sort((a, b) => made(a) - made(b) || 0);
-  const currentFailure = (d) => (d.state === 'failed' || d.state === 'interrupted' || !!d.error) &&
-    (convo.submitted?.has(d.id) || (d.agentSince && d.agentSince === agent.since));
-  // Display caches and the last submitted ID cannot revoke native membership
-  // or hide a failure from this agent generation. They never grant actions.
-  const own = (d) => d.nativePending || d.canRestore || currentFailure(d) ||
-    !FINISHED.has(d.state) || convo.sent?.has(d.id) || (d === latest && !settled(d));
-  const earlier = receipts.filter((d) => !own(d));
-  if (earlier.length) rows.push({ type: 'receipts', key: 'd:earlier', deliveries: earlier });
+  // open: on its way or in pi's queue, recalled and ready to go back to the
+  // input, or a problem the person has not dealt with: refused, cut off with
+  // pi's process or session, or answered with an error. Only the person says
+  // they have dealt with one, by dismissing it or by sending its draft again
+  // unchanged (handled). Sending something else does not: the answer may come
+  // after it, to a page reloaded since, and the new message may fail too. An
+  // uncertain answer without an error shows while it is the latest. Nothing
+  // here says a message was taken, and nothing replays it.
+  const open = (d) => !dismissible(d) || !convo.handled?.has(d.id) &&
+    (problem(d) || d.state === 'unconfirmed' && d === latest);
   for (const d of receipts) {
-    if (!own(d)) continue;
+    if (!open(d)) continue;
     const members = familyOf(convo, d);
     rows.push({ type: 'receipt', key: `d:${d.id}`, delivery: d, members, sent: sentOf(convo, members) });
   }
@@ -291,8 +293,10 @@ function foldFailures(rows) {
 // other, or one this page does not know, keeps its row.
 export const FINISHED = new Set(['unconfirmed', 'failed', 'interrupted', 'handled', 'dispatched', 'cancelled']);
 
-// settled is a finished receipt that needs nothing more: accepted with nothing
-// more pi can say, or handled by an extension. pi never says which message it
-// took, so this is not a claim that it was. A failure, an interruption or an
-// error stays in view while it is the latest submission.
-const settled = (d) => d.revision > 0 && !d.error && ['unconfirmed', 'handled', 'dispatched', 'cancelled'].includes(d.state);
+// dismissible: nothing is waiting on a submission, so the person may stop
+// seeing it. One still on its way, in pi's queue or ready to go back to the
+// input never is.
+export const dismissible = (d) => FINISHED.has(d.state) && !d.nativePending && !d.canRestore;
+
+// problem: a submission that was refused, cut off, or answered with an error.
+const problem = (d) => d.state === 'failed' || d.state === 'interrupted' || d.state === 'unconfirmed' && !!d.error;
