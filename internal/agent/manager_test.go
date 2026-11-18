@@ -94,6 +94,7 @@ func fakePi() {
 			time.Sleep(delay)
 		}
 		failPrompt := cmd.Type == "prompt" && (os.Getenv("FAKE_PI_FAIL_PROMPTS") != "" ||
+			os.Getenv("FAKE_PI_FAIL_RESTARTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Yes Man restarted") ||
 			os.Getenv("FAKE_PI_FAIL_REPORTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Worker"))
 		if failPrompt {
 			write(map[string]any{"type": "test_prompt_rejected"})

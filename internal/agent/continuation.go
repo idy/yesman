@@ -369,6 +369,7 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 		// Not inbox: a notice pi refuses must not leave the lead looking
 		// busy until its next run, which would hold off the retry.
 		lead.prompts++
+		lead.givenWork = true
 		m.mu.Unlock()
 		lead.modelMu.Unlock()
 	}

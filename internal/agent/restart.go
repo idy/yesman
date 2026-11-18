@@ -61,6 +61,9 @@ func (m *Manager) reportTrack(ctx context.Context, a *agent, run uint64, once bo
 				return errStopped
 			}
 			if once {
+				if a.givenWork {
+					return errStopped
+				}
 				wp := m.workerPauses[a.info.ID]
 				if wp != nil && wp.hiredAt.Equal(a.workspaceSince) && wp.since.Equal(a.info.Since) && wp.paused {
 					return errStopped
@@ -215,7 +218,7 @@ func notAdmitted(err error) error {
 
 // ResumeAfterRestart lets an agent a restart interrupted go on, once: it checks the
 // agent is still the one recorded, in the same workspace, unfinished, not
-// asleep and not already running, starts it with its session, and sends it
+// asleep and not given newer work, starts it with its session, and sends it
 // note. A worker whose report was known not to have reached its lead hands
 // that report on instead, with no new run; one whose report the lead's pi
 // took is recorded finished, as it would have been; one whose report may or
@@ -299,20 +302,25 @@ func (m *Manager) ResumeAfterRestart(ctx context.Context, r restart.Agent, note 
 		}
 		m.mu.Lock()
 		closed := m.closed || m.restartPausedLocked(r)
-		var running, slept bool
+		active, slept := m.restartHasInputLocked(r), false
 		if cur := m.agents[id]; cur != nil {
-			running = cur.proc != nil || cur.starting != nil
-			// Put to sleep in this instance before its turn came, as by
-			// the user: it stays asleep. ensureIn would clear the mark.
-			slept = !running && cur.stopping
+			if cur.retiring || cur.removing || !cur.workspaceSince.Equal(r.WorkspaceHiredAt) || !cur.info.Since.Equal(r.AgentSince) {
+				m.mu.Unlock()
+				outcome = restart.Gone
+				return nil
+			}
+			active = active || cur.restartHandled || cur.proc != nil && (cur.info.Status == Working || cur.info.Status == Waiting)
+			// A history read can start pi without giving it work. Its pending
+			// startup may be joined below; a Stop still wins at every boundary.
+			slept = cur.stopping
 		}
 		m.mu.Unlock()
 		switch {
 		case closed || slept:
 			outcome = restart.Stopped
 			return nil
-		case running:
-			outcome = restart.Active // the user or the lead talked to it first
+		case active:
+			outcome = restart.Active // actual new work or an earlier recovery owns it
 			return nil
 		case r.Reason == restart.ReasonNeedsYou:
 			outcome = restart.Waiting
@@ -332,7 +340,14 @@ func (m *Manager) ResumeAfterRestart(ctx context.Context, r restart.Agent, note 
 			return nil
 		}
 		var err error
-		a, p, err = m.ensureInCtx(ctx, y, id, r.Name, r.Role == RoleLead)
+		a, p, err = m.ensureInCtx(ctx, y, id, r.Name, r.Role == RoleLead, false, func() error {
+			cur := m.agents[id]
+			if m.restartHasInputLocked(r) || m.restartPausedLocked(r) || cur == nil || cur.stopping || cur.restartHandled ||
+				!cur.workspaceSince.Equal(r.WorkspaceHiredAt) || !cur.info.Since.Equal(r.AgentSince) {
+				return errStopped
+			}
+			return nil
+		})
 		return err
 	})
 	switch {
@@ -374,7 +389,7 @@ func (m *Manager) ResumeAfterRestart(ctx context.Context, r restart.Agent, note 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if m.closed || a.stopping || m.restartPausedLocked(r) {
+		if m.closed || a.stopping || m.restartPausedLocked(r) || m.restartHasInputLocked(r) {
 			return errStopped
 		}
 		return nil
@@ -424,9 +439,10 @@ func (m *Manager) admitResume(ctx context.Context, r restart.Agent, id string, a
 		return restart.Failed, errors.New("its pi exited before anything was sent")
 	case !a.info.Since.Equal(r.AgentSince) || !a.workspaceSince.Equal(r.WorkspaceHiredAt):
 		return restart.Gone, nil
-	case a.info.Status != Idle || a.prompts > 0 || a.reports > 0 || a.recalls > 0 || m.worktreeCleanup[id]:
+	case m.restartHasInputLocked(r) || a.restartHandled || a.info.Status != Idle || a.prompts > 0 || a.reports > 0 || a.recalls > 0 || m.worktreeCleanup[id]:
 		return restart.Active, nil
 	}
+	a.restartHandled = true
 	reg()
 	return "", nil
 }

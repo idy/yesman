@@ -256,6 +256,10 @@ type agent struct {
 	// the inbox at the last settle, so accepted prompts awaiting agent_start
 	// still defer telling the lead about its tasks. Both are guarded by the manager's mu.
 	inbox, settledInbox uint64
+	// givenWork records actual incoming work in this Manager incarnation,
+	// before its startup can wait. Observation and restart dispatch do not
+	// set it. restartHandled prevents a second recovery of the same agent.
+	givenWork, restartHandled bool
 }
 
 // errStopped is returned when Stop interrupts a start or the manager has quit.
@@ -422,11 +426,11 @@ func (m *Manager) ensure(id string) (*agent, *proc, error) {
 
 // ensureScoped starts the agent if needed. Automatic lead messages obey its pause.
 func (m *Manager) ensureScoped(id string, owner *agent, messageID string, scope *time.Time, auto bool) (*agent, *proc, error) {
-	return m.ensureScopedCtx(context.Background(), id, owner, messageID, scope, auto)
+	return m.ensureScopedCtx(context.Background(), id, owner, messageID, scope, auto, false)
 }
 
 // ensureScopedCtx bounds startup by the restart caller's context.
-func (m *Manager) ensureScopedCtx(ctx context.Context, id string, owner *agent, messageID string, scope *time.Time, auto bool) (*agent, *proc, error) {
+func (m *Manager) ensureScopedCtx(ctx context.Context, id string, owner *agent, messageID string, scope *time.Time, auto, input bool) (*agent, *proc, error) {
 	ys, name, err := SplitID(id)
 	if err != nil {
 		return nil, nil, err
@@ -451,14 +455,15 @@ func (m *Manager) ensureScopedCtx(ctx context.Context, id string, owner *agent, 
 			}
 		}
 		var err error
-		a, p, err = m.ensureInCtx(ctx, y, id, name, auto)
+		a, p, err = m.ensureInCtx(ctx, y, id, name, auto, input, nil)
 		return err
 	})
 	return a, p, err
 }
 
 // ensureInCtx stops waiting when ctx ends, including canceling its own start.
-func (m *Manager) ensureInCtx(ctx context.Context, y yesmen.Yesman, id, name string, auto bool) (*agent, *proc, error) {
+// check, if present, rechecks recovery ownership under mu before every start.
+func (m *Manager) ensureInCtx(ctx context.Context, y yesmen.Yesman, id, name string, auto, input bool, check func() error) (*agent, *proc, error) {
 	ys := y.Name
 	role := RoleLead
 	since := y.HiredAt
@@ -495,6 +500,15 @@ func (m *Manager) ensureInCtx(ctx context.Context, y yesmen.Yesman, id, name str
 		if err != nil {
 			m.mu.Unlock()
 			return nil, nil, err
+		}
+		if check != nil {
+			if err := check(); err != nil {
+				m.mu.Unlock()
+				return nil, nil, err
+			}
+		}
+		if input {
+			a.givenWork = true
 		}
 		if a.deliveries == nil {
 			m.mu.Unlock()
@@ -979,7 +993,7 @@ func (m *Manager) promptTrackedAdmitted(ctx context.Context, id, text, behavior,
 		if bounded {
 			start = ctx
 		}
-		if a, p, err = m.ensureScopedCtx(start, id, owner, messageID, scope, auto); err != nil {
+		if a, p, err = m.ensureScopedCtx(start, id, owner, messageID, scope, auto, true); err != nil {
 			return err
 		}
 		// Register before dispatch, under the same lock as configuration's
@@ -1307,6 +1321,7 @@ func (m *Manager) Answer(id, requestID string, answer map[string]any) error {
 	// Reserve the question before sending. A second answer cannot consume
 	// it, and events after the response (including a new question) stay put.
 	handedOver := a.handedOver
+	a.givenWork = true // an explicit answer owns the run, unlike a history read
 	a.info.Status, a.info.Dialog, a.info.UpdatedAt = Working, nil, time.Now()
 	m.mu.Unlock()
 	msg := map[string]any{}

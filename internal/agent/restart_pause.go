@@ -29,6 +29,20 @@ func (m *Manager) restartPausedLocked(r restart.Agent) bool {
 	return wp != nil && wp.hiredAt.Equal(r.WorkspaceHiredAt) && wp.since.Equal(r.AgentSince) && wp.paused
 }
 
+// restartHasInputLocked distinguishes a read-only process/start and recovery's
+// own bookkeeping from new incoming work. Both markers belong to the exact
+// recorded generation and survive closing only its pi process.
+func (m *Manager) restartHasInputLocked(r restart.Agent) bool {
+	if a := m.agents[ID(r.Yesman, r.Name)]; a != nil && a.workspaceSince.Equal(r.WorkspaceHiredAt) && a.info.Since.Equal(r.AgentSince) && a.givenWork {
+		return true
+	}
+	if r.Role == RoleLead {
+		lp := m.pauseOf(yesmen.Yesman{Name: r.Yesman, HiredAt: r.WorkspaceHiredAt})
+		return lp != nil && lp.givenWork
+	}
+	return false
+}
+
 // HoldAfterRestart preserves an interrupted human wait, unsuccessful recovery or uncertain report
 // through later ordinary starts too. The existing pause record expresses the
 // same contract: only an explicit message gives it work again. Never mark a
@@ -44,6 +58,9 @@ func (m *Manager) HoldAfterRestart(r restart.Agent) error {
 			return yesmen.ErrRehired
 		}
 		id := ID(r.Yesman, r.Name)
+		if r.Role == RoleLead && (r.Name != yesmen.LeadName || !r.AgentSince.Equal(y.HiredAt)) {
+			return errStopped
+		}
 		if r.Role == RoleWorker {
 			ws, err := m.cfg.Yesmen.Workers(y.Name)
 			if err != nil {
@@ -59,9 +76,11 @@ func (m *Manager) HoldAfterRestart(r restart.Agent) error {
 		}
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if a := m.agents[id]; a != nil && (a.starting != nil || a.retiring || !a.info.Since.Equal(r.AgentSince) ||
-			a.proc != nil && (a.info.Status != Idle || a.inbox != 0 || a.prompts != 0 || a.reports != 0)) {
-			return errStopped // explicitly messaged or replaced meanwhile
+		if m.restartHasInputLocked(r) {
+			return errStopped // newer work owns the agent, including a pending start
+		}
+		if a := m.agents[id]; a != nil && (a.retiring || a.removing || !a.workspaceSince.Equal(r.WorkspaceHiredAt) || !a.info.Since.Equal(r.AgentSince)) {
+			return errStopped
 		}
 		if r.Role == RoleLead {
 			if !m.ownPauseLocked(y) {
