@@ -19,14 +19,16 @@ func TestExclusiveInstallInterruptionResumesBeforeAliasChecks(t *testing.T) {
 				m, _ := Run(ws, Options{Action: "dry-run"})
 				target := map[string]string{"marker": Marker, "part": m.Parts[0].Path, "original": m.Original, "manifest": manifestPath(m.SHA256), "candidate": generation(m.SHA256) + "/toc.md", "toc": TOC}[where]
 				interrupted := errors.New("simulated interruption in exclusive installation")
+				requested, lastStage := "install-"+phase+":"+target, ""
 				_, e := Run(ws, Options{Action: "apply", Offline: true, Expect: m.SHA256, Hook: func(stage string) error {
-					if stage == "install-"+phase+":"+target {
+					lastStage = stage
+					if stage == requested {
 						return interrupted
 					}
 					return nil
 				}})
 				if !errors.Is(e, interrupted) {
-					t.Fatal(e)
+					t.Fatalf("initial apply before requested interruption: requested=%q last=%q: %v", requested, lastStage, e)
 				}
 				// This is the real filesystem state produced by put, including a
 				// two-link marker/TOC at the exact formerly unrecoverable boundary.

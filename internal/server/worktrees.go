@@ -33,6 +33,25 @@ func (s *Server) worktreeLock(workspace string) *sync.Mutex {
 	return s.worktreeLocks[workspace]
 }
 
+// worktreeOperation admits the original caller only after the workspace wait.
+// BeginOperation checks the exact hire, agent and process under a short Use
+// lease, then holds the process change gate until fn returns. Stop cancels its
+// context before draining that gate; Archive does the same before moving the
+// workspace. Do not hold or reacquire Use during fn: Archive may hold it while
+// draining this operation. Owner reservations and repository/worktree locks
+// follow admission; Manager.mu is never held across their waits or I/O.
+func (s *Server) worktreeOperation(ctx context.Context, c caller, fn func(context.Context, yesmen.Yesman) error) error {
+	l := s.worktreeLock(c.yesman.Name)
+	l.Lock()
+	defer l.Unlock()
+	ctx, finish, err := s.Agents.BeginOperation(ctx, c.token, c.agent, c.yesman.HiredAt)
+	if err != nil {
+		return err
+	}
+	defer finish()
+	return fn(ctx, c.yesman)
+}
+
 func latestWorktree(records []yesmen.WorktreeRecord, dir string) int {
 	for i := len(records) - 1; i >= 0; i-- {
 		if records[i].Dir == dir {
@@ -93,11 +112,22 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 			return pool.Worktree{}, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return pool.Worktree{}, err
+	}
 	wt, err := Checkout(ctx, s.Pool, y, req)
 	if err != nil {
 		return wt, err
 	}
-	records = append(records, yesmen.WorktreeRecord{ID: wt.CleanupID, Dir: wt.Dir, Repo: wt.Repo, Owner: c.agent.Name, OwnerSince: c.agent.Since, Purpose: purpose, Task: req.Task, Branch: wt.Branch, Head: wt.Head})
+	rec := yesmen.WorktreeRecord{ID: wt.CleanupID, Dir: wt.Dir, Repo: wt.Repo, Owner: c.agent.Name, OwnerSince: c.agent.Since, Purpose: purpose, Task: req.Task, Branch: wt.Branch, Head: wt.Head}
+	if wt.Root != nil {
+		// Measured by the pool at creation; bound here with the instance
+		// and the owner's generation (files.go checkInstance).
+		rec.Root = &yesmen.WorktreeRoot{Ino: wt.Root.Ino, Birth: wt.Root.Birth}
+	}
+	// Once Git succeeds, record the checkout even if cancellation just arrived.
+	// The operation lease still protects this final local bookkeeping.
+	records = append(records, rec)
 	if err := s.Yesmen.SaveWorktreeRecords(y.Name, records); err != nil {
 		// Do not delete the checkout on a failed metadata write. Unknown
 		// resources are protected and can be reported for manual recovery.
@@ -126,6 +156,9 @@ func (s *Server) retireMissingWorktree(ctx context.Context, c caller, y yesmen.Y
 		if registered {
 			return errors.New("missing checkout still has a Git registration; retain it")
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		rec.Removed = true
 		rec.RetiredReason = "directory and Git registration already absent; explicit owner checkout starts a new instance"
 		return s.Yesmen.SaveWorktreeRecords(y.Name, records)
@@ -147,6 +180,9 @@ type cleanupResult struct {
 }
 
 func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman, req removeWorktreeRequest) (cleanupResult, error) {
+	if err := ctx.Err(); err != nil {
+		return cleanupResult{}, err
+	}
 	if req.Force {
 		return cleanupResult{}, errors.New("agent cleanup never uses force")
 	}
@@ -201,6 +237,9 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 				if err == nil {
 					err = s.Pool.CheckTemporaryWorktree(ctx, y.Path, expectedWorktree(candidate))
 				}
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return out, ctxErr
+				}
 				if err != nil {
 					if len(rec.Attempts) == 0 || !sameWorktreeCompletion(rec.Attempts[len(rec.Attempts)-1].Completion, v) || rec.Attempts[len(rec.Attempts)-1].Reason != err.Error() {
 						rec.Attempts = append(rec.Attempts, yesmen.WorktreeAttempt{Completion: v, Reason: err.Error()})
@@ -211,6 +250,9 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 					return retain(err.Error())
 				}
 				branchVerified = true
+			}
+			if err := ctx.Err(); err != nil {
+				return out, err
 			}
 			rec.Completion = &v
 			if err := s.Yesmen.SaveWorktreeRecords(y.Name, records); err != nil {
@@ -230,6 +272,9 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 			return retain("handoff needs a worker in this workspace")
 		}
 		err = s.withWorktreeUsers(y.Name, *rec, c.agent.ID, func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			rec.CleanupOwner, rec.CleanupSince = target.Name, target.Since
 			return s.Yesmen.SaveWorktreeRecords(y.Name, records)
 		})
@@ -264,6 +309,9 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 		return retain("owner cannot be verified")
 	}
 	err = s.withWorktreeUsers(y.Name, *rec, c.agent.ID, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Idempotent recovery after git removed the tree but the app exited
 		// before the final metadata save. A replacement path is never touched.
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
@@ -279,6 +327,8 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 				return err
 			}
 		}
+		// Successful removal must be recorded even if cancellation just arrived.
+		// The process gate still keeps Stop/Archive from finishing before save.
 		rec.Removed = true
 		return s.Yesmen.SaveWorktreeRecords(y.Name, records)
 	})

@@ -31,6 +31,10 @@ func TestMain(m *testing.M) {
 		serverFakePi() // the scripted pi of fakepi_test.go
 		os.Exit(0)
 	}
+	if os.Getenv("YESMAN_TEMP_CHILD") != "" {
+		nestedTempChild() // a program an agent's command runs (files_test.go)
+		os.Exit(0)
+	}
 	if dir := os.Getenv("YESMAN_TEST_RPC_CHILD"); dir != "" {
 		rpcChild(dir)
 		return
@@ -49,6 +53,10 @@ func rpcChild(dir string) {
 	if os.WriteFile(filepath.Join(dir, name+".json"), trace, 0o600) != nil {
 		os.Exit(3)
 	}
+	if os.Getenv("YESMAN_TEST_TEMP_PROBE") != "" {
+		probeTemp(dir, name)
+	}
+	failInit(dir) // files_contract_test.go
 	in := bufio.NewScanner(os.Stdin)
 	out := json.NewEncoder(os.Stdout)
 	for in.Scan() {

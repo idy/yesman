@@ -67,7 +67,7 @@ try{for(const[name,engine]of selectedEngines)for(const language of ['en','zh-Han
   const text='  Original 中文\n'+('full text **markdown** '.repeat(50))+'END  ';
   const bytes=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAGUlEQVR4nGMQ7Aj9TwlmGDVg1IBRA4aLAQBbKO0Q8TW4KAAAAABJRU5ErkJggg==','base64');
   const attach=async(count)=>page.locator('.composer input[type=file]').setInputFiles(Array.from({length:count},(_,i)=>({name:`original-${i}.png`,mimeType:'image/png',buffer:bytes})));
-  const submit=async(text,count=0)=>{await input.fill(text);if(count)await attach(count);await page.waitForFunction(()=>!document.querySelector('.composer input[type=file]').disabled&&!document.querySelector('.composer textarea').readOnly);if(count)await page.locator('.composer-image').nth(count-1).waitFor();await input.press('Enter');await page.waitForFunction(()=>!document.querySelector('.composer textarea').readOnly&&document.querySelector('.composer textarea').value==='');return page.evaluate(()=>window.sent.filter(s=>s.method==='Yesman.Submit').at(-1));};
+  const submit=async(text,count=0)=>{await input.fill(text);if(count)await attach(count);await page.waitForFunction(()=>!document.querySelector('.composer input[type=file]').disabled&&!document.querySelector('.composer textarea').readOnly);if(count)await page.locator('.composer-image').nth(count-1).waitFor();await input.press('Enter');await page.waitForFunction(()=>!document.querySelector('.composer textarea').readOnly&&document.querySelector('.composer textarea').value==='');return page.evaluate(()=>window.sent.filter(s=>/^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1));};
   const first=await submit(text,2),id=first.args[1];
   const row=id=>page.locator(`[data-delivery="${id}"]`);
   await row(id).locator('.message-recall').waitFor();
@@ -90,8 +90,8 @@ try{for(const[name,engine]of selectedEngines)for(const language of ['en','zh-Han
   assert.equal(await row(id).locator('.message-recall').count(),0);
   // Edit + explicit resend produces a new intent and exactly the same images.
   await input.fill(text+' EDITED');await input.press('Enter');
-  await page.waitForFunction(()=>window.sent.filter(s=>s.method==='Yesman.Submit').length===2&&!document.querySelector('.composer textarea').readOnly);
-  const second=await page.evaluate(()=>window.sent.filter(s=>s.method==='Yesman.Submit').at(-1));
+  await page.waitForFunction(()=>window.sent.filter(s=>/^Yesman\.Submit(Coalescing)?$/.test(s.method)).length===2&&!document.querySelector('.composer textarea').readOnly);
+  const second=await page.evaluate(()=>window.sent.filter(s=>/^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1));
   assert.notEqual(second.args[1],id);assert.deepEqual(second.args[3],first.args[3]);
   await row(second.args[1]).locator('.message-recall').waitFor();
   const beforeArrow=(await control('Counts')).cancel;
@@ -113,15 +113,17 @@ try{for(const[name,engine]of selectedEngines)for(const language of ['en','zh-Han
   await page.waitForFunction(()=>document.querySelector('.composer textarea').readOnly);
   await page.locator('[data-agent="bob/lead"]').first().click();await input.fill('bob draft');
   await control('ReleaseCancel');
-  await page.waitForFunction(()=>window.sent.some(s=>s.method==='Yesman.AckRecall'&&s.args[1]===window.sent.filter(s=>s.method==='Yesman.Submit').at(-1).args[1]));
+  await page.waitForFunction(()=>window.sent.some(s=>s.method==='Yesman.AckRecall'&&s.args[1]===window.sent.filter(s=>/^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1).args[1]));
   assert.equal(await input.inputValue(),'bob draft');assert.equal(await page.locator('.composer-image').count(),0);
   await page.locator('[data-agent="alice/lead"]').first().click();
   assert.equal(await input.inputValue(),'late reply stays with alice');assert.equal(await page.locator('.composer-image').count(),1);
   await input.fill('');await page.locator('.composer-image button').click();
   const imageOnly=await submit('',2);await row(imageOnly.args[1]).locator('.message-recall').waitFor();
+  assert.equal(await row(imageOnly.args[1]).locator('.message-copy:not(.message-recall)').isDisabled(),true);
   await input.press('ArrowUp');await page.waitForFunction(()=>document.querySelectorAll('.composer-image').length===2&&!document.querySelector('.composer textarea').readOnly);
   assert.equal(await input.inputValue(),'');
-  assert.equal(await row(imageOnly.args[1]).locator('.message-copy:not(.message-recall)').isDisabled(),true);
+  // Returned to the input, it is no longer sent: its row leaves.
+  await page.waitForFunction(id=>!document.querySelector(`[data-delivery="${id}"]`),imageOnly.args[1]);
   for(let n=0;n<2;n++)await page.locator('.composer-image button').first().click();
   const recovery=await submit('recover original after reload',2);
   await control('HoldCancel');
@@ -138,7 +140,7 @@ try{for(const[name,engine]of selectedEngines)for(const language of ['en','zh-Han
   assert.equal(await page.locator('.composer-image').count(),2);
   assert.equal(await page.locator('.composer-image img').first().getAttribute('src'),`data:image/png;base64,${bytes.toString('base64')}`);
   await control('ReleaseProvider');
-  const nativeCopy = page.locator('#thread > .msg-user .message-copy, #thread > .msg-delivery[data-bound="true"] > .message-footer > .message-actions > .message-copy');
+  const nativeCopy = page.locator('#thread > .msg-user .message-copy, #thread > .msg-delivery[data-bound="true"] > .msg-user > .message-actions > .message-copy');
   await nativeCopy.first().waitFor();
   await nativeCopy.first().click();assert.equal(await page.evaluate(()=>window.copied.at(-1)),'hold');
   assert.equal(await page.locator('#thread > .msg-user .message-recall, #thread > .msg-delivery[data-bound="true"] .message-recall').count(),0);

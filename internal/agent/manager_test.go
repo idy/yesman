@@ -94,6 +94,7 @@ func fakePi() {
 			time.Sleep(delay)
 		}
 		failPrompt := cmd.Type == "prompt" && (os.Getenv("FAKE_PI_FAIL_PROMPTS") != "" ||
+			os.Getenv("FAKE_PI_FAIL_RESTARTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Yes Man restarted") ||
 			os.Getenv("FAKE_PI_FAIL_REPORTS") != "" && strings.HasPrefix(cmd.Message, "[yesman] Worker"))
 		if failPrompt {
 			write(map[string]any{"type": "test_prompt_rejected"})
@@ -126,6 +127,12 @@ func fakePi() {
 				heldReports = append(heldReports, cmd.ID)
 				write(map[string]any{"type": "test_report_waiting"})
 				continue
+			}
+		case "test_release_one_report":
+			if len(heldReports) > 0 {
+				id := heldReports[0]
+				heldReports = heldReports[1:]
+				write(map[string]any{"type": "response", "id": id, "command": "get_last_assistant_text", "success": true, "data": map[string]any{"text": "first run report"}})
 			}
 		case "test_release_reports":
 			for _, id := range heldReports {
@@ -255,8 +262,10 @@ func newTestManager(t *testing.T, delay time.Duration, env ...string) (*Manager,
 	m := New(Config{
 		Pi:        exe,
 		Extension: filepath.Join(tmp, "none.ts"),
-		Env:       append([]string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=" + delay.String()}, env...),
-		Yesmen:    store,
+		// A race-built fake pi otherwise sleeps a second as it exits, which
+		// every Stop would wait for (as in the server's Board fixture).
+		Env:    append([]string{"YESMAN_FAKE_PI=1", "FAKE_PI_DELAY=" + delay.String(), "GORACE=atexit_sleep_ms=0"}, env...),
+		Yesmen: store,
 	})
 	t.Cleanup(m.StopAll)
 	return m, store

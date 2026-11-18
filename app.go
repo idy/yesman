@@ -17,6 +17,7 @@ import (
 	"github.com/idy/yesman/internal/nativepermissions"
 	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/restart"
 	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
@@ -119,7 +120,8 @@ type app struct {
 
 	cfgmu sync.Mutex // one import at a time
 
-	updates *updates
+	updates  *updates
+	restarts *restarts
 
 	files fileWatch // the workspace whose files the page shows
 
@@ -235,6 +237,11 @@ func (a *app) trayMenu() *mygo.Menu {
 	return mygo.NewMenu([]*mygo.MenuItem{
 		{Label: tr("Open Yes Man"), Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
 		mygo.Separator(),
+		{Label: tr("Restart Yes Man"), Click: func(*mygo.MenuItem, *mygo.Window) {
+			if err := a.restarts.begin(restart.KindRestart, a.updates.snapshot()); err != nil {
+				log.Print("restart: ", err)
+			}
+		}},
 		{Label: tr("Quit Yes Man"), Click: func(*mygo.MenuItem, *mygo.Window) { mygo.App.Quit() }},
 	})
 }

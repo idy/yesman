@@ -32,6 +32,7 @@ function boardTool(role, answer) {
     process: { env: { YESMAN_API: 'http://unused', YESMAN_TOKEN: 'test', YESMAN_AGENT: `alice/${role}`, YESMAN_ROLE: role, YESMAN_WORKSPACE: '/tmp' }, platform: process.platform, cwd: () => '/tmp' },
     pi, lstatSync, realpathSync, isAbsolute, relative, resolve, Type, fetch, AbortSignal,
     createBashToolDefinition: factory, createPowerShellToolDefinition: factory,
+    createWriteToolDefinition: factory, createEditToolDefinition: factory,
   });
   return { tool: tools.get('yesman_board'), requests };
 }
@@ -73,3 +74,41 @@ test('a plan ID that is not one is dropped', async () => {
   assert.equal(out.details.tasks[0].schedule, undefined);
   assert.ok(!JSON.stringify(out).includes(RUN));
 });
+
+test('a blocked task shows what it waits for, and nothing else of its wait', async () => {
+  const wait = { kind: 'tasks', tasks: ['t2', 7], reason: 'after the build', since: '2026-11-18T09:00:00Z', secret: RUN };
+  const { tool } = boardTool('lead', { tasks: [{ id: 't1', title: 'Release', status: 'blocked', wait }, { id: 't2', title: 'Build', status: 'doing' }] });
+  const out = JSON.parse(JSON.stringify(await tool.execute('call', {})));
+  assert.deepEqual(out.details.tasks[0].wait, { kind: 'tasks', tasks: ['t2'], reason: 'after the build', since: '2026-11-18T09:00:00Z' });
+  assert.match(out.content[0].text, /- t1 \[blocked\] Release\n {2}wait: tasks t2: after the build/);
+  assert.ok(!JSON.stringify(out).includes(RUN));
+  assert.equal(out.details.tasks[1].wait, undefined);
+});
+
+// What the app's real API answers (internal/server TestBoardResponsesCarryWaits
+// writes and checks this fixture), through the registered tool: every wait,
+// beside the scheduled run's plan, for a lead and a worker, read or changed.
+const apiBoard = JSON.parse(readFileSync(new URL('./fixtures/board-api-waits.json', import.meta.url), 'utf8'));
+
+for (const role of ['lead', 'worker']) {
+  test(`yesman_board shows a ${role} the waits the API sends`, async () => {
+    for (const params of [{}, { update: [{ id: 't2', note: 'halfway' }] }]) {
+      const { tool } = boardTool(role, apiBoard);
+      const out = JSON.parse(JSON.stringify(await tool.execute('call', params)));
+      const since = '2026-11-18T09:00:00Z';
+      assert.deepEqual(out.details.tasks.map((t) => t.wait), [
+        { kind: 'tasks', tasks: ['t2'], reason: 'after the build', since },
+        undefined,
+        { kind: 'user', handoff: 'n3', reason: 'the user signs the release', since },
+        { kind: 'paused', reason: 'the user asked to stop', since },
+        { kind: 'external', reason: 'CI on the release tag', since },
+        undefined,
+      ]);
+      assert.deepEqual(out.details.tasks[0].schedule, { plan: 's1' });
+      const text = out.content[0].text;
+      assert.match(text, /- t1 \[blocked\] Morning check \(a run of scheduled task s1\)\n {2}wait: tasks t2: after the build/);
+      for (const id of ['t3', 't4', 't5']) assert.match(text, new RegExp(`- ${id} \\[blocked\\] [^\\n]*\\n {2}wait: `));
+      assert.match(text, /wait: user[^\n]*n3[^\n]*the user signs the release/);
+    }
+  });
+}

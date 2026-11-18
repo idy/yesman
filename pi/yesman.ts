@@ -15,10 +15,10 @@
 // writes only Knowledge notes and the working log. Its tools are narrowed when
 // its session starts, and any call outside them is refused.
 import { createHash } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createBashToolDefinition, createPowerShellToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, createEditToolDefinition, createPowerShellToolDefinition, createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const API = process.env.YESMAN_API;
@@ -181,6 +181,16 @@ async function commandEnv(signal?: AbortSignal): Promise<{ env: Record<string, s
 // env endpoint is unavailable, so PR creation cannot silently become personal.
 function shellEnvironment(base: Record<string, string>, injected: Record<string, string>): Record<string, string> {
 	const env = { ...base, ...injected };
+	// The workspace temporary directories and caches the app set for this
+	// process (internal/agent/workspace_temp.go ManagedEnvKeys) win over a
+	// user variable of the same name in any case, so configuration cannot move
+	// TMP, TEMP or a cache back out. A command can still set its own values.
+	for (const key of ["TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE", "GOMODCACHE", "npm_config_cache", "YESMAN_TMP", "YESMAN_EVIDENCE", "YESMAN_TMP_ROOT", "YESMAN_EVIDENCE_ROOT", "YESMAN_CACHE"]) {
+		const value = process.env[key];
+		if (value === undefined) continue; // started by an app that sets none
+		for (const name of Object.keys(env)) if (name.toUpperCase() === key.toUpperCase()) delete env[name];
+		env[key] = value;
+	}
 	const shim = process.env.YESMAN_GH_SHIM;
 	if (!shim) return env;
 	const pathOf = (source: Record<string, string>) => Object.entries(source).find(([name]) => name.toUpperCase() === "PATH")?.[1];
@@ -211,6 +221,69 @@ async function requireGitHubRouting(signal?: AbortSignal): Promise<void> {
 	if (mode?.mode !== "personal") throw new Error("GitHub App routing is unavailable for this workspace. Repair the runtime wrapper and restart, or explicitly disable App identity in Settings; no command ran with fallback credentials.");
 }
 
+// The process's own scratch directory, made by the app for this process
+// only. Its identity is taken when the extension loads; if it is later
+// removed or replaced, commands are refused rather than recreating it or
+// letting programs fall back to the system temporary directory.
+const TEMP = process.env.YESMAN_TMP;
+let tempIdentity: { dev: bigint; ino: bigint } | undefined;
+let tempProblem: string | undefined;
+
+function captureTemp(): void {
+	if (!TEMP) return;
+	try {
+		const st = lstatSync(TEMP, { bigint: true });
+		const owner = JSON.parse(readFileSync(join(TEMP, "owner.json"), "utf8"));
+		if (!st.isDirectory() || st.isSymbolicLink() || owner?.incarnation !== basename(TEMP)) throw new Error("not this process's directory");
+		tempIdentity = { dev: st.dev, ino: st.ino };
+	} catch (err) {
+		tempProblem = (err as Error).message;
+	}
+}
+
+function checkTemp(): void {
+	if (!TEMP) return;
+	let ok = false;
+	try {
+		const st = lstatSync(TEMP, { bigint: true });
+		ok = !!tempIdentity && st.isDirectory() && !st.isSymbolicLink() && st.dev === tempIdentity.dev && st.ino === tempIdentity.ino;
+	} catch {}
+	if (!ok) {
+		throw new Error(`This agent's temporary directory ${TEMP} is missing or was replaced${tempProblem ? ` (${tempProblem})` : ""}, so the command did not run. yesman does not recreate it in place; ask the lead to start this agent again, which gives it a new one.`);
+	}
+}
+
+// managedFiles routes a worker's write and edit through the app, which
+// decides from trusted state where this process may write (its own author
+// or release worktrees and its own scratch and evidence directories) and
+// does the I/O there itself, under this process's credential. pi still
+// resolves the path and computes the edit; an edit's write carries the hash
+// of what it read, so a file changed in between is not overwritten.
+function managedFiles(signal?: AbortSignal) {
+	const read = new Map<string, string>();
+	const send = (op: string, path: string, extra: Record<string, unknown> = {}) => call("POST", "/v1/files", { op, path, ...extra }, signal);
+	return {
+		mkdir: async (dir: string) => {
+			await send("mkdir", dir);
+		},
+		access: async (path: string) => {
+			await send("access", path);
+		},
+		readFile: async (path: string) => {
+			const r = await send("read", path);
+			read.set(path, r.sha256);
+			return Buffer.from(r.data, "base64");
+		},
+		// A write after this tool read the file is an edit of that existing
+		// file at the version read; the app neither creates it nor its
+		// directory. A write without a read creates what it needs.
+		writeFile: async (path: string, content: string) => {
+			const expect = read.get(path);
+			await send("write", path, expect === undefined ? { content } : { content, expect });
+		},
+	};
+}
+
 // refreshHidden asks the app for the secrets' values to hide, keeping
 // those remembered when it does not answer.
 async function refreshHidden(signal?: AbortSignal) {
@@ -219,11 +292,20 @@ async function refreshHidden(signal?: AbortSignal) {
 	} catch {}
 }
 
+// waitText says what a blocked task waits for (Wait in internal/yesmen).
+function waitText(w: any): string {
+	let s = String(w.kind);
+	if (w.tasks?.length) s += ` ${w.tasks.join(", ")}`;
+	if (w.handoff) s += ` ${w.handoff}`;
+	if (w.reason) s += `: ${String(w.reason).replace(/\n/g, " ")}`;
+	return s;
+}
+
 // publicBoard keeps of a board what the tool shows the model, as text and
-// as details: a task's own fields and, for one that tracks a scheduled run,
-// its scheduled task (plan). The app's API already leaves the scheduler's run
-// handle out; this keeps any other field it might add out of the model's
-// context as well.
+// as details: a task's own fields, what a blocked task waits for and, for one
+// that tracks a scheduled run, its scheduled task (plan). The app's API
+// already leaves the scheduler's run handle out; this keeps any other field
+// it might add out of the model's context as well.
 function publicBoard(board: any): { tasks: any[]; next?: number } {
 	const str = (v: unknown) => (typeof v === "string" ? v : undefined);
 	const tasks = (Array.isArray(board?.tasks) ? board.tasks : []).map((t: any) => {
@@ -234,6 +316,17 @@ function publicBoard(board: any): { tasks: any[]; next?: number } {
 		}
 		const plan = str(t?.schedule?.plan);
 		if (plan && /^s[1-9][0-9]{0,5}$/.test(plan)) out.schedule = { plan };
+		const kind = str(t?.wait?.kind);
+		if (kind) {
+			const wait: Record<string, unknown> = { kind };
+			const ids = Array.isArray(t.wait.tasks) ? t.wait.tasks.filter((id: unknown) => typeof id === "string") : [];
+			if (ids.length) wait.tasks = ids;
+			for (const k of ["handoff", "reason", "since"]) {
+				const v = str(t.wait[k]);
+				if (v !== undefined) wait[k] = v;
+			}
+			out.wait = wait;
+		}
 		return out;
 	});
 	return typeof board?.next === "number" ? { tasks, next: board.next } : { tasks };
@@ -246,6 +339,7 @@ function boardText(board: any): string {
 		let s = `- ${t.id} [${t.status}] ${t.title}`;
 		if (t.owner) s += ` (owner ${t.owner})`;
 		if (t.schedule?.plan) s += ` (a run of scheduled task ${t.schedule.plan})`;
+		if (t.wait) s += `\n  wait: ${waitText(t.wait)}`;
 		if (t.note) s += `\n  note: ${String(t.note).replace(/\n/g, "\n  ")}`;
 		if (t.detail) s += `\n  detail: ${String(t.detail).replace(/\n/g, "\n  ")}`;
 		return s;
@@ -405,6 +499,7 @@ export default function yesman(pi: ExtensionAPI) {
 			...base,
 			defaultActive: false,
 			async execute(id, params, signal, onUpdate, ctx) {
+				checkTemp();
 				await requireGitHubRouting(signal);
 				const { env, note } = await commandEnv(signal);
 				const tool = make(ctx.cwd, { spawnHook: (c) => ({ ...c, env: shellEnvironment(c.env, env) }) });
@@ -422,6 +517,28 @@ export default function yesman(pi: ExtensionAPI) {
 	};
 	shell(createBashToolDefinition);
 	if (process.platform === "win32") shell(createPowerShellToolDefinition);
+	captureTemp();
+
+	// A worker's write and edit: pi's own tools with their file operations
+	// done by the app (managedFiles). The lead keeps pi's tools and its own
+	// narrower rule above. Only these two tools are governed: shell commands,
+	// other tools, MCP tools and extensions write with the process's own
+	// permissions.
+	if (ROLE !== "lead") {
+		const managed = (make: typeof createWriteToolDefinition | typeof createEditToolDefinition) => {
+			const base = (make as any)(process.cwd());
+			pi.registerTool({
+				...base,
+				defaultActive: false,
+				async execute(id: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) {
+					const tool = (make as any)(ctx.cwd, { operations: managedFiles(signal) });
+					return tool.execute(id, params, signal, onUpdate, ctx);
+				},
+			});
+		};
+		managed(createWriteToolDefinition);
+		managed(createEditToolDefinition);
+	}
 
 	// Whatever a tool returns, a secret's value does not reach the model.
 	// The values are asked for again first: the secrets may have been
@@ -561,6 +678,23 @@ export default function yesman(pi: ExtensionAPI) {
 		owner: Type.Optional(Type.String({ description: "The agent the task is handed to, usually a worker's name; empty to clear" })),
 		detail: Type.Optional(Type.String({ description: "What the task is, in Markdown" })),
 		note: Type.Optional(Type.String({ description: "Where it stands: why it is blocked, or its result with links (branch, PR)" })),
+		wait: Type.Optional(
+			Type.Object(
+				{
+					kind: Type.String({
+						description:
+							"tasks: until the tasks listed are done; user: until the user acts on an open Needs you request for this task; external: something outside yesman, such as CI or another party; paused: the user paused it (lead only; it stays paused until the user says otherwise). Empty to clear.",
+					}),
+					tasks: Type.Optional(Type.Array(Type.String(), { description: "For kind tasks: the IDs of the tasks it waits for" })),
+					handoff: Type.Optional(Type.String({ description: "For kind user: the Needs you request, such as n3, if it is not linked to this task" })),
+					reason: Type.Optional(Type.String({ description: "What it waits for and what lets it go on; required for external and paused" })),
+				},
+				{
+					description:
+						"What a blocked task waits for; setting it makes the task blocked, and any other status clears it. yesman tells the lead when a task's wait is over, and of open tasks no running worker carries.",
+				},
+			),
+		),
 	};
 	pi.registerTool({
 		name: "yesman_board",

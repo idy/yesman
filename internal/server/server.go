@@ -61,7 +61,7 @@ type Server struct {
 
 	url           string
 	worktreeMu    sync.Mutex
-	worktreeLocks map[string]*sync.Mutex // serialize lifecycle operations per workspace
+	worktreeLocks map[string]*sync.Mutex // serialize checkout lifecycle and managed file I/O per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
 	// beginChange replaces Agents.BeginChange in tests that run no agent.
@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/repos", s.handle(s.addRepo))
 	mux.HandleFunc("POST /v1/checkout", s.handle(s.checkout))
 	mux.HandleFunc("POST /v1/worktrees/remove", s.handle(s.removeWorktree))
+	mux.HandleFunc("POST /v1/files", s.handle(s.files))
 	mux.HandleFunc("GET /v1/agents", s.handle(s.agents))
 	mux.HandleFunc("POST /v1/workers", s.handle(s.startWorker))
 	mux.HandleFunc("POST /v1/workers/send", s.handle(s.sendWorker))
@@ -352,18 +353,15 @@ func sanitize(s string) string {
 	return strings.Trim(b.String(), "-.")
 }
 
-func (s *Server) checkout(_ context.Context, c caller, r *http.Request) (any, error) {
+func (s *Server) checkout(ctx context.Context, c caller, r *http.Request) (any, error) {
 	var req CheckoutRequest
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
-	l := s.worktreeLock(c.yesman.Name)
-	l.Lock()
-	defer l.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	var wt pool.Worktree
-	err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+	err := s.worktreeOperation(ctx, c, func(ctx context.Context, y yesmen.Yesman) error {
 		var err error
 		wt, err = s.checkoutOwned(ctx, c, y, req)
 		return err
@@ -382,11 +380,8 @@ func (s *Server) removeWorktree(ctx context.Context, c caller, r *http.Request) 
 	if !dirRE.MatchString(req.Dir) {
 		return nil, fmt.Errorf("%q is not a worktree directory of this workspace", req.Dir)
 	}
-	l := s.worktreeLock(c.yesman.Name)
-	l.Lock()
-	defer l.Unlock()
 	var out cleanupResult
-	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+	if err := s.worktreeOperation(ctx, c, func(ctx context.Context, y yesmen.Yesman) error {
 		var err error
 		out, err = s.cleanupWorktree(ctx, c, y, req)
 		return err
@@ -543,8 +538,9 @@ func (s *Server) board(_ context.Context, c caller, _ *http.Request) (any, error
 // agentBoard is the board as an agent's tools return it, field by field: a
 // task that tracks a scheduled run names its scheduled task (plan), which
 // the lead's messages name too, and not the scheduler's run handle, which
-// stays between the app and its window. A field the board gains is not
-// shown to agents until it is added here.
+// stays between the app and its window; a blocked task says what it waits
+// for. A field the board gains is not shown to agents until it is added
+// here.
 type agentBoard struct {
 	Tasks []agentTask `json:"tasks"`
 	Next  int         `json:"next"`
@@ -560,10 +556,21 @@ type agentTask struct {
 	CreatedAt time.Time      `json:"createdAt"`
 	UpdatedAt time.Time      `json:"updatedAt"`
 	Schedule  *agentSchedule `json:"schedule,omitempty"`
+	Wait      *agentWait     `json:"wait,omitempty"`
 }
 
 type agentSchedule struct {
 	Plan string `json:"plan"`
+}
+
+// agentWait is what a blocked task waits for (yesmen.Wait), as agents set
+// it with yesman_board.
+type agentWait struct {
+	Kind    string    `json:"kind"`
+	Tasks   []string  `json:"tasks,omitempty"`
+	Handoff string    `json:"handoff,omitempty"`
+	Reason  string    `json:"reason,omitempty"`
+	Since   time.Time `json:"since"`
 }
 
 func agentBoardOf(b yesmen.Board) agentBoard {
@@ -572,6 +579,9 @@ func agentBoardOf(b yesmen.Board) agentBoard {
 		at := agentTask{ID: t.ID, Title: t.Title, Status: t.Status, Owner: t.Owner, Detail: t.Detail, Note: t.Note, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt}
 		if t.Schedule != nil {
 			at.Schedule = &agentSchedule{Plan: t.Schedule.Plan}
+		}
+		if w := t.Wait; w != nil {
+			at.Wait = &agentWait{Kind: w.Kind, Tasks: slices.Clone(w.Tasks), Handoff: w.Handoff, Reason: w.Reason, Since: w.Since}
 		}
 		out.Tasks = append(out.Tasks, at)
 	}
@@ -605,7 +615,7 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 		if s.beforeBoardChange != nil {
 			s.beforeBoardChange()
 		}
-		b, err = s.Yesmen.ChangeBoard(y.Name, change)
+		b, err = s.Yesmen.ChangeBoardBy(y.Name, change, c.agent.Role == agent.RoleLead)
 		return err
 	}); err != nil {
 		return nil, err
@@ -775,10 +785,10 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 		w("When a report arrives, check it against the board, mark the task, and start the next step yourself (follow-ups, fixes, reviews) until everything the user asked for is done.\n")
 		w("- A worker's question arrives as a [yesman] message: answer it with yesman_worker_answer, or with yesman_worker_send when the worker asked in its report. If only the user can answer it, hand it to them with yesman_needs_you handOver: it shows under Needs you in their window.\n")
 		w("- A worker whose process failed: message it with yesman_worker_send to start it again, or start a fresh worker. Tell the user only if it keeps failing.\n")
-		w("- A worker's run the user stopped: that was their call. Leave it stopped and mark its task blocked, unless they say otherwise.\n")
-		w("- When you end a run with tasks still todo or doing and no worker running, yesman reminds you once.\n")
+		w("- A worker's run the user stopped: that was their call. Leave it stopped, unless they say otherwise; when they pause a task, mark it blocked with wait kind paused.\n")
+		w("- A finished run or a report does not finish a task. yesman tells you, once per change, of open tasks no running worker carries and of blocked tasks whose wait is over, even while other workers run. Give every blocked task its wait with yesman_board: the tasks it waits for, the user (with a Needs you request), something external, or paused.\n")
 		w("Decide everything you can. Bring the user only what you cannot decide: what to build, trade-offs only they can weigh, taste, credentials, or anything irreversible they did not ask for. ")
-		w("Never hold the rest of the work for these: mark each task that waits on one blocked, with the question in its note, finish everything else, and then put the open decisions to the user together, each with the options and your recommendation.\n")
+		w("Never hold the rest of the work for these: mark each task that waits on one blocked with wait kind user, with the question in its note, finish everything else, and then put the open decisions to the user together, each with the options and your recommendation.\n")
 		w("- Register each thing only the user can do or decide with yesman_needs_you add (a decision, information, logging in, installing, another manual step), linked to its board task: it shows under Needs you until they mark it done or not needed, and you hear when they do. Resolve it yourself when it is settled otherwise. Never ask for passwords, keys, tokens or codes in chat: point the user to Settings › Secrets.\n")
 	} else {
 		w("You are %q, a worker of the yesman named %q. Your lead started you for one task and receives your final message when you finish a run, so end each run with a short report: what you did, where (worktree, branch, PR) and what is left.\n", me.Name, y.Label())
@@ -826,6 +836,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	}
 
 	writeWorktreeCleanupContext(&b, y, me)
+	writeTemporaryFilesContext(&b, y, me)
 
 	rel := ".yesman/knowledge"
 	w("\n## Knowledge\n\n")
@@ -853,7 +864,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 
 	w("\n## Board\n\n")
 	w("The board is this yesman's task list, which the user watches beside the conversation. Read and change it with yesman_board. ")
-	w("Statuses: todo, doing, blocked (say why in the note), done (put the result and its links, such as the branch or PR, in the note), dropped. ")
+	w("Statuses: todo, doing, blocked (set its wait, and say why in the note), done (put the result and its links, such as the branch or PR, in the note), dropped. ")
 	if me.Role == agent.RoleLead {
 		w("Add a task for each piece of work the user asks for, and set its owner when you hand it to a worker. Workers keep their own tasks current; when the board needs more than a quick change, such as reconciling it with reports, have a worker do it.\n")
 	} else {
@@ -926,6 +937,19 @@ func writeBoard(b *strings.Builder, board yesmen.Board) {
 		}
 		if t.Schedule != nil {
 			fmt.Fprintf(b, " (a run of scheduled task %s)", t.Schedule.Plan)
+		}
+		if w := t.Wait; w != nil {
+			fmt.Fprintf(b, " {waits: %s", w.Kind)
+			if len(w.Tasks) > 0 {
+				fmt.Fprintf(b, " %s", strings.Join(w.Tasks, ", "))
+			}
+			if w.Handoff != "" {
+				fmt.Fprintf(b, " %s", w.Handoff)
+			}
+			if w.Reason != "" {
+				fmt.Fprintf(b, ", %s", oneLine(w.Reason, 120))
+			}
+			b.WriteString("}")
 		}
 		if t.Note != "" {
 			fmt.Fprintf(b, ": %s", oneLine(t.Note, 160))

@@ -41,7 +41,7 @@ async function fixture() {
 const bridge = () => {
   localStorage.setItem('yesman.info', 'shown');
   const handlers = {};
-  const forwarded = ['State', 'Messages', 'Submit', 'Abort', 'Board', 'Info', 'Topics', 'CreateTopic', 'UpdateTopic', 'SubmitTopic'];
+  const forwarded = ['State', 'Messages', 'Submit', 'SubmitCoalescing', 'Abort', 'Board', 'Info', 'Topics', 'CreateTopic', 'UpdateTopic', 'SubmitTopic'];
   window.fixtureCalls = [];
   window.mygo = {
     locale: localStorage.getItem('fixture.locale') || 'en',
@@ -129,6 +129,12 @@ async function run(engineName, engine) {
     await topicsRow.click();
     await page.locator('#topics .board-empty', { hasText: 'No topics yet' }).waitFor();
     assert.equal(await page.locator('#board').isHidden(), true);
+    // At 1360px the info makes way for Topics' two columns; the titlebar's
+    // Show the info keeps it beside this pane, one column at a time, as the
+    // rest of this scenario reads it (resource explorer).
+    assert.equal(await page.locator('#yesman-info').isVisible(), false);
+    await page.locator('#bar-actions button[aria-label="Show the info"]').click();
+    await topicsRow.waitFor();
     assert.equal(await topicsRow.getAttribute('aria-current'), 'page');
 
     // Create two topics; Markdown renders, HTML stays text.
@@ -246,7 +252,7 @@ async function run(engineName, engine) {
     if (native) {
       // pi took both: each is its native message, tied to its submission.
       await page.waitForFunction(() => [...document.querySelectorAll('#thread .msg-delivery[data-bound="true"]')].filter((el) => el.querySelector('.topic-chip') &&
-        el.querySelector('.delivery-status')?.textContent === 'Taken by pi').length === 2, null, { timeout: 30000 });
+        !el.querySelector('.delivery-status')).length === 2, null, { timeout: 30000 });
     }
 
     // After a reload the native history still names each topic; a chip opens it.
@@ -261,6 +267,11 @@ async function run(engineName, engine) {
     assert.equal(await page.locator('#thread .msg-user--topic img').count(), 1, 'the image stays with topic B');
     await page.locator('#thread .msg-user--topic .topic-chip', { hasText: 'tp2' }).click();
     await page.locator('#topics h3.topic-title', { hasText: 'Image limits' }).waitFor();
+    // Opened anew after the reload, Topics has the info make way again;
+    // keep it beside, one column at a time, as above.
+    assert.equal(await page.locator('#yesman-info').isVisible(), false);
+    await page.locator('#bar-actions button[aria-label="Show the info"]').click();
+    await page.locator('#yesman-info [data-info-entry="topics"]').waitFor();
     // Its conversation lists the native message, and shows it exactly.
     await page.locator('#topics .topic-message button').first().click();
     await page.locator('#thread .msg-found:is(.msg-user--topic, :has(.msg-user--topic))').waitFor();
@@ -288,15 +299,16 @@ async function run(engineName, engine) {
     await page.click('#topics [data-key="archive"]');
     await page.locator('#topics .topic-composer[data-archived]').waitFor();
     await page.click('#topics [data-key="back"]');
-    assert.equal(await page.locator('#topics .topic-row').count(), 1);
-    await page.click('#topics [data-key="filter-archived"]');
-    await page.click('#topics [data-key="topic-tp2"]');
+    // The tree groups topics by their status: the archived topic moved to
+    // Archived, opened to keep it in view; Open keeps the other.
+    assert.equal(await page.locator('#topics [data-node="g:open"] .topic-row').count(), 1);
+    assert.equal(await page.locator('#topics [data-node="g:archived"] .topic-row').count(), 1);
+    await page.click('#topics [data-key="topic-tp2"] > .explorer-line');
     await page.click('#topics [data-key="restore"]');
     await page.locator('#topics [data-key="compose-tp2"]').waitFor();
 
     // Keyboard: Enter on a row opens it and the back button returns focus.
     await page.click('#topics [data-key="back"]');
-    await page.click('#topics [data-key="filter-all"]');
     await page.focus('#topics [data-key="topic-tp1"]');
     await page.keyboard.press('Enter');
     await page.locator('#topics h3.topic-title', { hasText: 'Topics and tasks' }).waitFor();

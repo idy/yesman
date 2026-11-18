@@ -191,7 +191,8 @@ func recoverInstallState(root *os.Root, expected string, linked bool) error {
 	case te == nil && tn == 1 && errors.Is(pe, os.ErrNotExist):
 		// The process exited after unlink but before clearing the intent.
 	default:
-		return fmt.Errorf("installation intent conflicts with files; preserve both paths: target=%v temporary=%v", te, pe)
+		// Report only the validated relative names and identities already read.
+		return fmt.Errorf("installation intent conflicts with files; preserve both paths: target=%v temporary=%v; targetPath=%q temporaryPath=%q targetLinks=%d temporaryLinks=%d sameFile=%t linked=%t", te, pe, i.Target, i.Temporary, tn, pn, target != nil && temp != nil && os.SameFile(target, temp), linked)
 	}
 	if _, n, e := installedFile(root, i.Target, i); e != nil || n != 1 {
 		return errors.Join(errors.New("installed target was changed during recovery"), e)

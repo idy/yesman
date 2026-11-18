@@ -51,6 +51,15 @@ func (m *Manager) workspaceAgentLocked(y yesmen.Yesman, info Info) (*agent, erro
 func (m *Manager) ForgetYesman(name string, since time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The user's pauses of that hire go with it; another hire's stay.
+	if lp := m.leadPauses[name]; lp != nil && lp.hiredAt.Equal(since) {
+		delete(m.leadPauses, name)
+	}
+	for id, wp := range m.workerPauses {
+		if ys, _, err := SplitID(id); err == nil && ys == name && wp.hiredAt.Equal(since) {
+			delete(m.workerPauses, id)
+		}
+	}
 	for id, a := range m.agents {
 		if a.info.Yesman == name && a.workspaceSince.Equal(since) && a.retiring && a.proc == nil && a.starting == nil && (a.deliveryWriter == nil || a.deliveryWriter.finished()) {
 			if a.token != "" {
@@ -161,7 +170,12 @@ func (m *Manager) sealDeliveriesLocked(a *agent) []Event {
 	return events
 }
 
-func (m *Manager) reopenWorkerInScope(a *agent) (bool, error) {
+// reopenWorkerInScope records that worker a was given work, clearing the
+// user's pause only while resume is still its current setting.
+func (m *Manager) reopenWorkerInScope(a *agent, resume workerResume) (bool, error) {
+	if m.reviewBeforeReopen != nil {
+		m.reviewBeforeReopen() // tests: the write is slow to begin
+	}
 	var reopened bool
 	err := m.cfg.Yesmen.Use(a.info.Yesman, func(y yesmen.Yesman) error {
 		m.mu.Lock()
@@ -170,8 +184,15 @@ func (m *Manager) reopenWorkerInScope(a *agent) (bool, error) {
 		if !active {
 			return errStopped
 		}
+		if reviewR5BeforeStoreReopen != nil {
+			reviewR5BeforeStoreReopen() // tests: the write is slow to begin
+		}
 		var err error
-		reopened, err = m.cfg.Yesmen.ReopenWorker(y.Name, a.info.Name)
+		// Only the worker that was given work: one of the same name started
+		// since keeps all it records.
+		reopened, err = m.cfg.Yesmen.ReopenWorkerIf(y.Name, a.info.Name, resume.since, func(yesmen.Worker) bool {
+			return m.workerSettingCurrent(resume.id, resume.hiredAt, resume.since, resume.epoch)
+		})
 		return err
 	})
 	return reopened, err
@@ -199,3 +220,7 @@ func (m *Manager) reportScope(a *agent) (time.Time, bool) {
 	}
 	return scope, active
 }
+
+// reviewR5BeforeStoreReopen, tests only: runs as a worker given work, its
+// scope checked, is about to be reopened in the workspace.
+var reviewR5BeforeStoreReopen func()

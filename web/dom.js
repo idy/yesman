@@ -94,6 +94,7 @@ export const ICONS = Object.freeze({
   question: '\ue3e8', // question
   keyboard: '\ue2d8', // keyboard
   chart: '\ue150', // chart-bar
+  speaker: '\ue44a', // speaker-high
 });
 
 // The opening of each dialog still waiting for its close.

@@ -353,6 +353,15 @@ func (s *service) Submit(ctx context.Context, id, messageID, text string, images
 	return s.app.agents.Submit(ctx, id, messageID, text, images, since)
 }
 
+// SubmitCoalescing is Submit for a composer input that pi may append into this
+// agent's newest still-pending human message instead of queueing another one.
+func (s *service) SubmitCoalescing(ctx context.Context, id, messageID, text string, images []agent.Image, since time.Time) (agent.Delivery, error) {
+	if s.app.piErr != nil {
+		return agent.Delivery{}, s.app.piErr
+	}
+	return s.app.agents.SubmitCoalescing(ctx, id, messageID, text, images, since)
+}
+
 // CancelSubmission removes one native pending occurrence and restores only its
 // exact original payload. Capability and generation are checked by the Manager.
 func (s *service) CancelSubmission(ctx context.Context, id, messageID string, since time.Time) (agent.RecallResult, error) {
@@ -394,14 +403,16 @@ func (s *service) Context(ctx context.Context, id string) (agent.ContextStats, e
 	return s.app.agents.Context(ctx, id)
 }
 
-// Abort stops an agent's current run.
+// Abort stops an agent's current run. The user stopped it: yesman does not
+// start it again by itself.
 func (s *service) Abort(ctx context.Context, id string) error {
-	return s.app.agents.Abort(ctx, id)
+	return s.app.agents.AbortByUser(ctx, id)
 }
 
-// Stop ends an agent's pi process; its session resumes next time.
+// Stop ends an agent's pi process; its session resumes next time. The user
+// put it to sleep: yesman does not start it again by itself.
 func (s *service) Stop(id string) {
-	s.app.agents.Stop(id)
+	s.app.agents.StopByUser(id)
 }
 
 // Answer answers the question an agent waits on.
