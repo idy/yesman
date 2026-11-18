@@ -27,6 +27,8 @@ sys.path.insert(0, str(QA))
 from guards import Owned, ProviderLedger
 import public_npm_cache
 import provenance
+import image_proof
+import process_proof
 
 HEAD = 'cfaaeec242a7d372669b5e39739b71bbd15ad646'
 TREE = 'c7b0c06488b613c56dd0e52ceba98e343a4e0369'
@@ -301,26 +303,29 @@ class Host:
         self.temp = root / 'app temp'; self.temp.mkdir()
         self.bundle = self.install / 'yesman.app'; self.main = self.bundle / 'Contents/MacOS/Yes Man'
         self.data, self.config = Path.home() / 'yesman', Path.home() / '.pi/agent'
+        self.process_observer = process_proof.Processes(self.data)
         self.process = self.controller = self.feed = self.server = self.watcher = None
         self.expect_exit = False; self.command_results = {}; self.events = collections.deque(maxlen=4000)
         self.submissions = {}; self.before = {}; self.old_page = None; self.arm_plan = None; self.final = None
         self.bound = {}; self.owned_profile = False; self.ledger = ProviderLedger()
         self.staging_attempted = False; self.helper_ownership = None
+        self.image_index = 0
+        self.image_diagnostics = image_proof.Diagnostics(evidence / 'image-diagnostics.json')
         self.timer = Deadline(self.health)
         self.log = (evidence / 'app.log').open('ab', buffering=0)
     def note(self, kind, **fields):
         with (self.evidence / 'attachment.jsonl').open('a') as f:
             f.write(json.dumps({'at': time.time(), 'kind': kind, **fields}, default=str) + '\n')
     def health(self):
+        self.process_observer.poll()
         if self.watcher:
             self.watcher.poll()
         need(not self.controller or not self.controller.failed, 'terminal controller/provider/page error')
         if self.process and not self.expect_exit:
             need(self.process.poll() is None, 'app exited before the current observation completed')
     def image(self, stage):
-        inventory = self.h.bundle_inventory(self.bundle)
+        inventory = image_proof.bundle_inventory(self.a, self.install, self.bundle, stage['mainSHA256'], 'image', self.image_diagnostics, alias_data=self.data)
         need(inventory['sha256'] == stage['bundleInventorySHA256'], 'installed bundle inventory differs from verified artifact')
-        need(self.f.hash_file(self.main)['sha256'] == stage['mainSHA256'], 'installed main changed')
         self.checked(['codesign', '--verify', '--deep', '--strict', str(self.bundle)], 'codesign')
         return inventory
     def checked(self, argv, label, seconds=30, env=None):
@@ -346,11 +351,13 @@ class Host:
         path.write_text(inject_page(original, driver))
         self.note('normal-page-plus-observer', stage=index, originalSHA256=sha(original.encode()), driverSHA256=sha(driver.encode()))
     def launch(self, index):
+        self.image_index = index
         self.switch_web(index)
         self.env = self.core.app_environment(os.environ, self.data, self.config, self.web, self.temp, self.plan['Feed'])
         self.env.update(NPM_CONFIG_USERCONFIG=str(self.data / '.runtime/pi-managed/npm-public-cache.ini'), NPM_CONFIG_GLOBALCONFIG=os.devnull, NPM_CONFIG_REGISTRY='https://registry.npmjs.org')
         child = subprocess.Popen([str(self.main)], cwd=self.root, env=self.env, stdin=subprocess.DEVNULL, stdout=self.log, stderr=self.log)
         self.process = Owned(child.pid, self.main, child=child)
+        self.process_observer.register(self.process)
         self.expect_exit = False
         self.note('explicit-verified-main-launch', stage=index, pid=self.process.pid)
     def start(self):
@@ -389,6 +396,7 @@ class Host:
         self.image(self.stages[0]); self.launch(0)
         self.bound['before'] = self.inspect(0, initial=True)
         self.controller.select_page(self.page)
+        self.wait_runtime()
         for name in ('active', 'paused'):
             hired = self.command('HireNamed', [name]); need(hired['name'] == name and hired['hiredAt'], 'unexpected synthetic hire')
             self.submissions[name] = self.a.submit_command(name + '/lead', hired['hiredAt'], runtime['run'], int(time.time() * 1000), uuid.uuid4().hex + uuid.uuid4().hex[:4])
@@ -400,12 +408,23 @@ class Host:
             found = [(page, v) for page, v in rows if v['about'].get('version') == stage['version'] and page != self.old_page and v.get('pageReady') and v.get('visibility') == 'visible' and (initial or v['about'].get('piState') == 'ready')]
             return found[-1] if found else None
         self.page, value = self.timer.wait('normal production page/bridge not observed', observation, 30)
-        native = self.timer.wait('exact main image not observed', lambda: self.h.collect_native(self.bundle) if self.runner.find(self.main) else None, 20)
+        phase = 'inspect-initial' if initial else 'inspect-ready'
+        native = self.timer.wait('exact main image not observed', lambda: image_proof.collect_native(self.h, self.install, self.bundle, stage['mainSHA256'], phase, self.image_diagnostics, alias_data=self.data) if self.runner.find(self.main) else None, 20)
         info = self.runner.naming.native(native['pid'], self.helper)
         need(info['processName'] == 'Yes Man' and any(w['onScreen'] and w['bounds'].get('Width', 0) > 100 for w in info['windows']), 'native window/name missing')
         bound = self.a.bind_bridge(value, native, self.data, stage, epoch='initial' if initial else 'resumed')
         self.note('bound-native-page', page=self.page, native=info, binding=bound, observation=value)
         return bound
+    def wait_runtime(self):
+        # Observe ordinary startup to ready before any fixture actor/mutation.
+        # Cache bootstrap is not production installer/readiness proof.
+        def ready():
+            with self.controller.lock:
+                about = self.controller.reports[self.page]['about']
+                need(not about.get('piError') and about.get('piState') != 'failed', 'managed runtime preparation failed')
+                return about.get('piState') == 'ready'
+        self.timer.wait('offline production managed runtime not ready', ready, 60)
+        self.note('managed-runtime-ready', receipt=capture_runtime(self.a, self.data, self.bindings, self.contract['runtimeSHA256']))
     def command(self, method, args):
         ident = self.controller.issue(method, args)
         self.timer.wait('mutation outcome unknown: ' + method, lambda: ident in self.command_results, 15)
@@ -437,7 +456,7 @@ class Host:
                 self.timer.wait('durable pause missing', lambda: self.a.capture_actor(self.data, 'paused', self.runtime['run'])['leadPausedAt'])
         self.timer.wait('eligible lead is not Working', lambda: any(a['id'] == 'active/lead' and a['status'] == 'working' for a in self.controller.reports[self.controller.page]['state']['agents']))
     def capture(self, label, failed=False):
-        proof = self.h.capture_phase(self.data, self.bundle, self.runtime['run'], self.evidence / label, failed_launch=failed)
+        proof = image_proof.capture_phase(self.h, self.a, self.f, self.install, self.data, self.bundle, self.runtime['run'], self.evidence / label, self.stages[self.image_index]['mainSHA256'], 'capture-' + label, self.image_diagnostics, failed_launch=failed)
         save(self.evidence / label / 'runtime.json', capture_runtime(self.a, self.data, self.bindings, self.contract['runtimeSHA256']))
         return proof
     def capture_before(self):
@@ -461,6 +480,7 @@ class Host:
     def old_exit(self):
         result = self.process.wait(timeout=30)
         self.note('old-main-exit', **ordinary_exit(result))
+        self.image_index = 1
     def capture_failed_launch(self):
         self.timer.wait('helper exit not observed', self.watcher.poll, 30)
         event = helper_failure(self.watcher.events, self.watcher.identity['pid'])
@@ -500,6 +520,7 @@ class Host:
         self.controller.select_page(self.page)
         if self.process.pid != self.bound['after']['pid']:
             self.process = Owned(self.bound['after']['pid'], self.main)
+            self.process_observer.register(self.process)
         self.expect_exit = False
     def verify_resumption(self):
         self.timer.wait('one real provider continuation missing', lambda: len(self.provider('active/lead', 'continue')) == 1)
@@ -549,7 +570,7 @@ class Host:
                     'helperEvents': self.watcher.events if self.watcher else None, 'runRootRetained': str(self.root),
                     'nativeReceipt': None, 'actorReceipts': {}, 'launchFailureReceipt': None}
         try:
-            snapshot['nativeReceipt'] = self.h.collect_native(self.bundle)
+            snapshot['nativeReceipt'] = image_proof.collect_native(self.h, self.install, self.bundle, self.stages[self.image_index]['mainSHA256'], 'failure', self.image_diagnostics, allow_absent=self.failed and self.expect_exit, alias_data=self.data)
         except Exception as e:
             snapshot['nativeCaptureError'] = str(e)
         for name in ('active', 'paused'):
@@ -565,6 +586,8 @@ class Host:
                 value['rawHex'] = value.pop('raw').hex()
         except Exception as e:
             snapshot['restartCaptureError'] = str(e)
+        self.process_observer.poll(force=True)
+        snapshot['processObservation'] = self.process_observer.snapshot()
         save(self.evidence / 'failure.json', snapshot)
         if self.feed:
             self.runner.failure_snapshot(self.evidence / 'production-upgrade-failure.json', self.feed, {}, self.process, None, self.install, lambda _: self.main, self.plan)
@@ -594,6 +617,11 @@ class Host:
             need(not self.runner.find(self.main), 'owned main still running at teardown')
         except Exception as e:
             errors.append('ownership/drain unresolved: ' + str(e))
+        self.process_observer.poll(force=True)
+        process_observation = self.process_observer.snapshot()
+        save(self.evidence / 'process-observations.json', process_observation)
+        if process_observation['unresolvedObserved']:
+            errors.append('observed owned descendant remains live or unverified')
         try:
             if self.controller:
                 self.controller.close()
@@ -604,6 +632,19 @@ class Host:
         if self.watcher:
             self.watcher.close()
         self.log.close()
+        self.image_diagnostics.close()
+        io_observation = {'mainOutputFileClosed': self.log.closed,
+                          'controllerThreadJoined': not self.controller or not self.controller.thread or not self.controller.thread.is_alive(),
+                          'runtimePipeScope': 'only sampled owned installer/npm descriptor types; not every pipe'}
+        if not io_observation['controllerThreadJoined']:
+            errors.append('owned controller thread remains unjoined')
+        failure_consumers = None
+        if not success:
+            failure_consumers = process_proof.profiles((('fixture-data', self.data), ('fixture-pi-config', self.config),
+                ('fixture-native-app-data', Path.home() / 'Library/Application Support/yesman'),
+                ('fixture-native-preferences', Path.home() / 'Library/Preferences/dev.idy.yesman.plist')))
+            if any(row['status'] not in ('absent', 'no-observed-consumer') for row in failure_consumers['paths']):
+                errors.append('failed profile consumer remains or observation unknown')
         # On failure retain the actual default fixture profiles for recovery;
         # do not start the second scenario over a failed/partial first one.
         if success and not errors and self.owned_profile:
@@ -625,7 +666,7 @@ class Host:
                         os.rename(p, retained / str(i))
             except Exception as e:
                 errors.append('profile retention: ' + str(e))
-        save(self.evidence / 'teardown.json', {'success': success and not errors, 'errors': errors, 'owners': owners, 'unresolvedOwnership': bool(errors), 'helperOwnership': self.helper_ownership, 'rootRetained': str(self.root), 'lsofScope': 'observed open profile consumers only'})
+        save(self.evidence / 'teardown.json', {'success': success and not errors, 'errors': errors, 'owners': owners, 'unresolvedOwnership': bool(errors), 'helperOwnership': self.helper_ownership, 'rootRetained': str(self.root), 'lsofScope': 'observed open profile consumers only', 'processObservation': process_observation, 'ioObservation': io_observation, 'failureProfileConsumers': failure_consumers})
         need(not errors, 'teardown incomplete: ' + '; '.join(errors))
 
 

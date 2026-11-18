@@ -59,7 +59,9 @@ def bootstrap(cache,data,lock):
     verify(target,lock)
     config=target.parent/'npm-public-cache.ini'
     need(not config.exists(), 'new npm fixture config required')
-    config.write_text('offline=true\nignore-scripts=true\naudit=false\nfund=false\n')
+    with config.open('x') as output:
+        os.chmod(config, 0o600)
+        output.write('offline=true\nignore-scripts=true\naudit=false\nfund=false\nupdate-notifier=false\nfetch-retries=0\n')
     return {**receipt,'target':str(target),'productionInstallerStillRequired':True,'npmUserConfig':str(config)}
 
 

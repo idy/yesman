@@ -1,0 +1,128 @@
+{
+  "schema": 1,
+  "scope": "official-arm64-full-archive-compatibility-only",
+  "independentTask": "t214",
+  "independentReviewer": "restart-package-review",
+  "independentReviewSealSHA256": "96ed36d8f7b86561b5380e980256583e306edea12122bcde7bbfa38dae90c376",
+  "independentReportSHA256": "1200a87e4b3bd6379e50afdda247300003ccb1dec316142eb3634eb259f7da31",
+  "independentAssessmentSHA256": "81b8656ee999682efd4e23e6c67d9b06ff2bf973a614e8c2ef5e5b99bef2f9c5",
+  "compatibilityAccepted": true,
+  "producerRunID": 44386374590,
+  "producerAttempt": 1,
+  "producerQAHead": "e795fd6ef33b68365fea29b2bb4144ebc92bd554",
+  "producerJobID": 135093512725,
+  "producerArtifactID": 14466362767,
+  "producerZIP_SHA256": "97141348eae2a5e08edab7d3494f2312579e27b3a324b5d57834ce8af02bd094",
+  "predecessor": "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9",
+  "successor": "e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0",
+  "proofSHA256": "391c6f01a21423c4f47401370ed6aae6891e1fdf88d557eb8f9d570ff1e80e73",
+  "compatPlanSHA256": "50bdefdbead8d72d8391a80c2ef68654064e28070015ca65d242df10a98b9fb3",
+  "publicKey": "yrQPn0gg1/gASLxIQiUCIiUQ/csWENI0+up1cs3KWO0=",
+  "officialReleases": [
+    {
+      "tag": "v0.1.48",
+      "id": 450165231,
+      "draft": false,
+      "assets": [
+        {
+          "id": 763899567,
+          "name": "update-darwin-arm64.json",
+          "size": 2735,
+          "digest": "sha256:ba19f79d3cadab580d24d572845648487a55fe37093cbe955fc374b963a0ee69"
+        },
+        {
+          "id": 763899336,
+          "name": "yesman-0.1.48-darwin-arm64.tar.gz",
+          "size": 7771478,
+          "digest": "sha256:0909d7aaee69db1c3bec110472994d96a77d3592ff1055db96c9cc7f38e3a025"
+        },
+        {
+          "id": 763899329,
+          "name": "yesman-0.1.47-to-0.1.48-darwin-arm64.delta",
+          "size": 266244,
+          "digest": "sha256:1c688034fa5e453d364e9807e4638b5474e458a0103f740e13408ecaa3aab2b0"
+        },
+        {
+          "id": 763899345,
+          "name": "yesman-0.1.46-to-0.1.48-darwin-arm64.delta",
+          "size": 624352,
+          "digest": "sha256:91d85ce52f94dd3593aff599905bf799ed262846ff3bb13379cd594f879402d5"
+        },
+        {
+          "id": 763899342,
+          "name": "yesman-0.1.45-to-0.1.48-darwin-arm64.delta",
+          "size": 627876,
+          "digest": "sha256:282eb5c9e88fd7cb6392fd724ca88e98255898fb4b7ffcfa36e744104f7c727a"
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.49",
+      "id": 450320998,
+      "draft": true,
+      "assets": [
+        {
+          "id": 764319964,
+          "name": "update-darwin-arm64.json",
+          "size": 2798,
+          "digest": "sha256:1b18883d58a8d02adbdcb11b5c525cc773442bccc38d59506b857205e04f43ff"
+        },
+        {
+          "id": 764319730,
+          "name": "yesman-0.1.49-darwin-arm64.tar.gz",
+          "size": 7829795,
+          "digest": "sha256:b5ccd2912b5621d856f8b07c024608c130ad7caf186d94e32a1859d0b5adc6f8"
+        },
+        {
+          "id": 764319732,
+          "name": "yesman-0.1.48-to-0.1.49-darwin-arm64.delta",
+          "size": 854827,
+          "digest": "sha256:ad3f6101668d61a39078b0bf668afae39e01b2d9ac7d3fa64e2fb1cd123d685f"
+        },
+        {
+          "id": 764319735,
+          "name": "yesman-0.1.47-to-0.1.49-darwin-arm64.delta",
+          "size": 881473,
+          "digest": "sha256:385837d3328ccef3b90419dde395d693c317de9b7a086c6278ec9f3b79a4c5e6"
+        },
+        {
+          "id": 764319731,
+          "name": "yesman-0.1.46-to-0.1.49-darwin-arm64.delta",
+          "size": 1000442,
+          "digest": "sha256:fde882e17652c5cbef4d98ebf26f465ec43fb34923f770454f442127ee6c3231"
+        }
+      ]
+    }
+  ],
+  "S_SourceFileHashesSHA256": "b48e82b767b1ca74c848f5fc4d8eff747dc04b3082ff224f3b636aa320294ae9",
+  "sourceFiles": {
+    "qa/restart-resume/compat.py": "8516d732ef193d82e5af85b91916c071c0d62e8060ee1cf61522fd9eb09cc7a7",
+    "qa/restart-resume/guards.py": "dcd54d0b61db3bbe8ef49c3c16348127b8e596da72ef10f96123bde6ef461d56",
+    "scripts/check-production-upgrade.py": "680a562e17a9a5a11e2e52bd570ef9ffacf895496ca34c0578d85ee2f211939e",
+    "scripts/upgrade-transport.py": "0813e6939f46478e1906de12d2b0ae446670a91f6f2cccc0aec17092f445d41b",
+    "scripts/check-process-name.py": "14cd383ba984548e0cfc13a93bf0e92d4e2f2eec4167e215f557373969a3b3a1",
+    "scripts/name-process-macos.swift": "193d089c39997214f0d290fad8a38f1f7e095b47f6c5aa7d51e1de2188e4b15e",
+    "qa/restart-resume/download.py": "b00a6e38cfd9ba7922395095ac344a034343dbef493a79bad1d844b0d3075335",
+    "scripts/prepare-upgrade-qa.py": "16060021e033c180c5b03487c7df1a7abfe3e4637500fc5a82c8caffb91c2cb6",
+    "qa/restart-resume/bind.py": "7dd3789a1c4514b4a809cba8ea69cc9bf8e7576a3744aa21dc237a58ba99671b",
+    "qa/restart-resume/provenance.py": "4354708b7ef1425db0891390799cffa98066ec031550a6bc5e97b182d3ca8232"
+  },
+  "helperSegments": {
+    "helper_rows": "4bb2e0e83f488842e7170daeae26896a971a06508d1bf3922ae21d1bea6b3f24",
+    "ordinary_exit": "0a401de076a8fce1e6f58cbe8cb61ca891cff2f54a45116738a10f31733b3d08",
+    "HelperExit": "670cf06ef264fe229cb5c4aa1578cee92e783affc047b1ea247065756bbea81a"
+  },
+  "limitations": [
+    "managed-pi installation",
+    "positive predecessor restart checkpoint",
+    "S-to-Q continuation",
+    "failed-launch explicit recovery",
+    "ordinary reopen no replay",
+    "TCC continuity",
+    "delta-update behavior",
+    "whole native job success",
+    "successor drain exit status unavailable; no TCC or whole-job success claim"
+  ],
+  "statefulOrPublicationAcceptance": false,
+  "executionAuthorized": false
+}

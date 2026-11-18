@@ -3,6 +3,7 @@ import hashlib,json,os,subprocess,sys
 from pathlib import Path
 from verify import verify
 from provenance import first_attempt
+import compatibility_reuse
 
 def main():
     first_attempt()
@@ -16,12 +17,16 @@ def main():
     if handoff['workflowCommit']!=os.environ['GITHUB_SHA']or handoff['runID']!=os.environ['GITHUB_RUN_ID']or handoff['runAttempt']!=int(os.environ['GITHUB_RUN_ATTEMPT'])or handoff['dispatchApprovedQACommit']!=os.environ['APPROVED_QA_COMMIT']:raise ValueError('specific native authority differs')
     verifier=root/'inputs/public-upgrade-verifier'
     if verifier.is_symlink()or hashlib.sha256(verifier.read_bytes()).hexdigest()!=handoff['publicVerifierSHA256']:raise ValueError('transferred public verifier differs')
+    reused=compatibility_reuse.verify(repo,root/'inputs')
+    reused['newExecution']={'workflowCommit':os.environ['GITHUB_SHA'],'runID':os.environ['GITHUB_RUN_ID'],'runAttempt':int(os.environ['GITHUB_RUN_ATTEMPT'])}
     verifier.chmod(0o700)  # transfer ZIP drops execute mode; bytes were checked above
     output=Path(os.environ['RUNNER_TEMP'])/'restart-evidence';output.mkdir(exist_ok=False)
+    (output/'compatibility-reused.json').write_text(json.dumps(reused,indent=2)+'\n')
     command=[sys.executable,str(repo/'scripts/check-production-upgrade.py')]
-    # Each is a concrete opt-in invocation of the production runner. An error
-    # short-circuits; no failed or unknown mutation is resent in place.
-    for plan,module,evidence in [('compat-plan.json','compat.py','compat'),('plan.json','runner-attachment-f48/runner_attachment.py','stateful')]:
+    # The immutable, independently accepted .48→S edge is reused as evidence.
+    # Only missing stateful proof runs here, using this run's new Q/cache/binding.
+    # An error still short-circuits; no failed/unknown mutation is resent.
+    for plan,module,evidence in [('plan.json','runner-attachment-f48/runner_attachment.py','stateful')]:
         argv=command+[plan,str(output/evidence),'--t199-attachment',str(repo/'qa/restart-resume'/module),'contract.json']
         result=subprocess.run(argv,cwd=root/'inputs',env=dict(os.environ))
         if result.returncode:raise SystemExit(result.returncode)

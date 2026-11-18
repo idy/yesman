@@ -1,0 +1,186 @@
+{
+  "source": "e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0",
+  "predecessor": "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9",
+  "runID": "44386374590",
+  "nativeAcceptance": false,
+  "fingerprint": "668b5d9c672f094002367ad88728030d0ebc63c7",
+  "stages": [
+    {
+      "index": 0,
+      "native": {
+        "bundleIdentifier": "dev.idy.yesman",
+        "executable": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/Application install with spaces/yesman.app/Contents/MacOS/Yes Man",
+        "fileDisplayName": "Yes Man",
+        "localizedName": "Yes Man",
+        "windows": [
+          {
+            "bounds": {
+              "Height": 674,
+              "Width": 1024,
+              "X": 0,
+              "Y": 31
+            },
+            "onScreen": true
+          }
+        ],
+        "processName": "Yes Man",
+        "psComm": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/Application install with spaces/yesman.app/Contents/MacOS/Yes Man"
+      },
+      "bridge": {
+        "page": "0.21107119360200566",
+        "about": {
+          "version": "0.1.48",
+          "revision": "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9",
+          "time": "2026-11-18T15:16:51Z",
+          "modified": false,
+          "go": "go1.27.3",
+          "mygo": "(devel)",
+          "magpie": "v0.4.4",
+          "piError": "pi --version failed: pi --version: fork/exec /Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/missing-pi: no such file or directory",
+          "piManaged": false
+        },
+        "state": {
+          "home": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data",
+          "pool": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/repos",
+          "yesmen": [],
+          "agents": []
+        },
+        "settings": {
+          "appearance": "dark",
+          "language": "en",
+          "autoFetch": 0,
+          "home": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data",
+          "pool": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/repos",
+          "yesmen": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/yesmen",
+          "archive": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/archive",
+          "runtime": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/.runtime",
+          "settingsFile": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/settings.json",
+          "secrets": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/secrets",
+          "variables": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/variables.yaml",
+          "homeOverride": true
+        },
+        "update": {
+          "enabled": true,
+          "state": "idle",
+          "checking": false,
+          "progress": 0
+        },
+        "localStorage": "a390cf59e1634e9f8fd87f0e62eac2db",
+        "visibility": "visible",
+        "errors": []
+      },
+      "pid": 1808,
+      "mainSHA256": "8212a1749b8b987840ba872c8302cabafc94ee5a49077f0c343e8bceba6b36ce"
+    },
+    {
+      "index": 1,
+      "native": {
+        "bundleIdentifier": "dev.idy.yesman",
+        "executable": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/Application install with spaces/yesman.app/Contents/MacOS/Yes Man",
+        "fileDisplayName": "Yes Man",
+        "localizedName": "Yes Man",
+        "windows": [
+          {
+            "bounds": {
+              "Height": 677,
+              "Width": 1024,
+              "X": 0,
+              "Y": 31
+            },
+            "onScreen": true
+          }
+        ],
+        "processName": "Yes Man",
+        "psComm": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/Application install with spaces/yesman.app/Contents/MacOS/Yes Man"
+      },
+      "bridge": {
+        "page": "0.6105344568977417",
+        "about": {
+          "version": "0.1.49",
+          "revision": "e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0",
+          "time": "2026-11-18T17:22:57Z",
+          "modified": false,
+          "go": "go1.27.3",
+          "mygo": "(devel)",
+          "magpie": "v0.4.4",
+          "piError": "pi --version failed: pi --version: fork/exec /Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/missing-pi: no such file or directory",
+          "piManaged": false
+        },
+        "state": {
+          "home": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data",
+          "pool": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/repos",
+          "yesmen": [],
+          "agents": []
+        },
+        "settings": {
+          "appearance": "dark",
+          "language": "en",
+          "autoFetch": 0,
+          "home": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data",
+          "pool": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/repos",
+          "yesmen": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/yesmen",
+          "archive": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/archive",
+          "runtime": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/.runtime",
+          "settingsFile": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/settings.json",
+          "secrets": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/secrets",
+          "variables": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/data/variables.yaml",
+          "homeOverride": true
+        },
+        "update": {
+          "enabled": true,
+          "state": "idle",
+          "checking": false,
+          "progress": 0
+        },
+        "localStorage": "a390cf59e1634e9f8fd87f0e62eac2db",
+        "visibility": "visible",
+        "errors": []
+      },
+      "pid": 1875,
+      "mainSHA256": "e64f3d89c93ad045308f2a7fa3dd1373a4525898a680608af6b9d157d834c11a"
+    }
+  ],
+  "helper": [
+    {
+      "pid": 1855,
+      "fflags": 2751463424,
+      "data": 0,
+      "at": 1795032260.9217322
+    }
+  ],
+  "requests": [
+    {
+      "stage": 1,
+      "file": "update-darwin-arm64.json"
+    },
+    {
+      "stage": 1,
+      "file": "yesman-0.1.49-darwin-arm64.tar.gz"
+    }
+  ],
+  "contractPassed": true,
+  "rootRetained": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8",
+  "completed": true,
+  "teardown": {
+    "owners": [
+      {
+        "owner": {
+          "pid": 1875,
+          "executable": "/Users/runner/work/_temp/t199-compat-c43e0f48f5e844908708c551e3782be8/Application install with spaces/yesman.app/Contents/MacOS/Yes Man",
+          "startSeconds": 1795032255,
+          "startMicroseconds": 420167,
+          "uid": 501
+        },
+        "signals": [
+          15
+        ],
+        "drained": true,
+        "graceful": true,
+        "exitCode": null,
+        "exitStatusAvailable": false
+      }
+    ],
+    "errors": [],
+    "unresolvedOwnership": false
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "kind": "released-candidate-plus-private-QA",
+  "PublicKey": "yrQPn0gg1/gASLxIQiUCIiUQ/csWENI0+up1cs3KWO0=",
+  "Feed": "http://127.0.0.1:37059",
+  "Target": "darwin-arm64",
+  "Stages": [
+    {
+      "Version": "0.1.48",
+      "Source": "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9",
+      "Archive": "v0.1.48/yesman-0.1.48-darwin-arm64.tar.gz",
+      "Manifest": "v0.1.48/update-darwin-arm64.json",
+      "Web": "v0.1.48/web",
+      "mainName": "Yes Man",
+      "binarySHA256": "8212a1749b8b987840ba872c8302cabafc94ee5a49077f0c343e8bceba6b36ce",
+      "official": true
+    },
+    {
+      "Version": "0.1.49",
+      "Source": "e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0",
+      "Archive": "v0.1.49/yesman-0.1.49-darwin-arm64.tar.gz",
+      "Manifest": "v0.1.49/update-darwin-arm64.json",
+      "Web": "v0.1.49/web",
+      "mainName": "Yes Man",
+      "binarySHA256": "e64f3d89c93ad045308f2a7fa3dd1373a4525898a680608af6b9d157d834c11a",
+      "official": true
+    }
+  ],
+  "sourceSHA": "e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0",
+  "refs": {
+    "v0.1.48": "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9",
+    "v0.1.49": "e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0"
+  },
+  "limits": [
+    "untouched official .48 to feature-bearing .49 compatibility only; no predecessor feature checkpoint exists"
+  ]
+}
