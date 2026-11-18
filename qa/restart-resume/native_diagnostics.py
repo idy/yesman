@@ -1,6 +1,8 @@
 """Bounded QA diagnostics; no process policy changes and no raw argv/env/errors.
 The original guards.Owned remains the authority for equality and signalling.
 """
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -10,7 +12,7 @@ import time
 
 from guards import Owned, identity
 
-PHASES = {'initialization', 'launch', 'initial-inspect', 'runtime-ready', 'actors',
+PHASES = {'initialization', 'launch', 'initial-inspect', 'runtime-ready', 'model-admission', 'actors',
           'update', 'seed', 'capture', 'restart', 'resumption', 'quit', 'reopen',
           'failure-snapshot', 'teardown', 'finished'}
 ROLES = {'initial-S-main', 'successor-Q-main', 'owned-main'}
@@ -100,7 +102,8 @@ class Journal:
 
     def receipt(self, name, value):
         need(name in {'original-failure.json', 'snapshot-failure.json', 'teardown-failure.json',
-                      'teardown-start.json', 'episode-result.json'}, 'invalid diagnostic receipt')
+                      'teardown-start.json', 'episode-result.json', 'seed-overlay.json',
+                      'model-admission.json', 'observer-release.json'}, 'invalid diagnostic receipt')
         raw = (json.dumps(value, sort_keys=True) + '\n').encode()
         need(len(raw) <= 8192, 'diagnostic receipt budget')
         fd = os.open(self.root / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -180,6 +183,47 @@ class BoundMain:
              (again.st_dev, again.st_ino) == (held.st_dev, held.st_ino), 'fixed alias changed during observation')
         return True
 
+    def release(self):
+        """Last descriptor use after owner drain; installed name may now be Q.
+        Verify the held original inode/bytes even when its old names were unlinked.
+        Closing this exact fd is resource cleanup, never a consumer exemption.
+        """
+        need(self.fd is not None, 'observer already released')
+        before = os.fstat(self.fd)
+        signature = lambda st: (st.st_dev, st.st_ino, st.st_mode, st.st_uid,
+                                st.st_nlink, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and
+             before.st_mode & 0o111 and 0 < before.st_size <= 512 << 20 and
+             (before.st_dev, before.st_ino) == (self.original.st_dev, self.original.st_ino),
+             'observer held identity differs')
+        digest = hashlib.sha256()
+        offset = 0
+        while offset < before.st_size:
+            raw = os.pread(self.fd, min(1 << 20, before.st_size - offset), offset)
+            need(raw, 'observer bytes unavailable')
+            digest.update(raw)
+            offset += len(raw)
+        need(digest.hexdigest() == self.expected and signature(before) == signature(os.fstat(self.fd)),
+             'observer held bytes changed')
+        path_role = 'unavailable'
+        try:
+            path = fcntl.fcntl(self.fd, 50, bytes(1024)).split(b'\0', 1)[0].decode()  # Darwin F_GETPATH
+            path_role = 'installed-main' if path == str(self.main) else 'fixed-private-gh-shim' if path == str(getattr(self, 'shim', '')) else 'other'
+        except OSError:
+            pass  # Unlinked old S has no current name; held inode/hash is authoritative.
+        fd = self.fd
+        self.close()
+        try:
+            os.fstat(fd)
+        except OSError as error:
+            need(error.errno == errno.EBADF, 'observer release status unknown')
+        else:
+            raise ValueError('observer descriptor remains open')
+        return {'fd': fd, 'role': 'bound-main-observer', 'dev': before.st_dev,
+                'ino': before.st_ino, 'uid': before.st_uid, 'nlink': before.st_nlink,
+                'bytes': before.st_size, 'mainSHA256': self.expected,
+                'kernelPathRole': path_role, 'closed': True, 'postClose': 'EBADF'}
+
     def close(self):
         if self.fd is not None:
             os.close(self.fd)
@@ -228,6 +272,21 @@ class DiagnosticOwned(Owned):
         except BaseException:
             self.close_observer()
             raise
+
+    def release_observer(self):
+        # Same guard observation as signalling; no release while a root lives or
+        # its incarnation is unknown/changed. Never inspect/signal an lsof PID.
+        need(self.poll() is not None and self.observe(self.pid) is None,
+             'observer release requires departed owned main')
+        observer = identity(os.getpid())
+        need(observer is not None and observer['pid'] == os.getpid() and observer['uid'] == os.getuid(),
+             'fixture observer identity unavailable')
+        self.bound_main.shim = self.shim
+        need(identity(os.getpid()) == observer, 'fixture observer identity changed')
+        released = self.bound_main.release()
+        return {'owner': safe_identity(self.owner, self.main, self.shim),
+                'observer': safe_identity(observer, self.main, self.shim),
+                'observerPPID': os.getppid(), 'ownedMainDeparted': True, **released}
 
     def close_observer(self):
         self.bound_main.close()

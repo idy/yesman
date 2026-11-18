@@ -182,6 +182,9 @@ class Startup(unittest.TestCase):
         host.log = (host.evidence / 'app.log').open('ab')
         host.image_diagnostics = self.diag
         host.owned_profile = True
+        host.diagnostic_owners = []
+        host.diagnostics = attachment.native_diagnostics.Journal(host.evidence / 'diagnostics')
+        self.addCleanup(host.diagnostics.close)
         with patch.object(Path, 'home', return_value=self.root / 'synthetic-home'):
             host.close(False)
         result = json.loads((host.evidence / 'teardown.json').read_bytes())

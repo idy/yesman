@@ -14,7 +14,8 @@ EPISODE = {'failure.json', 'teardown.json', 'process-observations.json',
            'image-diagnostics.json', 'provider-complete.json', 'provider-reopen.json',
            'episode.json', 'production-upgrade-failure.json'}
 DIAGNOSTICS = {'process.jsonl', 'original-failure.json', 'snapshot-failure.json',
-               'teardown-failure.json', 'teardown-start.json', 'episode-result.json'}
+               'teardown-failure.json', 'teardown-start.json', 'episode-result.json',
+               'seed-overlay.json', 'model-admission.json', 'observer-release.json'}
 PHASE_FILES = {'proof.json', 'runtime.json'}
 PER_FILE = 4 << 20
 TOTAL = 16 << 20

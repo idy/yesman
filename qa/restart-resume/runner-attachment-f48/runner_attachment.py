@@ -30,6 +30,7 @@ import provenance
 import image_proof
 import process_proof
 import native_diagnostics
+import fixture_admission
 
 HEAD = 'cfaaeec242a7d372669b5e39739b71bbd15ad646'
 TREE = 'c7b0c06488b613c56dd0e52ceba98e343a4e0369'
@@ -355,11 +356,9 @@ class Host:
         shutil.copytree(self.plan['Stages'][index]['Web'], self.web, dirs_exist_ok=True)
         path = self.web / 'index.html'; original = path.read_text()
         driver = self.f.driver_text(self.endpoints['driverEndpoint'])
-        # Extra observational fields only. The sealed driver's command journal,
-        # catch behavior and public method set remain its original code.
-        marker = 'return { about:'
-        need(driver.count(marker) == 1, 'sealed driver observation seam changed')
-        driver = driver.replace(marker, "return { visibility: document.visibilityState, pageReady: !!document.querySelector('#settings-button'), about:", 1)
+        # Readonly Crew is projected in page memory; original mutation set,
+        # command journal and terminal/no-retry behavior stay sealed.
+        driver = fixture_admission.driver(driver)
         path.write_text(inject_page(original, driver))
         self.note('normal-page-plus-observer', stage=index, originalSHA256=sha(original.encode()), driverSHA256=sha(driver.encode()))
     def launch(self, index):
@@ -411,9 +410,12 @@ class Host:
                     host.command_results[ident] = result
         self.controller = Observed(runtime, self.evidence / 'controller.jsonl')
         self.endpoints = self.controller.start()
-        seed = self.a.seed_plan(Path.home(), self.endpoints['providerBase'])
+        seed, seed_receipt = fixture_admission.fresh_seed(self.a.seed_plan(Path.home(), self.endpoints['providerBase']))
         self.owned_profile = True  # fresh guard precedes the first write; retain partial seed on failure
         self.a.write_fresh_seed(seed)
+        seed_receipt['writtenSettingsSHA256'] = sha(self.a.read_owned(self.data, self.data / 'settings.json', 1 << 20))
+        need(seed_receipt['writtenSettingsSHA256'] == seed_receipt['settingsSHA256'], 'fresh fixture settings write differs')
+        self.diagnostics.receipt('seed-overlay.json', seed_receipt)
         self.note('public-npm-cache-bootstrap', receipt=public_npm_cache.bootstrap(c['publicNpmCache'], self.data, read(QA / '../../internal/piruntime/assets/package-lock.json')))
         self.feed = self.runner.Feed(self.plan, 'archive'); self.feed.target = 1
         from urllib.parse import urlsplit
@@ -426,6 +428,7 @@ class Host:
         self.bound['before'] = self.inspect(0, initial=True)
         self.controller.select_page(self.page)
         self.wait_runtime()
+        self.admit_model()
         self.phase = 'actors'
         for name in ('active', 'paused'):
             hired = self.command('HireNamed', [name]); need(hired['name'] == name and hired['hiredAt'], 'unexpected synthetic hire')
@@ -457,6 +460,13 @@ class Host:
                 return about.get('piState') == 'ready'
         self.timer.wait('offline production managed runtime not ready', ready, 60)
         self.note('managed-runtime-ready', receipt=capture_runtime(self.a, self.data, self.bindings, self.contract['runtimeSHA256']))
+    def admit_model(self):
+        self.phase = 'model-admission'
+        with self.controller.lock:
+            projected = self.controller.reports[self.page].get('modelAdmission')
+        value = fixture_admission.retain_admission(projected)
+        self.diagnostics.receipt('model-admission.json', value)
+        need(value['admitted'], 'synthetic Crew model admission refused before Hire')
     def command(self, method, args):
         ident = self.controller.issue(method, args)
         self.timer.wait('mutation outcome unknown: ' + method, lambda: ident in self.command_results, 15)
@@ -677,6 +687,20 @@ class Host:
                           'runtimePipeScope': 'only sampled owned installer/npm descriptor types; not every pipe'}
         if not io_observation['controllerThreadJoined']:
             errors.append('owned controller thread remains unjoined')
+        observer_release = {'schema': 1, 'status': 'refused-unresolved-drain', 'observers': []}
+        if not errors:
+            try:
+                for owned in self.diagnostic_owners:
+                    observer_release['observers'].append(owned.release_observer())
+                observer_release['status'] = 'released-before-full-profile-scan'
+            except (OSError, ValueError) as error:
+                observer_release['status'] = 'release-refused'
+                observer_release['errorCode'] = native_diagnostics.error_code(error)
+                errors.append('fixture observer release refused')
+        try:
+            self.diagnostics.receipt('observer-release.json', observer_release)
+        except (OSError, ValueError):
+            errors.append('fixture observer release receipt unavailable')
         failure_consumers = None
         if not success:
             failure_consumers = process_proof.profiles((('fixture-data', self.data), ('fixture-pi-config', self.config),
@@ -705,7 +729,7 @@ class Host:
                         os.rename(p, retained / str(i))
             except Exception as e:
                 errors.append('profile retention: ' + str(e))
-        save(self.evidence / 'teardown.json', {'success': success and not errors, 'errors': errors, 'owners': owners, 'unresolvedOwnership': bool(errors), 'helperOwnership': self.helper_ownership, 'rootRetained': str(self.root), 'lsofScope': 'observed open profile consumers only', 'processObservation': process_observation, 'ioObservation': io_observation, 'failureProfileConsumers': failure_consumers})
+        save(self.evidence / 'teardown.json', {'success': success and not errors, 'errors': errors, 'owners': owners, 'unresolvedOwnership': bool(errors), 'helperOwnership': self.helper_ownership, 'rootRetained': str(self.root), 'lsofScope': 'observed open profile consumers only', 'processObservation': process_observation, 'ioObservation': io_observation, 'failureProfileConsumers': failure_consumers, 'observerRelease': observer_release})
         need(not errors, 'teardown incomplete: ' + '; '.join(errors))
 
 
