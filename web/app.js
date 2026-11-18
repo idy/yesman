@@ -1644,9 +1644,11 @@ function renderNeedsYouPane() {
   const nav = h('div', { class: 'explorer-nav-scroll needs-you-body' });
   let content;
   if (!y) {
-    content = h('div', { class: 'needs-you-detail' }, h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
-      h('strong', null, t('What {name} needs from you cannot be read', { name: label })),
-      h('p', null, t('Its workspace is unavailable; the sidebar says why.')))));
+    content = h('div', { class: 'needs-you-detail' },
+      narrowBack(t('Show the conversation again'), closeNeedsYou),
+      h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+        h('strong', null, t('What {name} needs from you cannot be read', { name: label })),
+        h('p', null, t('Its workspace is unavailable; the sidebar says why.')))));
   } else {
     if (y.handoffsError) {
       nav.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
@@ -1678,7 +1680,8 @@ function renderNeedsYouPane() {
         h('p', null, t('What {name} hands you shows here in full, with what you can do about it.', { name: label }))));
   }
   const count = items.length ? tn(items.length, '{n} waiting', '{n} waiting') : '';
-  const focus = !chosen || narrowFocus === 'nav' ? 'nav' : 'content';
+  // An unavailable workspace has no navigation; its error lives in content.
+  const focus = !y ? 'content' : !chosen || narrowFocus === 'nav' ? 'nav' : 'content';
   aside.replaceChildren(
     h('div', { class: 'files-head drag' },
       h('h2', { class: 'files-title needs-you-heading', tabindex: '-1' }, t('Needs You')),

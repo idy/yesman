@@ -4,7 +4,7 @@
 // is answered here or recorded as unmocked, which fails the run.
 //
 // YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs \
-//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks,answer \
+//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks,answer,unavailable \
 //   EXPLORER_SHOTS=/path/for/screenshots node scripts/resource-explorer-browser.mjs
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -16,7 +16,7 @@ const root = fileURLToPath(new URL('../web/', import.meta.url));
 const shots = process.env.EXPLORER_SHOTS;
 if (shots) await mkdir(shots, { recursive: true });
 const engines = (process.env.EXPLORER_ENGINES || 'chromium,webkit').split(',');
-const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks,answer').split(','));
+const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks,answer,unavailable').split(','));
 
 const bridge = `<script>
 window.calls=[];window.unmocked=[];window.delayed={};window.releases={};
@@ -805,7 +805,59 @@ async function answerPart(page, engine) {
   assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'ResolveHandoff', 'HireNamed'].includes(c[0])).length), 0, 'focus and navigation perform no action');
 }
 
-const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart, tasks: tasksPart, answer: answerPart };
+// An unavailable workspace must show its error rather than an empty narrow
+// navigation column. Returning and later recovering remain ordinary actions.
+async function unavailablePart(page, engine) {
+  const pane = page.locator('#needs-you');
+  const refresh = async () => {
+    const n = await page.evaluate(() => calls.filter((c) => c[0] === 'State').length);
+    await page.evaluate(() => handlers.changed?.());
+    await page.waitForFunction((n) => calls.filter((c) => c[0] === 'State').length > n, n);
+    await frames(page);
+  };
+  await page.locator('[data-info-entry="needs-you"]').click();
+  await pane.locator('[data-detail-control="answer-text"]').fill('Before the workspace error');
+  await page.evaluate(() => {
+    window.unavailableAlice = fixtureState.yesmen.shift();
+    fixtureState.workspaceErrors = [{ name: 'alice', path: '/synthetic/alice/.yesman/yesman.json', size: 1048577, limit: 1048576 }];
+  });
+  await refresh();
+  const alert = pane.locator('[role="alert"]');
+  assert.equal(await alert.isVisible(), true, 'wide workspace error');
+  assert.match(await alert.innerText(), /cannot be read/);
+  await page.setViewportSize({ width: 1000, height: 780 });
+  await frames(page);
+  assert.equal(await alert.isVisible(), true, 'narrow workspace error stays visible');
+  const back = pane.getByRole('button', { name: 'Show the conversation again', exact: true });
+  await back.focus();
+  await shot(page, `${engine}-unavailable-back-focused`);
+  await page.keyboard.press('Enter');
+  assert.equal(await pane.isVisible(), false, 'Back closes the unavailable pane');
+  assert.equal(await page.locator('#dock textarea').evaluate((e) => e === document.activeElement), true, 'Back returns focus to the conversation');
+  // A fresh healthy State restores the real rows and the original draft.
+  await page.evaluate(() => { fixtureState.yesmen.unshift(window.unavailableAlice); fixtureState.workspaceErrors = []; });
+  await refresh();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.locator('[data-info-entry="needs-you"]').click();
+  assert.equal(await alert.count(), 0);
+  assert.equal(await pane.locator('.needs-you-open').count(), 3);
+  assert.equal(await pane.locator('[data-detail-control="answer-text"]').inputValue(), 'Before the workspace error');
+  await page.locator('[data-agent="bob/lead"]').first().click();
+  assert.equal(await alert.count(), 0);
+  assert.equal(await pane.locator('.needs-you-open').count(), 1);
+  assert.match(await pane.locator('.needs-you-detail-title').innerText(), /Bob-only request/);
+  assert.equal(await pane.locator('[data-detail-control="answer-text"]').count(), 0);
+  await page.locator('[data-agent="alice/lead"]').first().click();
+  await page.evaluate(() => { fixtureState.yesmen[0].handoffs = []; fixtureState.agents[0].status = 'idle'; delete fixtureState.agents[0].dialog; });
+  await refresh();
+  await page.setViewportSize({ width: 1000, height: 780 });
+  await frames(page);
+  assert.equal(await pane.locator('.needs-you-empty').isVisible(), true, 'healthy empty list stays in navigation');
+  assert.equal(await alert.count(), 0);
+  assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'ResolveHandoff'].includes(c[0])).length), 0);
+}
+
+const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart, tasks: tasksPart, answer: answerPart, unavailable: unavailablePart };
 try {
   for (const name of engines) {
     const browser = await pw[name].launch({ headless: true });
