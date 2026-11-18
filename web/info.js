@@ -22,6 +22,7 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   isOpen()               whether the panel shows
 //   files()                what the files pane shows (files.shown())
 //   openKnowledge(), openTaskLog(), openWorktree(dir, show), checkout(y)
+//   openTasks(), tasksOpen(), tasksSummary(y)   the Tasks pane and its summary
 //   needsYou(y)            what waits on the user from y: { count, error,
 //                          refused, open (the Needs you pane shows) }
 //   openNeedsYou(y)        open the Needs you pane, of y, beside its conversation
@@ -146,7 +147,7 @@ export function createInfo(host) {
   // order: what it keeps, what it did, what waits on the user, and what the
   // user discussed with it. A new part adds its row to entries.
   function entries(y, d) {
-    return [knowledgeEntry(y, d), workingLogsEntry(y), needsYouEntry(y), topicsEntry(y, d)];
+    return [knowledgeEntry(y, d), workingLogsEntry(y), needsYouEntry(y), topicsEntry(y, d), tasksEntry(y)].filter(Boolean);
   }
 
   function entriesCard(y, d) {
@@ -214,6 +215,40 @@ export function createInfo(host) {
   // The topics changed: their count is read again.
   function onTopics(name) {
     if (data.has(name)) soon(name, ['info'], 1500);
+  }
+
+  // ---------- Tasks ----------
+
+  // Tasks: the yesman's scheduled tasks, how many are on and when the next
+  // one runs, and whether a run needs a look; it opens the Tasks pane.
+  function tasksEntry(y) {
+    const s = host.tasksSummary?.(y);
+    if (!s) return null;
+    // A file that cannot be read is said, not counted as nothing.
+    const unread = !!s.error && s.total == null;
+    let text;
+    if (s.loading) text = t('Loading…');
+    else if (unread) text = t('Cannot be read');
+    else if (!s.total) text = t('None');
+    else if (!s.on) text = t('All off');
+    else text = s.next ? t('{n} on · next {when}', { n: formatNumber(s.on), when: nextWhen(s.next, s.zone) }) : t('{n} on', { n: formatNumber(s.on) });
+    const look = s.attention ? tn(s.attention, '1 run needs a look', '{n} runs need a look') : '';
+    const attention = look ? h('span', { class: 'info-attention', title: look }, icon('alert'), h('span', { class: 'mds-visually-hidden' }, look)) : null;
+    return {
+      key: 'tasks', label: t('Tasks'), title: unread ? s.error : t('Scheduled tasks: requests the lead gets at times you choose'),
+      current: !!host.tasksOpen?.(),
+      aside: [attention, text], tone: unread ? 'error' : null,
+      open: () => host.openTasks(),
+    };
+  }
+
+  // nextWhen says when the next run is, briefly: a time today, else a day.
+  function nextWhen(iso, zone) {
+    const d = new Date(iso);
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    const opts = sameDay ? { hour: '2-digit', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+    return new Intl.DateTimeFormat(undefined, opts).format(d);
   }
 
   // ---------- Worktrees ----------

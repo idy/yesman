@@ -103,6 +103,11 @@ func (p *Pool) RemoveTemporaryWorktree(ctx context.Context, workspace string, ex
 	l := p.lock(r.Name)
 	l.Lock()
 	defer l.Unlock()
+	// Managed file writes into this checkout (WithWorktree) finish first;
+	// none starts until the removal is decided.
+	tl := p.treeLock(filepath.Join(workspace, expected.Dir))
+	tl.Lock()
+	defer tl.Unlock()
 	path, err := p.checkTemporaryWorktree(ctx, r, workspace, expected)
 	if err != nil {
 		return err

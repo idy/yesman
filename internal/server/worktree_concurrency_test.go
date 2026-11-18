@@ -43,7 +43,7 @@ func TestConcurrentCleanupUsesOneCompletionAndCheckpoint(t *testing.T) {
 	results := make(chan error, 8)
 	for range 8 {
 		go func() {
-			out, err := f.s.removeWorktree(context.Background(), f.lead, httptest.NewRequest("POST", "/v1/worktrees/remove", bytes.NewReader(body)))
+			out, err := f.removeRequest(context.Background(), f.lead, httptest.NewRequest("POST", "/v1/worktrees/remove", bytes.NewReader(body)))
 			if err == nil && !out.(cleanupResult).Removed {
 				err = fmt.Errorf("cleanup: %+v", out)
 			}

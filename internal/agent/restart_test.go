@@ -216,7 +216,7 @@ func TestResumeAfterRestart(t *testing.T) {
 		{"workspace gone", func() restart.Agent { e := lead; e.Yesman = "bob"; return e }(), restart.Gone},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			outcome, err := m.Resume(ctx, c.entry, note)
+			outcome, err := m.ResumeAfterRestart(ctx, c.entry, note)
 			if outcome != c.want {
 				t.Fatalf("Resume = %s (%v), want %s", outcome, err, c.want)
 			}
@@ -234,7 +234,7 @@ func TestResumeAfterRestart(t *testing.T) {
 
 	// A second resume of the same agent, as a duplicate, does not send it
 	// again while it runs.
-	if outcome, _ := m.Resume(ctx, lead, note); outcome != restart.Active {
+	if outcome, _ := m.ResumeAfterRestart(ctx, lead, note); outcome != restart.Active {
 		t.Fatalf("a second resume = %s", outcome)
 	}
 	if n := got.notes(ID("alice", "lead"), note); n != 1 {
@@ -245,7 +245,7 @@ func TestResumeAfterRestart(t *testing.T) {
 	// with no new run, and is closed as finished.
 	reportEntry := entry(reporting, restart.ReasonReport)
 	reportEntry.Report = &restart.Report{State: restart.ReportNotSent, Digest: digest("done")}
-	outcome, err := m.Resume(ctx, reportEntry, note)
+	outcome, err := m.ResumeAfterRestart(ctx, reportEntry, note)
 	if outcome != restart.Reported || err != nil {
 		t.Fatalf("report Resume = %s %v", outcome, err)
 	}
@@ -271,7 +271,7 @@ func TestResumeAfterRestart(t *testing.T) {
 	// The app quitting during resume stops the rest.
 	late := addWorker(t, store, "late")
 	m.StopAll()
-	if outcome, _ := m.Resume(ctx, entry(late, restart.ReasonWorking), note); outcome != restart.Stopped {
+	if outcome, _ := m.ResumeAfterRestart(ctx, entry(late, restart.ReasonWorking), note); outcome != restart.Stopped {
 		t.Fatalf("Resume after quit = %s", outcome)
 	}
 }
@@ -284,7 +284,7 @@ func TestResumeYieldsToFirstMessage(t *testing.T) {
 	if err := m.Prompt(context.Background(), ID("alice", "lead"), "user first"); err != nil {
 		t.Fatal(err)
 	}
-	if outcome, _ := m.Resume(context.Background(), lead, "note"); outcome != restart.Active {
+	if outcome, _ := m.ResumeAfterRestart(context.Background(), lead, "note"); outcome != restart.Active {
 		t.Fatalf("Resume = %s", outcome)
 	}
 	if p := got.to(ID("alice", "lead")); len(p) != 1 || p[0] != "user first" {
@@ -302,7 +302,7 @@ func TestResumeStoppedWhileStarting(t *testing.T) {
 	t.Cleanup(m.StopAll)
 	lead := restart.Agent{Yesman: "alice", Name: "lead", Role: RoleLead, WorkspaceHiredAt: y.HiredAt, AgentSince: y.HiredAt, Reason: restart.ReasonWorking}
 	res := make(chan string, 1)
-	go func() { o, _ := m.Resume(context.Background(), lead, "note"); res <- o }()
+	go func() { o, _ := m.ResumeAfterRestart(context.Background(), lead, "note"); res <- o }()
 	waitStatus(t, m, ID("alice", "lead"), Starting)
 	m.Stop(ID("alice", "lead"))
 	if o := <-res; o != restart.Stopped {
@@ -323,7 +323,7 @@ func TestResumeKeepsASleepFromThisInstance(t *testing.T) {
 	}
 	m.Stop(id) // the user puts it to sleep
 	lead := restart.Agent{Yesman: "alice", Name: "lead", Role: RoleLead, WorkspaceHiredAt: y.HiredAt, AgentSince: y.HiredAt, Reason: restart.ReasonWorking}
-	if outcome, _ := m.Resume(context.Background(), lead, "note"); outcome != restart.Stopped {
+	if outcome, _ := m.ResumeAfterRestart(context.Background(), lead, "note"); outcome != restart.Stopped {
 		t.Fatalf("Resume = %s", outcome)
 	}
 	if m.running(id) != nil || got.notes(id, "note") != 0 {
@@ -342,7 +342,7 @@ func TestResumeTooLateSendsNothing(t *testing.T) {
 	lead := restart.Agent{Yesman: "alice", Name: "lead", Role: RoleLead, WorkspaceHiredAt: y.HiredAt, AgentSince: y.HiredAt, Reason: restart.ReasonWorking}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if outcome, err := m.Resume(ctx, lead, "note"); outcome != restart.Failed || err == nil {
+	if outcome, err := m.ResumeAfterRestart(ctx, lead, "note"); outcome != restart.Failed || err == nil {
 		t.Fatalf("Resume = %s %v", outcome, err)
 	}
 	// A prompt sent anyway would reach pi a moment later: watch for it.

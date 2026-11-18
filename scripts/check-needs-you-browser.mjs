@@ -70,6 +70,8 @@ function bridge() {
         case 'Update': return { enabled: false };
         case 'Models': return { models: [], agent: fixtureState.agents.find((a) => a.id === args[0]) };
         case 'Board': return { tasks: [] };
+        // The info panel's Tasks row: this yesman has no scheduled tasks.
+        case 'Schedules': return { plans: [] };
         case 'AgentMenu': return '';
         case 'WatchFiles': case 'Abort': case 'Stop': return;
         // Reading it would start the agent: its context is not measured here.
@@ -198,6 +200,8 @@ async function scenario(engineName, page) {
   // opens the pane again. (WebKit, as macOS by default, tabs to buttons with
   // Option.)
   await page.keyboard.press(engineName === 'webkit' ? 'Alt+Tab' : 'Tab');
+  assert.equal(await focused(), 'pane-refresh');
+  await page.keyboard.press(engineName === 'webkit' ? 'Alt+Tab' : 'Tab');
   assert.equal(await focused(), 'pane-close');
   await page.keyboard.press('Enter');
   await until('the pane closed', () => pane.isHidden());
@@ -268,9 +272,16 @@ async function scenario(engineName, page) {
   assert.equal(await composer.inputValue(), 'unsent alice draft');
   assert.equal(await page.locator('.composer-image').count(), 1);
 
-  // Opening a handoff lands in its lead's conversation, on it; opening it
-  // answers nothing, and the pane stays, marking it.
+  // Choosing a request shows it in full beside the list; Open in the
+  // conversation lands in its lead's conversation,
+  // on it. Neither answers it, and the pane stays, marking it.
   await pane.locator('.needs-you-item[data-type="login"] [data-request]').click();
+  await pane.locator('.needs-you-detail-title', { hasText: 'Log in to the npm registry' }).waitFor();
+  assert.match(await pane.locator('.needs-you-detail').innerText(), /npm login[\s\S]*Task t1[\s\S]*checks it before relying on it[\s\S]*Mark done[\s\S]*Not needed/);
+  assert.ok((await focused())?.startsWith('pane:h:alice@'), 'beside the list: focus stays on the row chosen');
+  assert.equal(await pane.locator('.explorer-nav').isVisible() && await pane.locator('.explorer-content').isVisible(), true);
+  assert.equal(await called('ResolveHandoff'), 0);
+  await pane.locator('[data-detail-control="open"]').click();
   await until('the handoff focused', async () => (await focused())?.startsWith('dock:h:alice@'));
   assert.equal(await page.locator('#crumbs').innerText(), 'Alice 团队');
   assert.equal(await composer.inputValue(), 'unsent alice draft');
@@ -280,7 +291,7 @@ async function scenario(engineName, page) {
   assert.equal(await pane.locator('.needs-you-item[data-type="login"] [data-request]').getAttribute('aria-current'), 'true');
   assert.equal(await called('ResolveHandoff'), 0);
   assert.equal(await called('Answer'), 0);
-  await page.getByRole('button', { name: 'Show where it was asked' }).click();
+  await page.locator('#dock').getByRole('button', { name: 'Show where it was asked' }).click();
   const tool = page.locator('#thread [data-tool="call-login"].needs-you-target');
   await tool.waitFor();
   assert.ok(await tool.evaluate((el) => { const r = el.getBoundingClientRect(); const s = document.querySelector('#scroll').getBoundingClientRect(); return r.bottom > s.top && r.top < s.bottom; }));
@@ -291,6 +302,9 @@ async function scenario(engineName, page) {
   // A handed-over worker question, by keyboard: it opens on that worker.
   await pane.locator('.needs-you-item[data-type="select"] [data-request]').focus();
   await page.keyboard.press('Enter');
+  await pane.locator('.needs-you-detail-title', { hasText: 'Allow rm -rf build?' }).waitFor();
+  assert.equal(await pane.locator('.needs-you-ask button').count(), 3, 'the dialog\'s own choices, answerable here');
+  await pane.locator('[data-detail-control="open"]').click();
   await until('the question focused', async () => (await focused())?.startsWith('dock:d:alice/w1@'));
   assert.equal((await page.locator('#crumbs').innerText()).split(/\s*\n\s*/).join(''), 'Alice 团队/w1');
   assert.match(await page.locator('.ask').innerText(), /Alice 团队 handed this question to you\./);
@@ -306,6 +320,7 @@ async function scenario(engineName, page) {
   await rowsAre(1);
   await rows.first().focus();
   await page.keyboard.press('Enter');
+  await pane.locator('[data-detail-control="open"]').click();
   await until('the dialog focused', async () => (await focused())?.startsWith('dock:d:bob/lead@'));
   await page.keyboard.press('Enter'); // Yes, the first action
   await agentIs('bob/lead', (i) => i.status !== 'waiting');
@@ -335,6 +350,53 @@ async function scenario(engineName, page) {
   await settle(0);
   await rowsAre(0);
   await assert.rejects(page.evaluate(() => mygo.call('Yesman.Answer', 'alice/lead', 'qt', { value: 'late' })), /no longer waiting/);
+
+  // In the pane's detail, through the real service: a text answer typed
+  // there survives showing Bob and coming back, and Submit answers that very
+  // dialog; Not needed and Mark done close Alice's handoffs for her current
+  // hire, and her lead hears of them.
+  await ctl('prompt', { agent: 'alice/lead', message: ask({ id: 'qpane', method: 'input', title: 'Name the pane branch' }) });
+  await agentIs('alice/lead', (i) => i.status === 'waiting');
+  await settle(1);
+  await rowsAre(1);
+  await rows.first().click();
+  const paneAnswer = pane.locator('[data-detail-control="answer-text"]');
+  const answers = await called('Answer');
+  await paneAnswer.fill('pane-branch');
+  await lead('bob').click();
+  await pane.locator('.needs-you-empty').waitFor();
+  await refresh();
+  await lead('alice').click();
+  await rowsAre(1);
+  assert.equal(await paneAnswer.inputValue(), 'pane-branch', 'the unsent answer survives another yesman and a refresh');
+  assert.equal(await called('Answer'), answers);
+  await pane.locator('.needs-you-ask [data-detail-control="answer-0"]').click();
+  await agentIs('alice/lead', (i) => i.status !== 'waiting');
+  assert.ok(await page.evaluate(() => calls.some((c) => c[0] === 'Answer' && c[1] === 'alice/lead' && c[2] === 'qpane' && c[3]?.value === 'pane-branch')));
+  await settle(0);
+  await rowsAre(0);
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou({ add: { type: 'decision', title: 'Pick the pane width' } }) });
+  await ctl('prompt', { agent: 'alice/lead', message: needsYou({ add: { type: 'manual', title: 'Plug in the pane phone' } }) });
+  await settle(2);
+  await rowsAre(2);
+  const resolves = await called('ResolveHandoff');
+  await pane.locator('.needs-you-item[data-type="decision"] [data-request]').click();
+  await pane.locator('.needs-you-detail-title', { hasText: 'Pick the pane width' }).waitFor();
+  await pane.locator('[data-detail-control="not-needed"]').click();
+  await settle(1);
+  await rowsAre(1);
+  await pane.locator('.needs-you-detail-title', { hasText: 'Plug in the pane phone' }).waitFor();
+  await pane.locator('[data-detail-control="done"]').click();
+  await settle(0);
+  await rowsAre(0);
+  assert.equal(await called('ResolveHandoff'), resolves + 2);
+  const hired = await page.evaluate(() => fixtureState.yesmen.find((y) => y.name === 'alice').hiredAt);
+  assert.ok(await page.evaluate((hired) => calls.filter((c) => c[0] === 'ResolveHandoff').slice(-2).every((c) => c[1] === 'alice' && c[2] === hired), hired));
+  const told = (title, how) => until(`alice/lead told ${title}`, async () => ((await observed()).prompts['alice/lead'] ?? []).some((p) => p.startsWith('[yesman] The user marked ') && p.includes(`"${title}"`) && p.includes(how)));
+  await told('Pick the pane width', 'not needed');
+  await told('Plug in the pane phone', 'as done');
+  assert.match(await pane.locator('.needs-you-history').innerText(), /Plug in the pane phone[\s\S]*Marked done[\s\S]*Pick the pane width[\s\S]*Marked not needed/);
+  await shot('detail-resolved');
 
   // While the user composes in the message box, with an IME, a request
   // that arrives redraws the pane only: the message box keeps its focus,
@@ -456,7 +518,7 @@ async function scenario(engineName, page) {
     return {
       pane: box('#needs-you'), scroll: box('#scroll'), composer: box('.composer'), viewport: { width: innerWidth, height: innerHeight },
       rows: [...pane.querySelectorAll('.needs-you-item')].map((el) => el.getBoundingClientRect().height),
-      overflow: [pane, document.scrollingElement, pane.querySelector('.board-body')].some((el) => el.scrollWidth > el.clientWidth + 1),
+      overflow: [pane, document.scrollingElement, pane.querySelector('.explorer-nav-scroll'), pane.querySelector('.explorer-content')].some((el) => el.scrollWidth > el.clientWidth + 1),
       requests: document.querySelector('.dock-requests')?.getBoundingClientRect().height ?? 0,
     };
   });
@@ -496,7 +558,7 @@ async function scenario(engineName, page) {
   // The request memory, in Chinese, dark and wide: Bob's is full, which his
   // pane and his Info row say; the user starts a new one by keyboard, and his
   // lead hears of it.
-  await page.setViewportSize({ width: 1240, height: 800 });
+  await page.setViewportSize({ width: 1600, height: 800 });
   const memory = pane.locator('.needs-you-memory[data-memory="bob"]');
   const memoryState = (name = 'bob') => page.evaluate((name) => document.querySelector(`#needs-you .needs-you-memory[data-memory="${name}"]`)?.dataset.state ?? '', name);
   const memoryIs = (state, name = 'bob') => until(`${name}'s memory ${state || 'fine'}`, async () => {
@@ -635,8 +697,11 @@ try {
     let browser;
     try {
       browser = await engine.launch({ headless: true });
-      // The app's own window size.
-      const page = await browser.newPage({ viewport: { width: 1180, height: 780 } });
+      // Wide enough for the info panel beside the pane's two columns, as
+      // this scenario reads the info row while the pane is open; at the
+      // app's own 1180x780 the info makes way for the pane
+      // (resource-explorer-browser.mjs, layout).
+      const page = await browser.newPage({ viewport: { width: 1600, height: 780 } });
       const errors = [];
       page.on('pageerror', (err) => { errors.push(err.message); console.error(err.stack); });
       await page.addInitScript(bridge);
@@ -648,7 +713,7 @@ try {
       assert.deepEqual(errors, []);
       assert.deepEqual(await page.evaluate(() => window.unmocked), []);
       results.push(`${engineName}: PASS`);
-      console.log(`${engineName}: Needs you pane from Info and the palette beside the conversation (no gathered sidebar entry), Board and Needs you sharing the place, close by keyboard, the yesman shown only (Alice, then Bob), sources, retried and stale calls, count, open a handoff or a handed-over question without answering it, draft and image kept, back to the pane, answer, done, history, expiry, IME and refresh focus, archive/rehire with a late older agent list, remove, reload, an unreadable file, long rows, zh/dark/narrow, request memory near/full/pre-release with a keyboard reset, a stale confirmation, the lead told, a cancelled reset never answered by another's confirmation and a late reset not taking focus passed`);
+      console.log(`${engineName}: Needs you pane from Info and the palette beside the conversation (no gathered sidebar entry), Board and Needs you sharing the place, close by keyboard, the yesman shown only (Alice, then Bob), sources, retried and stale calls, count, open a handoff or a handed-over question without answering it, draft and image kept, back to the pane, answer, done, the pane detail's own answer kept across yesmen, Not needed and Mark done, history, expiry, IME and refresh focus, archive/rehire with a late older agent list, remove, reload, an unreadable file, long rows, zh/dark/narrow, request memory near/full/pre-release with a keyboard reset, a stale confirmation, the lead told, a cancelled reset never answered by another's confirmation and a late reset not taking focus passed`);
     } finally {
       await browser?.close();
       await backend.close();

@@ -40,8 +40,9 @@ type restarts struct {
 	version  func() string
 	now      func() time.Time
 	changed  func(RestartView)
-	timeout  time.Duration // for all the agents of a restart to go on
-	drain    time.Duration // for reports the shutdown cut short to end
+	timeout  time.Duration             // for all the agents of a restart to go on
+	drain    time.Duration             // for reports the shutdown cut short to end
+	hold     func(restart.Agent) error // keep unfinished recovery from waking through task evaluation
 
 	mu      sync.Mutex
 	pending *pendingRestart
@@ -165,7 +166,7 @@ func (r *restarts) canceled() {
 	r.changed(v)
 }
 
-// resumer resumes one agent; Manager.Resume in the app.
+// resumer resumes one agent; Manager.ResumeAfterRestart in the app.
 type resumer func(ctx context.Context, a restart.Agent, note string) (string, error)
 
 // Bounds of a restart. At most resumeParallel agents are resumed at
@@ -205,6 +206,11 @@ func (r *restarts) resume(resume resumer) {
 		res.Unfinished = true
 		for i, a := range in.Agents {
 			res.Agents[i] = restart.Outcome{Yesman: a.Yesman, Name: a.Name, Role: a.Role, Reason: a.Reason, Outcome: restart.NotContinued}
+			if r.hold != nil {
+				if err := r.hold(a); err != nil {
+					res.Agents[i].Error = err.Error()
+				}
+			}
 		}
 	} else if rejected == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
@@ -225,6 +231,9 @@ func (r *restarts) resume(resume resumer) {
 					// Resume stops waiting when ctx ends and sends nothing
 					// after; its place is held until it has returned.
 					o.Outcome, err = resume(ctx, a, restartNote(in, running, a.Reason))
+					if r.hold != nil && (o.Outcome == restart.Failed || o.Outcome == restart.Uncertain) {
+						err = errors.Join(err, r.hold(a))
+					}
 					if err != nil {
 						o.Error = err.Error()
 						log.Printf("restart: %s/%s: %s: %v", a.Yesman, a.Name, o.Outcome, err)

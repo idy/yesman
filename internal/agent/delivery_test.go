@@ -201,7 +201,7 @@ func TestDeliveryAcceptanceNeverClaimsConsumption(t *testing.T) {
 					text = ""
 				}
 				images := []Image{testImage(), testImage()}
-				d, err := m.submit(ctx, id, messageID, text, images, behavior)
+				d, err := m.submit(ctx, id, messageID, text, images, behavior, nil)
 				if err != nil || d.State != state {
 					t.Fatalf("submit %+v %v", d, err)
 				}

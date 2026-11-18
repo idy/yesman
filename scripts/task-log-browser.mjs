@@ -45,6 +45,7 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
  case 'TakeFocus':return '';case 'Update':return {enabled:false};
  case 'Messages':return {messages:[]};case 'Models':return {models:[],agent:agents.find(a=>a.id===args[0])};
  case 'Info':return {knowledge:{notes:1,index:true},worktrees:[]};case 'Board':return {tasks:[]};
+ case 'Schedules':return {plans:[]}; // the info panel's Tasks row: no scheduled tasks
  case 'WatchFiles':case 'Reveal':case 'OpenURL':return;
  case 'FilesMenu':return menuAction;
  case 'ReadFile':{
@@ -115,11 +116,21 @@ try {
    await files.getByRole('link',{name:'Picker',exact:true}).click();
    await files.locator('#validation').waitFor();
    assert.equal(await page.locator('[data-info-entry="working-logs"]').getAttribute('aria-current'),'page');
-   assert.deepEqual(await page.locator('[data-info-entry]').evaluateAll(es=>es.map(e=>e.dataset.infoEntry)),['knowledge','working-logs','needs-you','topics']);
+   assert.deepEqual(await page.locator('[data-info-entry]').evaluateAll(es=>es.map(e=>e.dataset.infoEntry)),['knowledge','working-logs','needs-you','topics','tasks']);
+   // With room for the info beside Needs You's two columns, its row marks
+   // the pane open; at 1360px the info makes way for them and comes back
+   // when the pane closes, with focus on its row (resource explorer).
+   await page.setViewportSize({width:1600,height:900});
    await page.locator('[data-info-entry="needs-you"]').focus();await page.keyboard.press('Enter');
    await page.getByRole('button',{name:'Close Needs You',exact:true}).waitFor();
    assert.equal(await page.locator('[data-info-entry="needs-you"]').getAttribute('aria-current'),'page');
    await page.getByRole('button',{name:'Close Needs You',exact:true}).click();
+   assert.equal(await page.evaluate(()=>document.activeElement.dataset.infoEntry),'needs-you');
+   await page.setViewportSize({width:1360,height:900});
+   await page.locator('[data-info-entry="needs-you"]').focus();await page.keyboard.press('Enter');
+   await page.getByRole('button',{name:'Close Needs You',exact:true}).waitFor();
+   assert.equal(await page.locator('#yesman-info').isVisible(),false);
+   await page.getByRole('button',{name:'Close Needs You',exact:true}).focus();await page.keyboard.press('Enter');
    assert.equal(await page.evaluate(()=>document.activeElement.dataset.infoEntry),'needs-you');
    await page.locator('[data-info-entry="working-logs"]').focus();await page.keyboard.press('Enter');
    await files.getByRole('link',{name:'Picker',exact:true}).click();await files.locator('#validation').waitFor();

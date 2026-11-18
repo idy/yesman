@@ -47,6 +47,7 @@ jobs:
           runtime=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).root)' "$RUNNER_TEMP/yesman-runtime.json")
           echo "YESMAN_TEST_RUNTIME=$runtime" >> "$GITHUB_ENV"
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-queue-runtime.mjs
+          YESMAN_TEST_RUNTIME="$runtime" node scripts/check-queue-append.mjs
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-queue-preparation.mjs
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-queue-sdk.mjs
           YESMAN_TEST_RUNTIME="$runtime" node scripts/check-promote-checkpoints.mjs
@@ -79,6 +80,14 @@ jobs:
           else
             go test -race ./...
           fi
+
+      # Each managed write/edit and link-refusal test, by name, with its own
+      # PASS or SKIP. Links must be creatable here: a test that cannot make
+      # its symbolic link or (Windows) junction fails instead of skipping.
+      - name: Managed write and link refusal (verbose)
+        env:
+          YESMAN_REQUIRE_LINK_TESTS: "1"
+        run: go test -count=1 -v -run 'TestSafeFS|TestWorktreeRegistration|TestWorktreeInstance|TestManagedFiles|TestManagedWriteAndEdit|TestManagedEdit|TestManagedWorktree' ./internal/safefs ./internal/pool ./internal/server
 
       - name: Check the published naming-pair downloader offline
         if: runner.os == 'Linux'

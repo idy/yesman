@@ -108,7 +108,7 @@ func TestRecallWithManagedPi(t *testing.T) {
 		if n >= 3 {
 			behavior = "followUp"
 		}
-		d, err := m.submit(ctx, info.ID, id, text, []Image{image, image}, behavior, info.Since)
+		d, err := m.submit(ctx, info.ID, id, text, []Image{image, image}, behavior, nil, info.Since)
 		if err != nil {
 			t.Fatal(err)
 		}

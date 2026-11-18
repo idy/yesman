@@ -319,12 +319,12 @@ async function unknownImages(browser, engine) {
       assert.equal(await row.getAttribute("data-bound"), c.bound ? "true" : null, `${label}: bound to a receipt`);
       seen[c.name] = shown.length;
     }
-    assert.deepEqual(await page.locator(`[data-delivery="${sub(8)}"] .delivery-status`).allInnerTexts(), ["Taken by pi"]);
-    // The receipt of a submission no message is tied to is folded with the
-    // earlier ones: a light line there, its text kept as text.
-    await page.evaluate(() => (document.querySelector("#thread > .receipts").open = true));
-    assert.match(await page.locator(`#thread > .receipts [data-delivery="${sub(7)}"]`).innerText(), /Submission: \[yesman\] Worker[\s\S]*1 image submitted/);
-    assert.equal(await page.locator(`[data-delivery="${sub(7)}"]`).getAttribute("data-bound"), null);
+    // A message pi has reads as any message, without a delivery label.
+    assert.deepEqual(await page.locator(`[data-delivery="${sub(8)}"] .delivery-status`).allInnerTexts(), []);
+    // The receipt of a submission no message is tied to, with nothing more to
+    // know and a later one sent: nothing of it shows, and there is no record list.
+    assert.equal(await page.locator(`[data-delivery="${sub(7)}"]`).count(), 0);
+    assert.equal(await page.locator("#thread > .receipts").count(), 0);
     return seen;
   };
   const live = await check("live");
@@ -374,22 +374,18 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert(!(await thread.innerText()).includes(MARK), "the report is shown before it is opened");
     // People and replies in full, in order; the question to the user shows.
     const order = await page.locator("#thread > *").evaluateAll((els) => els.map((el) => el.classList.contains("work") ? "work" : el.matches("[data-bound]") ? "user" : el.classList.contains("msg-assistant") ? "text" : el.className.split(" ")[0]));
-    assert.deepEqual(order, ["user", "text", "work", "text", "work", "text", "user", "work", "text", "note", "receipts", "msg-delivery"]);
+    assert.deepEqual(order, ["user", "text", "work", "text", "work", "text", "user", "work", "text", "note", "msg-delivery"]);
     assert.match(await page.locator("[data-bound]").first().innerText(), /为什么会把 thinking 分成这么多次显示/);
     assert.equal(await page.locator("[data-bound]").first().locator(".message-images img").count(), 1);
-    assert.deepEqual(await page.locator("[data-bound] .delivery-status").allInnerTexts(), ["Taken by pi", "Taken by pi"]);
+    assert.deepEqual(await page.locator("[data-bound] .delivery-status").allInnerTexts(), []);
     assert(await page.getByText("你希望默认收起，还是只合并 Thinking？").isVisible());
     // A message from before origins were recorded is shown as it was.
     assert.equal(await page.locator("#thread > details.note[open] > summary", { hasText: "Report from worker legacy" }).count(), 1);
     // Receipts without a message: the latest failure as the message, with its
-    // state; an earlier one with nothing more to know folded into one line,
-    // opened to read what was kept of it.
+    // state; an earlier one with nothing more to know shows nothing.
     assert.match(await page.locator(`#thread > [data-delivery="${sub(4)}"]`).innerText(), /a rejected submission[\s\S]*Not sent/);
     assert.equal(await page.locator(`[data-delivery="${sub(3)}"]`).count(), 0);
-    assert.equal(await page.locator("#thread > .receipts > summary").innerText().then((s) => s.trim().split(/\s*\n\s*/).join(" | ")), "Earlier submission records · 1");
-    await page.locator("#thread > .receipts > summary").click();
-    assert.match(await page.locator(`#thread > .receipts [data-delivery="${sub(3)}"]`).innerText(), /Submission: an older submission[\s\S]*No confirmation recorded at the time/);
-    assert.equal(await page.locator(`[data-delivery="${sub(3)}"] .msg-user`).count(), 0);
+    assert.equal(await page.locator("#thread > .receipts").count(), 0);
 
     // Keyboard: open a stretch of work and read it in order, focus kept.
     const report = page.locator("#thread > .work").nth(1);
@@ -511,7 +507,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
     await page.waitForTimeout(50);
     assert.equal((await summaries(page))[0], "已完成 | 思考 2 次 · 工具调用 2 次 · 启动 1 个助手");
-    assert.deepEqual(await page.locator("[data-bound] .delivery-status").allInnerTexts(), ["pi 已取走", "pi 已取走", "pi 已取走"]);
+    assert.deepEqual(await page.locator("[data-bound] .delivery-status").allInnerTexts(), []);
     await page.locator("#scroll").evaluate((el) => (el.scrollTop = 0));
     await shot(page, "zh", engine);
     assert.deepEqual(errors, []);

@@ -94,7 +94,10 @@ func (s *service) SubmitTopic(ctx context.Context, yesman string, since time.Tim
 	}
 	s.app.topicsChanged(yesman)
 	full := yesmen.TopicMessage(send.Context, text)
-	d, err := s.app.agents.Submit(ctx, agent.ID(yesman, yesmen.LeadName), messageID, full, images, since)
+	// The topic is also the message's trusted conversation context: host-only,
+	// so pi never lets it share an occurrence with the composer's or another
+	// topic's input. Its text and pi's command stay exactly as sent.
+	d, err := s.app.agents.SubmitInContext(ctx, agent.ID(yesman, yesmen.LeadName), messageID, full, images, topicContext(id), since)
 	state := d.State
 	if err != nil {
 		state = "failed"
@@ -114,3 +117,7 @@ func (s *service) SubmitTopic(ctx context.Context, yesman string, since time.Tim
 	}
 	return TopicSubmission{Delivery: d, Send: send, Text: full}, nil
 }
+
+// topicContext is the host-only conversation context of a topic's messages
+// (agent.SubmitInContext); topic IDs such as tp3 fit its bounds.
+func topicContext(id string) string { return "topic:" + id }

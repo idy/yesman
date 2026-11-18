@@ -51,6 +51,7 @@ async function answer(m, args) {
   case 'Models': return {models:[{provider:'p',id:'m1',name:'Model One'}],agent:agents.find(a=>a.id===args[0])};
   case 'Info': return {knowledge:[],worktrees:[]};
   case 'Board': return {tasks:[]};
+  case 'Schedules': return {plans:[]};
   case 'Crew': return {members:[],yesman:''};
   case 'Context': case 'Usage': return null;
   case 'Shortcuts': return {};

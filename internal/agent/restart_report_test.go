@@ -87,7 +87,7 @@ func TestResumeExpiredBeforeAdmissionSendsNothing(t *testing.T) {
 	defer cancel()
 	done := make(chan string, 1)
 	lead := restart.Agent{Yesman: y.Name, Name: "lead", Role: RoleLead, WorkspaceHiredAt: y.HiredAt, AgentSince: y.HiredAt, Reason: restart.ReasonWorking}
-	go func() { o, _ := m.Resume(ctx, lead, "expired note"); done <- o }()
+	go func() { o, _ := m.ResumeAfterRestart(ctx, lead, "expired note"); done <- o }()
 	eventually(t, "the start", func() bool { m.mu.Lock(); defer m.mu.Unlock(); return a.proc != nil && a.info.Status == Idle })
 	var outcome string
 	select {
@@ -127,7 +127,7 @@ func TestResumeCutsOffItsOwnStart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	began := time.Now()
-	outcome, err := m.Resume(ctx, lead, "note")
+	outcome, err := m.ResumeAfterRestart(ctx, lead, "note")
 	if outcome != restart.Failed || err == nil {
 		t.Fatalf("Resume = %s %v", outcome, err)
 	}
@@ -183,7 +183,7 @@ func TestLateSettleHandedOnWithoutNewRun(t *testing.T) {
 	}
 
 	next, got := restartInstance(t, store, tmp)
-	outcome, err := next.Resume(context.Background(), entries[0], "must not run")
+	outcome, err := next.ResumeAfterRestart(context.Background(), entries[0], "must not run")
 	if outcome != restart.Reported || err != nil {
 		t.Fatalf("Resume = %s %v", outcome, err)
 	}
@@ -237,7 +237,7 @@ func TestAcceptedReportNotSentAgain(t *testing.T) {
 	}
 
 	next, got := restartInstance(t, store, tmp)
-	outcome, err := next.Resume(context.Background(), entry, "must not run")
+	outcome, err := next.ResumeAfterRestart(context.Background(), entry, "must not run")
 	if outcome != restart.Accepted || err == nil || !strings.Contains(err.Error(), "not sent again") {
 		t.Fatalf("Resume = %s %v", outcome, err)
 	}
@@ -289,7 +289,7 @@ func TestUncertainReportNotSentAgain(t *testing.T) {
 	}
 
 	next, got := restartInstance(t, store, tmp)
-	outcome, err := next.Resume(context.Background(), entry, "must not run")
+	outcome, err := next.ResumeAfterRestart(context.Background(), entry, "must not run")
 	if outcome != restart.Uncertain || err == nil {
 		t.Fatalf("Resume = %s %v", outcome, err)
 	}
@@ -308,7 +308,7 @@ func TestReportOfAnotherMessageNotHandedOn(t *testing.T) {
 	m, got := restartInstance(t, store, tmp)
 	entry := restart.Agent{Yesman: "alice", Name: "worker", Role: RoleWorker, WorkspaceHiredAt: y.HiredAt, AgentSince: w.StartedAt,
 		Reason: restart.ReasonReport, Report: &restart.Report{State: restart.ReportNotSent, Digest: digest("another message")}}
-	outcome, err := m.Resume(context.Background(), entry, "must not run")
+	outcome, err := m.ResumeAfterRestart(context.Background(), entry, "must not run")
 	if outcome != restart.Uncertain || err == nil {
 		t.Fatalf("Resume = %s %v", outcome, err)
 	}
@@ -339,7 +339,7 @@ func TestDeliveredReportStaysDelivered(t *testing.T) {
 	next, got := restartInstance(t, store, tmp)
 	entry := restart.Agent{Yesman: "alice", Name: "worker", Role: RoleWorker, WorkspaceHiredAt: y.HiredAt, AgentSince: w.StartedAt,
 		Reason: restart.ReasonReport, Report: &restart.Report{State: restart.ReportNotSent}}
-	if outcome, _ := next.Resume(context.Background(), entry, "must not run"); outcome != restart.Finished {
+	if outcome, _ := next.ResumeAfterRestart(context.Background(), entry, "must not run"); outcome != restart.Finished {
 		t.Fatalf("Resume = %s", outcome)
 	}
 	if n := len(gotOld.reports(ID("alice", "lead"), "worker")) + len(got.reports(ID("alice", "lead"), "worker")); n != 1 {
@@ -376,7 +376,7 @@ func TestNeedsYouYieldsToARunningAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	lead := restart.Agent{Yesman: "alice", Name: "lead", Role: RoleLead, WorkspaceHiredAt: y.HiredAt, AgentSince: y.HiredAt, Reason: restart.ReasonNeedsYou}
-	if outcome, _ := m.Resume(context.Background(), lead, "note"); outcome != restart.Active {
+	if outcome, _ := m.ResumeAfterRestart(context.Background(), lead, "note"); outcome != restart.Active {
 		t.Fatalf("Resume = %s", outcome)
 	}
 	if p := got.to(ID("alice", "lead")); len(p) != 1 {
@@ -432,7 +432,7 @@ func TestHandedOnReportBoundedByLeadLock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	done := make(chan string, 1)
-	go func() { o, _ := m.Resume(ctx, entry, "must not run"); done <- o }()
+	go func() { o, _ := m.ResumeAfterRestart(ctx, entry, "must not run"); done <- o }()
 	var outcome string
 	select {
 	case outcome = <-done:

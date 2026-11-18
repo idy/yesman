@@ -162,7 +162,8 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
                 agent: agents.find((a) => a.id === args[0]),
                 models: [{ id: "m", provider: "p", name: "Model" }],
               };
-            case "Submit": {
+            case "Submit":
+            case "SubmitCoalescing": {
               window.sent.push({ method, args });
               const [agent, id, text, images] = args;
               saved.receipts[agent] ??= {};
@@ -208,7 +209,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     const idAt = async (i) =>
       page.evaluate(
         (i) =>
-          window.sent.filter((s) => s.method === "Yesman.Submit")[i].args[1],
+          window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method))[i].args[1],
         i,
       );
     const row = (id) => page.locator(`[data-delivery="${id}"]`);
@@ -277,12 +278,12 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     assert.equal(await page.locator("#thread > .msg-user").count(), 1);
     assert.equal(await row(two).count(), 1);
     assert.match(await row(two).innerText(), /delivery unconfirmed/);
-    // A message tied to its receipt carries the receipt's state under it.
+    // A message tied to its receipt reads as any message: pi has it, no status.
     await page.evaluate((id) => window.fixture.consume("alice/lead", id, true), one);
     assert.equal(await row(one).count(), 1);
     assert.equal(await row(one).getAttribute("data-bound"), "true");
-    assert.equal(await row(one).locator(".msg-user").innerText(), "same");
-    assert.equal(await row(one).locator(".delivery-status").innerText(), "Taken by pi");
+    assert.equal(await row(one).locator(".msg-user").evaluate((el) => el.firstChild.textContent), "same");
+    assert.equal(await row(one).locator(".delivery-status").count(), 0);
     assert.equal(await page.locator("#thread > .msg-user, #thread > [data-bound] > .msg-user").count(), 2); // identical text and timestamps remain two real messages
     await page.evaluate(() =>
       window.fixture.emit("alice/lead", {
@@ -323,7 +324,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await input.press("Enter");
     await page.waitForFunction(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").length === 1,
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).length === 1,
     );
     const imageID = await idAt(0);
     // What this window sent shows as sent: its images, not a count of them.
@@ -345,7 +346,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await input.press("Enter");
     await page.waitForFunction(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").length === 2,
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).length === 2,
     );
     const retryID = await idAt(1);
     await page.evaluate((id) => window.fixture.reject(id), retryID);
@@ -357,7 +358,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await input.press("Enter");
     await page.waitForFunction(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").length === 3,
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).length === 3,
     );
     await page.waitForFunction(
       () => !document.querySelector(".composer textarea").readOnly,
@@ -405,7 +406,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     );
     const rejectedID = await page.evaluate(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").at(-1).args[1],
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1).args[1],
     );
     await ack(rejectedID, "failed");
     assert.equal(await input.inputValue(), "known rejection");
@@ -417,7 +418,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     );
     const newID = await page.evaluate(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").at(-1).args[1],
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1).args[1],
     );
     assert.notEqual(newID, rejectedID);
     await ack(newID);
@@ -461,7 +462,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     );
     const unknownID = await page.evaluate(
       () =>
-        window.sent.filter((s) => s.method === "Yesman.Submit").at(-1).args[1],
+        window.sent.filter((s) => /^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1).args[1],
     );
     const nativeBefore = await page.locator("#thread > .msg-user").count();
     await page.evaluate((id) => {
@@ -562,10 +563,10 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       two,
     );
     assert((await page.locator("#scroll").evaluate((el) => el.scrollTop)) < 10);
-    // Untied and only accepted: open the earlier records to read its preview.
-    if (!(await page.locator('#thread > .receipts').evaluate(el => el.open))) await page.locator('#thread > .receipts > summary').click();
-    assert.equal(await row(two).locator(".msg-user").count(), 0);
-    assert.match(await row(two).innerText(), /Submission: same[\s\S]*No confirmation recorded at the time/);
+    // Untied and only accepted, with later submissions after it: nothing more
+    // to show, and no record list to keep it in.
+    assert.equal(await row(two).count(), 0);
+    assert.equal(await page.locator("#thread > .receipts").count(), 0);
     await page.evaluate(() => {
       window.fixture.saved.queues["alice/lead"] = { known: false };
       window.fixture.emit("alice/lead", {
@@ -578,8 +579,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       window.events["mygo:locale"]({ locale: "zh-Hans" }),
     );
     await page.waitForTimeout(30);
-    assert.match(await row(two).innerText(), /当时未记录确认/);
-    assert.match(await row(one).innerText(), /pi 已取走/);
+    assert.equal(await row(one).locator(".delivery-status").count(), 0);
     assert.match(await row(retryID).innerText(), /交付已中断/);
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "en" }));
     await page.waitForTimeout(30);
@@ -622,7 +622,7 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       0,
     );
     assert(
-      await row(one)
+      await row(mouseID)
         .locator(".delivery-status[role=status][aria-live=polite]")
         .count(),
     );
@@ -636,14 +636,14 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     await page.waitForFunction(
       () => !document.querySelector(".composer textarea").readOnly,
     );
-    assert.equal(await page.locator("#thread > .msg-delivery > .msg-user").innerText(), "/receipt-only");
-    assert.match(await page.locator("#thread > .msg-delivery").innerText(), /Handled by an extension/);
+    // Handled by an extension: nothing left to wait for, so nothing to show,
+    // live as after a reload.
+    assert.equal(await page.locator("#thread .msg-delivery").count(), 0);
     await page.reload();
     await input.waitFor();
     await page.locator('[data-agent="alice/worker"]').click();
-    // After a reload only the receipt is left of it: a record, folded.
-    await page.locator("#thread > .receipts").waitFor();
-    assert.equal((await page.locator("#thread > .receipts > summary").innerText()).trim().split(/\s*\n\s*/).join(" | "), "Earlier submission records · 1");
+    await page.waitForTimeout(100);
+    assert.equal(await page.locator("#thread > .receipts").count(), 0);
     assert.equal(await page.locator("#thread .msg-delivery").count(), 0);
     assert.equal(await page.locator("#thread > .msg-user").count(), 0);
     assert.equal(await page.locator("#thread .thread-empty").count(), 0);

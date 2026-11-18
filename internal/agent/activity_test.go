@@ -20,7 +20,9 @@ func TestDescribeTool(t *testing.T) {
 		name, args, want string
 	}{
 		{"read", string(inside), "Reading " + filepath.Join("web", "app.js")},
-		{"read", string(outside), "Reading " + filepath.Join(filepath.Dir(dir), "notes.md")},
+		// Shown absolute, within the display limit: an agent's TMPDIR is a
+		// long workspace path, so this one may be clipped.
+		{"read", string(outside), clip("Reading " + filepath.Join(filepath.Dir(dir), "notes.md"))},
 		{"read", `{"path":"src/main.go"}`, "Reading src/main.go"},
 		{"bash", `{"command":"go test ./...\necho done"}`, "Running go test ./... …"},
 		{"edit", ``, "Editing"},

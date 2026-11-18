@@ -1,20 +1,30 @@
-// Optional browser check of how receipts read beside a long conversation, in
-// the production page against a controlled bridge, in Chromium and WebKit:
+// Optional browser check of what a person sees of their submissions beside a
+// long conversation, in the production page against a controlled bridge, in
+// Chromium and WebKit:
 //
 //   YESMAN_TEST_PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node scripts/check-receipts-browser.mjs
 //
 // The history is synthetic, shaped like a lead's after an upgrade and a
-// summary of earlier conversation: 42 retained receipts, 27 unconfirmed, beside
-// questions and answers whose messages carry no submission, and messages tied
-// to their receipts. It checks the earlier receipts are one
-// folded line that opens to all of them while every message, image and reply
-// stays as it was, and that what is sent now reads as the person's message
-// with its state: sending, accepted, refused, uncertain and retried, two with
-// the same text, images, a native message tied late, another agent, the
-// command palette, keys and Settings pages, repeated records and snapshots,
-// reloading, Chinese, dark and narrow windows, and the local icon font with
-// outside requests blocked. Set YESMAN_RECEIPTS_WEB to another page's web
-// directory (such as an earlier release's) to check it instead. A browser bridge is not the native window, pi or a real provider.
+// summary of earlier conversation: 42 retained receipts, 13 of them taken by pi
+// and 27 never confirmed, beside questions and answers whose messages carry no
+// submission, and messages tied to their receipts. The conversation is pi's
+// messages: finished receipts draw no list, count, row or label, and every
+// message, image and reply stays as it was. A submission shows at the foot,
+// with its state and actions, only while it is open: sending or accepted,
+// waiting in pi's queue (Send now, Cancel and edit), recalled with its
+// original to return to the input, uncertain while it is the latest, or
+// refused, interrupted or answered with an error until the person hides it or
+// sends its draft again unchanged; whatever else is sent after it, a refusal
+// that comes late, to a page reloaded since, stays. A hidden one tried again,
+// by the person or taken up again by the server, shows what comes of it. It also
+// covers two with the same text, images, a native message tied late, taken
+// ones leaving one by one while the reader's place, focus and draft stay, late
+// lower revisions, another agent, the command palette, keys and Settings
+// pages, repeated records and snapshots, reloading (the same rows as live),
+// Chinese, dark and narrow windows, and the local icon font with outside
+// requests blocked. Set YESMAN_RECEIPTS_WEB to another page's web directory
+// (such as an earlier release's) to check it instead. A browser bridge is not
+// the native window, pi or a real provider.
 const { chromium, webkit } = await import(process.env.YESMAN_TEST_PLAYWRIGHT_MODULE || "playwright");
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -148,7 +158,8 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
           case "Repos": case "Clones": return [];
           case "Messages": return structuredClone({ messages: saved.messages[args[0]] ?? [], live: [], seq: saved.seq, deliveries: saved.receipts[args[0]] ?? [], queue: { known: false } });
           case "Models": return { agent: agents.find((a) => a.id === args[0]), models: [{ id: "m", provider: "p", name: "Model" }] };
-          case "Submit": {
+          case "Submit":
+          case "SubmitCoalescing": {
             const [agent, id, text, images] = args;
             window.sent.push({ agent, id, text, images: images.length });
             if (window.fixture.bridgeDown) {
@@ -168,6 +179,14 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
             return structuredClone(saved.payloads[args[1]]);
           }
           case "SubmissionText": return saved.payloads[args[1]]?.text ?? "";
+          case "CancelSubmission": {
+            const [agent, id] = args;
+            return { delivery: window.fixture.set(agent, id, "cancelled", { nativePending: false, canCancel: false, canPromote: false, canRestore: true }), payload: structuredClone(saved.payloads[id]) };
+          }
+          case "AckRecall": {
+            window.fixture.set(args[0], args[1], "cancelled", { canRestore: false, originalPayload: false, originalText: false });
+            return {};
+          }
           case "PromoteSubmission": {
             window.promoted.push(args[1]);
             return { delivery: window.fixture.set(args[0], args[1], "steering", { canPromote: false }) };
@@ -179,6 +198,7 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
           case "Topics": return [];
           case "Update": return {};
           case "TakeFocus": return "";
+          case "CopyValue": window.copied = args[0]; return {};
           case "Shortcuts": return {};
           case "Grants": return { platform: "darwin", items: [] };
           case "ModelUsage": return { rows: [], coverage: {}, totals: {} };
@@ -195,7 +215,8 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
 }
 
 // What a reader sees at the foot of the thread and in it: the receipts drawn
-// on their own, the folded line, and every person's message and reply.
+// on their own, any folded record list (there should be none), and every
+// person's message and reply.
 const seen = (page) =>
   page.evaluate(() => {
     const thread = document.querySelector("#thread");
@@ -215,6 +236,22 @@ const seen = (page) =>
 const frame = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 const shot = (page, name, engine) => page.screenshot({ path: `${out}/${engine}-${name}.png` });
 
+// The rows a reader sees for submissions not tied to a message, in order.
+const ownIDs = (page) => page.evaluate(() => [...document.querySelectorAll("#thread > .msg-delivery:not([data-bound])")].map((el) => el.dataset.delivery));
+// Words of the removed record list and labels, in either language.
+const RECORDS = /Submission:|Earlier submission|Recorded as|Taken by pi|No confirmation recorded|较早的提交记录|提交记录：|当时记录|pi 已取走/;
+// Where the reader is: the scroll offset and the first row in view, with its place.
+const anchorOf = (page) => page.evaluate(() => {
+  const scroll = document.querySelector("#scroll");
+  const top = scroll.getBoundingClientRect().top;
+  const first = [...document.querySelectorAll("#thread > [data-row]")].find((el) => el.getBoundingClientRect().bottom > top);
+  return { scrollTop: Math.round(scroll.scrollTop), row: first?.dataset.row, offset: Math.round(first.getBoundingClientRect().top - top) };
+});
+const composerState = (page) => page.evaluate(() => {
+  const el = document.querySelector(".composer textarea");
+  return { focused: document.activeElement === el, value: el.value, selection: [el.selectionStart, el.selectionEnd] };
+});
+
 const results = {};
 const engines = process.env.YESMAN_TEST_ENGINES?.split(",") ?? ["chromium", "webkit"];
 for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) => engines.includes(e))) {
@@ -226,10 +263,11 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     const sentID = () => page.evaluate(() => window.sent.at(-1).id);
     const settled = () => page.waitForFunction(() => !document.querySelector(".composer textarea").readOnly);
     const row = (id) => page.locator(`#thread > [data-delivery="${id}"]`);
-    const folded = page.locator("#thread > .receipts");
 
-    // Reproduce the reported 42 old receipts / 27 unconfirmed headline.
+    // The reported situation: receipts kept for messages a summary replaced or
+    // from before messages were tied to receipts, many of them taken by pi.
     assert.equal(deliveries().filter((d) => d.id < sub(100)).length, EARLIER);
+    assert.equal(deliveries().filter((d) => d.id < sub(100) && d.state === "dispatched").length, 13);
     assert.equal(deliveries().filter((d) => d.id < sub(100) && d.state === "unconfirmed").length, 27);
     const first = await seen(page);
     results[`${engine}-history`] = { ...first, people: first.people.length };
@@ -243,46 +281,30 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.deepEqual(first.people, expected);
     assert.equal(first.replies, LEGACY + 3);
     assert.equal(await page.locator("#thread .msg-assistant strong", { hasText: "回答 7" }).count(), 1, "replies keep their Markdown");
-    // The kept receipts: no line of their own, one folded line saying what they are.
-    assert.equal(first.submissionLines, 0, `${first.submissionLines} Submission lines in the conversation`);
-    assert.equal(first.ownReceipts, 0);
-    assert.equal(first.folded, 1);
-    assert.equal(first.foldedSummary, "Earlier submission records · 42");
-    assert.match(await folded.locator(":scope > summary").getAttribute("title"), /cannot tie to a message above/);
-    assert.equal(await folded.evaluate((el) => el.open), false);
-    assert.equal(await folded.locator(".receipts-body > *").count(), 0, "a folded line draws what it folds");
-    for (const id of [sub(101), sub(102)]) assert.equal(await page.locator(`[data-delivery="${id}"][data-bound="true"] .delivery-status`).innerText(), "Taken by pi");
-    // The local icon font, decorative; nothing fetched from outside.
-    const caret = folded.locator(":scope > summary [data-icon=chevron]");
-    assert.equal(await caret.getAttribute("aria-hidden"), "true");
-    assert.match(await caret.evaluate((el) => getComputedStyle(el).fontFamily), /yesman Phosphor/);
-    assert.equal(await page.evaluate(() => document.fonts.check('12px "yesman Phosphor"')), true);
-    const box = await caret.boundingBox();
-    assert(box.width <= 12.5 && box.height <= 12.5, `caret is ${box.width}x${box.height}`);
-
-    // Opened by keyboard: every one of them, in order, with what was kept.
-    await folded.locator(":scope > summary").focus();
-    await page.keyboard.press("Enter");
-    await page.waitForFunction(() => document.querySelector("#thread > .receipts")?.open && document.querySelector("#thread > .receipts .receipts-body > [data-delivery]"));
-    const items = folded.locator(".receipts-body > [data-delivery]");
-    assert.equal(await items.count(), EARLIER);
-    assert.deepEqual(await items.evaluateAll((els) => els.map((el) => el.dataset.delivery)), Array.from({ length: EARLIER }, (_, i) => sub(i + 1)));
-    const lines = await items.allInnerTexts();
-    assert.match(lines[0], /^Submission: 历史问题摘要 #1：为什么这里会有 Submission？\s*No confirmation recorded at the time$/);
-    assert.match(lines[5], /Submission: 历史问题摘要 #6[^\n]* · 1 image submitted\s*No confirmation recorded at the time/);
-    assert.match(lines[17], /^Submission: Attached images · 2 images submitted\s*No confirmation recorded at the time$/);
-    assert.match(lines[39], /Submission: <img src=x onerror="window.pwned=1"> \*\*not bold\*\*/);
-    assert.match(lines[40], /Submission: \/status\s*Recorded as taken by pi/);
-    assert.match(lines[41], /Submission: an earlier recalled input\s*Recorded as recalled/);
-    assert.match(await folded.locator(".receipts-note").innerText(), /Missing confirmation does not establish whether pi processed/);
-    assert.equal(await folded.locator('[role="status"], [aria-live], button, img').count(), 0, "historical records neither announce live statuses nor grant actions");
-    assert.equal(await items.nth(6).locator(".delivery-compact").getAttribute("title"), `${textOf(7)}…`, "a truncated preview says so");
-    assert.equal(await folded.locator("img, strong").count(), 0, "a preview is text");
+    // The kept receipts: no list, no count, no row and no label of their own.
+    assert.equal(first.folded, 0, "finished receipts are folded into a record list");
+    assert.equal(first.foldedSummary, null);
+    assert.equal(first.ownReceipts, 0, `${first.ownReceipts} finished receipts have rows`);
+    assert.equal(first.submissionLines, 0);
+    assert.doesNotMatch(await page.locator("#thread").innerText(), RECORDS);
+    for (const id of [sub(101), sub(102)]) {
+      assert.equal(await page.locator(`#thread > [data-delivery="${id}"][data-bound="true"]`).count(), 1);
+      assert.equal(await page.locator(`[data-delivery="${id}"] .delivery-status`).count(), 0, "a message pi has carries a delivery label");
+    }
     assert.equal(await page.evaluate(() => window.pwned), undefined);
-    assert.equal(await folded.locator(":scope > summary").evaluate((el) => document.activeElement === el), true);
-    await shot(page, "opened", engine);
+    // The local icon font, decorative; nothing fetched from outside.
+    const glyph = page.locator(`[data-delivery="${sub(102)}"] .message-copy [data-icon=copy]`);
+    assert.equal(await glyph.getAttribute("aria-hidden"), "true");
+    assert.match(await glyph.evaluate((el) => getComputedStyle(el).fontFamily), /yesman Phosphor/);
+    assert.equal(await page.evaluate(() => document.fonts.check('12px "yesman Phosphor"')), true);
 
-    // The same records and snapshots again and again add nothing.
+    // The same records and snapshots again and again add nothing, and leave the
+    // reader's place, focus and draft as they were.
+    await page.locator("#scroll").evaluate((el) => (el.scrollTop = Math.round((el.scrollHeight - el.clientHeight) / 2)));
+    await input.focus();
+    await input.fill("a draft in progress");
+    await input.evaluate((el) => el.setSelectionRange(2, 7));
+    const place = await anchorOf(page);
     const before = await seen(page);
     const legacy = await page.evaluate((id) => window.fixture.saved.receipts["alice/lead"].find((d) => d.id === id), sub(5));
     for (let i = 0; i < 40; i++) {
@@ -294,8 +316,9 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     }
     await frame(page);
     assert.deepEqual(await seen(page), before);
-    assert.equal(await items.count(), EARLIER);
-    assert.equal(await folded.locator(":scope > summary").evaluate((el) => document.activeElement === el), true, "repeated records moved focus");
+    assert.deepEqual(await anchorOf(page), place, "repeated records moved the reader");
+    assert.deepEqual(await composerState(page), { focused: true, value: "a draft in progress", selection: [2, 7] }, "repeated records moved focus or the draft");
+    await input.fill("");
 
     // Sent now, with two images: the person's message as sent, its state under it.
     await input.click();
@@ -316,16 +339,18 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await row(pics).locator(".msg-user").evaluate((el) => (el.dataset.kept = "1"));
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "accepted"), pics);
     await settled();
+    await frame(page);
     assert.equal(await row(pics).locator('.msg-user[data-kept="1"]').count(), 1, "the message was redrawn for a state");
     assert.equal(await row(pics).locator(".delivery-status").innerText(), "Accepted · delivery unconfirmed");
     assert.equal((await seen(page)).ownReceipts, 1);
-    // pi's own message tied to it takes its place, once.
+    // pi's own message tied to it takes its place, once, as any message.
     await page.evaluate(([id, a, b]) => window.fixture.native("alice/lead", id, "看一下这两张图", [{ type: "image", data: a, mimeType: "image/png" }, { type: "image", data: b, mimeType: "image/png" }]), [pics, png, png1]);
     await frame(page);
     const now = await seen(page);
     assert.equal(now.ownReceipts, 0, "a receipt tied to a message keeps a row of its own");
     assert.deepEqual(now.people.filter((p) => p.text === "看一下这两张图"), [{ text: "看一下这两张图", images: [`data:image/png;base64,${png}`, `data:image/png;base64,${png1}`] }]);
-    assert.equal(await page.locator(`[data-delivery="${pics}"][data-bound="true"] .delivery-status`).innerText(), "Taken by pi");
+    assert.equal(await page.locator(`[data-delivery="${pics}"][data-bound="true"]`).count(), 1);
+    assert.equal(await page.locator(`[data-delivery="${pics}"] .delivery-status`).count(), 0, "a message pi has carries a delivery label");
 
     // Two with the same text are two, each tied by its own ID, never by text.
     await page.evaluate(() => window.fixture.agents[0].status = "working");
@@ -339,6 +364,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
       await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), sameIDs[i]);
       await settled();
     }
+    await frame(page);
     assert.notEqual(sameIDs[0], sameIDs[1]);
     for (const id of sameIDs) assert.match(await row(id).innerText(), /^same\s*Accepted for steering · delivery unconfirmed$/);
     await page.evaluate((id) => window.fixture.native("alice/lead", id, "same"), sameIDs[1]);
@@ -350,7 +376,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal((await seen(page)).ownReceipts, 0);
 
     // One still to come when the next is sent, which pi then stops before
-    // taking, folds as it finishes: nothing keeps it as it was sent.
+    // taking, leaves as it finishes: nothing keeps it as it was sent.
     let count = await page.evaluate(() => window.sent.length);
     await input.fill("first while working");
     await page.locator("input[type=file]").setInputFiles([{ name: "d.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") }]);
@@ -366,12 +392,12 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     const later = await sentID();
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), later);
     await settled();
+    await frame(page);
     assert.equal(await row(early).locator(".msg-user img").count(), 1);
     assert.match(await row(early).innerText(), /^first while working\s*Accepted for steering/);
     await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed"), early);
     await frame(page);
-    assert.equal(await row(early).count(), 0, "a submission a later one followed kept its own row once it finished");
-    assert.match(await folded.locator(`[data-delivery="${early}"]`).innerText(), /^Submission: first while working · 1 image submitted\s*No confirmation recorded at the time$/);
+    assert.equal(await page.locator(`#thread [data-delivery="${early}"]`).count(), 0, "a submission a later one followed kept a row once it finished");
     assert.match(await row(later).innerText(), /^second while working\s*Accepted for steering/);
     await page.evaluate((id) => window.fixture.native("alice/lead", id, "second while working"), later);
     await frame(page);
@@ -383,6 +409,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await input.fill("did this arrive?");
     await input.press("Enter");
     await settled();
+    await frame(page);
     const lost = await sentID();
     assert.equal(await row(lost).locator(".msg-user").innerText(), "did this arrive?");
     assert.equal(await row(lost).locator(".delivery-status").innerText(), "Delivery unconfirmed");
@@ -396,12 +423,13 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     // ...its answer lost too: still the same row, uncertain, the draft kept.
     await page.evaluate((id) => window.fixture.lose(id), lost);
     await settled();
+    await frame(page);
     assert.equal(await page.locator("#thread > .msg-delivery", { hasText: "did this arrive?" }).count(), 1);
     assert.equal(await row(lost).locator(".delivery-status").innerText(), "Delivery unconfirmed");
     assert.equal(await row(lost).locator(".delivery-status").getAttribute("title"), "the bridge lost its answer");
     assert.equal(await input.inputValue(), "did this arrive?");
-    // Editing is a new intent. The current uncertain failure remains visible
-    // even after the payload display cache lets go of it.
+    // Editing and sending is a new intent; it does not say the uncertain one
+    // was dealt with, which stays; nothing resends it.
     await input.fill("did this arrive? (edited)");
     count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
@@ -410,17 +438,18 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.notEqual(edited, lost);
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), edited);
     await settled();
+    await frame(page);
     assert.match(await row(edited).innerText(), /^did this arrive\? \(edited\)\s*Accepted for steering/);
-    assert.equal(await row(lost).count(), 1);
-    assert.equal(await folded.locator(`[data-delivery="${lost}"]`).count(), 0);
+    assert.match(await row(lost).innerText(), /^did this arrive\?\s*Delivery unconfirmed/, "an uncertain answer with an error left when the person sent another");
     // One the server never heard of, superseded by an edited draft the server
-    // answers for, folds too: it is no longer the latest.
+    // answers for, leaves too: it is no longer the latest.
     await page.evaluate(() => (window.fixture.bridgeDown = true));
     await input.fill("never heard of");
     await input.press("Enter");
     await settled();
+    await frame(page);
     const unheard = await sentID();
-    assert.match(await row(unheard).innerText(), /^never heard of\s*Delivery unconfirmed$/);
+    assert.match(await row(unheard).innerText(), /^never heard of\s*Delivery unconfirmed\s*Hide$/);
     count = await page.evaluate(() => window.sent.length);
     await input.fill("never heard of (edited)");
     await input.press("Enter");
@@ -429,12 +458,12 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.notEqual(reworded, unheard);
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), reworded);
     await settled();
+    await frame(page);
     assert.equal(await row(unheard).count(), 0, "a submission the server never heard of stays the latest");
-    assert.match(await folded.locator(`[data-delivery="${unheard}"]`).innerText(), /Submission: never heard of\s*No confirmation recorded at the time/);
-    assert.deepEqual(await folded.locator(".receipts-body > [data-delivery]").evaluateAll((els) => els.slice(-1).map((el) => el.dataset.delivery)), [unheard]);
     assert.match(await row(reworded).innerText(), /^never heard of \(edited\)\s*Accepted for steering/);
 
-    // A current refusal stays visible with its error after later submissions.
+    // A refusal stays in view, with its error and the draft, whatever is sent
+    // after it.
     await input.fill("this will be refused");
     count = await page.evaluate(() => window.sent.length);
     await input.press("Enter");
@@ -442,7 +471,8 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     const refused = await sentID();
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "failed", { error: "pi refused the prompt" }), refused);
     await settled();
-    assert.match(await row(refused).innerText(), /^this will be refused\s*Not sent$/);
+    await frame(page);
+    assert.match(await row(refused).innerText(), /^this will be refused\s*Not sent\s*Hide$/);
     assert.equal(await row(refused).locator(".delivery-status").getAttribute("title"), "pi refused the prompt");
     assert.equal(await input.inputValue(), "this will be refused");
     // Images alone, sent now.
@@ -457,43 +487,46 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await row(alone).locator(".msg-user").evaluate((el) => el.firstChild?.nodeType === 3 ? el.firstChild.textContent : ""), "");
     await page.evaluate((id) => window.fixture.ack("alice/lead", id, "queued"), alone);
     await settled();
+    await frame(page);
     assert.equal(await row(alone).locator(".delivery-status").innerText(), "Accepted for follow-up · delivery unconfirmed");
-    assert.equal(await row(refused).count(), 1, "a later submission hid the current refusal");
-    assert.equal((await seen(page)).foldedSummary, "Earlier submission records · 44");
+    assert.match(await row(refused).innerText(), /^this will be refused\s*Not sent/, "a refusal left when the person sent another");
     // The uncertain answer from the server, the latest now, is in view.
     await page.evaluate((id) => window.fixture.set("alice/lead", id, "unconfirmed", { error: "pi stopped before answering" }), alone);
     await frame(page);
     assert.match(await row(alone).innerText(), /Delivery unconfirmed/);
     assert.equal(await row(alone).locator(".msg-user img").count(), 1, "the latest let go of what it was sent as");
     const live = await seen(page);
-    results[`${engine}-live`] = { ...live, people: live.people.length };
+    const liveRows = await ownIDs(page);
+    assert.deepEqual(liveRows, [lost, edited, reworded, refused, alone]);
+    assert.equal(live.folded, 0);
+    assert.doesNotMatch(await page.locator("#thread").innerText(), RECORDS);
+    results[`${engine}-live`] = { ...live, people: live.people.length, rows: liveRows.length };
+    await page.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
+    await shot(page, "live", engine);
 
-    // Another agent's conversation is its own; coming back keeps what was open.
+    // Another agent's conversation is its own; coming back keeps what was there.
     await page.locator('[data-agent="alice/w1"]').click();
     await page.locator("#thread .thread-empty").waitFor();
     assert.equal(await page.locator("#thread [data-delivery]").count(), 0);
     await input.fill("worker draft");
     await page.locator('[data-agent="alice/lead"]').first().click();
-    await folded.waitFor();
-    assert.equal(await folded.evaluate((el) => el.open), true);
+    await row(alone).waitFor();
     assert.equal(await input.inputValue(), "");
     assert.deepEqual(await seen(page), live);
 
-    // Keys, the command palette and Settings around it: the folded line stays
-    // open and keeps focus, and the conversation is as it was.
-    const summary = folded.locator(":scope > summary");
+    // Keys, the command palette and Settings around it: focus comes back and
+    // the conversation is as it was.
+    const copy = row(edited).locator(".message-copy").first();
     const focused = (locator) => locator.evaluate((el) => document.activeElement === el);
-    await summary.focus();
+    await copy.focus();
     await page.keyboard.press("Meta+KeyK");
     await page.locator("dialog.palette-dialog[open]").waitFor();
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => !document.querySelector("dialog.palette-dialog[open]"));
     await frame(page);
-    assert.equal(await focused(summary), true, "the palette gave focus back elsewhere");
-    assert.equal(await folded.evaluate((el) => el.open), true);
+    assert.equal(await focused(copy), true, "the palette gave focus back elsewhere");
     await page.keyboard.press("Meta+KeyL");
     assert.equal(await focused(input), true);
-    assert.equal(await folded.evaluate((el) => el.open), true);
     // Settings › Grant and Settings › Model usage, then back by the sidebar.
     await page.keyboard.press("Meta+Comma");
     await page.locator('#settings-nav [data-page="grant"]').click();
@@ -502,86 +535,282 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await page.locator('#settings-nav [data-page="usage"][aria-current="page"]').waitFor();
     await page.waitForTimeout(50);
     await page.locator('[data-agent="alice/lead"]').first().click();
-    await folded.waitFor();
-    assert.equal(await folded.evaluate((el) => el.open), true);
+    await row(alone).waitFor();
     assert.deepEqual(await seen(page), live);
     // The next conversation and back by keys.
-    await summary.focus();
+    await copy.focus();
     await page.keyboard.press("Meta+Alt+ArrowDown");
     await page.locator("#thread .thread-empty").waitFor();
     await page.keyboard.press("Meta+Alt+ArrowUp");
-    await folded.waitFor();
-    assert.equal(await folded.evaluate((el) => el.open), true);
+    await row(alone).waitFor();
     assert.deepEqual(await seen(page), live);
-    assert.equal(await folded.locator(".receipts-body > [data-delivery]").count(), 44);
+    assert.deepEqual(await ownIDs(page), liveRows);
 
-    // History reads the same, without what only this window had: the folded
-    // line closed again, the latest uncertain one in view from its preview.
+    // History reads the same, without what only this window had: the same
+    // rows as the live window, from their previews.
     await page.reload();
     await page.locator('[data-agent="alice/lead"]').first().click();
-    await folded.waitFor();
+    await row(alone).waitFor();
     await page.waitForTimeout(100);
     const reloaded = await seen(page);
     assert.deepEqual(reloaded.people, live.people);
     assert.equal(reloaded.replies, live.replies);
-    // The one the server never heard of was only ever this window's.
-    assert.equal(reloaded.foldedSummary, "Earlier submission records · 43");
-    assert.equal(await folded.evaluate((el) => el.open), false);
+    assert.equal(reloaded.folded, 0);
+    assert.deepEqual(await ownIDs(page), liveRows, "a reloaded window shows other rows than the live one");
     assert.equal(await row(alone).locator(".delivery-image-count").innerText(), "1 image submitted");
     assert.equal(await row(alone).locator("img").count(), 0, "an image was made up from a receipt");
     assert.match(await row(alone).innerText(), /Delivery unconfirmed/);
-    // The steering one, still to come, from what its receipt keeps.
+    // The steering ones, still to come, from what their receipts keep.
     assert.match(await row(edited).innerText(), /^did this arrive\? \(edited\)\s*Accepted for steering/);
     assert.match(await row(reworded).innerText(), /^never heard of \(edited\)\s*Accepted for steering/);
-    assert.equal(reloaded.ownReceipts, 5);
-    for (const id of [lost, refused, alone]) assert.equal(await row(id).count(), 1, "current uncertain/failed receipts survive reload");
+
+    // The person hides a refusal: it leaves, focus moves on to the next one
+    // to hide, and nothing is sent. Hidden ones stay hidden through a reload.
+    const hide = (id) => row(id).getByRole("button", { name: "Hide", exact: true });
+    count = await page.evaluate(() => window.sent.length);
+    assert.equal(await row(edited).locator(".message-dismiss").count(), 0, "a submission still on its way can be hidden");
+    await hide(refused).focus();
+    await page.keyboard.press("Enter");
+    await frame(page);
+    assert.equal(await row(refused).count(), 0);
+    assert.equal(await hide(alone).evaluate((el) => document.activeElement === el), true, "focus did not move on to the next one");
+    await hide(lost).click();
+    await frame(page);
+    assert.deepEqual(await ownIDs(page), [edited, reworded, alone]);
+    assert.equal(await page.evaluate(() => window.sent.length), count, "hiding sent something");
+    await page.reload();
+    await page.locator('[data-agent="alice/lead"]').first().click();
+    await row(alone).waitFor();
+    await page.waitForTimeout(100);
+    assert.deepEqual(await ownIDs(page), [edited, reworded, alone]);
+    // A refusal sent again unchanged, from the draft it left: once the server
+    // has the new one, the refused one has been dealt with, live and reloaded.
+    await input.fill("refused, then sent again as it was");
+    count = await page.evaluate(() => window.sent.length);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    const refusedOnce = await sentID();
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "failed", { error: "pi refused the prompt" }), refusedOnce);
+    await settled();
+    await frame(page);
+    assert.equal(await input.inputValue(), "refused, then sent again as it was");
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 2, count);
+    const again = await sentID();
+    assert.notEqual(again, refusedOnce);
+    assert.match(await row(refusedOnce).innerText(), /Not sent/, "the refusal left before the server had its retry");
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "steering"), again);
+    await settled();
+    await frame(page);
+    assert.equal(await row(refusedOnce).count(), 0, "a refusal sent again unchanged stayed");
+    assert.match(await row(again).innerText(), /^refused, then sent again as it was\s*Accepted for steering/);
+    // A refusal that comes late, to a page reloaded since, after a newer one
+    // was sent (the shape a real Manager gives when durable registration
+    // fails): both stay, the earlier one's text copyable, live and reloaded.
+    const late = sub(0x10a);
+    await page.evaluate((id) => window.fixture.emit("alice/lead", { type: "delivery_update", delivery: { id, agentSince: "1", session: "", revision: 1, state: "sending", text: "late A original", imageCount: 0, order: ++window.fixture.saved.order } }), late);
+    await frame(page);
+    await input.fill("new B also fails");
+    count = await page.evaluate(() => window.sent.length);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    const newer = await sentID();
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "failed", { error: "disk I/O failure" }), late);
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "failed", { error: "disk I/O failure" }), newer);
+    await settled();
+    await frame(page);
+    for (let pass = 0; pass < 2; pass++) {
+      assert.match(await row(late).innerText(), /^late A original\s*Not sent/);
+      assert.match(await row(newer).innerText(), /^new B also fails\s*Not sent/);
+      await row(late).locator(".message-copy").click();
+      await page.waitForFunction(() => window.copied === "late A original");
+      await page.evaluate(() => (window.copied = null));
+      if (!pass) {
+        await page.reload();
+        await page.locator('[data-agent="alice/lead"]').first().click();
+        await row(late).waitFor();
+      }
+    }
+    // Hidden, it shows again if it is waiting again: hiding never hides what pi may still take.
+    await hide(late).click();
+    await frame(page);
+    assert.equal(await row(late).count(), 0);
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "queued", { nativePending: true }), late);
+    await frame(page);
+    assert.match(await row(late).innerText(), /^late A original\s*Waiting · follow-up/);
+    assert.equal(await row(late).locator(".message-dismiss").count(), 0);
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "dispatched", { nativePending: false }), late);
+    await hide(newer).click();
+    await frame(page);
+    assert.deepEqual(await ownIDs(page), [edited, reworded, alone, again]);
+
+    // A hidden submission tried again: whatever comes of the new attempt
+    // shows, live and reloaded, with its whole text to copy. The Hide covered
+    // only what the person saw then.
+    const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem("yesman.handledSubmissions") ?? "{}")["alice/lead@1"] ?? []);
+    const copyOf = async (id) => {
+      await page.evaluate(() => (window.copied = null));
+      await row(id).locator(".message-copy").click();
+      await page.waitForFunction(() => window.copied !== null);
+      return page.evaluate(() => window.copied);
+    };
+    const reloadLead = async () => {
+      await page.reload();
+      await page.locator('[data-agent="alice/lead"]').first().click();
+      await row(alone).waitFor();
+      await page.waitForTimeout(100);
+    };
+    // (a) The bridge loses the first send before the server hears of it; the
+    // person hides that row, then sends the same draft again (the same ID).
+    // The server registers it and refuses it: the refusal shows.
+    await page.evaluate(() => (window.fixture.bridgeDown = true));
+    await input.fill("retry hidden unknown");
+    count = await page.evaluate(() => window.sent.length);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    await settled();
+    const retried = await sentID();
+    await hide(retried).click();
+    await frame(page);
+    assert.equal(await row(retried).count(), 0);
+    assert.equal((await stored()).includes(retried), true);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 2, count);
+    assert.equal(await sentID(), retried, "an unchanged retry got a new ID");
+    await row(retried).locator(".delivery-status", { hasText: "Sending" }).waitFor();
+    assert.equal((await stored()).includes(retried), false, "a retried submission stayed hidden in storage");
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "failed", { error: "initial persistence failed" }), retried);
+    await settled();
+    await frame(page);
+    for (let pass = 0; pass < 2; pass++) {
+      assert.match(await row(retried).innerText(), /^retry hidden unknown\s*Not sent/, "the new attempt's refusal is hidden");
+      assert.equal(await copyOf(retried), "retry hidden unknown");
+      if (!pass) await reloadLead();
+    }
+    // (b) Hidden again, it stays hidden through a late lower revision and an
+    // earlier generation's callback: neither is a new attempt.
+    await hide(retried).click();
+    await frame(page);
+    await page.evaluate((id) => {
+      const d = window.fixture.saved.receipts["alice/lead"].find((x) => x.id === id);
+      const deliver = (delivery) => window.events["agent-event"]({ agent: "alice/lead", seq: ++window.fixture.saved.seq, data: { type: "delivery_update", delivery } });
+      deliver({ ...d, revision: 1, state: "sending", error: "" });
+      deliver({ ...d, agentSince: "0", revision: 99, state: "queued", nativePending: true, error: "" });
+    }, retried);
+    await frame(page);
+    assert.equal(await row(retried).count(), 0, "a stale callback brought a hidden row back");
+    assert.equal((await stored()).includes(retried), true);
+    await reloadLead();
+    assert.equal(await row(retried).count(), 0);
+    // (c) The bridge loses its answer though the server got the message: the
+    // person hides the uncertain row, then the server's own answer arrives,
+    // waits in pi's queue, and is cut off. The interruption shows.
+    await page.evaluate(() => (window.fixture.bridgeDown = true));
+    await input.fill("reached the server after all");
+    count = await page.evaluate(() => window.sent.length);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    await settled();
+    const ambiguous = await sentID();
+    await hide(ambiguous).click();
+    await frame(page);
+    assert.equal(await row(ambiguous).count(), 0);
+    await page.evaluate((id) => window.fixture.emit("alice/lead", { type: "delivery_update", delivery: { id, agentSince: "1", session: "s", revision: 1, state: "sending", text: "reached the server after all", imageCount: 0, order: ++window.fixture.saved.order } }), ambiguous);
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "queued", { nativePending: true }), ambiguous);
+    await frame(page);
+    assert.match(await row(ambiguous).innerText(), /^reached the server after all\s*Waiting · follow-up/);
+    assert.equal(await row(ambiguous).locator(".message-dismiss").count(), 0);
+    await page.evaluate((id) => window.fixture.set("alice/lead", id, "interrupted", { nativePending: false }), ambiguous);
+    await frame(page);
+    for (let pass = 0; pass < 2; pass++) {
+      assert.match(await row(ambiguous).innerText(), /^reached the server after all\s*Delivery interrupted/, "an interruption after the server took it up again is hidden");
+      assert.equal(await copyOf(ambiguous), "reached the server after all");
+      if (!pass) await reloadLead();
+    }
+    // (d) An interruption hidden, then its kept draft sent again: the server
+    // answers with the same receipt, unchanged, and nothing is sent to pi.
+    // The person asked again, so the answer shows again.
+    await input.fill("interrupted, hidden, asked again");
+    count = await page.evaluate(() => window.sent.length);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 1, count);
+    const asked = await sentID();
+    await page.evaluate((id) => window.fixture.ack("alice/lead", id, "interrupted"), asked);
+    await settled();
+    await hide(asked).click();
+    await frame(page);
+    assert.equal(await row(asked).count(), 0);
+    const revision = await page.evaluate((id) => window.fixture.saved.receipts["alice/lead"].find((x) => x.id === id).revision, asked);
+    await input.press("Enter");
+    await page.waitForFunction((n) => window.sent.length === n + 2, count);
+    assert.equal(await sentID(), asked);
+    await settled();
+    await frame(page);
+    assert.equal(await page.evaluate((id) => window.fixture.saved.receipts["alice/lead"].find((x) => x.id === id).revision, asked), revision);
+    for (let pass = 0; pass < 2; pass++) {
+      assert.match(await row(asked).innerText(), /^interrupted, hidden, asked again\s*Delivery interrupted/);
+      if (!pass) await reloadLead();
+    }
+    // Hidden once more, all three stay hidden; the rest are as they were.
+    for (const id of [retried, ambiguous, asked]) if (await row(id).count()) await hide(id).click();
+    await frame(page);
+    await input.fill("");
+    assert.deepEqual(await ownIDs(page), [edited, reworded, alone, again]);
 
     // Chinese.
     await page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
     await page.waitForTimeout(50);
-    assert.equal((await seen(page)).foldedSummary, "较早的提交记录 · 43 条");
+    assert.equal(await row(alone).locator(".delivery-status").innerText(), "交付状态尚未确认");
+    assert.equal(await row(alone).locator(".message-dismiss").innerText(), "隐藏");
+    assert.doesNotMatch(await page.locator("#thread").innerText(), RECORDS);
     assert.deepEqual(errors, []);
     assert.deepEqual(outside, []);
     assert.deepEqual(unsupported, []);
     await context.close();
 
-    // Dark and narrow, opened.
+    // Dark and narrow, in both languages: nothing at the foot, nothing wider than the window.
     const dark = await open(browser, { colorScheme: "dark", width: 480, height: 800 });
-    await dark.page.locator("#thread > .receipts > summary").click();
-    await dark.page.waitForFunction(() => document.querySelectorAll("#thread > .receipts [data-delivery]").length === 42);
-    const overflow = await dark.page.evaluate(() => {
+    const overflow = (p) => p.evaluate(() => {
       const scroll = document.querySelector("#scroll");
       const edge = scroll.getBoundingClientRect().right;
       const wide = [...scroll.querySelectorAll("*")].filter((el) => el.getBoundingClientRect().right > edge + 0.5);
       return { scroll: scroll.scrollWidth - scroll.clientWidth, wide: wide.map((el) => `${el.tagName.toLowerCase()}.${el.className}`).slice(0, 8) };
     });
-    assert.deepEqual(overflow, { scroll: 0, wide: [] });
+    assert.deepEqual(await overflow(dark.page), { scroll: 0, wide: [] });
     await dark.page.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
     await shot(dark.page, "dark-narrow", engine);
     await dark.page.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
     await frame(dark.page);
-    assert.equal((await seen(dark.page)).foldedSummary, "较早的提交记录 · 42 条");
-    assert.equal(await dark.page.locator('.receipts [data-state="unconfirmed"]').first().innerText(), "当时未记录确认");
+    const zh = await seen(dark.page);
+    assert.equal(zh.folded + zh.ownReceipts, 0);
+    assert.doesNotMatch(await dark.page.locator("#thread").innerText(), RECORDS);
     await shot(dark.page, "zh-dark-narrow", engine);
-    await writeFile(`${out}/${engine}-zh-dark-narrow.json`, JSON.stringify(await seen(dark.page), null, 2));
+    await writeFile(`${out}/${engine}-zh-dark-narrow.json`, JSON.stringify(zh, null, 2));
     assert.deepEqual(dark.errors, []);
     assert.deepEqual(dark.outside, []);
     assert.deepEqual(dark.unsupported, []);
     await dark.context.close();
 
-    // Twelve real composer submissions exceed the eight-payload display cache.
-    // Controlled DTOs describe native membership and recoverable payloads; no
-    // historical row gains those controls merely because its confirmation is missing.
+    // Twelve real composer submissions wait in pi's queue, beyond the
+    // eight-payload display cache, after one interrupted before a restart and
+    // beside a receipt in a state this page does not know. Controlled DTOs
+    // describe native membership and recoverable payloads.
     const mixed = await open(browser);
     const mp = mixed.page;
     const mi = mp.getByRole("textbox", { name: "Message", exact: true });
-    const mf = mp.locator("#thread > .receipts");
     const mr = (id) => mp.locator(`#thread > [data-delivery="${id}"]`);
     const canonical = await seen(mp);
-    const ids = [];
+    const interrupted = "e".repeat(48), unknown = "f".repeat(48);
+    await mp.evaluate((id) => window.fixture.emit("alice/lead", { type: "delivery_update", delivery: { id, session: "s-before-restart", revision: 3, order: 150, state: "interrupted", text: "an interrupted follow-up", imageCount: 0 } }), interrupted);
+    await frame(mp);
+    assert.deepEqual(await ownIDs(mp), [interrupted]);
+    assert.equal(await mr(interrupted).locator(".delivery-status").innerText(), "Delivery interrupted");
+    assert.deepEqual(await mr(interrupted).locator("button:not(:disabled)").evaluateAll((els) => els.map((el) => el.getAttribute("aria-label"))), ["Copy message text", "Hide"], "an interrupted submission offers more than Copy and Hide");
+    const ids = [], texts = [];
     const fullText = "  original current input\n" + "全文 ".repeat(200);
     for (let i = 0; i < 12; i++) {
-      await mi.fill(i === 0 ? fullText : `current input ${i}`);
+      texts.push(i === 0 ? fullText : `current input ${i}`);
+      await mi.fill(texts[i]);
       if (i === 0 || i === 3) {
         await mp.locator("input[type=file]").setInputFiles([
           { name: "current.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") },
@@ -598,39 +827,28 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
       }), id);
       await mp.waitForFunction(() => !document.querySelector(".composer textarea").readOnly);
     }
-    await mp.evaluate((ids) => {
-      window.fixture.set("alice/lead", ids[1], "failed", { error: "current rejection", nativePending: false, canCancel: false, canPromote: false, originalPayload: false, originalText: false });
-      window.fixture.set("alice/lead", ids[2], "unconfirmed", { error: "current uncertainty", nativePending: false, canCancel: false, canPromote: false, originalPayload: false, originalText: false });
+    await mp.evaluate(([ids, unknown]) => {
       window.fixture.set("alice/lead", ids[3], "cancelled", { nativePending: false, canCancel: false, canPromote: false, canRestore: true });
-      const unknown = { id: "f".repeat(48), revision: 1, order: 199, state: "future-state", text: "unknown older receipt", preview: true, imageCount: 1 };
-      window.fixture.emit("alice/lead", { type: "delivery_update", delivery: unknown });
-    }, ids);
+      window.fixture.emit("alice/lead", { type: "delivery_update", delivery: { id: unknown, revision: 1, order: 199, state: "future-state", text: "unknown older receipt", preview: true, imageCount: 1 } });
+    }, [ids, unknown]);
     await frame(mp);
-    await mf.locator("summary").click();
-    await mp.waitForFunction(() => document.querySelectorAll(".receipts-body > [data-delivery]").length === 42);
-    assert.equal((await seen(mp)).foldedSummary, "Earlier submission records · 42");
-    assert.equal((await seen(mp)).ownReceipts, 13);
-    for (const id of ids) assert.equal(await mr(id).count(), 1);
-    assert.equal(await mf.locator("button").count(), 0);
-    assert.equal(await mr(ids[1]).locator(".delivery-status").innerText(), "Not sent");
-    assert.equal(await mr(ids[2]).locator(".delivery-status").innerText(), "Delivery unconfirmed");
+    // A submission to the restarted session does not say the interruption was dealt with.
+    assert.deepEqual(await ownIDs(mp), [interrupted, unknown, ...ids]);
     assert.equal(await mr(ids[3]).getByRole("button", { name: "Return recalled message to input", exact: true }).count(), 1);
-    assert.equal(await mr("f".repeat(48)).locator("img, button:not(:disabled)").count(), 0);
-    // A higher revision updates one historical record in place, without focus
-    // movement, a live announcement or another item in the count.
-    await mf.locator("summary").focus();
-    await mp.evaluate(() => window.fixture.set("alice/lead", "5".padStart(48, "0"), "unconfirmed"));
-    await frame(mp);
-    assert.equal(await mf.locator(".receipts-body > [data-delivery]").count(), 42);
-    assert.equal(await mf.locator("summary").evaluate((el) => document.activeElement === el), true);
-    assert.equal(await mf.locator('[role="status"], [aria-live]').count(), 0);
+    assert.equal(await mr(unknown).locator("img, button:not(:disabled)").count(), 0);
+    for (const id of ids.filter((_, i) => i !== 3)) {
+      assert.equal(await mr(id).locator(".delivery-status").innerText(), "Waiting · follow-up");
+      assert.equal(await mr(id).getByRole("button", { name: "Send now", exact: true }).count(), 1);
+      assert.equal(await mr(id).getByRole("button", { name: "Cancel and edit", exact: true }).count(), 1);
+    }
+    // Reloaded: the same rows, originals read back beyond the display cache.
     await mp.reload();
     await mp.locator('[data-agent="alice/lead"]').first().click();
     await mr(ids[0]).locator('[data-original], .msg-user img').first().waitFor();
-    await mp.waitForFunction(() => document.querySelectorAll('#thread > [data-original="true"]').length === 10);
+    await mp.waitForFunction(() => document.querySelectorAll('#thread > [data-original="true"]').length === 12);
     const afterReload = await seen(mp);
-    assert.equal(afterReload.foldedSummary, "Earlier submission records · 42");
-    assert.equal(afterReload.ownReceipts, 13);
+    assert.deepEqual(await ownIDs(mp), [interrupted, unknown, ...ids]);
+    assert.equal(afterReload.folded, 0);
     assert.deepEqual(afterReload.people, canonical.people);
     assert.equal(afterReload.replies, 42);
     assert.equal(await mr(ids[0]).locator(".msg-user").evaluate((el) => el.firstChild.textContent), fullText);
@@ -640,16 +858,81 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     await frame(mp);
     assert.deepEqual(await mp.evaluate(() => window.promoted), [ids[0]]);
     assert.equal(await mr(ids[0]).locator(".delivery-status").innerText(), "Steering · waiting for input checkpoint");
-    assert.equal(await mr(ids[1]).locator(".delivery-status").innerText(), "Not sent");
-    assert.equal(await mr(ids[2]).locator(".delivery-status").innerText(), "Delivery unconfirmed");
-    results[`${engine}-mixed-current`] = { ...afterReload, people: afterReload.people.length, payloadsRestored: 10, exactPromotion: ids[0] };
+    results[`${engine}-mixed-current`] = { ...afterReload, people: afterReload.people.length, rows: 14, payloadsRestored: 12, exactPromotion: ids[0] };
     await mp.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
     await shot(mp, "mixed-current", engine);
+    // Narrow, in Chinese.
+    await mp.setViewportSize({ width: 480, height: 800 });
+    await mp.evaluate(() => window.events["mygo:locale"]({ locale: "zh-Hans" }));
+    await frame(mp);
+    assert.equal(await mr(ids[1]).locator(".delivery-status").innerText(), "等待后续处理");
+    assert.equal(await mr(ids[3]).getByRole("button", { name: "将已撤回消息放回输入框", exact: true }).count(), 1);
+    assert.deepEqual(await overflow(mp), { scroll: 0, wide: [] });
+    await mp.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
+    await shot(mp, "mixed-zh-narrow", engine);
+    await mp.evaluate(() => window.events["mygo:locale"]({ locale: "en" }));
+    await mp.setViewportSize({ width: 900, height: 900 });
+    await frame(mp);
+
+    // pi takes them one by one: half tied to pi's own message, half with none
+    // in view (a summary replaced it, as in the reported case). Each row
+    // leaves as it is taken, the rest stay, and the reader's place, focus and
+    // draft stay as they were.
+    await mp.locator("#scroll").evaluate((el) => (el.scrollTop = Math.round((el.scrollHeight - el.clientHeight) / 3)));
+    await mi.focus();
+    await mi.fill("a draft while they are taken");
+    await mi.evaluate((el) => el.setSelectionRange(2, 7));
+    const mplace = await anchorOf(mp);
+    const queued = ids.filter((_, i) => i !== 3);
+    for (const [n, id] of queued.entries()) {
+      await mp.evaluate(([id, tie, text]) => {
+        window.fixture.set("alice/lead", id, "dispatched", { nativePending: false, canCancel: false, canPromote: false, originalPayload: false, originalText: false });
+        if (tie) window.fixture.native("alice/lead", id, text);
+      }, [id, n % 2 === 0, texts[ids.indexOf(id)]]);
+      await frame(mp);
+      assert.deepEqual(await ownIDs(mp), [interrupted, unknown, ids[3], ...queued.slice(n + 1)].sort((a, b) => [interrupted, unknown, ...ids].indexOf(a) - [interrupted, unknown, ...ids].indexOf(b)), `after ${n + 1} taken`);
+      assert.deepEqual(await anchorOf(mp), mplace, "a taken submission moved the reader");
+    }
+    assert.deepEqual(await composerState(mp), { focused: true, value: "a draft while they are taken", selection: [2, 7] });
+    const tied = queued.filter((_, n) => n % 2 === 0);
+    assert.equal(await mp.locator('#thread > [data-bound="true"]').evaluateAll((els, tied) => els.filter((el) => tied.includes(el.dataset.delivery)).length, tied), tied.length);
+    assert.equal(await mp.locator('[data-bound="true"] .delivery-status, [data-bound="true"] .message-recall, [data-bound="true"] .message-promote').count(), 0);
+    // A late answer with a lower revision brings none of them back.
+    await mp.evaluate((id) => {
+      const d = window.fixture.saved.receipts["alice/lead"].find((x) => x.id === id);
+      window.events["agent-event"]({ agent: "alice/lead", seq: ++window.fixture.saved.seq, data: { type: "delivery_update", delivery: { ...d, revision: 2, state: "queued", nativePending: true, canCancel: true, canPromote: true } } });
+    }, queued[1]);
+    await frame(mp);
+    assert.deepEqual(await ownIDs(mp), [interrupted, unknown, ids[3]]);
+    // The recalled one goes back to the input with its text and images, then leaves.
+    await mi.fill("");
+    await mr(ids[3]).getByRole("button", { name: "Return recalled message to input", exact: true }).click();
+    await mp.waitForFunction((text) => document.querySelector(".composer textarea").value === text, texts[3]);
+    await mp.waitForFunction(() => document.querySelectorAll(".composer-image").length === 2);
+    await frame(mp);
+    assert.deepEqual(await ownIDs(mp), [interrupted, unknown]);
+    // The person hides the interruption; a state this page does not know cannot be hidden.
+    await mr(interrupted).getByRole("button", { name: "Hide", exact: true }).click();
+    await frame(mp);
+    assert.deepEqual(await ownIDs(mp), [unknown]);
+    // Reloaded once more: the same rows; every message pi has is there.
+    await mp.reload();
+    await mp.locator('[data-agent="alice/lead"]').first().click();
+    await mr(unknown).waitFor();
+    await mp.waitForTimeout(100);
+    assert.deepEqual(await ownIDs(mp), [unknown]);
+    const end = await seen(mp);
+    assert.equal(end.people.length, canonical.people.length + tied.length);
+    assert.equal(end.folded, 0);
+    assert.doesNotMatch(await mp.locator("#thread").innerText(), RECORDS);
+    results[`${engine}-mixed-taken`] = { rows: (await ownIDs(mp)).length, tied: tied.length, untied: queued.length - tied.length };
+    await mp.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
+    await shot(mp, "mixed-taken", engine);
     assert.deepEqual(mixed.errors, []);
     assert.deepEqual(mixed.unsupported, []);
     assert.deepEqual(mixed.outside, []);
     await mixed.context.close();
-    console.log(engine, "earlier receipts folded/messages and replies whole/opened in order/repeats/sent as sent/states/same text/late native/retry/edit/refusal/images/agents/palette/keys/Settings/reload/i18n/dark/narrow/local icons/cache8/current failures PASS");
+    console.log(engine, "finished receipts draw nothing/messages and replies whole/no labels/repeats keep place, focus and draft/sent as sent/states/same text/late native/retry/edit/refusal stays/hide and focus/unchanged resend/late refusal after reload/hidden but waiting again/hidden then tried again shows its outcome/stale callbacks keep hidden/images/agents/palette/keys/Settings/reload equals live/i18n/dark/narrow/local icons/cache8/queue actions/taken one by one/late revision/interruption until hidden/restore PASS");
   } finally {
     await browser.close();
   }
