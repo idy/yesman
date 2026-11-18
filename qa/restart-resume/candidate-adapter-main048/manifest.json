@@ -1,0 +1,46 @@
+{
+  "README.md": {
+    "bytes": 9802,
+    "sha256": "671322343e121a4991ad17ebbffca253b3df9a1eb3bc49ade259b0350d689112"
+  },
+  "STATUS.json": {
+    "bytes": 2452,
+    "sha256": "c1e2c38cbd985db2cb3cacb8ec292aef2090c43f5af816d2ba8e346d28e41768"
+  },
+  "adapter.py": {
+    "bytes": 15202,
+    "sha256": "d85f9af502435cd4bee081ec85bf65ccc7ef1315ab3eee920bf0f2ca7213c1c6"
+  },
+  "candidate-contract.json": {
+    "bytes": 2009,
+    "sha256": "846e3ef15411c6a8a8224d7f055f7634821aa3e9aa06a8ad0d4ed79a1f58c747"
+  },
+  "checks.json": {
+    "bytes": 927,
+    "sha256": "75c9f91aa57da11ea47f1295c299eaba7d7ee994a4953a76f52cfa01e75ec3a3"
+  },
+  "host_proof.py": {
+    "bytes": 4609,
+    "sha256": "a045ac90b3640efaf04a1b4261d6b2959450a2b149bbe79b6fd2250cd81674cb"
+  },
+  "inputs.json": {
+    "bytes": 1146,
+    "sha256": "43ab3a9950d3be40dd5dea3a11459bdb9b33b4101f69d9d5b889d7d16efac606"
+  },
+  "pure-tests.log": {
+    "bytes": 693,
+    "sha256": "72f0cbda5706bd861f82889fd45bee82604206eacd62c95a656f96a8342914d7"
+  },
+  "runtime-format-binding.json": {
+    "bytes": 1649,
+    "sha256": "2fcbc6df79acafc7cac1d3aedc924c9a02c4d242b30baf1ab088e7a7dd51360a"
+  },
+  "source-binding.json": {
+    "bytes": 5147,
+    "sha256": "4a86ef1baf5acbec22582511e5b5cac9104499c690bc2047177e7e04568ebd69"
+  },
+  "test_adapter.py": {
+    "bytes": 8807,
+    "sha256": "b30c999bebefdafd3ccd3ae6e5dd299bbad66ab5b6cc9f6c8d26e53643da176c"
+  }
+}

@@ -251,7 +251,19 @@ class Producer(unittest.TestCase):
         self.assertEqual(step, '        env:\n          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}\n'
                          '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
                          '        run: python3 .qa-producer/scripts/prepare-upgrade-qa.py "$RUNNER_TEMP/released-inputs" "$RUNNER_TEMP/gate-inputs"')
-        self.assertEqual(text.count('secrets.MYGO_UPDATER_PRIVATE_KEY'), 1)
+        self.assertEqual(text.count('secrets.MYGO_UPDATER_PRIVATE_KEY'), 2)
+        # Two disjoint workflow routes each expose the key only to the same
+        # reviewed producer step. Neither native route receives it.
+        restart = text.split('\n  restart-sign-qa:\n', 1)[1].split('\n  restart-bind:\n', 1)[0]
+        restart_step = restart.split('      - name: Package and sign exactly one private Q from immutable S\n', 1)[1].split('\n      - ', 1)[0]
+        self.assertEqual(restart_step, step)
+        self.assertIn('    needs: restart-download\n', restart)
+        restart_download = text.split('\n  restart-download:\n', 1)[1].split('\n  restart-public-npm:\n', 1)[0]
+        self.assertIn('    if: inputs.restart_qa_commit == github.sha\n', restart_download)
+        for native in (text.split('\n  native:\n', 1)[1].split('\n  restart-download:\n', 1)[0], text.split('\n  restart-native:\n', 1)[1]):
+            self.assertNotIn('secrets.', native)
+            self.assertNotIn('GH_TOKEN:', native)
+            self.assertIn('persist-credentials: false', native)
 
 
 def git(cwd, *args):

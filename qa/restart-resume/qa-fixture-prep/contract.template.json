@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "run": null,
+  "target": "darwin-arm64",
+  "scenario": "failed-launch-recovery",
+  "source": null,
+  "tree": null,
+  "helperLiteralSHA256": "6c4ec4630929b75d034ffaef8b58d2f7f9521336074d39a90ba8874846c26efc",
+  "runtimeSHA256": null,
+  "extensionSHA256": null,
+  "eligible": ["active/lead"],
+  "paused": ["paused/lead"],
+  "S": {
+    "version": null,
+    "source": null,
+    "tree": null,
+    "archiveSHA256": null,
+    "mainSHA256": null,
+    "evidence": null
+  },
+  "Q": {
+    "version": null,
+    "source": null,
+    "tree": null,
+    "archiveSHA256": null,
+    "mainSHA256": null,
+    "evidence": null,
+    "privateQA": true
+  }
+}

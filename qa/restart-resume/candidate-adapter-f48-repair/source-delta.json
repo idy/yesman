@@ -1,0 +1,162 @@
+{
+  "UTC": "2026-11-18T16:27:24.398344+00:00",
+  "method": "fixed full commit verification then read-only Git object access through common object store; no checkout/ref/index/worktree mutation",
+  "identities": {
+    "8a73d96335dc5d2fa787f9b15e1b812bd58b0728": {
+      "tree": "395ecf86348f0fa5923af118e886efc7c31c39f7",
+      "parents": [
+        "41208a33b7c3712c141408d7e87ab732af86970d",
+        "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9"
+      ],
+      "rawCommitSHA256": "ac29625f3b1a60dc299c8e7708e32c8c344eb33481d570f8448364904784cd45"
+    },
+    "cfaaeec242a7d372669b5e39739b71bbd15ad646": {
+      "tree": "c7b0c06488b613c56dd0e52ceba98e343a4e0369",
+      "parents": [
+        "8a73d96335dc5d2fa787f9b15e1b812bd58b0728"
+      ],
+      "rawCommitSHA256": "4151e40af6e81088345185939e17baeee9ff9971124bfe97bad0e25323d41a4c"
+    },
+    "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9": {
+      "tree": "0126ef4a6e19a665f0f8482ba31d9a2bffb49d41",
+      "parents": [
+        "94f4c2b2953ec6be4b2829ea911de05d43c95956"
+      ],
+      "rawCommitSHA256": "4279c5626879694d7ba0b73d9bb665d457f88933fdd65d7629e30fe03a416262"
+    }
+  },
+  "baseAncestorOfCandidate": true,
+  "changed": [
+    {
+      "path": "internal/agent/continuation.go",
+      "before": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "55d3878c2c012c363307d45e8ed0fce246b4c09b"
+      },
+      "after": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "c5542c475f3a2f863eb780fab6606453c8ed0db3"
+      }
+    },
+    {
+      "path": "internal/agent/delivery.go",
+      "before": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "6f4a46ca81982138879d431d091d0dc819cc7432"
+      },
+      "after": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "4eabd5567823a3beea70a3aaf97cfe56a5976811"
+      }
+    },
+    {
+      "path": "internal/agent/manager.go",
+      "before": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "767a5e9a58ac858dd845ac270653c294803ce99b"
+      },
+      "after": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "288fc48ad7ec44b2eb7d3bee828218da734e60d4"
+      }
+    },
+    {
+      "path": "internal/agent/manager_test.go",
+      "before": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "bf4c6ee122bbbf07551950233a62ff6dc94fb892"
+      },
+      "after": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "19b113b3ce863b628eb93b6873b523f8a5aed56b"
+      }
+    },
+    {
+      "path": "internal/agent/pause.go",
+      "before": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "de075059c52c83976de900de25274f0ae71db921"
+      },
+      "after": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "45dabc84a92e086a3b008a1d1c0fcc976691a6c1"
+      }
+    },
+    {
+      "path": "internal/agent/restart.go",
+      "before": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "dc66820479c4bb4adb7cc8482ed1fb1891b8ceeb"
+      },
+      "after": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "f2d0b6b3abd87fa392cace92ff2bb82e63210b5e"
+      }
+    },
+    {
+      "path": "internal/agent/restart_input_test.go",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "48666ba52f631fb54692aede36f644ccad5fd100"
+      }
+    },
+    {
+      "path": "internal/agent/restart_pause.go",
+      "before": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "de1d166c816d7f614321e1aa10c7492af1234480"
+      },
+      "after": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "371d6f3e5241b70e15226ab596d0f78776a4e41f"
+      }
+    },
+    {
+      "path": "internal/agent/restart_recovery_test.go",
+      "before": null,
+      "after": {
+        "mode": "100644",
+        "type": "blob",
+        "blob": "671baf48dcdf00796e8870e3ef39f47db9d3ff70"
+      }
+    }
+  ],
+  "unchangedEntries": 673,
+  "allPathsOutsideNineUnchanged": true,
+  "productionPaths": [
+    "internal/agent/continuation.go",
+    "internal/agent/delivery.go",
+    "internal/agent/manager.go",
+    "internal/agent/pause.go",
+    "internal/agent/restart.go",
+    "internal/agent/restart_pause.go"
+  ],
+  "productionDeltaSHA256": "59ce6d5c05ccff99d421b6d0b8d2fc7e99da7b1f3561f0a8460a77fb27fce66e",
+  "numstat": [
+    "1\t0\tinternal/agent/continuation.go",
+    "3\t0\tinternal/agent/delivery.go",
+    "20\t5\tinternal/agent/manager.go",
+    "1\t0\tinternal/agent/manager_test.go",
+    "7\t1\tinternal/agent/pause.go",
+    "27\t11\tinternal/agent/restart.go",
+    "103\t0\tinternal/agent/restart_input_test.go",
+    "22\t3\tinternal/agent/restart_pause.go",
+    "288\t0\tinternal/agent/restart_recovery_test.go"
+  ]
+}

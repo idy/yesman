@@ -1,0 +1,231 @@
+{
+  "candidate": "cfaaeec242a7d372669b5e39739b71bbd15ad646",
+  "tree": "c7b0c06488b613c56dd0e52ceba98e343a4e0369",
+  "parent": "8a73d96335dc5d2fa787f9b15e1b812bd58b0728",
+  "method": "full ref verified before read-only Git object reads; task-private source export only",
+  "goRunFiles": ["main.go", "patches.go"],
+  "runtimeSourceSHA256": "3652e1b07378b9d6846733fbd9bef04ac1168ae4e68281475d30af9a45769329",
+  "runtimeAssetNames": ["LICENSE-pi", "install.mjs", "package-lock.json", "package.json", "patch.json", "pending-queue.js"],
+  "files": {
+    "internal/piruntime/assets/LICENSE-pi": {"blob": "4864295e12c6656c26cfc0d297f8b7e5bc55df15", "sha256": "4f6a1985796db5225e3b1e59972bd47e07a27a0748427cb3d3c8fbf39f9311f0", "bytes": 1070},
+    "internal/piruntime/assets/install.mjs": {"blob": "ebf616e3055218c2855b6a00ce38d60d25a92541", "sha256": "e92b34a44cab2f028cfc61a5aa612e84b1e70cafbd3ca13eb79024224551202f", "bytes": 2603},
+    "internal/piruntime/assets/package-lock.json": {"blob": "b44379c0911991be73740f8e0e698840d5c21cdf", "sha256": "805dadc8e1468ae4f0d72fac3936e7a1fc9a97ac3e7b23ab1e3fc18d1e1f5569", "bytes": 58409},
+    "internal/piruntime/assets/package.json": {"blob": "ae3754b9dd28d4d7365a2f0e08c50024325c1894", "sha256": "ebe3b8eab26c2007d69658c6c42b53ddd29351b805c326777eaf4692d3369626", "bytes": 329},
+    "internal/piruntime/assets/patch.json": {"blob": "ef4a7cd77c752ec04791dd4152b7b1c3e3595e0c", "sha256": "3db2b6ce5a4e9a20fa3b46a0291b4659f193529ce363383f8db43089bf391056", "bytes": 70328},
+    "internal/piruntime/assets/pending-queue.js": {"blob": "365e57985248b7abda44f6369d350221da392ed0", "sha256": "a732d7efba0a7dc3c4db2a2ed4b273bbd10228d4883b75052da4027ab4bdd084", "bytes": 18883},
+    "go.mod": {
+      "blob": "97fc86ea424c09713db3bbc41c8ae8c67710e9aa",
+      "sha256": "b827fcadf40c4ced85c79a2c63bcc4f054e36fe206cbb0511a678532d9ed7157",
+      "bytes": 714
+    },
+    "go.sum": {
+      "blob": "9b22ae3a5d51ef041af7f79578f263cd434960c5",
+      "sha256": "cfb66c5982a65a18d5040dd45997e4c860428e319066d3000d925c5481e85991",
+      "bytes": 3563
+    },
+    "scripts/check-production-upgrade.py": {
+      "blob": "0b48fdbd779b0c17c5f05f3a76d73992c08ef636",
+      "sha256": "5185dcebaf62850244e53dcf1a280468c06bac10187e8aff4877d9f76dfa67f7",
+      "bytes": 27024
+    },
+    "scripts/check-process-name.py": {
+      "blob": "242ace25dc40fe0bf20ec6546f3d85a898ba42ba",
+      "sha256": "14cd383ba984548e0cfc13a93bf0e92d4e2f2eec4167e215f557373969a3b3a1",
+      "bytes": 18961
+    },
+    "scripts/name-process-macos.swift": {
+      "blob": "2810d2387a8f0f1f57ad45143743e17bcca53a0d",
+      "sha256": "193d089c39997214f0d290fad8a38f1f7e095b47f6c5aa7d51e1de2188e4b15e",
+      "bytes": 1105
+    },
+    "scripts/upgrade-transport.py": {
+      "blob": "5f5230e344df818ef6d727ec8db0a9d496cb5b5c",
+      "sha256": "0813e6939f46478e1906de12d2b0ae446670a91f6f2cccc0aec17092f445d41b",
+      "bytes": 2956
+    },
+    "tools/package/upgrade_assets.go.txt": {
+      "blob": "19db2ba6d293dc9aa07f05a7609efb6ec96cb3ed",
+      "sha256": "7dce99eca930d101e5b94571b2030f488dde5d245687c717d9d782f565b7c6cc",
+      "bytes": 3420
+    },
+    "tools/package/main.go": {
+      "blob": "bb8d9cb483f8025c6f52963c4b50fbf88a76b738",
+      "sha256": "e8987e19d80a042dc62d31a7fc3a1721d4daa34a2814122198df498e409076f0",
+      "bytes": 5805
+    },
+    "tools/package/patches.go": {
+      "blob": "b56d16b51d22a559a07a2d3d1a70847932a3e4dd",
+      "sha256": "975fb934ae1152634f167c23031da6766b06c06679b9ff2c55be14397323d9b8",
+      "bytes": 5143
+    },
+    "tools/package/updater_contract.go.txt": {
+      "blob": "1bae51b28c462cf4ad7bd3a22738be0ba52b755d",
+      "sha256": "ae05d59de37025061d447d6fd01952ac56aed7525f2005dfc45dad491016241c",
+      "bytes": 8026
+    },
+    "pi/yesman.ts": {
+      "blob": "ebe63d1005dd679a86266a6a72271bfed67ec4b0",
+      "sha256": "93e7a798a14b64cfe305123ef52c6bf0603a06f8893e6ed48d6886aec496d217",
+      "bytes": 51711
+    },
+    "mygo.json": {
+      "blob": "4e59343e8904f130e1cb6d3e30cda1ab66cee4e0",
+      "sha256": "b77a890cfe0c1b3dae12c43dfdf48960442143e756b49bd021a3885de25d3fd7",
+      "bytes": 1089
+    }
+  },
+  "kqueueHeader": {
+    "path": "MacOSX.sdk/usr/include/sys/event.h",
+    "sha256": "435ed8fe99ae70c19404c3da14be6e2d217686ac256aed3b5df721b353dbb350",
+    "excerpt": "NOTE_EXITSTATUS 0x04000000: exit status valid for child process or when allowed to signal target pid; NOTE_EXEC 0x20000000; NOTE_EXIT 0x80000000"
+  },
+  "mygoUpdater": {
+    "module": "github.com/egoist/mygo@v0.9.0",
+    "sha256": "d1fd3ea79d84ddfea42f6b6171a9cf79188b0b40d70f356ee5851f0630b53084",
+    "helperLiteralSHA256": "6c4ec4630929b75d034ffaef8b58d2f7f9521336074d39a90ba8874846c26efc",
+    "stderr": "exec.Command helper has no Stdout/Stderr assignment; use kernel process event exit evidence, not guessed captured stderr"
+  },
+  "mygoConfig": {
+    "name": "Yes Man",
+    "slug": "yesman",
+    "identifier": "dev.idy.yesman",
+    "version": "0.1.48",
+    "icon": "resources/icon.png",
+    "copyright": "\u00a9 2026 Yan",
+    "license": "MIT",
+    "out": "build",
+    "windows": {
+      "installDirName": "yesman",
+      "installerInclude": "packaging/windows/compatibility.nsh"
+    },
+    "linux": {
+      "command": [
+        "yesman"
+      ]
+    },
+    "macos": {
+      "minimumSystemVersion": "13.0",
+      "entitlements": "packaging/macos/permissions.entitlements.plist",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "yesman requests Bluetooth access for device tasks you choose to run. No devices are scanned or connected when granting access.",
+        "NSMicrophoneUsageDescription": "yesman requests microphone access for audio tasks you choose to run. Granting access does not start recording.",
+        "NSCameraUsageDescription": "yesman requests camera access for capture tasks you choose to run. Granting access does not capture images."
+      }
+    },
+    "updates": {
+      "publicKey": "yrQPn0gg1/gASLxIQiUCIiUQ/csWENI0+up1cs3KWO0=",
+      "github": "idy/yesman"
+    }
+  },
+  "webFiles": {
+    "actions.js": "298ef9b9b6a7a97de6f3f4b56751dbed065e34b87e4a2cf89cb9f18ae7d5e788",
+    "app.css": "a18ee94bca1dcea6d09a61bab2024d56cfb77d9d5c42f6555cb2b5616170f819",
+    "app.js": "dcaf9efe341c8b6b3a13a4689b58d77b10a5931d937e791372ff2ffa7c5ca1e3",
+    "board.js": "d1a93797148df6ab4dc94f296aa3446c49aeaa90d8ab4f037cf62db78b10b0f8",
+    "code.js": "6b8da425435e061d178977bd1cc4d3bcaac15b9d4dce6fe43856e8c34fe943e2",
+    "context.js": "66afee849e38f21833f6117fab7f5dfaf1c6e403312600c87191eebb0989c81e",
+    "contextmenu.js": "f678a7e6a323ded8c39b016a4e3a57bd23935108711153c4a786dd91e2832899",
+    "conversation.js": "f794b6640edb9488be40eff95a9c37eb00b4e102b66bcbe2572c4a4f0ff55c86",
+    "crew.js": "5f907f6ad9f78a707ffc0b520d3197ed4c01b922e3058190c5082862389ccf61",
+    "diff.js": "54345be5f4e4527c3c29fffe9fd5b065c344e557f73b3f8601966546fbe6ea01",
+    "dom.js": "830729d78947bd4b8bb86876cd69c292438cc94bf799e82026ae55f20432a252",
+    "editor.js": "2f26272dbba48f6452b2ced28a672dcc473e304f722fd0344e34416a172db6f6",
+    "env.js": "80428bc8a20d7c2539cfcd5bbf2ca1c8eae0e2ce619ee48564a46d964f6854ff",
+    "explorer.css": "12a7d295808d777e794dddcafd103ac6425546fbea7b22b4d31f5f6ba1f25c53",
+    "explorer.js": "55227623acba7064511eda1810e73d487f1e08c9ad058db5e0fc617b5da78b1f",
+    "files.js": "4cc28b0404459a2094e4f063f57976f5a50f6cedacfcc89bc60f4c02f7bd967a",
+    "github-app.js": "2abde774f7f29ea80a33e9c46240dd3630e5631a5776211f6653dc0af133ff56",
+    "grants.js": "6df190a504d93bac764cefb63a12e3e06612c7bb2007a92c80cd8549e1c06ac9",
+    "i18n.js": "09fc637fc0ce14c75b46d9bb902b53018be7e538d3b1d9542f4dd16df06f7b72",
+    "icons.css": "6666f44002e8fab6d01b9541a82313216d0cffdf500a57ee1cf5de7925fb8ee1",
+    "icons/LICENSE": "687fbe52d0eb5c2353eca27a4037e889145ee0b584d3b1abf67581c4a4a4e47c",
+    "icons/README.md": "b87ba1383e8a2ea012ed146c70438925303c1e400144e927b11dcd9b5c9440fe",
+    "icons/manifest.json": "256c6c2571d1b447da89fe6e1e7fe4a0e6addaeb0c606df836dc2cfdc2d45a82",
+    "icons/phosphor-fill.woff2": "660bd6045c0e0d9756cddb8ba2ece3aad855df7d4a170ef23f7b1c0bf511c430",
+    "icons/phosphor-regular.woff2": "c2ea45ea05ff5c7df1936770c104725f2a68f43fd343f35f3da23a30b27de32a",
+    "images.js": "1d5275b1dc7b56e05fb10b3f46a0c1d791f1dbeeddd0e150ce443a61dabd4986",
+    "index.html": "ef5603422fd2af01968fa1d77954377732ebf8ca65c189ec25bba5b4ee5f8b51",
+    "info.js": "2098ed8758918458537d190583e36d2599d263f2a4d35d2e2b6ba08d35474134",
+    "keys.js": "6a41105d5175bc7120f03400dd48d631d4f46a1ef6793a64758898e64b053b62",
+    "locales/zh-Hans.js": "09d6745d2ac968871e027c6f194e059fbf9d65b61f4ec9007e46f31c899db5cf",
+    "markdown.js": "c905101c209663038681eee4640b2d23e7ee310bceff0dbc290e0d057c47c09f",
+    "mds/LICENSE": "0dd08639ea8a1207ed64d5fce280b7165bc84208aaade1bc45b05be9fe5a41cd",
+    "mds/VERSION": "87026d78f15f16ca8e6703375ce25a750fc16ff14c1d68ff136541f887e3c219",
+    "mds/css/Magpie-MIT.txt": "79d2c8444715d4bc453ec4f8a0aaf2051a4c1ee5ac08f5bd2e5848aef87c7572",
+    "mds/css/base.css": "e97c180f375f3b4754f392921f09286ca85349695430b9b2a96cbce8c5cda45a",
+    "mds/css/components.css": "5996495fc12020d7c965f1a8ce834ab43445fa0010a86607fa751bf0120a95ee",
+    "mds/css/fonts.css": "d3d780ff7a3b11b25013a5ed760e6cc260a7d3461402df62c6c9cc9652fba03d",
+    "mds/css/layout.css": "fa9b3644bd51fb7bc04b77dd8409b8f80dd748d2c0116e103fb1f444ca48a04a",
+    "mds/css/magpie.css": "5076b11b4857538fa7eb7113294d6bb05c1401d51dce0aa18c20247adec7cf87",
+    "mds/css/tokens.css": "fee5253a537307a74c4fcab751692cd8ac0d9c55b28be190a1e4afbc4779f29b",
+    "mds/fonts/Outfit-OFL.txt": "e2a6bbb2589b85bac1690ec8f220b22a9c3af9bfda56df6391f7ab491c7a039f",
+    "mds/fonts/README.md": "9d7205a136e724fcf4c19be09d54664d75e2b5813f07ecbb7d929eefa83849d4",
+    "mds/fonts/Source-Sans-3-OFL.txt": "7fac2f6c6bc47144e2c35e8f41147b3c8c895490d44b46266a5312fe93364d2e",
+    "mds/fonts/outfit-latin.woff2": "642044f7e80e815f6f7d89d5a0f57b51e5f9992a62bc1dd03f7f444176529f71",
+    "mds/fonts/source-sans-3-latin.woff2": "587435ca9d90732b8c1ce4958222c6ad3ade2b875500188e1d318efbcb61f4c5",
+    "mds/icons/LICENSE": "ddbe6082ec3cf979db47e5af549d2849c5d6182b3e005ef91ce1dbb9eb122f11",
+    "mds/icons/README.md": "dab3bb7cd8e693bbfed9acf55ab17a61f6b0a39571c1e10315094402d143d6fc",
+    "mds/icons/caret-down.svg": "78378db92be2e8617b8756a4a09196817a50fb3a3e8e971851c7b06d2380d3ba",
+    "mds/icons/check.svg": "fe090b3fec058b91709ab0c35961e5efcbbf697128860cc794242a4fa69ffe97",
+    "mds/icons/icons.svg": "d780e8ea20bc4f980711c7014fbd3957ef6e0bd663d554e0e27cf89c48f0837f",
+    "mds/icons/manifest.json": "4a5106b9e8ff1cc68d780163f90485d8e1db9a7c655f69e5d1e99fc5e53deba6",
+    "mds/icons/spinner.svg": "30e5a1af9807600147a847bcb21c6e45584755b2accbbeca131b948ba25ed910",
+    "mds/js/magpie.js": "f6e053a9bd7c81fe45fe5564046a1078e0559084e2f8bbb952ec316a02ef0d84",
+    "mds/js/select.js": "6228e3ad9922ef8325adc566b696fae6e0185c2da136fc8a4e21159af2ec731b",
+    "message-actions.js": "2e4840d6e15968bef866f6e6c246d66fc75a2312892b4d9f81761ba4c513afe6",
+    "models.js": "90490f79d908e409cba0550cc8b0d1164ad0abaecf5f2fe2b0800eb942857b88",
+    "needsyou.js": "556fbd50a1e787a42d61948fbd322392d5bdca07186581b14e77ca3ddb06f0e2",
+    "palette.js": "a10d325e086f327c987a988729b981f78df0d8e1a1d32a0d2dd5e465cd4b390a",
+    "pi.js": "1b56ef52ced787c0c5bedbfe3c1cfdf9797ab42de0f099fdec99539ce37f3b17",
+    "recall.js": "0df69ac73dcecd62fab6c377f5febde5a6550e82834acaeb960a6b79b02dcca7",
+    "schedules.js": "09eb2dd892d527328ae464474dd671a7c781e270a13c38fcb5c62651ca727cae",
+    "shortcuts-page.js": "fd1d130e38cdcd1c644e4405060e447ada808b346b91db41c3713cda9c598872",
+    "shortcuts.js": "9d1e8a151b796e678893ab2a034f74c7df549293fc6547a4196599611b4b1bf0",
+    "sidebar.js": "ebf9e7015f4ed2d1b810c038854ddb28fba701bcf1fabfdded63dde577148da7",
+    "submission.js": "a28a93c3433dcb070e3195ef2322ae0b7c1482e1997cb7f790507fed8f551d24",
+    "task-log.css": "4e1583c11b14e7f34277fa059cbdb25f335671c348ddadc5c07424b7f145857c",
+    "task-log.js": "55bac6517f45bc155a44e883380e41ffec1f95d9c64fd003f7e4b2de5dafc130",
+    "topics.js": "0b2b9fb4cd608036bb7df6dfd8a855f323bfb68b82a53c49eab15c71b47a00c8",
+    "usage.js": "213dd1af11a03ea2dbbe7fcc940510f080c0c59e8cdf752756c5f9d4cfce6c3b",
+    "vendor/codemirror/LICENSES.txt": "c81f37b1f6bca453d62961b7dc31330203c5ad20a5cfb92f568baa043cfb1a75",
+    "vendor/codemirror/VERSION": "6d454259d862821677eae425214456bb180816719fca42b56442cf6d8a9067f8",
+    "vendor/codemirror/chunks/chunk-3UINLDVN.js": "05565a352b57722a765d7891da879013e779ac57764a33ec8345dd3946d1d69a",
+    "vendor/codemirror/chunks/chunk-6S5PGQ27.js": "13fa9d74fa8bf9dbbe7d7dbeeaf6b128e66ec19aa88a1446af54b42a705b5f18",
+    "vendor/codemirror/chunks/chunk-HJENO6J6.js": "af19274b479d356532b4cd904e9840373cf6b74a8d65d21ac412a9f35f7e0391",
+    "vendor/codemirror/chunks/chunk-OX47ZWHU.js": "7de0dad7e52c9775403fd374b952eb684d9c412264f1d8aac2a56b1fdf0119f9",
+    "vendor/codemirror/chunks/chunk-QZO3YTHE.js": "7d7e31d3b78bf644bd259221914dff08047c79a2a8bb866cae848b5318c30f6a",
+    "vendor/codemirror/chunks/chunk-YJIJWSGA.js": "e6319aa9d53ab08d5830ec189c1af095bdecbb3ab2bbeb0af2e493d08defcdb3",
+    "vendor/codemirror/chunks/clike-4UP5PEW4.js": "1db627e00c872aed122f4990f5257f738ed13bcc70d2c1c6da9478a353109de2",
+    "vendor/codemirror/chunks/diff-PVYMWOJB.js": "bb1d08aae39aa784345ce3189ad49843504284a35e716f6ecc0c214079e00ccb",
+    "vendor/codemirror/chunks/dist-5CSWSUG7.js": "df22ea014542453023306383388d353cec0b2bdf51c3f658acc2c98161ca057a",
+    "vendor/codemirror/chunks/dist-BQMX2SQS.js": "5d67f34f3895e647063d7ad35d88dbfa59be4056f681d27de4f831b9487bbeb3",
+    "vendor/codemirror/chunks/dist-CXURQTSL.js": "838de50d4d6a118e0c3dd485f2423fec91a5ab8e4387f0d631da0eb30808faa1",
+    "vendor/codemirror/chunks/dist-CZBAPNWI.js": "b1bf296a3a3671a277898561cc6e44f8f489798b991d47e7d404018df644bd7b",
+    "vendor/codemirror/chunks/dist-FHJ7475A.js": "b05f501d6419b1bae0775364e2239d74f9ea52e23faba935691df2230f2dd07a",
+    "vendor/codemirror/chunks/dist-FIEJUQV6.js": "3723ca3fcfb8728443f52b0103d07ed267527dc49c2fe7d0dc2c3c9f195139d2",
+    "vendor/codemirror/chunks/dist-GHZYWFO5.js": "774866238866a6fdcd42d8d728d356dd9db03a8eef0357950f830b2f44d326af",
+    "vendor/codemirror/chunks/dist-J2UCFTL6.js": "9a4e114df477721cf4325b12296049c9c934372f18eb45670148e76d83e7a1b4",
+    "vendor/codemirror/chunks/dist-LXKNXZ5X.js": "ba60a7ff73136a657d6cd3ae1c4a194add6a16f45d214e950642737449b18a1e",
+    "vendor/codemirror/chunks/dist-OPZ45GAP.js": "e3f25434464bebc8e4b4e9fa0f15b17ba4e402d54ed8eca8d276eb8e0bacfb9c",
+    "vendor/codemirror/chunks/dist-USYQVE7V.js": "8a41cac5458ea2bf0221bb2b22d9c73808635012cef3c73740e2a88e41bd2065",
+    "vendor/codemirror/chunks/dist-VJQV3QRM.js": "df2b1acb605158c8d79a4128bf51110da38c2b10ec593eebb8da79896e0962fc",
+    "vendor/codemirror/chunks/dist-WT3XZIV7.js": "f564d6a8de9a600bcf1bf747c53b68497b2736ee230b701d059f43e6d3d88e84",
+    "vendor/codemirror/chunks/dist-ZLYG7SH4.js": "797663bdb31c543cd911cfd496c816c4992f6e871d0dd2c2961033c351377375",
+    "vendor/codemirror/chunks/dockerfile-CYYUE53V.js": "d413049328fa0451e388cc512401181e33043f6a4ebc2f4d47c160d7f3cd3eaa",
+    "vendor/codemirror/chunks/lua-LE4O2TMQ.js": "f9112def38a992796e7a82ee04a7d2b878cef0d83cfe213ffe36cb2c94a67a5c",
+    "vendor/codemirror/chunks/nginx-PW3FROB3.js": "6be1f775371948e16b84886e5a3d7afb9dbc28d5e67290a2acfb4abd0a98fca6",
+    "vendor/codemirror/chunks/perl-C67I5U7E.js": "89509c3424a9140d8d5c71b4df59dbaf366e9fa93e48e9247d0923f48a2e1f65",
+    "vendor/codemirror/chunks/powershell-A7XF4WJK.js": "d477202cc14e4c550a4f57d38d276847b4f387f872ac4315582f423f6cbe8ee5",
+    "vendor/codemirror/chunks/properties-VHDJJYON.js": "f2264c2812350a6af004c2beb7be779e6c40874652c912cf34e7595f3d15a6f8",
+    "vendor/codemirror/chunks/protobuf-4VWYBOVI.js": "410e397f9c686772145d7b1f691fc311d5a8193ad3161d3be3f2b5718e06a285",
+    "vendor/codemirror/chunks/r-XC74DDUP.js": "4399288c78c9db7f28b0dd749996a4d0ba27aa917aec69a7dfdf2fa5df9bafeb",
+    "vendor/codemirror/chunks/ruby-WCG3B57V.js": "6b667923f1ec80066c94aa13c1ec82be77f264112f53efd45c518bea988c386f",
+    "vendor/codemirror/chunks/shell-V4VJJNLB.js": "be07e9940077eb67689c5a287e91a34879711f8836b538027a05da5cd28d91a6",
+    "vendor/codemirror/chunks/swift-JZV5AN43.js": "d9d4bb028702d1f50aefb526298b719dfef21dfdacb2c7a59ac9a2894aabbe5b",
+    "vendor/codemirror/chunks/toml-3MD5VWJX.js": "72fc16a5b8910272458e0421cc458c272f12690cade22be62a584ed547e7e5cc",
+    "vendor/codemirror/codemirror.js": "453ab0bf4923caaa39a0b645715380e206265816ac6cd7db29d92a2d050cdd06",
+    "yak.svg": "61c6543334d433796ea5f0d7b51dfc2f1d9973ebedc1e3e422237dad7094c7d1"
+  },
+  "patchedRunnerSHA256": "680a562e17a9a5a11e2e52bd570ef9ffacf895496ca34c0578d85ee2f211939e",
+  "patchSHA256": "82cfdd2ba62b636b5fd866cdc7174da1aad71b42293489b067e6c5899b4a5fe6"
+}

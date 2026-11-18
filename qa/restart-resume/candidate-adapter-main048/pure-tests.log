@@ -1,0 +1,12 @@
+test_collectors_read_only_declared_synthetic_files (__main__.AdapterContracts) ... ok
+test_initial_runtime_and_private_Q_revision_are_distinct (__main__.AdapterContracts) ... ok
+test_inventory_and_process_parser_are_image_scoped (__main__.AdapterContracts) ... ok
+test_profile_and_real_submit_schema (__main__.AdapterContracts) ... ok
+test_raw_session_origin_identity_pause_and_replay_oracles (__main__.AdapterContracts) ... ok
+test_receipt_is_preserved_not_inferred_consumed (__main__.AdapterContracts) ... ok
+test_unclaimed_final_binds_same_completed_result (__main__.AdapterContracts) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.019s
+
+OK

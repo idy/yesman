@@ -453,12 +453,22 @@ def _produce(key):
 
 def _successors(group,key,inputs,out,meta):
     target=group.run(['go','env','GOOS'],capture=True).decode().strip()+'-'+group.run(['go','env','GOARCH'],capture=True).decode().strip()
-    source=group.run(['git','rev-parse','HEAD'],capture=True).decode().strip();assert source==meta['refs']['v0.1.39']
+    source=group.run(['git','rev-parse','HEAD'],capture=True).decode().strip()
+    restart=meta.get('restartAcceptance')
+    if restart is not None:
+        assert restart=={'candidate':'cfaaeec242a7d372669b5e39739b71bbd15ad646','tree':'c7b0c06488b613c56dd0e52ceba98e343a4e0369','productIntegration':'077b642022eff788f41c6e2cc530551f3518a919'},'unexpected restart QA source binding'
+        assert target=='darwin-arm64' and source==meta['refs']['v0.1.49'],'one exact ARM64 release candidate only'
+        assert group.run(['git','show','-s','--format=%P',source],capture=True).decode().strip()==restart['productIntegration'],'S must be the metadata-only release child'
+        assert set(group.run(['git','diff','--name-only',restart['productIntegration'],source],capture=True).decode().splitlines())=={'mygo.json','CHANGELOG.md'},'S includes unreviewed product changes'
+        candidate_tag='v0.1.49';official_tags=('v0.1.48','v0.1.49');private_versions=('0.1.900001',)
+    else:
+        candidate_tag='v0.1.39';official_tags=('v0.1.38','v0.1.39');private_versions=('0.1.900002','0.1.900003')
+        assert source==meta['refs'][candidate_tag]
     # The helper is compiled by this producer; it must be the candidate's helper.
     candidate,checkout=helper_blobs(group,source)
     assert candidate==checkout,'producer and candidate upgrade-assets helpers differ'
     stages=[]
-    for tag in ('v0.1.38','v0.1.39'):
+    for tag in official_tags:
         original=meta['stages'][tag+'/'+target];s=dict(original)
         for field in ('Archive','Manifest','Web'):
             dest=out/original[field];dest.parent.mkdir(parents=True,exist_ok=True)
@@ -471,11 +481,14 @@ def _successors(group,key,inputs,out,meta):
         stages.append(s)
     with owned_dir('private-qa-successor-',group) as directory:
         root=pathlib.Path(directory)
-        for version in ('0.1.900002','0.1.900003'):
+        for version in private_versions:
             check_stop()
             tree=root/version;tree.mkdir()
             with tarfile.open(fileobj=io.BytesIO(group.run(['git','archive',source],capture=True))) as archive:archive.extractall(tree,filter='data')
             before={str(p.relative_to(tree)):hashlib.sha256(p.read_bytes()).hexdigest() for p in tree.rglob('*.go')}
+            if restart is not None:
+                exported={str(p.relative_to(tree)):hashlib.sha256(p.read_bytes()).hexdigest() for p in tree.rglob('*') if p.is_file() and not p.is_symlink()}
+                assert exported==meta['sourceFileHashes'],'private Q export differs from downloaded immutable S source'
             cfg=json.loads((tree/'mygo.json').read_text(encoding='utf-8'));assert cfg['updates']['publicKey']==meta['PublicKey']
             cfg['version']=version;cfg['updates']['deltas']=0
             notes=root/(version+'.md');notes.write_text('## '+version+'\n\nPrivate QA successor; no tag/publication.\n',encoding='utf-8');cfg['updates']['changelog']=str(notes)
@@ -494,6 +507,12 @@ def _successors(group,key,inputs,out,meta):
             web=out/version/'web';shutil.copytree(tree/'web',web)
             stages.append({'Version':version,'Source':source,'Archive':str((package/('yesman-'+version+'-'+target+'.tar.gz')).relative_to(out)),'Manifest':str((package/('update-'+target+'.json')).relative_to(out)),'Web':str(web.relative_to(out)),'mainName':'Yes Man','binarySHA256':hashlib.sha256(binary.read_bytes()).hexdigest(),'sourceGoHashes':before,'official':False,'limits':['private QA version, normal production build from exact candidate source','temporary packaging version/notes/linked loopback feed; no source change or formal tag','not a future released version']})
     plan={'kind':'released-candidate-plus-private-QA','PublicKey':meta['PublicKey'],'Feed':'http://127.0.0.1:37059','Target':target,'Stages':stages,'releases':meta['releases'],'refs':meta['refs'],'sourceSHA':source,'limits':['first edge uses untouched published .38 and downloaded draft .39 bytes','subsequent edges are normal production-source private QA successors, not .40 releases','released feed discovery is supplied by a constrained VM TLS transport; original Ed25519 verification remains active']}
+    if restart is not None:
+        compatibility={'kind':'released-candidate-plus-private-QA','PublicKey':meta['PublicKey'],'Feed':plan['Feed'],'Target':target,'Stages':stages[:2],'sourceSHA':source,'refs':meta['refs'],'limits':['untouched official .48 to feature-bearing .49 compatibility only; no predecessor feature checkpoint exists']}
+        (out/'compat-plan.json').write_text(json.dumps(compatibility,indent=2),encoding='utf-8')
+        plan['Stages']=stages[1:]
+        plan['limits']=['exactly official S and one private production-source Q; no product version/tag/release allocation for Q','production updater/Ed25519/TLS retained; app job receives no signing/download credentials']
+        assert len(plan['Stages'])==2
     path=out/'plan.json';path.write_text(json.dumps(plan,indent=2),encoding='utf-8')
     with owned_dir('qa-upgrade-assets-',group) as helper_dir:
         helper=os.path.join(helper_dir,'yesman-upgrade-assets'+('.exe' if target.startswith('windows-') else ''))
@@ -501,6 +520,15 @@ def _successors(group,key,inputs,out,meta):
         group.run(['go','run','./tools/package','-build-upgrade-assets',helper],cwd=PRODUCER,env=dict(os.environ))
         group.run([helper,str(path)],env=dict(os.environ,**{KEY:key.strip()}))
         group.run([helper,str(path),'verify'],env=dict(os.environ))
+        if restart is not None:
+            group.run([helper,str(out/'compat-plan.json'),'verify'],env=dict(os.environ))
+            shutil.copyfile(helper,out/'public-upgrade-verifier')
+            (out/'public-upgrade-verifier').chmod(0o700)
+    if restart is not None:
+        validation={'schema':1,'candidate':restart['candidate'],'candidateTree':restart['tree'],'sourceCommit':source,'target':target,'privateVersion':'0.1.900001','sourceFilesVerified':True,'archiveAndDeltaSignaturesVerified':True,'publicKey':meta['PublicKey'],'planSHA256':hashlib.sha256(path.read_bytes()).hexdigest(),'compatPlanSHA256':hashlib.sha256((out/'compat-plan.json').read_bytes()).hexdigest(),'signingCredentialIncluded':False,'publicVerifierSHA256':hashlib.sha256((out/'public-upgrade-verifier').read_bytes()).hexdigest(),'publicVerifierSourceBlob':candidate,'publicVerifierCompiledWithoutKey':True}
+        (out/'producer-validation.json').write_text(json.dumps(validation,indent=2)+'\n',encoding='utf-8')
+        shutil.copy2(inputs/'release-inputs.json',out/'release-inputs.json')
+        shutil.copy2(inputs/'source-mapping.json',out/'source-mapping.json')
     check_stop()
     print('PASS: immutable official pair preserved; private production-source QA successors signed separately; no private key in runtime artifacts')
 if __name__=='__main__':main()

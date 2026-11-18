@@ -1,0 +1,42 @@
+{
+  "task": "t199",
+  "owner": "restart-resume-release",
+  "round": "QA fixture preparatory implementation",
+  "result": "reviewer-ready tree-external prototype; not native acceptance",
+  "entrypoint": ".yesman/evidence/t199/restart-resume-release/qa-fixture-prep/README.md",
+  "scope": "one hosted macOS ARM64 S-to-private-Q episode; eligible lead or pre-seeded worker plus pause and no-duplicate controls",
+  "ready": [
+    "replaceable immutable source/artifact/runtime/helper input contract",
+    "production bridge observer/command driver",
+    "loopback OpenAI-compatible deterministic provider for real managed pi",
+    "single-serve mutation journal with no automatic resend",
+    "prearmed staged-main rename obstruction and same-file recovery functions",
+    "offline episode oracle and seven distinguishing pure contract test groups"
+  ],
+  "remaining": [
+    "t198 final composition/current gates and actual S/private-Q input handoff",
+    "final synthetic app crew/seed schema binding",
+    "narrow attachment to existing upgrade runner native/helper/session/inventory/codesign collectors",
+    "real managed-pi SSE and cancellation verification",
+    "actual hosted macOS ARM64 S-to-Q, launch failure, explicit verified-image recovery and reopen evidence"
+  ],
+  "productionHookChanged": false,
+  "barrierDesign": "Before RestartToUpdate, move only verified staged Q main to a reserved sibling within its bundle; whole-bundle swap carries it into Q, intended launch path stays absent until explicit restore. Pinned helper binding required; actual OS launch failure still unexecuted.",
+  "installRollback": "reuse existing separate evidence; no launch-health or auto-rollback claim",
+  "newShippingRequirements": [],
+  "multiArchStatefulDuplication": false,
+  "environmentFreeProfileMigration": false,
+  "newCheckout": false,
+  "newBranch": null,
+  "newPR": null,
+  "sourceEdits": false,
+  "nativePackageLaunches": 0,
+  "piLaunches": 0,
+  "serversStarted": 0,
+  "workflowDispatches": 0,
+  "networkRequests": 0,
+  "releaseVersionAllocated": false,
+  "originalPreparationPayloads": 9,
+  "originalPreparationManifestSHA256": "22f1277b27276a070669ccba5e64a0564f795e297d18d90d0a5fb2607573ef5f",
+  "publicationStatus": "blocked on t198 final composition/current gates and predecessor .48 publication; later t199 release authority"
+}

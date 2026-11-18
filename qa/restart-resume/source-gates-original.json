@@ -1,0 +1,90 @@
+{
+  "sourceVerdict": "SOURCE PASS unchanged; F48-1/F48-2 closed",
+  "gateVerdict": "CURRENT GATES COMPLETE-PASS",
+  "pr": "https://github.com/idy/yesman/pull/100",
+  "head": "cfaaeec242a7d372669b5e39739b71bbd15ad646",
+  "tree": "c7b0c06488b613c56dd0e52ceba98e343a4e0369",
+  "parent": "8a73d96335dc5d2fa787f9b15e1b812bd58b0728",
+  "base": "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9",
+  "title": "feat: Restart and continue interrupted agents",
+  "bodySha256": "23f75358187e367f59659ee7970c6c7d11cae4192eaa2ca08e769d6fa7b412ed",
+  "preview": "99e3f73710daf327b2507e967d0b60382c1176df",
+  "previewParents": [
+    "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9",
+    "cfaaeec242a7d372669b5e39739b71bbd15ad646"
+  ],
+  "previewTree": "c7b0c06488b613c56dd0e52ceba98e343a4e0369",
+  "collectedFrom": "2026-11-18T16:40:30.775871+00:00",
+  "collectedThrough": "2026-11-18T16:41:03.497953+00:00",
+  "macOS": {
+    "run": 44346357280,
+    "attempt": 1,
+    "job": 134949696802,
+    "conclusion": "success",
+    "completedAt": "2026-11-18T16:34:46Z",
+    "checkoutAt": "2026-11-18T16:24:41.5813240Z",
+    "checkout": "99e3f73710daf327b2507e967d0b60382c1176df",
+    "test": {
+      "name": "Test",
+      "status": "completed",
+      "conclusion": "success",
+      "number": 9,
+      "started_at": "2026-11-18T16:26:25Z",
+      "completed_at": "2026-11-18T16:33:57Z"
+    },
+    "testCommand": "go test -race ./...",
+    "runtime": "1.5.2-yesman.5-498b685a8d6ccde6",
+    "logSha256": "c6177df7799ce2d83e06a008e13651e198e3eb117eca9730ba00771d8715a967",
+    "qaTests": 25,
+    "qaSkipped": 1,
+    "nodePassed": 129,
+    "nodeFailed": 0
+  },
+  "reusedCIJobs": [
+    134949696412,
+    134949697001,
+    134949697044,
+    134949697192,
+    134949695697,
+    134949696157,
+    134949696207,
+    134949696241,
+    134949696245,
+    134949696303,
+    134949696345,
+    134949696451,
+    134949695238,
+    134949695580,
+    134949695592
+  ],
+  "allApplicableCI": 16,
+  "allApplicableCIPassed": 16,
+  "actualOpenAI": {
+    "run": 44346379316,
+    "nativeReview": 5960738286,
+    "nativeState": "COMMENTED/PASS",
+    "checks": {
+      "OpenAI Code Review": 134950082993,
+      "OpenAI Issue Review": 134950076655,
+      "OpenAI PR Review": 134950068599
+    },
+    "generation": "1b9c32b0831f46434ae1d9d82e4a0a0c37eee1813521eb955ee24bb09b19ece9",
+    "snapshot": "e4df2f08f36ba88887da23ed299fc255d3e1512aef8e1efae6eba9995cfaf162",
+    "reuse": "Sealed exact prior admission/model/generation/artifact/publication/finalize proof; all current statuses and identities reconfirmed; no new actual run"
+  },
+  "discussions": {
+    "reviews": 27,
+    "inline": 29,
+    "issues": 0,
+    "threads": 18,
+    "paginationComplete": true,
+    "allParsedObjectsIdenticalToPrior": true,
+    "newFinding": false,
+    "currentBugbotChecks": 0
+  },
+  "priorManifestSha256": "c20bf1a49e6f9945aada98ff39cb0d775f681a0e6f1bbf47c17f8d8bc2cda77b",
+  "priorPayloadsPreserved": 88,
+  "reviewTreeRemainsRemoved": true,
+  "noCheckoutTestsOrRemoteMutations": true,
+  "releaseAcceptance": "Separate Lead/t199 package execution, integration and release authority; this record does not perform or certify those actions"
+}

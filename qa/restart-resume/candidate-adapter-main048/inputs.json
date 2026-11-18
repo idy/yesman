@@ -1,0 +1,31 @@
+{
+  "atUTC": "2026-11-18T16:03:17.336092+00:00",
+  "networkRequests": 0,
+  "files": [
+    {
+      "path": ".yesman/evidence/t198/restart-resume-recovery/final-main048/REMOTE-FROZEN.json",
+      "bytes": 2880,
+      "sha256": "5e157725b793696a43ac8674ed27d279ee9bb30c908d7a0ab7d954c9cd2e3feb"
+    },
+    {
+      "path": ".yesman/evidence/t198/restart-resume-recovery/final-main048/publisher-handoff.md",
+      "bytes": 4648,
+      "sha256": "49cfb8da8c265a183a64190946b8171bf90159c3f389030b1fc7bdf4be15dee6"
+    },
+    {
+      "path": ".yesman/evidence/t198/restart-resume-recovery/final-main048/publisher-sdk-binding.json",
+      "bytes": 298,
+      "sha256": "7f1923e2a75af2b8da01b7caf45309798c9fe31afc1144a0844efdbbd3fad65a"
+    },
+    {
+      "path": ".yesman/evidence/t193/resource-explorer-release/GA-SIX-FEEDS.json",
+      "bytes": 6979,
+      "sha256": "724cdbbd20effff2f2a2c9efc3e21844e8f6109f1083f5c086644090e10f1f0e"
+    },
+    {
+      "path": ".yesman/evidence/t193/resource-explorer-release/release048/COMPLETE.json",
+      "bytes": 3139,
+      "sha256": "7ff763cb05de9a8fd7d81fbf7b0e8c01474b2b84dcce6951fe302bf3bad731ea"
+    }
+  ]
+}

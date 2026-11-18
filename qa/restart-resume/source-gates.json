@@ -1,0 +1,11 @@
+{
+  "candidate": "cfaaeec242a7d372669b5e39739b71bbd15ad646",
+  "tree": "c7b0c06488b613c56dd0e52ceba98e343a4e0369",
+  "sourceAccepted": true,
+  "currentGatesAccepted": true,
+  "acceptedByLead": true,
+  "originalReceiptSHA256": "f4d3f03e5ecdf42ac1a873149c95daab6f6f1dc4bf8aaab3ad13f9c3a1bdab55",
+  "originalReceipt": "source-gates-original.json",
+  "nativeReview": 5960738286,
+  "applicableCIPassed": 16
+}

@@ -1,0 +1,24 @@
+{
+  "atUTC": "2026-11-18T16:03:17.407628+00:00",
+  "exit": 0,
+  "pythonCompile": "PASS",
+  "scope": "seven pure adapter contract groups; no server/pi/profile write/package/native command/CI/API",
+  "logSHA256": "72f0cbda5706bd861f82889fd45bee82604206eacd62c95a656f96a8342914d7",
+  "sourceSHA256": {
+    "host_proof.py": "a045ac90b3640efaf04a1b4261d6b2959450a2b149bbe79b6fd2250cd81674cb",
+    "adapter.py": "d85f9af502435cd4bee081ec85bf65ccc7ef1315ab3eee920bf0f2ca7213c1c6",
+    "test_adapter.py": "b30c999bebefdafd3ccd3ae6e5dd299bbad66ab5b6cc9f6c8d26e53643da176c"
+  },
+  "priorSeals": {
+    "preparation": {
+      "payloads": 9,
+      "manifestSHA256": "22f1277b27276a070669ccba5e64a0564f795e297d18d90d0a5fb2607573ef5f",
+      "unchanged": true
+    },
+    "qa-fixture-prep": {
+      "payloads": 13,
+      "manifestSHA256": "4f36fd03d62ca6b48e1fd198e238d6b1866f33737cebc415c51201f38d3deb24",
+      "unchanged": true
+    }
+  }
+}

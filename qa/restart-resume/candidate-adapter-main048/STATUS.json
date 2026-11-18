@@ -1,0 +1,42 @@
+{
+  "task": "t199",
+  "owner": "restart-resume-release",
+  "round": "candidate adapter preparation on final-main048",
+  "result": "bounded preparation complete; independent QA review ready, no native acceptance",
+  "entrypoint": ".yesman/evidence/t199/restart-resume-release/candidate-adapter-main048/README.md",
+  "candidate": "8a73d96335dc5d2fa787f9b15e1b812bd58b0728",
+  "candidateTree": "395ecf86348f0fa5923af118e886efc7c31c39f7",
+  "predecessor": "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9",
+  "predecessorPublicationGateSatisfied": true,
+  "predecessorSixFeedsUTC": "2026-11-18T15:43:49.325471+00:00",
+  "sourceAPIFinding": "none in static bridge/settings binding",
+  "QAAdapterCorrections": [
+    "initial About may report unprepared; ready required after work starts and after recovery",
+    "private QA export may lack VCS revision; record build/source receipt provenance separately",
+    "generated synthetic config uses clean VM default data/pi paths rather than assuming arbitrary relaunch environment forwarding",
+    "Submit uses real HiredAt and 48-hex timestamp/random IDs; receipt storage is version2",
+    "raw canonical v3 session and yesman-origin parent, not transcript substrings alone, determine input/restart counts"
+  ],
+  "newCode": ["adapter.py", "host_proof.py", "test_adapter.py"],
+  "pureContractGroups": 7,
+  "pureChecks": "PASS",
+  "priorPayloadsUnchanged": {"preparation": 9, "qa-fixture-prep": 13},
+  "runtimeContentKey": "498b685a8d6ccde6",
+  "realNativeOrPiExecution": false,
+  "nativeCommandsExecuted": false,
+  "privateProfileReadOrWritten": false,
+  "workflowPolling": false,
+  "networkRequests": 0,
+  "sourceModified": false,
+  "authorCheckoutBorrowed": false,
+  "newCheckoutBranchPR": false,
+  "reservedReleaseVersion": false,
+  "remaining": [
+    "independent t206 source/current-gate acceptance and QA adapter review",
+    "specific Lead integration/release/hosted authority and actual immutable S/private Q inputs",
+    "packaging handoff must replace historical downloader/producer tag assumptions; no such producer/secret/dispatch was used here",
+    "real managed-pi/provider/cancellation and normal production bridge/native/helper observations",
+    "actual one-ARM S-to-Q/final-intent claim, failed launch, verified explicit recovery and no-replay reopen evidence"
+  ],
+  "publicationStatus": "blocked on final source/current gates and later specific authority; .48 publication is no longer a blocker"
+}

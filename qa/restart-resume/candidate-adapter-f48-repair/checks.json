@@ -1,0 +1,27 @@
+{
+  "UTC": "2026-11-18T16:28:39.044984+00:00",
+  "exit": 0,
+  "pureBindingGroups": 3,
+  "pythonCompile": "PASS",
+  "logSHA256": "4477907033ee9da7c10f74288820b51e0cd820354d2e6829c2ca4875d39d57c0",
+  "priorSeals": {
+    "preparation": {
+      "payloads": 9,
+      "manifestSHA256": "22f1277b27276a070669ccba5e64a0564f795e297d18d90d0a5fb2607573ef5f",
+      "unchanged": true
+    },
+    "qa-fixture-prep": {
+      "payloads": 13,
+      "manifestSHA256": "4f36fd03d62ca6b48e1fd198e238d6b1866f33737cebc415c51201f38d3deb24",
+      "unchanged": true
+    },
+    "candidate-adapter-main048": {
+      "payloads": 11,
+      "manifestSHA256": "b3ad4d7d677f1cbe9c8fed391d92735ba43b0ff2874154ea0a47fc171575c3da",
+      "unchanged": true
+    }
+  },
+  "originalSevenContractGroups": "reused by exact implementation identity; not rerun",
+  "nativeAcceptance": false,
+  "execution": "in-memory synthetic bridge dictionaries only; no server/profile/native/pi/package process"
+}

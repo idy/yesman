@@ -1,0 +1,42 @@
+{
+  "candidate": "8a73d96335dc5d2fa787f9b15e1b812bd58b0728",
+  "runtimeVersion": "1.5.2-yesman.5",
+  "contentKey": "498b685a8d6ccde6",
+  "assets": [
+    {
+      "path": "internal/piruntime/assets/LICENSE-pi",
+      "sha256": "4f6a1985796db5225e3b1e59972bd47e07a27a0748427cb3d3c8fbf39f9311f0",
+      "bytes": 1070
+    },
+    {
+      "path": "internal/piruntime/assets/install.mjs",
+      "sha256": "e92b34a44cab2f028cfc61a5aa612e84b1e70cafbd3ca13eb79024224551202f",
+      "bytes": 2603
+    },
+    {
+      "path": "internal/piruntime/assets/package-lock.json",
+      "sha256": "805dadc8e1468ae4f0d72fac3936e7a1fc9a97ac3e7b23ab1e3fc18d1e1f5569",
+      "bytes": 58409
+    },
+    {
+      "path": "internal/piruntime/assets/package.json",
+      "sha256": "ebe3b8eab26c2007d69658c6c42b53ddd29351b805c326777eaf4692d3369626",
+      "bytes": 329
+    },
+    {
+      "path": "internal/piruntime/assets/patch.json",
+      "sha256": "3db2b6ce5a4e9a20fa3b46a0291b4659f193529ce363383f8db43089bf391056",
+      "bytes": 70328
+    },
+    {
+      "path": "internal/piruntime/assets/pending-queue.js",
+      "sha256": "a732d7efba0a7dc3c4db2a2ed4b273bbd10228d4883b75052da4027ab4bdd084",
+      "bytes": 18883
+    }
+  ],
+  "extensionSHA256": "93e7a798a14b64cfe305123ef52c6bf0603a06f8893e6ed48d6886aec496d217",
+  "sessionManagerSourceSHA256": "7e24f1c857c9f0e7be6485e9be12ba528fad9eea3423abf2c96fc27585a88b61",
+  "sessionManagerRead": "installed public runtime source only; no configuration/auth/session data read",
+  "format": "v3 header + id/parentId entries; first user flushes file; yesman-origin parent bound by timestamp",
+  "actualPackagedRuntimeAcceptance": false
+}

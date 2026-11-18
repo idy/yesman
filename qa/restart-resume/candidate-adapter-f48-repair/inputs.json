@@ -1,0 +1,30 @@
+{
+  "UTC": "2026-11-18T16:28:06.765935+00:00",
+  "inputs": [
+    {
+      "path": ".yesman/evidence/t198/restart-resume-recovery/f48-repair/report.md",
+      "bytes": 9947,
+      "sha256": "853fe9fe36fbd58feb7543a132d4a8bbdbf5bbcaadee95d69fcaf0fe6189999e"
+    },
+    {
+      "path": ".yesman/evidence/t199/restart-resume-release/corrected-source-proof-boundary.md",
+      "bytes": 5882,
+      "sha256": "1cc80632f3df9f83b8c952efff4044458e2f0f8ed4b029afe730e4b535215112"
+    },
+    {
+      "path": ".yesman/evidence/t199/restart-resume-release/candidate-adapter-main048/candidate-contract.json",
+      "bytes": 2009,
+      "sha256": "846e3ef15411c6a8a8224d7f055f7634821aa3e9aa06a8ad0d4ed79a1f58c747"
+    },
+    {
+      "path": ".yesman/evidence/t199/restart-resume-release/candidate-adapter-main048/manifest.json",
+      "bytes": 1408,
+      "sha256": "b3ad4d7d677f1cbe9c8fed391d92735ba43b0ff2874154ea0a47fc171575c3da"
+    },
+    {
+      "path": ".yesman/evidence/t199/restart-resume-release/qa-fixture-prep/manifest.json",
+      "bytes": 1659,
+      "sha256": "4f36fd03d62ca6b48e1fd198e238d6b1866f33737cebc415c51201f38d3deb24"
+    }
+  ]
+}

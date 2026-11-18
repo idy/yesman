@@ -1,0 +1,38 @@
+[
+  {
+    "ref": "a7084420e984f1814bf92e0d13a1b3c282873f4a",
+    "path": "scripts/check-delivery-pi.mjs",
+    "bytes": 6745,
+    "sha256": "4f8476182aa307ec379b89280d6561e584451b17ca1340108408972e6d534720"
+  },
+  {
+    "ref": "a7084420e984f1814bf92e0d13a1b3c282873f4a",
+    "path": "scripts/fixtures/delivery-provider.ts",
+    "bytes": 2234,
+    "sha256": "9f94eccd4521a5f3a79d183cfb5a0529d32ae76dbb3167646f0f74fbb4c9c4c8"
+  },
+  {
+    "ref": "a7084420e984f1814bf92e0d13a1b3c282873f4a",
+    "path": "scripts/fixtures/topics-provider.ts",
+    "bytes": 2692,
+    "sha256": "cd5ec3772f9b88fe661eb967baea576b825a5c3cff2452eb5f4a8f619c79ffd7"
+  },
+  {
+    "ref": "a7084420e984f1814bf92e0d13a1b3c282873f4a",
+    "path": "topics_pi_test.go",
+    "bytes": 15773,
+    "sha256": "ea512a428f66493795885be48ed8eef2442be67103a866e5e4b6abdbe284ce9b"
+  },
+  {
+    "ref": "a7084420e984f1814bf92e0d13a1b3c282873f4a",
+    "path": "scripts/upgrade-transport.py",
+    "bytes": 2956,
+    "sha256": "0813e6939f46478e1906de12d2b0ae446670a91f6f2cccc0aec17092f445d41b"
+  },
+  {
+    "ref": "a7084420e984f1814bf92e0d13a1b3c282873f4a",
+    "path": "tools/package/updater_contract.go.txt",
+    "bytes": 8026,
+    "sha256": "ae05d59de37025061d447d6fd01952ac56aed7525f2005dfc45dad491016241c"
+  }
+]

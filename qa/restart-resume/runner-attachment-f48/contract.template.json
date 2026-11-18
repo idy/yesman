@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "candidate": "cfaaeec242a7d372669b5e39739b71bbd15ad646",
+  "candidateTree": "c7b0c06488b613c56dd0e52ceba98e343a4e0369",
+  "target": "darwin-arm64",
+  "scenarios": ["update", "failed-launch-recovery"],
+  "sourceGates": null,
+  "hostedHandoff": null,
+  "releaseSourceCommit": null,
+  "packagePlanSHA256": null,
+  "helperLiteralSHA256": "6c4ec4630929b75d034ffaef8b58d2f7f9521336074d39a90ba8874846c26efc",
+  "runtimeContentKey": "498b685a8d6ccde6",
+  "runtimeSHA256": null,
+  "extensionSHA256": "93e7a798a14b64cfe305123ef52c6bf0603a06f8893e6ed48d6886aec496d217",
+  "artifacts": {"S": null, "Q": null},
+  "bindingInstructions": {
+    "sourceGates": "{path,sha256} of a Lead-accepted receipt containing candidate, tree, sourceAccepted:true, currentGatesAccepted:true. The t206 accepted result is available; this null is an unbound transferred receipt, not a missing source review.",
+    "hostedHandoff": "{path,sha256} containing task:t199,candidate,tree,authorized:true,runID as string,scenarios exactly as above. A general release authority is not invented as an actual runtime runID.",
+    "releaseSourceCommit": "Actual full immutable S tag commit after source/metadata integration; preserve separate approved candidate source identity.",
+    "artifactRuntimeReceipt": "Both verification receipts must bind actual runtimeSHA256, extensionSHA256, updaterPublicKey, candidate, candidateTree, sourceFilesVerified:true and passed:true. runtimeSHA256 is SHA-256 of json.dumps({internal/piruntime/assets/NAME: embedded asset SHA256 for the six shipped assets},sort_keys=True). Expected source aggregate is 3652e1b07378b9d6846733fbd9bef04ac1168ae4e68281475d30af9a45769329; actual package evidence remains unbound. Each native phase also captures ready.json, all installed patch-after hashes and pending queue identity.",
+    "S": "version,sourceCommit,archiveSHA256,mainSHA256,bundleInventorySHA256,webSHA256,releaseID,archiveAssetID,verificationReceipt:{path,sha256}",
+    "Q": "version,sourceCommit,archiveSHA256,mainSHA256,bundleInventorySHA256,webSHA256,producerRunID,transferArtifactID,verificationReceipt:{path,sha256}; receipt additionally privateQA:true. Q is an Actions artifact with no release asset allocation.",
+    "packagePlanSHA256": "Hash exact two-stage production plan bytes before path normalization. Plan.Target darwin-arm64; kind released-candidate-plus-private-QA; sourceSHA equals S commit; PublicKey exact compiled public key; Feed http://127.0.0.1:PORT; Stages contain official S then private Q with Archive/Manifest/Web/Source/Version/mainName/binarySHA256/official. Relative paths resolve beside plan.json.",
+    "hashAlgorithms": "All file hashes SHA-256. webSHA256 hashes json.dumps(relative-name-to-file-SHA256,sort_keys=True). bundleInventorySHA256 uses the unchanged host_proof.bundle_inventory. Preserve all raw verification sources for independent review. Receipt hashes bind supplied evidence; they are not remote attestation."
+  }
+}

@@ -240,6 +240,10 @@ def main():
 
 
 def run(stack):
+    if len(sys.argv) == 6 and sys.argv[3] == '--t199-attachment':
+        attachment_spec=importlib.util.spec_from_file_location('t199_attachment',pathlib.Path(sys.argv[4]).resolve())
+        attachment=importlib.util.module_from_spec(attachment_spec);attachment_spec.loader.exec_module(attachment)
+        return attachment.run(stack,sys.modules[__name__],sys.argv[1],sys.argv[2],sys.argv[5])
     naming.hosted()
     path=pathlib.Path(sys.argv[1]).resolve();plan=json.loads(path.read_text(encoding='utf-8'));plan['_path']=str(path)
     evidence=pathlib.Path(sys.argv[2]).resolve();evidence.mkdir(parents=True,exist_ok=True)

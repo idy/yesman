@@ -10,6 +10,9 @@ on:
         description: Immutable draft candidate
         default: v0.1.39
         required: true
+      restart_qa_commit:
+        description: Exact independently reviewed QA-only commit; selects the separate .49 restart jobs
+        required: false
 permissions:
   contents: read
 jobs:
@@ -244,3 +247,168 @@ jobs:
           name: released-upgrade-proof-${{ matrix.os }}
           path: ${{ runner.temp }}/upgrade-gate-evidence
           if-no-files-found: error
+
+  restart-download:
+    if: inputs.restart_qa_commit == github.sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # Draft GET visibility only; downloader makes GET requests.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify reviewed QA successor before import
+        run: python3 qa/restart-resume/verify.py "$GITHUB_WORKSPACE"
+      - name: GET exact immutable public predecessor and draft S
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 qa/restart-resume/download.py "$RUNNER_TEMP/released-inputs"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: restart-released-inputs
+          path: ${{ runner.temp }}/released-inputs
+          if-no-files-found: error
+  restart-public-npm:
+    if: inputs.restart_qa_commit == github.sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24.22.1'
+      - name: Verify reviewed QA successor before import
+        run: python3 qa/restart-resume/verify.py "$GITHUB_WORKSPACE"
+      - name: Acquire only lock-pinned public npm tarballs without scripts or credentials
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 qa/restart-resume/public_npm_cache.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/public-npm"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        id: upload
+        with:
+          name: restart-public-npm
+          path: ${{ runner.temp }}/public-npm
+          include-hidden-files: true
+          if-no-files-found: error
+  restart-sign-qa:
+    needs: restart-download
+    runs-on: macos-latest
+    timeout-minutes: 30
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: .qa-producer
+          persist-credentials: false
+      - name: Verify reviewed QA successor before import
+        run: python3 .qa-producer/qa/restart-resume/verify.py "$GITHUB_WORKSPACE/.qa-producer"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: restart-released-inputs
+          path: ${{ runner.temp }}/released-inputs
+      - name: Package and sign exactly one private Q from immutable S
+        env:
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 .qa-producer/scripts/prepare-upgrade-qa.py "$RUNNER_TEMP/released-inputs" "$RUNNER_TEMP/gate-inputs"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        id: upload
+        with:
+          name: restart-signed-inputs
+          path: |
+            ${{ runner.temp }}/gate-inputs/plan.json
+            ${{ runner.temp }}/gate-inputs/compat-plan.json
+            ${{ runner.temp }}/gate-inputs/release-inputs.json
+            ${{ runner.temp }}/gate-inputs/source-mapping.json
+            ${{ runner.temp }}/gate-inputs/producer-validation.json
+            ${{ runner.temp }}/gate-inputs/public-upgrade-verifier
+            ${{ runner.temp }}/gate-inputs/**/*.tar.gz
+            ${{ runner.temp }}/gate-inputs/**/update-*.json
+            ${{ runner.temp }}/gate-inputs/*.delta
+            ${{ runner.temp }}/gate-inputs/**/web
+            ${{ runner.temp }}/gate-inputs/qa-build-*.log
+          if-no-files-found: error
+  restart-bind:
+    needs: [restart-sign-qa, restart-public-npm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify reviewed QA successor before import
+        run: python3 qa/restart-resume/verify.py "$GITHUB_WORKSPACE"
+      - name: Validate real same-run transfers and bind package/manifest/source receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QA_ARTIFACT_ID: ${{ needs.restart-sign-qa.outputs.artifact }}
+          QA_ARTIFACT_DIGEST: ${{ needs.restart-sign-qa.outputs.digest }}
+          NPM_ARTIFACT_ID: ${{ needs.restart-public-npm.outputs.artifact }}
+          NPM_ARTIFACT_DIGEST: ${{ needs.restart-public-npm.outputs.digest }}
+          APPROVED_QA_COMMIT: ${{ inputs.restart_qa_commit }}
+        run: python3 qa/restart-resume/bind.py "$RUNNER_TEMP/bound-restart"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: restart-bound-inputs
+          path: ${{ runner.temp }}/bound-restart
+          include-hidden-files: true
+          if-no-files-found: error
+  restart-native:
+    needs: restart-bind
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24.22.1'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: restart-bound-inputs
+          path: ${{ runner.temp }}/bound-restart
+      - name: Run official compatibility then serial S to Q restart acceptance
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          APPROVED_QA_COMMIT: ${{ inputs.restart_qa_commit }}
+        run: python3 qa/restart-resume/run_native.py "$RUNNER_TEMP/bound-restart"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: restart-native-proof
+          path: |
+            ${{ runner.temp }}/restart-evidence
+            ${{ runner.temp }}/t199-attachment-*
+            ${{ runner.temp }}/t199-compat-*
+            ${{ runner.temp }}/bound-restart/inputs/receipts
+            ~/yesman
+            ~/.pi/agent
+          include-hidden-files: true
+          if-no-files-found: warn

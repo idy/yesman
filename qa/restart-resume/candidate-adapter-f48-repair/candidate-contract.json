@@ -1,0 +1,76 @@
+{
+  "schema": 2,
+  "purpose": "corrected candidate binding of sealed QA adapter; no native execution or publication authority",
+  "candidate": {
+    "head": "cfaaeec242a7d372669b5e39739b71bbd15ad646",
+    "tree": "c7b0c06488b613c56dd0e52ceba98e343a4e0369",
+    "base": "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9",
+    "PR": "https://github.com/idy/yesman/pull/100",
+    "sourceAndCurrentGateAcceptance": "pending independent t206 source/current CI; no gate refresh in t199 prep",
+    "parent": "8a73d96335dc5d2fa787f9b15e1b812bd58b0728"
+  },
+  "predecessor": {
+    "tag": "v0.1.48",
+    "source": "6f0a1f1400f667c09cc57a2b5d5fc93962334ee9",
+    "releaseID": 450165231,
+    "sixFeedsVerifiedUTC": "2026-11-18T15:43:49.325471+00:00",
+    "receipt": ".yesman/evidence/t193/resource-explorer-release/GA-SIX-FEEDS.json",
+    "publicationGateSatisfied": true
+  },
+  "prototypeManifestSHA256": "4f36fd03d62ca6b48e1fd198e238d6b1866f33737cebc415c51201f38d3deb24",
+  "target": "darwin-arm64",
+  "actors": {
+    "eligible": "active/lead",
+    "paused": "paused/lead"
+  },
+  "bridge": "Yesman",
+  "seed": {
+    "method": "Submit",
+    "IDFormat": "12 timestamp hex + 36 random hex",
+    "generation": "HireNamed result hiredAt"
+  },
+  "profile": {
+    "data": "<fresh-hosted-VM-home>/yesman",
+    "piConfig": "<fresh-hosted-VM-home>/.pi/agent",
+    "crewKey": "t199-fixture/fixture"
+  },
+  "managedPi": {
+    "version": "1.5.2-yesman.5",
+    "expectedContentKey": "498b685a8d6ccde6",
+    "artifactRuntimeReceipt": null
+  },
+  "helperLiteralSHA256": "6c4ec4630929b75d034ffaef8b58d2f7f9521336074d39a90ba8874846c26efc",
+  "artifactInputs": {
+    "S": null,
+    "Q": null
+  },
+  "officialStageRequired": [
+    "version",
+    "sourceCommit",
+    "mainSHA256",
+    "candidate",
+    "candidateTree",
+    "verificationReceipt",
+    "official=true"
+  ],
+  "privateQRequired": [
+    "version",
+    "sourceCommit",
+    "mainSHA256",
+    "candidate",
+    "candidateTree",
+    "verificationReceipt",
+    "official=false",
+    "privateQA=true",
+    "sourceFilesVerified=true"
+  ],
+  "remainingAuthority": "specific Lead handoff after accepted source/current gates, with real immutable S/private Q artifacts",
+  "releaseVersionReserved": false,
+  "nativeAcceptance": false,
+  "rebasedFrom": {
+    "contractSHA256": "846e3ef15411c6a8a8224d7f055f7634821aa3e9aa06a8ad0d4ed79a1f58c747",
+    "adapterManifestSHA256": "b3ad4d7d677f1cbe9c8fed391d92735ba43b0ff2874154ea0a47fc171575c3da",
+    "bindingEntry": "adapter.py",
+    "implementationChanged": false
+  }
+}

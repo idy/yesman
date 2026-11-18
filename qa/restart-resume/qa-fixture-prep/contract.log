@@ -1,0 +1,12 @@
+test_commands_never_replay_after_serving_or_page_change (__main__.Contracts) ... ok
+test_failure_is_unclaimed_final_then_same_id_recovery (__main__.Contracts) ... ok
+test_obstruction_plan_is_prearmed_and_keeps_exact_bytes (__main__.Contracts) ... ok
+test_provider_holds_then_continues_only_preserved_context (__main__.Contracts) ... ok
+test_replaceable_input_bindings (__main__.Contracts) ... ok
+test_runtime_env_is_allowlisted_and_loopback (__main__.Contracts) ... ok
+test_wrong_image_duplicate_note_pause_and_second_open_rejected (__main__.Contracts) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.004s
+
+OK

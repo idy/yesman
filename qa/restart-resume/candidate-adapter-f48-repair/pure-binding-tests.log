@@ -1,0 +1,8 @@
+test_contract_changes_only_purpose_candidate_and_rebase_receipt (__main__.BindingContracts) ... ok
+test_rejected_candidate_and_mixed_identity_cannot_bind (__main__.BindingContracts) ... ok
+test_verified_original_bridge_uses_corrected_pins (__main__.BindingContracts) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.000s
+
+OK

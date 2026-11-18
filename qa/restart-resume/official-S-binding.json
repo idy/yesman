@@ -1,0 +1,38 @@
+{
+  "passed": true,
+  "sourceCommit": "e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0",
+  "releaseID": 450320998,
+  "archive": {
+    "id": 764319730,
+    "node_id": "RA_kwDOVqqT_s4tjpfy",
+    "url": "https://api.github.com/repos/idy/yesman/releases/assets/764319730",
+    "size": 7829795,
+    "digest": "sha256:b5ccd2912b5621d856f8b07c024608c130ad7caf186d94e32a1859d0b5adc6f8"
+  },
+  "manifest": {
+    "id": 764319964,
+    "node_id": "RA_kwDOVqqT_s4tjpjc",
+    "url": "https://api.github.com/repos/idy/yesman/releases/assets/764319964",
+    "size": 2798,
+    "digest": "sha256:1b18883d58a8d02adbdcb11b5c525cc773442bccc38d59506b857205e04f43ff"
+  },
+  "mainSHA256": "e64f3d89c93ad045308f2a7fa3dd1373a4525898a680608af6b9d157d834c11a",
+  "buildSettings": {
+    "-buildmode": "exe",
+    "-compiler": "gc",
+    "-tags": "mygo_nodownload,mygo_noinspector",
+    "-trimpath": "true",
+    "CGO_ENABLED": "1",
+    "GOARCH": "arm64",
+    "GOOS": "darwin",
+    "GOARM64": "v8.0",
+    "vcs": "git",
+    "vcs.revision": "e2c1e68851b2a16f4ac3cd0f77baffcc0cfd7dc0",
+    "vcs.time": "2026-11-18T17:22:57Z",
+    "vcs.modified": "false"
+  },
+  "embeddedSourceResources": 117,
+  "sourceReceiptSHA256": "49d4d46172e2af88731d0142611c67738e111c59962359a4769846e6271e64ff",
+  "binaryReceiptSHA256": "144a0194910d10e80ab392fcf0e3e071c2a2fc4e6782ee076722b23d1dd6c0dd",
+  "sourceFilesVerified": true
+}
