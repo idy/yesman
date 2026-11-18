@@ -32,7 +32,11 @@ import (
 //     nothing. The grant is chosen from the path before any checkout's
 //     metadata is read, and only the chosen checkout's is read: small regular
 //     files, through handles, never waiting on one.
-//   - The change is admitted with BeginChange inside the Store's Use, and held
+//   - Managed file operations, including reads, hold the workspace's checkout
+//     lock from before admission through commit. This serializes an edit's
+//     content check with its write and keeps reads from seeing a partial
+//     managed write. Workspace and process identity are checked after waiting.
+//     The change is admitted with BeginChange inside the Store's Use, and held
 //     across the commit, so a write of a stopped or replaced process either
 //     lands before Stop returns, in that process's own directories, or not at
 //     all. A worktree's directory is opened, and checked, while the pool
@@ -90,6 +94,12 @@ func (s *Server) files(ctx context.Context, c caller, r *http.Request) (any, err
 	if c.agent.Role == agent.RoleLead {
 		return nil, errors.New("the lead's write and edit tools do not use the managed entry")
 	}
+	// Share checkout/removal's workspace lock, before either lifecycle lease.
+	// The caller snapshot predates this wait; Use and BeginChange below must
+	// revalidate its workspace generation and exact process credential.
+	l := s.worktreeLock(c.yesman.Name)
+	l.Lock()
+	defer l.Unlock()
 	var out any
 	err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
 		if !y.HiredAt.Equal(c.yesman.HiredAt) {

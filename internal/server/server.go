@@ -61,7 +61,7 @@ type Server struct {
 
 	url           string
 	worktreeMu    sync.Mutex
-	worktreeLocks map[string]*sync.Mutex // serialize lifecycle operations per workspace
+	worktreeLocks map[string]*sync.Mutex // serialize checkout lifecycle and managed file I/O per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
 	// beginChange replaces Agents.BeginChange in tests that run no agent.
