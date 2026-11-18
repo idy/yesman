@@ -5,6 +5,7 @@
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
 import { orderWorkers } from './sidebar.js';
+import { CONVERSATION_MIN, TWO_COLUMNS, explorerBody, listView, narrowBack, resizer, scrollMemory } from './explorer.js';
 import { needsYouItems, requestsOf, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
 import { messageActions, messageText, receiptText } from './message-actions.js';
 import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
@@ -70,6 +71,12 @@ const runFailed = (a) => !!a.runError && (a.status === 'idle' || a.status === 's
 const runErrorText = (text) => (text?.trim() ? text : t('The model returned an error without a message.'));
 const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: yesmanLabel(a.yesman) }) : runFailed(a) ? t('Last run ended with an error') : statusText(a.status));
 const statusTone = (a) => (asking(a) ? 'asking' : runFailed(a) ? 'error' : a.status);
+
+// Whether the user kept the info panel beside the pane open now, and whether
+// it makes way for it (infoYields, below).
+let infoKept = false;
+let infoYielded = false;
+let infoFocus = null; // see the resize listener
 
 const state = {
   snap: { yesmen: [], agents: [] },
@@ -1496,15 +1503,74 @@ function needsYouScope() {
 
 let needsYouHistoryOpen = false;
 
-// showNeedsYou opens the pane for the yesman shown, and puts focus on the
-// request named or on the pane's heading. Outside a conversation there is no
-// yesman to show it for.
+// The pane is an explorer: the request chosen, in full, on the left, and the
+// list of what waits on the right. What is chosen is kept per yesman and
+// hire; when it is answered, the request in its place in the list follows.
+// In a narrow pane one column shows: the list ('nav') until a request is
+// chosen, then its detail ('content'), per yesman and hire.
+const needsYouChosen = new Map(); // needsYouScope() -> { key, at, focus }
+const needsYouSizes = resizer('needs-you', { min: 360 });
+const needsYouPlaces = scrollMemory();
+// What is typed into a dialog's text answer in the pane, by request key,
+// with the yesman and hire it was typed for, so that a redraw, or showing
+// another yesman and coming back, keeps it. It goes once the request is
+// known to be closed (pruneNeedsYouDrafts); a bounded number are kept.
+const needsYouDrafts = new Map(); // key -> { yesman, hiredAt, text }
+const NEEDS_YOU_DRAFTS = 64;
+// Past that bound, the one answer being typed for the request shown, kept
+// apart and only while that very request, of that hire, stays shown: a
+// redraw keeps it, choosing another request or yesman lets it go.
+let needsYouOverflow = null; // { key, yesman, hiredAt, text }
+
+// pruneNeedsYouDrafts drops the answers typed for requests the whole state
+// shows closed: answered, cancelled, timed out, of an agent stopped or
+// started again, or of a yesman hired again since. A yesman the state does
+// not list (its workspace cannot be read) is unknown, not closed: its
+// answers are kept.
+function pruneNeedsYouDrafts() {
+  const yesmen = new Map(state.snap.yesmen.map((y) => [y.name, y]));
+  const open = new Map();
+  for (const [k, d] of needsYouDrafts) {
+    const y = yesmen.get(d.yesman);
+    if (!y) continue;
+    if ((y.hiredAt ?? '') !== d.hiredAt) { needsYouDrafts.delete(k); continue; }
+    if (!open.has(y.name)) open.set(y.name, new Set(needsYouOf(y).map((item) => item.key)));
+    if (!open.get(y.name).has(k)) needsYouDrafts.delete(k);
+  }
+}
+
+const needsYouRow = (aside, key) => key && aside.querySelector(`.needs-you-open[data-request="${CSS.escape(key)}"]`);
+
+// showNeedsYou opens the pane for the yesman shown, with the request named
+// chosen and focused in its list, or focus on the pane's heading. Outside a
+// conversation there is no yesman to show it for.
 function showNeedsYou(focusKey = null) {
   if (!selectedAgent()) return false;
   if (state.pane !== 'needs-you') setPane('needs-you');
   const aside = $('#needs-you');
-  ((focusKey && aside.querySelector(`[data-request="${CSS.escape(focusKey)}"]`)) || aside.querySelector('.needs-you-heading'))?.focus({ preventScroll: true });
+  const scope = needsYouScope();
+  // Coming back to the pane shows the list, with the request named chosen.
+  if (scope) {
+    const was = needsYouChosen.get(scope);
+    needsYouChosen.set(scope, { key: focusKey ?? was?.key ?? null, at: was?.at ?? 0, focus: 'nav' });
+    renderNeedsYouPane();
+  }
+  (needsYouRow(aside, focusKey) || aside.querySelector('.needs-you-heading'))?.focus({ preventScroll: true });
   return true;
+}
+
+// chooseRequest shows a request's detail beside the list.
+function chooseRequest(item, at) {
+  const scope = needsYouScope();
+  if (!scope) return;
+  needsYouChosen.set(scope, { key: item.key, at, focus: 'content' });
+  renderNeedsYouPane();
+  const aside = $('#needs-you');
+  // In a narrow pane the list makes way: focus goes to the way back to it,
+  // as in Topics.
+  const row = needsYouRow(aside, item.key);
+  if (row?.getClientRects().length) row.focus({ preventScroll: true });
+  else aside.querySelector('.needs-you-detail [data-key="list"]')?.focus({ preventScroll: true });
 }
 
 // closeNeedsYou closes the pane and gives focus back to what opens it: the
@@ -1534,43 +1600,66 @@ function renderNeedsYouPane() {
   aside.setAttribute('aria-label', t('Needs You'));
   document.documentElement.dataset.needsYou = shown ? 'open' : 'closed';
   if (!shown) {
+    needsYouOverflow = null;
     aside.replaceChildren();
     delete aside.dataset.scope;
+    delete aside.dataset.shown;
     return;
   }
   const { name, y } = shown;
   const scope = needsYouScope();
   const same = aside.dataset.scope === scope;
   // What had focus, to give back after the redraw: the request (or the one
-  // now in its place), the request memory, the history, the close button or
-  // the heading. A control gone with another yesman or hire leaves focus on
-  // the heading; focus outside the pane stays where it is.
+  // now in its place), a control of the detail, the request memory, the
+  // history, the close button or the heading. A control gone with another
+  // yesman or hire leaves focus on the heading; focus outside the pane stays
+  // where it is.
   const active = aside.contains(document.activeElement) ? document.activeElement : null;
-  const rows = [...aside.querySelectorAll('[data-request]')];
-  const at = rows.indexOf(active?.closest('[data-request]'));
-  const key = active?.closest('[data-request]')?.dataset.request;
+  const rows = [...aside.querySelectorAll('.needs-you-open[data-request]')];
+  const at = rows.indexOf(active?.closest('.needs-you-open[data-request]'));
+  const key = active?.closest('.needs-you-open[data-request]')?.dataset.request;
   const memory = active?.closest('[data-memory]') ? 'memory' : null;
   const control = memory ?? active?.closest('[data-pane-control]')?.dataset.paneControl;
-  const scroll = same ? $('.board-body', aside)?.scrollTop ?? 0 : 0;
+  const detailControl = active?.closest('[data-detail-control]')?.dataset.detailControl;
+  const caret = active && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
+  const navScroll = same ? $('.explorer-nav-scroll', aside)?.scrollTop ?? 0 : 0;
+  const contentScroll = same ? $('.explorer-content', aside)?.scrollTop ?? 0 : 0;
+  if (aside.dataset.shown) needsYouPlaces.save(aside.dataset.shown, $('.explorer-content', aside)?.scrollTop ?? 0);
 
   const label = yesmanLabel(name);
   const items = y ? needsYouOf(y) : [];
-  const body = h('div', { class: 'board-body needs-you-body' });
+  // The request chosen, or, once it is gone, the one in its place.
+  const was = needsYouChosen.get(scope);
+  let chosen = items.find((item) => item.key === was?.key) ?? null;
+  // A request answered meanwhile gives its place to the next; a narrow pane
+  // goes back to the list rather than show another request unasked.
+  const gone = Boolean(was?.key) && !chosen;
+  if (!chosen && items.length) chosen = items[Math.min(was?.at ?? 0, items.length - 1)];
+  const narrowFocus = gone ? 'nav' : was?.focus ?? 'nav';
+  if (chosen) needsYouChosen.set(scope, { key: chosen.key, at: items.indexOf(chosen), focus: narrowFocus });
+  else needsYouChosen.delete(scope);
+  pruneNeedsYouDrafts();
+  if (needsYouOverflow && (needsYouOverflow.key !== chosen?.key || needsYouOverflow.yesman !== name || needsYouOverflow.hiredAt !== (y?.hiredAt ?? ''))) needsYouOverflow = null;
+
+  const nav = h('div', { class: 'explorer-nav-scroll needs-you-body' });
+  let content;
   if (!y) {
-    body.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
-      h('strong', null, t('What {name} needs from you cannot be read', { name: label })),
-      h('p', null, t('Its workspace is unavailable; the sidebar says why.')))));
+    content = h('div', { class: 'needs-you-detail' },
+      narrowBack(t('Show the conversation again'), closeNeedsYou),
+      h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+        h('strong', null, t('What {name} needs from you cannot be read', { name: label })),
+        h('p', null, t('Its workspace is unavailable; the sidebar says why.')))));
   } else {
     if (y.handoffsError) {
-      body.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+      nav.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
         h('strong', null, t('What {name} handed to you cannot be read', { name: label })), h('p', null, y.handoffsError))));
     }
     const notice = callMemoryNotice(y);
-    if (notice) body.append(notice);
+    if (notice) nav.append(notice);
     if (items.length) {
-      body.append(h('ol', { class: 'board-list needs-you-list', 'aria-label': t('Waiting for you') }, items.map(needsYouPaneRow)));
+      nav.append(listView({ label: t('Waiting for you'), cls: 'board-list needs-you-list', items: items.map((item, i) => needsYouPaneRow(item, item === chosen, i)) }));
     } else if (!y.handoffsError) {
-      body.append(h('div', { class: 'board-empty needs-you-empty', role: 'status' },
+      nav.append(h('div', { class: 'board-empty needs-you-empty', role: 'status' },
         h('strong', null, t('Nothing from {name} needs you right now.', { name: label })),
         h('p', null, t('When a yesman needs your answer, a decision or a step only you can take, it shows here.'))));
     }
@@ -1583,40 +1672,55 @@ function renderNeedsYouPane() {
           h('span', { class: 'needs-you-history-meta' },
             `${t(RESOLUTIONS[handoff.resolution] ?? 'Closed')} · ${t('{time} ago', { time: elapsed(handoff.closedAt) })}`)))));
       history.addEventListener('toggle', () => { needsYouHistoryOpen = history.open; });
-      body.append(history);
+      nav.append(history);
     }
+    content = chosen ? needsYouDetail(y, chosen)
+      : h('div', { class: 'needs-you-detail' }, h('div', { class: 'board-empty', role: 'status' },
+        h('strong', null, t('Nothing to answer')),
+        h('p', null, t('What {name} hands you shows here in full, with what you can do about it.', { name: label }))));
   }
   const count = items.length ? tn(items.length, '{n} waiting', '{n} waiting') : '';
+  // An unavailable workspace has no navigation; its error lives in content.
+  const focus = !y ? 'content' : !chosen || narrowFocus === 'nav' ? 'nav' : 'content';
   aside.replaceChildren(
     h('div', { class: 'files-head drag' },
       h('h2', { class: 'files-title needs-you-heading', tabindex: '-1' }, t('Needs You')),
       count ? h('span', { class: 'board-count', 'data-tone': 'waiting' }, count) : null,
       h('div', { class: 'files-head-actions' },
+        h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-pane-control': 'refresh', title: t('Check again'), 'aria-label': t('Check again'), onclick: () => refreshState().catch(fail) }, icon('reload')),
         h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-pane-control': 'close', title: t('Close Needs You'), 'aria-label': t('Close Needs You'), onclick: closeNeedsYou }, icon('x')))),
-    body);
+    explorerBody({ name: 'needs-you', content, nav, focus, handle: needsYouSizes.nav(aside), label: chosen ? requestWhat(chosen) : t('Needs You') }),
+    needsYouSizes.pane(aside));
+  needsYouSizes.apply(aside);
   aside.dataset.scope = scope;
-  body.scrollTop = scroll;
+  const shownKey = `${scope}\u0001${chosen?.key ?? ''}`;
+  const kept = aside.dataset.shown === shownKey;
+  aside.dataset.shown = shownKey;
+  $('.explorer-nav-scroll', aside).scrollTop = navScroll;
+  $('.explorer-content', aside).scrollTop = kept ? contentScroll : needsYouPlaces.get(shownKey);
   if (!active) return;
   let target = null;
   if (same && key) {
-    const now = [...aside.querySelectorAll('[data-request]')];
+    const now = [...aside.querySelectorAll('.needs-you-open[data-request]')];
     target = now.find((el) => el.dataset.request === key) ?? (now.length ? now[Math.min(at, now.length - 1)] : null);
-  } else if (same && control === 'memory') target = aside.querySelector('[data-memory] button');
+  } else if (same && detailControl && kept) target = aside.querySelector(`[data-detail-control="${CSS.escape(detailControl)}"]`);
+  else if (same && detailControl) target = needsYouRow(aside, chosen?.key);
+  else if (same && control === 'memory') target = aside.querySelector('[data-memory] button');
   else if (same && control === 'history') target = aside.querySelector('[data-pane-control="history"] > summary');
-  else if (control === 'close') target = aside.querySelector('[data-pane-control="close"]');
+  else if (control === 'close' || control === 'refresh') target = aside.querySelector(`[data-pane-control="${control}"]`);
   (target ?? aside.querySelector('.needs-you-heading'))?.focus({ preventScroll: true });
+  if (target && caret && typeof target.setSelectionRange === 'function') try { target.setSelectionRange(...caret); } catch {}
 }
 
-// A request in the pane, as a task on the board: what it asks, a line of its
-// text, its kind and how long it has waited, and who asks.
-function needsYouPaneRow(item) {
+// A request in the list: what it asks, a line of its text, its kind and how
+// long it has waited, and who asks. Choosing it shows it in full.
+function needsYouPaneRow(item, chosen, at) {
   const text = requestSummary(item.summary);
-  const opened = state.request?.key === item.key && state.view.kind === 'agent' && state.view.id === item.agent;
-  return h('li', { class: 'board-task needs-you-item', 'data-type': item.type, 'data-kind': item.kind },
+  return h('li', { class: 'board-task needs-you-item', 'data-type': item.type, 'data-kind': item.kind, 'aria-current': chosen ? 'true' : null },
     h('button', {
-      class: 'board-toggle needs-you-open', type: 'button', 'data-request': item.key, 'aria-current': opened ? 'true' : null,
+      class: 'board-toggle needs-you-open', type: 'button', 'data-request': item.key, 'aria-current': chosen ? 'true' : null,
       title: `${requestFrom(item)}: ${requestWhat(item)} (${t(typeLabel(item))})`,
-      onclick: () => openRequest(item),
+      onclick: () => chooseRequest(item, at),
     }, requestIcon(item, 'mds-icon board-mark'),
     h('span', { class: 'needs-you-item-text' },
       h('span', { class: 'board-title' }, requestWhat(item)),
@@ -1626,6 +1730,131 @@ function needsYouPaneRow(item) {
         item.since ? h('span', null, t('Waiting'), ' ', h('span', { 'data-elapsed': item.since }, elapsed(item.since))) : null,
         item.timeout ? h('span', null, t('Goes on without you after {time}', { time: span(Math.round(item.timeout / 1000)) })) : null))),
     h('span', { class: 'board-owner needs-you-source', title: requestFrom(item) }, requestSource(item)));
+}
+
+// needsYouDetail is a request in full, with what the user can do about it
+// there: a handoff's Mark done and Not needed, or the dialog's own answer,
+// through the same calls as where it was asked.
+function needsYouDetail(y, item) {
+  const box = h('div', { class: 'needs-you-detail', 'data-detail': item.key });
+  const scope = JSON.stringify([y.name, y.hiredAt ?? '']);
+  // The default detail is editable beside the list even before its row is
+  // chosen. Focusing its controls keeps that detail visible when narrowing,
+  // without redrawing the input or disturbing its caret. Back still chooses
+  // navigation explicitly; a detached or different request cannot claim it.
+  box.addEventListener('focusin', (e) => {
+    if (!e.target.closest('[data-detail-control]') || needsYouScope() !== scope) return;
+    const aside = box.closest('#needs-you');
+    const chosen = needsYouChosen.get(scope);
+    if (!aside || aside.dataset.scope !== scope || chosen?.key !== item.key) return;
+    chosen.focus = 'content';
+    $('.explorer', aside).dataset.focus = 'content';
+  });
+  box.append(
+    narrowBack(t('All requests'), () => {
+      const scope = needsYouScope();
+      if (scope && needsYouChosen.has(scope)) needsYouChosen.get(scope).focus = 'nav';
+      renderNeedsYouPane();
+      needsYouRow($('#needs-you'), item.key)?.focus({ preventScroll: true });
+    }, 'list'),
+    h('span', { class: 'needs-you-type' }, requestIcon(item), t(typeLabel(item))),
+    h('h3', { class: 'needs-you-detail-title', tabindex: '-1' }, requestWhat(item)),
+    h('p', { class: 'needs-you-detail-meta' },
+      h('span', null, requestFrom(item)),
+      item.since ? h('span', null, t('Waiting'), ' ', h('span', { 'data-elapsed': item.since }, elapsed(item.since))) : null,
+      item.timeout ? h('span', null, t('Goes on without you after {time}', { time: span(Math.round(item.timeout / 1000)) })) : null));
+  const where = h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-detail-control': 'open', onclick: () => openRequest(item) },
+    icon('topics'), t('Open in the conversation'));
+  if (item.kind === 'handoff') {
+    const ho = item.handoff;
+    const busy = state.resolving.has(item.key);
+    const facts = [ho.task && t('Task {id}', { id: ho.task }), ho.worker && t('Worker {name}', { name: ho.worker })].filter(Boolean).join(' · ');
+    const confirmedByUser = ['login', 'install', 'manual'].includes(ho.type);
+    box.append(
+      ho.detail ? h('div', { class: 'md', html: renderMarkdown(ho.detail) }) : null,
+      facts ? h('p', { class: 'needs-you-detail-meta' }, facts) : null,
+      h('p', { class: 'ask-hint' }, confirmedByUser
+        ? t('Mark it done once you have done it yourself; {name} checks it before relying on it.', { name: yesmanLabel(y.name) })
+        : t('Answer in the conversation if it needs words, then mark it done.')),
+      h('div', { class: 'needs-you-detail-actions' },
+        h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', 'data-detail-control': 'done', disabled: busy, onclick: () => resolveHandoff(y, item, 'done') }, t('Mark done')),
+        h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-detail-control': 'not-needed', disabled: busy, onclick: () => resolveHandoff(y, item, 'not-needed') }, t('Not needed')),
+        ho.toolCall ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-detail-control': 'asked', onclick: () => {
+          const lead = agentById(item.agent);
+          if (!lead) { openRequest(item); return; }
+          selectAgent(lead.id);
+          showToolCall(lead, ho.toolCall);
+        } }, t('Show where it was asked')) : null,
+        where));
+    return box;
+  }
+  // A dialog is answered here only while its agent, of the same start,
+  // still asks this very dialog.
+  const a = agentById(item.agent);
+  const id = item.key.slice(item.key.lastIndexOf(':') + 1);
+  if (a && a.status === 'waiting' && (a.since ?? '') === item.agentSince && a.dialog?.id === id) {
+    const ask = askEl(a);
+    ask.removeAttribute('role');
+    ask.removeAttribute('data-request');
+    // The dock's question stays the one .ask on the page; this copy is
+    // styled as the pane's own (explorer.css).
+    ask.className = 'needs-you-ask';
+    ask.querySelector(':scope > strong')?.remove(); // the title is the heading above
+    for (const [i, b] of [...ask.querySelectorAll('.ask-actions button')].entries()) b.dataset.detailControl = `answer-${i}`;
+    const input = ask.querySelector('input, textarea');
+    if (input) {
+      input.dataset.detailControl = 'answer-text';
+      input.setAttribute('aria-label', requestWhat(item));
+      // Past the bound, no other answer is dropped to make room: this one
+      // is kept apart while its request shows, and the pane says so. Once
+      // room frees, it is remembered like the others.
+      const draft = { yesman: y.name, hiredAt: y.hiredAt ?? '' };
+      const over = needsYouOverflow?.key === item.key ? needsYouOverflow : null;
+      if (over && needsYouDrafts.size < NEEDS_YOU_DRAFTS) { needsYouDrafts.set(item.key, { ...draft, text: over.text }); needsYouOverflow = null; }
+      if (needsYouDrafts.has(item.key)) input.value = needsYouDrafts.get(item.key).text;
+      else if (needsYouOverflow) input.value = needsYouOverflow.text;
+      const full = h('p', { class: 'ask-hint', role: 'status', hidden: !needsYouOverflow },
+        t('Kept only while this request is shown: {n} other unsent answers are already kept.', { n: formatNumber(NEEDS_YOU_DRAFTS) }));
+      input.addEventListener('input', () => {
+        const keep = needsYouDrafts.has(item.key) || needsYouDrafts.size < NEEDS_YOU_DRAFTS;
+        if (keep) {
+          needsYouDrafts.set(item.key, { ...draft, text: input.value });
+          if (needsYouOverflow?.key === item.key) needsYouOverflow = null;
+        } else needsYouOverflow = { key: item.key, ...draft, text: input.value };
+        full.hidden = keep;
+      });
+      ask.append(full);
+    }
+    box.append(ask);
+  } else {
+    box.append(h('p', { class: 'ask-hint', role: 'status' }, t('This request is no longer open: it was answered, cancelled or timed out.')));
+  }
+  box.append(h('div', { class: 'needs-you-detail-actions' }, where));
+  return box;
+}
+
+// resolveHandoff closes a handoff of yesman y, for the hire it was read in,
+// as the user chose: done or not needed. A handoff closed meanwhile, or of a
+// yesman hired again, is refused by the app.
+async function resolveHandoff(y, item, resolution, after) {
+  if (state.resolving.has(item.key)) return false;
+  state.resolving.add(item.key);
+  renderDock();
+  renderNeedsYouPane();
+  let closed = false;
+  try {
+    await call('ResolveHandoff', y.name, y.hiredAt, item.handoff.id, resolution);
+    closed = true;
+    await refreshState();
+  } catch (err) {
+    fail(err);
+  } finally {
+    state.resolving.delete(item.key);
+    renderDock();
+    renderNeedsYouPane();
+    after?.(closed);
+  }
+  return closed;
 }
 
 // What a yesman's memory of its lead's tool calls means for the user, when
@@ -1715,25 +1944,9 @@ function handoffEls(a) {
 function handoffEl(a, y, item) {
   const ho = item.handoff;
   const busy = state.resolving.has(item.key);
-  const resolve = async (resolution) => {
-    if (state.resolving.has(item.key)) return;
-    state.resolving.add(item.key);
-    renderDock();
-    let closed = false;
-    try {
-      await call('ResolveHandoff', y.name, y.hiredAt, ho.id, resolution);
-      closed = true;
-      await refreshState();
-    } catch (err) {
-      fail(err);
-    } finally {
-      state.resolving.delete(item.key);
-      if (selectedAgent()?.id === a.id) {
-        renderDock();
-        if (closed) $('#dock textarea')?.focus();
-      }
-    }
-  };
+  const resolve = (resolution) => resolveHandoff(y, item, resolution, (closed) => {
+    if (closed && selectedAgent()?.id === a.id) $('#dock textarea')?.focus();
+  });
   const confirmedByUser = ['login', 'install', 'manual'].includes(ho.type);
   const facts = [ho.task && t('Task {id}', { id: ho.task }), ho.worker && t('Worker {name}', { name: ho.worker })].filter(Boolean).join(' · ');
   return h('div', { class: 'ask handoff', role: 'group', 'aria-label': `${t(typeLabel(item))}: ${ho.title}`, 'data-request': item.key, 'data-type': ho.type },
@@ -1867,7 +2080,7 @@ function renderBarActions() {
       ? button('power', t('Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.'), () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
-    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }, 'pane.info') : null,
+    a ? button('listDashes', infoShown() ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(infoShown()) }, 'pane.info') : null,
     a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }, 'pane.board') : null,
     a ? button('topics', state.pane === 'topics' ? t('Hide the topics') : t('Show the topics'), () => togglePane('topics'), { 'aria-pressed': String(state.pane === 'topics') }, 'pane.topics') : null,
     a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }, 'pane.files') : null,
@@ -3499,7 +3712,7 @@ const info = createInfo({
     const a = selectedAgent();
     return a ? yesmanOf(a.id) : null;
   },
-  isOpen: () => state.panelOpen,
+  isOpen: () => infoShown(),
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
@@ -3525,11 +3738,81 @@ const info = createInfo({
   openURL: (url) => call('OpenURL', url).catch(fail),
 });
 
+// The info panel makes way for Topics and Needs You while, beside it, they
+// could not show their content and navigation side by side and still leave
+// the conversation its room; it shows again once the pane closes. This
+// never changes whether the user keeps the panel shown (yesman.info).
+// Showing it while it makes way keeps it beside that pane, until the pane
+// closes or another opens; the pane then shows one column at a time.
+function infoYields() {
+  if (!state.panelOpen || (state.pane !== 'topics' && state.pane !== 'needs-you')) return false;
+  // Below 1072px app.css hides the panel beside these panes, kept or not.
+  if (window.matchMedia('(max-width: 1071px)').matches) return true;
+  if (infoKept) return false;
+  const css = getComputedStyle(document.documentElement);
+  const side = $('#side')?.getBoundingClientRect().width || parseFloat(css.getPropertyValue('--side-width')) || 0;
+  const panel = parseFloat(css.getPropertyValue('--info-width')) || 0;
+  return window.innerWidth < side + panel + TWO_COLUMNS + CONVERSATION_MIN;
+}
+const infoShown = () => state.panelOpen && !infoYields();
+
 function togglePanel() {
-  state.panelOpen = !state.panelOpen;
-  localStorage.setItem('yesman.info', state.panelOpen ? 'shown' : 'hidden');
+  if (infoShown()) {
+    state.panelOpen = false;
+    infoKept = false;
+    localStorage.setItem('yesman.info', 'hidden');
+  } else {
+    if (!state.panelOpen) localStorage.setItem('yesman.info', 'shown');
+    state.panelOpen = true;
+    infoKept = true;
+  }
+  infoYielded = infoYields();
   info.render();
   renderBarActions();
+}
+
+// As the window changes, the info panel makes way, or shows again; focus it
+// hid goes into the pane, to a control of the column it shows (paneFocus).
+// A browser may drop that focus to the page as the panel hides, before this
+// runs, so the panel having focus is remembered for the pane and yesman it
+// was beside (infoFocus): focus moved elsewhere, or let go of while the
+// panel still shows, forgets it, as does any change of pane, yesman, or
+// whether the panel makes way.
+const infoScope = () => `${state.pane}\n${yesmanOf(selectedAgent()?.id)?.name ?? ''}`;
+document.addEventListener('focusin', (e) => {
+  infoFocus = $('#yesman-info')?.contains(e.target) ? infoScope() : null;
+});
+document.addEventListener('focusout', (e) => {
+  if (!e.relatedTarget && e.target.isConnected && e.target.getClientRects().length > 0) infoFocus = null;
+});
+window.addEventListener('resize', () => {
+  const now = infoYields();
+  if (now === infoYielded) return;
+  infoYielded = now;
+  const active = document.activeElement;
+  const dropped = (!active || active === document.body) && infoFocus === infoScope();
+  const lost = now && ($('#yesman-info')?.contains(active) || dropped);
+  infoFocus = null;
+  info.render();
+  renderBarActions();
+  if (lost) paneFocus(state.pane)?.focus({ preventScroll: true });
+});
+
+// paneFocus is the first visible control of the explorer pane shown, in the
+// column it shows (content or navigation), else its close button.
+function paneFocus(pane) {
+  const aside = pane === 'topics' ? $('#topics') : pane === 'needs-you' ? $('#needs-you') : null;
+  if (!aside) return null;
+  const content = $('.explorer', aside)?.dataset.focus === 'content';
+  const choices = pane === 'topics'
+    ? (content ? ['[data-key="back"]', '[data-key="detail-title"]', '[data-key="edit-title"]'] : ['.topics-search', '#topics-tree .explorer-row[tabindex="0"]'])
+    : (content ? ['[data-key="list"]', '.needs-you-detail-title'] : ['.needs-you-open[aria-current="true"]', '.needs-you-open', '.needs-you-heading']);
+  const visible = (el) => el && !el.disabled && el.getClientRects().length > 0;
+  for (const sel of [...choices, '.files-head-actions button:last-child']) {
+    const el = $(sel, aside);
+    if (visible(el)) return el;
+  }
+  return null;
 }
 
 // ---------- Board pane ----------
@@ -3679,7 +3962,9 @@ function setPane(pane) {
   const visible = had && had !== document.body && shown(had);
   const inPane = !!had?.closest?.('#board, #schedules, #needs-you, #topics, #files');
   const entry = had?.closest?.('#yesman-info [data-info-entry]')?.dataset.infoEntry;
+  if (state.pane !== pane) { infoKept = false; infoFocus = null; }
   state.pane = pane;
+  infoYielded = infoYields();
   renderInfo();
   renderBarActions();
   // Only focus this change hid moves: to the pane opened, or, once it
