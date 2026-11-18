@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.47
+
+- Default agents' temporary files, command-output files and Go/npm caches to the current workspace's `.yesman/tmp`, with retained verification evidence under `.yesman/evidence`.
+- Route workers' built-in Write and Edit tools through Yes Man, limited to their own scratch and evidence folders and eligible managed author or release worktrees. Check the current process, workspace and checkout identity, and serialize managed file checks and updates.
+- Keep existing temporary files and caches, home directories, credentials and configuration in place. Shell commands, other tools and extensions retain their operating-system permissions; this update does not enable an operating-system sandbox.
+
 ## 0.1.46
 
 - Keep your original messages and images in the conversation without a second Earlier submission records list, its counters or permanent success labels.
