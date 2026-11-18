@@ -69,7 +69,7 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
  case 'Usage':return {bytes:0,files:0,parts:[],measuredAt:'2026-01-15T00:00:00Z'};
  case 'Repos':case 'Clones':case 'Pulls':return [];
  case 'Fetches':return {fetching:[],errors:{}};
- case 'TakeFocus':return '';case 'Update':return {enabled:false};
+ case 'TakeFocus':return '';case 'Update':return {enabled:false};case 'RestartStatus':return {};
  case 'Messages':return {messages:[]};case 'Models':return {models:[],agent:fixtureState.agents.find(a=>a.id===args[0])};
  case 'Info':return {knowledge:{notes:2,index:true},worktrees:[]};case 'Board':return {tasks:[]};
  case 'Schedules':return {plans:[]};case 'Crew':return {members:[],yesman:''};
@@ -233,7 +233,12 @@ async function topicsPart(page, engine) {
   assert.deepEqual(update.slice(1, 4), ['alice', '2026-03-01T08:00:00Z', 'tp1']);
   assert.equal(update[4].revision, 1);
   assert.equal(await pane.locator('[data-key="topic-tp1"] .explorer-label').first().innerText(), 'Explorer layout');
-  await pane.locator('[data-key="compose-tp1"]').fill('Is the tree enough?');
+  const topicDraft = pane.locator('[data-key="compose-tp1"]');
+  await topicDraft.fill('Is the tree enough?');
+  await topicDraft.evaluate((e) => { e.focus(); e.setSelectionRange(3, 7); });
+  await page.evaluate(() => handlers.restart({last:{id:'topics-restart',resumedAt:new Date().toISOString(),agents:[{yesman:'alice',name:'lead',outcome:'waiting'}]}}));
+  await frames(page);
+  assert.deepEqual(await topicDraft.evaluate((e) => [document.activeElement === e, e.value, e.selectionStart, e.selectionEnd]), [true, 'Is the tree enough?', 3, 7], 'restart result preserves Topics draft and focus');
   await pane.locator('[data-key="send-tp1"]').click();
   await page.waitForFunction(() => calls.some((c) => c[0] === 'SubmitTopic' && c[1] === 'alice' && c[2] === '2026-03-01T08:00:00Z' && c[3] === 'tp1' && c[5] === 'Is the tree enough?'));
   await pane.locator('[data-key="topic-tp4"] > .explorer-line').click();
@@ -750,6 +755,9 @@ async function answerPart(page, engine) {
   await size(1000);
   assert.deepEqual(await answerState(), { visible: true, active: true, value: text, selection: [5, 9] }, 'default detail stays visible and focused with its selection');
   assert.equal(await input.evaluate((e) => e === window.originalAnswer), true, 'resize does not replace the active input');
+  await page.evaluate(() => handlers.restart({last:{id:'answer-restart',resumedAt:new Date().toISOString(),agents:[{yesman:'alice',name:'lead',outcome:'waiting'}]}}));
+  await frames(page);
+  assert.deepEqual(await answerState(), { visible: true, active: true, value: text, selection: [5, 9] }, 'restart result leaves the active answer intact');
   await shot(page, `${engine}-answer-narrow-focused`);
   // A normal State redraw remembers the same content ownership and caret.
   const states = await page.evaluate(() => calls.filter((c) => c[0] === 'State').length);

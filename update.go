@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+
+	"github.com/idy/yesman/internal/restart"
 )
 
 // updateEvent tells the page where updating yesman stands.
@@ -229,12 +231,8 @@ func (s *service) CheckForUpdates(ctx context.Context) (UpdateView, error) {
 // RestartToUpdate, or the next time yesman starts.
 func (s *service) InstallUpdate() error { return s.app.updates.install() }
 
-// RestartToUpdate quits yesman and starts the installed version. Its
-// agents stop, and resume their sessions when you next talk to them.
+// RestartToUpdate quits yesman and starts the installed version, as
+// Restart does: agents that were working go on afterwards.
 func (s *service) RestartToUpdate() error {
-	if s.app.updates.snapshot().State != updateReady {
-		return errors.New("no update is ready")
-	}
-	mygo.App.Relaunch()
-	return nil
+	return s.app.restarts.begin(restart.KindUpdate, s.app.updates.snapshot())
 }

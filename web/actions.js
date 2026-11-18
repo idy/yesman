@@ -34,6 +34,12 @@ export function registerActions(shortcuts, host) {
       when: () => (host.dialogOpen() ? 'A dialog is open.' : true),
       run: () => host.openHire(),
     },
+    {
+      // Unbound: restarting is not a key to press by accident.
+      id: 'app.restart', label: 'Restart and continue', group: 'General', keywords: ['restart', 'relaunch', 'reload', 'resume', 'update'],
+      when: () => (host.dialogOpen() ? 'A dialog is open.' : true),
+      run: () => host.restart(),
+    },
 
     // ---------- Conversation ----------
     {

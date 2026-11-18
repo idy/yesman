@@ -2106,13 +2106,92 @@ function installUpdate() {
   call('InstallUpdate').catch(fail);
 }
 
-async function restartToUpdate() {
+function restartToUpdate() {
+  return restartApp('RestartToUpdate');
+}
+
+// Restart and continue, Restart to update and the tray's Restart all go
+// one way: agents that were working continue afterwards. Ask only when one
+// works, once.
+async function restartApp(method = 'Restart') {
+  if (state.restart?.pending) return;
   const busy = state.snap.agents.filter((a) => a.status === 'working' || a.status === 'waiting').length;
-  if (busy && !(await confirmAction(t('Restart yesman?'),
-    tn(busy, 'An agent is working. Restarting stops it; it picks up its session when you next talk to it.',
-      '{n} agents are working. Restarting stops them; they pick up their sessions when you next talk to them.'),
+  if (busy && !(await confirmAction(t('Restart Yes Man?'),
+    tn(busy, 'An agent is working. Restarting interrupts its current step; it continues afterwards from its session.',
+      '{n} agents are working. Restarting interrupts their current steps; they continue afterwards from their sessions.'),
     t('Restart')))) return;
-  call('RestartToUpdate').catch(fail);
+  if (state.restart?.pending) return; // another click went first while this one asked
+  // Pending at once, so that a second click sends nothing; yesman says so too.
+  onRestart({ ...state.restart, pending: true });
+  call(method).catch((err) => {
+    onRestart({ ...state.restart, pending: false });
+    fail(err);
+  });
+}
+
+// What the last restart came to, said in one line: every agent it had
+// recorded is counted under what became of it, skipped ones included.
+const RESTART_OUTCOMES = [
+  ['resumed', '{n} continued'],
+  ['reported', '{n} report handed on', '{n} reports handed on'],
+  ['accepted', '{n} report already with its lead', '{n} reports already with their leads'],
+  ['uncertain', '{n} uncertain, not sent again'],
+  ['waiting', '{n} waits for you', '{n} wait for you'],
+  ['active', '{n} already busy'],
+  ['stopped', '{n} kept stopped'],
+  ['finished', '{n} already finished'],
+  ['gone', '{n} no longer there'],
+  ['failed', '{n} could not continue'],
+];
+
+const OUTCOME_LABELS = {
+  resumed: 'Continued', reported: 'Report handed on', accepted: 'Report was already with the lead; not sent again',
+  uncertain: 'Uncertain whether it arrived; nothing sent again', waiting: 'Waits for you', active: 'Already busy',
+  finished: 'Already finished', gone: 'No longer there', stopped: 'Kept stopped', failed: 'Could not continue; nothing sent',
+  'not-continued': 'Not continued; waits for a message',
+};
+
+function restartSummary(last) {
+  if (last.rejected) return t('The record of the last restart could not be used; no agent was woken.');
+  // The old instance quit before it finished its record: nobody went on.
+  if (last.unfinished) {
+    return tn(last.agents.length, 'Its record was not finished, so no agent was continued: {n} interrupted agent waits for a message.',
+      'Its record was not finished, so no agent was continued: {n} interrupted agents wait for a message.');
+  }
+  if (!last.agents.length) return t('No agent was working.');
+  const count = (o) => last.agents.filter((a) => a.outcome === o).length;
+  const parts = RESTART_OUTCOMES.map(([o, one, many]) => (count(o) ? tn(count(o), one, many ?? one) : null)).filter(Boolean);
+  const other = last.agents.filter((a) => !OUTCOME_LABELS[a.outcome]).length;
+  if (other) parts.push(tn(other, '{n} other'));
+  return parts.join(t(', '));
+}
+
+function onRestart(v) {
+  const before = state.restart?.last?.resumedAt;
+  state.restart = v;
+  // Said once: as it arrives, or when the window opens just after it.
+  const fresh = state.restartSeen ? v.last?.resumedAt !== before : Date.now() - new Date(v.last?.resumedAt ?? 0).getTime() < 2 * 60e3;
+  if (v.last && fresh && (v.last.agents.length || v.last.rejected)) {
+    toast(t('Yes Man restarted: {summary}', { summary: restartSummary(v.last) }), { duration: 6000 });
+  }
+  state.restartSeen = true;
+  if (state.view.kind === 'settings' && state.view.page === 'about') renderBody();
+}
+
+function restartStatus() {
+  const r = state.restart;
+  const faint = (text) => h('span', { class: 'about-faint' }, text);
+  const ready = state.update?.state === 'ready';
+  const note = r?.pending ? faint(t('Restarting…'))
+    : r?.last ? h('span', { title: r.last.agents.map((a) => `${yesmanLabel(a.yesman)} · ${a.name}: ${t(OUTCOME_LABELS[a.outcome] ?? a.outcome)}`).join('\n') || null },
+      t('Last restart, {when}: {summary}', {
+        when: new Date(r.last.resumedAt).toLocaleString(locale(), { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }),
+        summary: restartSummary(r.last),
+      }))
+    : faint(ready ? t('Starts the installed update. Working agents continue afterwards.') : t('Working agents continue afterwards from their sessions.'));
+  return h('span', { class: 'about-update' }, note,
+    h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: !!r?.pending, onclick: () => restartApp() },
+      icon('reload'), h('span', null, t('Restart and continue'))));
 }
 
 function onUpdate(u) {
@@ -3035,6 +3114,7 @@ function renderAbout(inner) {
     settingsSection('Yes Man', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
       row(t('Build'), build),
       row(t('Updates'), updateStatus()),
+      row(t('Restart'), restartStatus()),
       row(!v ? 'pi' : v.piManaged ? t('Managed pi') : t('External pi'), v ? (v.pi || (v.piState && v.piState !== 'failed' ? t({ preparing: 'Preparing…', unprepared: 'Not prepared', closed: 'Stopped.' }[v.piState] || 'Version unknown') : h('span', { class: 'danger' }, v.piError || t('Version unknown')))) : checking()),
       row('MyGo', v ? v.mygo || faint(t('unknown')) : checking()),
       row('Magpie', v ? v.magpie || faint(t('unknown')) : checking()),
@@ -4178,6 +4258,7 @@ const actionHost = {
   },
   abort: (a) => call('Abort', a.id),
   sleep: (a) => call('Stop', a.id),
+  restart: () => restartApp(),
   // Another dialog than the palette, which closes before an action runs.
   dialogOpen: () => !!document.querySelector('dialog[open]:not(.palette-dialog)'),
   showSettings(page) {
@@ -4348,6 +4429,7 @@ async function start() {
   mygo.on('fetches', onFetches);
   mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
+  mygo.on('restart', onRestart);
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
   mygo.on('board', (yesman) => { board.onChange(yesman); schedules.onBoard(yesman); });
   mygo.on('schedules', (yesman) => schedules.onChange(yesman));
@@ -4357,6 +4439,7 @@ async function start() {
   shortcuts.listen();
   shortcuts.load().catch(fail);
   call('Update').then(onUpdate, () => {});
+  call('RestartStatus').then(onRestart, () => {});
   mygo.on('focus-agent', (id) => {
     call('TakeFocus').catch(() => {});
     selectAgent(id);

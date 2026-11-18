@@ -94,8 +94,9 @@ var zhHans = map[string]string{
 	"coding is a percentage, at most 100":                    "编码是百分比，不能超过 100",
 
 	// The tray
-	"Open Yes Man": "打开 Yes Man",
-	"Quit Yes Man": "退出 Yes Man",
+	"Open Yes Man":    "打开 Yes Man",
+	"Quit Yes Man":    "退出 Yes Man",
+	"Restart Yes Man": "重启 Yes Man",
 	"Yes Man: %d working, %d waiting for you": "Yes Man：%d 个在工作，%d 个在等你",
 
 	// Notifications

@@ -9,6 +9,7 @@ import (
 	"log"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/idy/yesman/internal/yesmen"
@@ -66,6 +67,21 @@ type continuation struct {
 // TasksChanged tells the manager that a yesman's board changed.
 func (m *Manager) TasksChanged(yesman string) { go m.continueTasks(yesman) }
 
+// HoldContinuations reserves startup for explicit restart recovery. Call before
+// starting schedulers or agents. Releasing it evaluates all work once; events
+// during recovery cannot race a second automatic notice against the claim.
+func (m *Manager) HoldContinuations() func() {
+	m.mu.Lock()
+	m.recovering = true
+	m.mu.Unlock()
+	return sync.OnceFunc(func() {
+		m.mu.Lock()
+		m.recovering = false
+		m.mu.Unlock()
+		m.Resume()
+	})
+}
+
 // Resume checks every yesman's open work once the app starts: a trigger lost
 // with the app's last run, such as a worker that was working when it quit,
 // is not lost. It starts no process unless a lead has something new to be
@@ -85,7 +101,7 @@ func (m *Manager) Resume() {
 // runs makes it run again when it ends.
 func (m *Manager) continueTasks(yesman string) {
 	m.mu.Lock()
-	if m.closed {
+	if m.closed || m.recovering {
 		m.mu.Unlock()
 		return
 	}
@@ -161,7 +177,7 @@ const (
 // report coming is busy: its next settle evaluates again. Other workers
 // working does not matter.
 func (m *Manager) leadStateLocked(yesman string) (*agent, *proc, uint64, int) {
-	if m.closed {
+	if m.closed || m.recovering {
 		return nil, nil, 0, leadBusy
 	}
 	for _, w := range m.agents {
@@ -294,7 +310,7 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 	actionable := 0
 	for _, n := range items {
 		prev, seen := record.Tasks[n.task.ID]
-		if seen && prev.Sig == n.sig && prev.Delivered {
+		if seen && prev.Sig == n.sig && (prev.Delivered || prev.RestartReserved) {
 			continue // told already, and nothing changed since
 		}
 		n.count = 1
@@ -353,6 +369,7 @@ func (m *Manager) evaluate(yesman string, c *continuation) {
 		// Not inbox: a notice pi refuses must not leave the lead looking
 		// busy until its next run, which would hold off the retry.
 		lead.prompts++
+		lead.givenWork = true
 		m.mu.Unlock()
 		lead.modelMu.Unlock()
 	}
@@ -537,7 +554,7 @@ func (m *Manager) forgetSettled(y yesmen.Yesman, record yesmen.Continuation, ite
 			changed := false
 			for id, r := range c.Tasks {
 				if !needs[id] && r.Sig != "" {
-					r.Sig, r.Delivered = "", false
+					r.Sig, r.Delivered, r.RestartReserved = "", false, false
 					c.Tasks[id] = r
 					changed = true
 				}
