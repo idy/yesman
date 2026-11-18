@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.44
+
+- Show the macOS app copy and signing type checked by Settings › Grant, with clearer guidance when an ad-hoc build reports no Accessibility, Screen Recording or Input Monitoring access. Keep the reported state unchanged: replacing a build can invalidate an older grant, and the check cannot determine why access is missing.
+- Add a separate System Audio Recording Only row, independent of Microphone and Screen Recording. On macOS 14.2 or later it shows Manual · cannot detect and opens the relevant System Settings pane; earlier versions show Not applicable. The row performs no recording and requests no access; macOS asks when a recording task actually uses that permission.
+- Wrap long app paths within Grant so the full path and permission controls remain accessible, and keep English and Simplified Chinese category names and Settings action labels consistent.
+- Full Disk Access still requires manual verification, and Automation remains specific to each target app. Opening System Settings does not establish authorization. This update does not reset or repair macOS permission records, change certificate signing, or establish that desktop automation access has recovered.
+
 ## 0.1.43
 
 - Combine consecutive messages sent from the composer while its latest message is still waiting for pi, updating the same conversation bubble in submission order.
