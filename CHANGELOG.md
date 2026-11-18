@@ -2,6 +2,14 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.42
+
+- Add Tasks for requests scheduled once, daily, weekly or at an interval in a chosen time zone. Plans run while Yes Man is open and the computer is awake; missed times appear together for a manual catch-up instead of replaying automatically.
+- Show Tasks as a fifth Info entry with the enabled count, next time and attention state. Create, edit, turn off and archive plans, inspect run history, and follow links between a run, its Board task and the lead conversation.
+- Send each run to the lead as an ordinary follow-up, preserving a reply in progress. Skip automatic overlaps while the previous run is being delivered or its Board task remains open; explicit Run now and catch-up actions ask for confirmation when work overlaps.
+- Keep run and submission identities through supported retry, restart and workspace lifecycle paths. Delivery states follow pi's receipt or native queue evidence; uncertain delivery is shown as unknown and is never automatically resent as a new request. These records do not guarantee exactly-once execution.
+- Show the Board task's recorded status and note as the outcome. The lead is asked to record results in Working log; the scheduler keeps its own run records and does not write that log. Lead-created plans stay off until the user turns them on.
+
 ## 0.1.41
 
 - Add Topics to keep questions and discussions, with summaries, confirmed conclusions, open questions and linked sources. Search, filter, edit, resolve, archive and restore topics in their own pane.
