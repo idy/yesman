@@ -14,6 +14,7 @@ sys.path.insert(0, str(KIT))
 from contract import SOURCE, TREE, CSV, SETTINGS, check_native, sha
 
 BRANCH = 'refs/heads/qa/model-score-package-acceptance'
+QA_PARENT = 'a8830edc327f29379495d3cc4875ccd4b63f599c'
 RECORDS = [
     'admission.json', 'plan.json', 'dependencies.log',
     'evidence/build-A.log', 'evidence/build-B.log',
@@ -54,12 +55,12 @@ def check_inputs(source):
     qa = HERE.parent.parent
     head = output(['git', 'rev-parse', 'HEAD'], qa)
     assert head == os.environ['GITHUB_SHA']
-    assert output(['git', 'show', '-s', '--format=%P', 'HEAD'], qa) == SOURCE
+    assert output(['git', 'show', '-s', '--format=%P', 'HEAD'], qa) == QA_PARENT
     changed = output(['git', 'diff', '--name-only', SOURCE, head], qa).splitlines()
     assert sorted(changed) == sorted(inputs['qaPaths'])
     return {'productHead': SOURCE, 'productTree': TREE, 'qaHead': head,
             'qaTree': output(['git', 'rev-parse', 'HEAD^{tree}'], qa),
-            'qaParent': SOURCE, 'qaPaths': changed,
+            'qaParent': QA_PARENT, 'qaPaths': changed,
             'qaFileSHA256': {p: sha((qa / p).read_bytes()) for p in changed},
             'preparedKitZIP_SHA256': inputs['preparedKitZIP_SHA256'],
             'selectedKitFiles': inputs['selectedKitFiles']}

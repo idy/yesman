@@ -68,7 +68,7 @@ def main():
             spec=plan['stages'][stage];app=Path(spec['app']).resolve();assert app.is_relative_to(root)
             assert {str(p.relative_to(app)):sha(p.read_bytes()) for p in app.rglob('*') if p.is_file()}==spec['bundleFiles']
             if target.exists():shutil.rmtree(target) # Only this run's previous, normally exited private image.
-            shutil.copytree(app,target)
+            shutil.copytree(app,target,symlinks=True)
             inspected=inspect(target)
             executable=target/'Contents/MacOS'/inspected['info']['CFBundleExecutable']
             assert sha(executable.read_bytes())==spec['binarySHA256']
