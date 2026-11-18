@@ -309,6 +309,62 @@ func TestCoalesceFallbacksWithManagedPi(t *testing.T) {
 	})
 }
 
+// Only a composer occurrence is joined. A pending plain Submit, topic message
+// or scheduled run stays its own message, and a later composer input becomes
+// its own occurrence: pi takes and the provider receives each once.
+func TestCoalesceTargetsOnlyComposerOccurrencesWithManagedPi(t *testing.T) {
+	cases := []struct {
+		name, lane, first string
+		submit            func(ctx context.Context, f *promotionFixture, id string) (Delivery, error)
+	}{
+		{"plain Submit", "steering", "plain A", func(ctx context.Context, f *promotionFixture, id string) (Delivery, error) {
+			return f.m.Submit(ctx, f.info.ID, id, "plain A", nil, f.info.Since)
+		}},
+		{"topic message", "steering", "[Topic tp1: Storage]\n\ntopic A", func(ctx context.Context, f *promotionFixture, id string) (Delivery, error) {
+			return f.m.SubmitInContext(ctx, f.info.ID, id, "[Topic tp1: Storage]\n\ntopic A", nil, "topic:tp1", f.info.Since)
+		}},
+		{"scheduled run", "queued", "scheduled A", func(ctx context.Context, f *promotionFixture, id string) (Delivery, error) {
+			return f.m.SubmitFollowUp(ctx, f.info.ID, id, "scheduled A", Origin{Source: OriginSchedule, Plan: "s1", Run: "s1-20261118t0900"}, f.info.Since)
+		}},
+	}
+	for n, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newPromotionFixture(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			idA, idB := deliveryTestID(87001+2*n), deliveryTestID(87002+2*n)
+			if _, err := c.submit(ctx, f, idA); err != nil {
+				t.Fatal(err)
+			}
+			f.delivery(t, idA, c.lane)
+			behavior := "steer"
+			if c.lane == "queued" {
+				behavior = "followUp" // the same lane, so only the occurrence's kind decides
+			}
+			b, err := f.m.submitDelivery(ctx, f.info.ID, idB, "composer B", nil, behavior, submission{coalesce: true}, f.info.Since)
+			if err != nil || b.MergedInto != "" || len(f.receipt(idA).Merged) != 0 {
+				t.Fatalf("composer input joined a %s: %+v %v", c.name, b, err)
+			}
+			f.delivery(t, idB, c.lane)
+			if items := f.pendingItems(); len(items) != 2 || len(items[0].Segments) != 0 {
+				t.Fatalf("queue %+v", items)
+			}
+			f.release(t)
+			f.delivery(t, idA, "dispatched")
+			f.delivery(t, idB, "dispatched")
+			calls, raw := f.awaitProvider(t, c.first, "composer B")
+			if len(introduced(calls, c.first)) != 1 || len(introduced(calls, "composer B")) != 1 || len(introduced(calls, c.first+"\ncomposer B")) != 0 {
+				t.Fatalf("provider saw %s", raw)
+			}
+			for _, private := range []string{idA, idB, "topic:tp1", "s1-20261118t0900"} {
+				if strings.Contains(raw, private) {
+					t.Fatalf("provider saw %q", private)
+				}
+			}
+		})
+	}
+}
+
 func TestCoalesceCancelAndPromoteFamilyWithManagedPi(t *testing.T) {
 	t.Run("cancel returns the whole message and keeps others", func(t *testing.T) {
 		f := newPromotionFixture(t)

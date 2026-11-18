@@ -163,6 +163,42 @@ try {
       independent: { stale_item: 'D', not_latest: 'E', ineligibleOrigin: 'F', stale_control: 'G', kind_mismatch: 'H' } };
   }
 
+  // 1b. Host origins keep occurrences apart: a topic's trusted context and a
+  // scheduled run are never joined by another context's or a person's input;
+  // inputs of one context may join (yesman itself never proposes that).
+  {
+    const from = records.length;
+    await holdTurn('hold origins');
+    const [idA, idB, idC, idD, idE, idF, idG] = [newId(), newId(), newId(), newId(), newId(), newId(), newId()];
+    const topic1 = { source: 'user', context: 'topic:tp1' }, topic2 = { source: 'user', context: 'topic:tp2' };
+    const schedule = { source: 'schedule', plan: 's1', run: 's1-20261118t0900' };
+    const latest = async (id) => { const q = await call({ type: 'get_pending_queue' }); const i = q.items.find(x => x.submissionId === id); return { epoch: q.epoch, queueId: i.queueId, expectedRevision: i.itemRevision, controlGeneration: q.controlGeneration }; };
+    await call({ type: 'prompt', message: 'topic A', streamingBehavior: 'steer', submissionId: idA, hostOrigin: topic1 });
+    const rB = await call({ type: 'prompt', message: 'composer B', streamingBehavior: 'steer', submissionId: idB, hostOrigin: user, appendTo: await latest(idA) });
+    assert.equal(rB.append.outcome, 'ineligible'); assert.equal(rB.append.enqueued, true);
+    const rC = await call({ type: 'prompt', message: 'topic C', streamingBehavior: 'steer', submissionId: idC, hostOrigin: topic1, appendTo: await latest(idB) });
+    assert.equal(rC.append.outcome, 'ineligible'); assert.equal(rC.append.enqueued, true);
+    await call({ type: 'prompt', message: 'scheduled D', streamingBehavior: 'steer', submissionId: idD, hostOrigin: schedule });
+    const rE = await call({ type: 'prompt', message: 'composer E', streamingBehavior: 'steer', submissionId: idE, hostOrigin: user, appendTo: await latest(idD) });
+    assert.equal(rE.append.outcome, 'ineligible'); assert.equal(rE.append.enqueued, true);
+    await call({ type: 'prompt', message: 'topic F', streamingBehavior: 'steer', submissionId: idF, hostOrigin: topic2 });
+    const rG = await call({ type: 'prompt', message: 'topic G', streamingBehavior: 'steer', submissionId: idG, hostOrigin: topic2, appendTo: await latest(idF) });
+    assert.equal(rG.append.outcome, 'appended');
+    const q = await call({ type: 'get_pending_queue' });
+    assert.deepEqual(q.items.map(i => i.submissionId), [idA, idB, idC, idD, idE, idF]); assert.deepEqual(q.items.at(-1).segments, [idG]);
+    await openAll();
+    await until(() => records.slice(from).some(r => r.type === 'agent_settled'), 'origins settle');
+    await closeAll();
+    assert.deepEqual(usersSince(from).map(r => text(r.message)), ['hold origins', 'topic A', 'composer B', 'topic C', 'scheduled D', 'composer E', 'topic F\ntopic G']);
+    const recorded = (id) => records.slice(from).find(r => r.type === 'input_recorded' && r.inputIdentity?.submissionId === id)?.inputIdentity;
+    assert.deepEqual(recorded(idA).origin, topic1); assert.deepEqual(recorded(idB).origin, user);
+    assert.deepEqual(recorded(idD).origin, schedule); assert.deepEqual(recorded(idF).segments, [idG]);
+    providerCount = (await providerCalls()).length;
+    const raw = await readFile(`${temp}/provider`, 'utf8') + await readFile(`${temp}/hooks`, 'utf8');
+    for (const key of ['topic:tp1', 'topic:tp2', 's1-20261118t0900', '"plan":"s1"']) assert.equal(raw.includes(key), false, `${key} reached a hook or provider`);
+    results.originIsolation = { topicVsComposer: 'ineligible both ways', scheduledTarget: 'ineligible', sameContext: 'appended once', providerOrHookSawContext: false };
+  }
+
   // 2. Checkpoint drain wins: A is taken first, so B becomes its own occurrence once.
   {
     const from = records.length;

@@ -39,7 +39,7 @@ type coalesceUnit struct {
 	events []Event
 }
 
-// newCoalesceUnit builds a capability 4 agent with one pending human
+// newCoalesceUnit builds a capability 4 agent with one pending composer
 // occurrence A (steering, queueId E:1, revision 0) and a composer input B that
 // is bound to the same session and waiting for pi's answer.
 func newCoalesceUnit(t *testing.T) (*coalesceUnit, string, string) {
@@ -57,7 +57,7 @@ func newCoalesceUnit(t *testing.T) (*coalesceUnit, string, string) {
 	u.a.nativeQueue.Items[0].SubmissionID = idA
 	session := u.p.deliverySession()
 	u.a.deliveries[idA] = Delivery{ID: idA, State: "steering", Text: "alpha", ImageCount: 1, Order: 1, AgentSince: since, Session: session,
-		queueID: "E:1", queueEpoch: "E", fingerprint: deliveryFingerprint("alpha", []Image{testPNG(1, 0, 0)})}
+		queueID: "E:1", queueEpoch: "E", coalesce: true, fingerprint: deliveryFingerprint("alpha", []Image{testPNG(1, 0, 0)})}
 	u.a.deliveries[idB] = Delivery{ID: idB, State: "sending", Text: "beta", ImageCount: 2, Order: 2, AgentSince: since, Session: session,
 		coalesce: true, appendRoot: idA, fingerprint: "b"}
 	u.m.retainRecallLocked(u.a, idA, "alpha", []Image{testPNG(1, 0, 0)})
@@ -195,6 +195,25 @@ func TestCoalesceTargetEligibility(t *testing.T) {
 	}{
 		{"eligible", func(*coalesceUnit, string, string) {}, true},
 		{"not composer", func(u *coalesceUnit, _, idB string) { d := u.get(idB); d.coalesce = false; u.a.deliveries[idB] = d }, false},
+		// Only a composer occurrence is a target: a plain Submit, a scheduled
+		// run, a topic's message or one restored from disk (coalesce is never
+		// persisted) is not, even when pi would accept its origin.
+		{"plain occurrence", func(u *coalesceUnit, idA, _ string) { d := u.get(idA); d.coalesce = false; u.a.deliveries[idA] = d }, false},
+		{"scheduled occurrence", func(u *coalesceUnit, idA, _ string) {
+			d := u.get(idA)
+			d.Origin = &Origin{Source: OriginSchedule, Plan: "s1", Run: "s1-a"}
+			u.a.deliveries[idA] = d
+		}, false},
+		{"topic occurrence", func(u *coalesceUnit, idA, _ string) {
+			d := u.get(idA)
+			d.hostContext = "topic:tp1"
+			u.a.deliveries[idA] = d
+		}, false},
+		{"input in a topic", func(u *coalesceUnit, _, idB string) {
+			d := u.get(idB)
+			d.hostContext = "topic:tp1"
+			u.a.deliveries[idB] = d
+		}, false},
 		{"older runtime", func(u *coalesceUnit, _, _ string) { u.a.nativeQueue.Capability = 3 }, false},
 		{"stopping", func(u *coalesceUnit, _, _ string) { u.a.nativeQueue.AppendAllowed = false }, false},
 		{"preparing", func(u *coalesceUnit, _, _ string) { u.a.nativeQueue.Items[0].Preparing = true }, false},
@@ -347,5 +366,28 @@ func TestCoalesceFamilyPreviewWithoutOriginals(t *testing.T) {
 	payload, err := v.m.SubmissionPayload(v.a.info.ID, idB2, v.a.info.Since)
 	if err != nil || !slices.Equal(payload.Members, []string{idA2, idB2}) || payload.Text != "alpha\nbeta" || len(payload.Images) != 3 {
 		t.Fatalf("family payload %+v %v", payload, err)
+	}
+}
+
+// The host origin pi records carries a trusted context only when the app sent
+// the input in one; every other field is the Origin's own.
+func TestHostOriginWire(t *testing.T) {
+	id := deliveryTestID(80100)
+	plain, _ := json.Marshal(hostOriginWire{Origin: Origin{Source: OriginUser, Submission: id}})
+	if string(plain) != `{"source":"user","submission":"`+id+`"}` {
+		t.Fatalf("plain %s", plain)
+	}
+	topic, _ := json.Marshal(hostOriginWire{Origin: Origin{Source: OriginUser, Submission: id}, Context: "topic:tp3"})
+	if string(topic) != `{"source":"user","submission":"`+id+`","context":"topic:tp3"}` {
+		t.Fatalf("topic %s", topic)
+	}
+	scheduled, _ := json.Marshal(hostOriginWire{Origin: Origin{Source: OriginSchedule, Plan: "s1", Run: "s1-a", Submission: id}})
+	if string(scheduled) != `{"source":"schedule","submission":"`+id+`","plan":"s1","run":"s1-a"}` {
+		t.Fatalf("scheduled %s", scheduled)
+	}
+	for _, bad := range []string{"", "Topic:1", "-x", strings.Repeat("a", 65), "topic tp1"} {
+		if hostContextRE.MatchString(bad) {
+			t.Fatalf("context %q accepted", bad)
+		}
 	}
 }

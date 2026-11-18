@@ -44,10 +44,14 @@ type Delivery struct {
 	Ack string `json:"ack,omitempty"`
 	// Origin marks a submission the app made for the user, a scheduled
 	// task's run; nil for what a person typed.
-	Origin              *Origin `json:"origin,omitempty"`
-	queuePreparing      bool
-	coalesce            bool   // a composer submission that may join a pending occurrence
-	appendRoot          string // the occurrence an in-flight append targeted
+	Origin         *Origin `json:"origin,omitempty"`
+	queuePreparing bool
+	coalesce       bool   // a composer submission that may join a pending occurrence
+	appendRoot     string // the occurrence an in-flight append targeted
+	// hostContext is the trusted conversation context the app sent this
+	// submission in (a topic's), host-only: pi keeps inputs of different
+	// contexts in different occurrences. Never persisted or shown.
+	hostContext         string
 	queueRevision       uint64
 	queueID, queueEpoch string
 	boundSeq            uint64
@@ -128,9 +132,22 @@ func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images
 // instead of queueing another one. pi decides atomically at its own enqueue
 // point; when the occurrence was taken, claimed or changed first, or the
 // runtime predates capability 4, the input is queued exactly once as its own
-// message.
+// message. Only another composer input can be joined: never a scheduled run,
+// a topic's message, a worker's report or any other submission.
 func (m *Manager) SubmitCoalescing(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
 	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{coalesce: true}, expectedSince...)
+	return m.submitView(id, d), err
+}
+
+// SubmitInContext is Submit for a message the user sends within a trusted
+// conversation context, such as a topic. The context is host-only: pi records
+// it with the input's identity and never lets inputs of different contexts
+// share an occurrence; the text and pi's command are otherwise unchanged.
+func (m *Manager) SubmitInContext(ctx context.Context, id, messageID, text string, images []Image, hostContext string, expectedSince ...time.Time) (Delivery, error) {
+	if !hostContextRE.MatchString(hostContext) {
+		return Delivery{}, errors.New("invalid conversation context")
+	}
+	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{context: hostContext}, expectedSince...)
 	return m.submitView(id, d), err
 }
 
@@ -153,7 +170,12 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 type submission struct {
 	origin   *Origin // a scheduled run's; nil for what a person typed
 	coalesce bool    // the composer's: may join its newest pending occurrence
+	context  string  // a trusted host-only conversation context, such as a topic's
 }
+
+// hostContextRE bounds a host-only conversation context, as pi's
+// pending-queue.js does (CONTEXT_KEY).
+var hostContextRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
 
 func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string, images []Image, behavior string, sub submission, expectedSince ...time.Time) (Delivery, error) {
 	origin := sub.origin
@@ -269,7 +291,7 @@ func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string
 	preview, truncated := deliveryClip(text, maxDeliveryPreview)
 	a.deliveryOrder++
 	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, Origin: origin, fingerprint: fingerprint, created: deliveryTimestamp(messageID),
-		coalesce: sub.coalesce && origin == nil}
+		coalesce: sub.coalesce && origin == nil && sub.context == "", hostContext: sub.context}
 	a.deliveries[messageID] = d
 	// Only what a person typed can be recalled, edited or shown again in
 	// full: a scheduled run's request is the plan's, never the user's draft.

@@ -887,7 +887,7 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		m.mu.Lock()
 		retiring := a.retiring || a.proc != p
 		if a.nativeQueue.supportsInputIdentity() {
-			cmd["hostOrigin"] = origin
+			cmd["hostOrigin"] = hostOriginWire{Origin: origin, Context: a.deliveries[messageID].hostContext}
 		}
 		if messageID != "" && a.nativeQueue.supported() {
 			cmd["submissionId"] = messageID

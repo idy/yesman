@@ -80,13 +80,22 @@ func (a *agent) rootDeliveryLocked(id string) (Delivery, bool) {
 	return d, true
 }
 
+// hostOriginWire is the host origin sent with an input for pi's own identity of
+// it: who wrote it and, for a message sent within one, the trusted
+// conversation context. pi keeps it beside the message, never in it.
+type hostOriginWire struct {
+	Origin
+	Context string `json:"context,omitempty"`
+}
+
 // joinableText excludes slash input. pi expands /skill and /template inputs and
 // runs extension commands before queueing, so a merged message would mix an
 // expansion with ordinary text; such inputs always stay their own messages.
 func joinableText(text string) bool { return !strings.HasPrefix(strings.TrimSpace(text), "/") }
 
 // appendTargetLocked proposes the occurrence a composer submission may join.
-// Only the newest pending human occurrence qualifies, in the same lane, session
+// Only the newest pending occurrence qualifies, and only when it is itself a
+// composer submission (root.coalesce) in the same lane, session
 // and agent generation, unclaimed by an idle preparation, with every member's
 // complete payload retained and the combined images within the single-message
 // limits. The revision is pi's own current one for exactly that segment list,
@@ -106,7 +115,11 @@ func (m *Manager) appendTargetLocked(a *agent, p *proc, d Delivery, behavior str
 	}
 	root, ok := a.deliveries[last.SubmissionID]
 	session := p.deliverySession()
-	if !ok || root.MergedInto != "" || root.Session != session || !root.AgentSince.Equal(a.info.Since) || !d.AgentSince.Equal(a.info.Since) ||
+	// Only another composer input is a target: never a scheduled run, a topic's
+	// message, a plain submission, or an occurrence restored without that fact.
+	// pi independently requires a user origin and the same trusted context.
+	if !ok || !root.coalesce || root.Origin != nil || root.hostContext != d.hostContext ||
+		root.MergedInto != "" || root.Session != session || !root.AgentSince.Equal(a.info.Since) || !d.AgentSince.Equal(a.info.Since) ||
 		root.queueID != last.QueueID || root.queueEpoch != q.Epoch || root.queueRevision != last.ItemRevision ||
 		root.State != "steering" && root.State != "queued" {
 		return nil, ""
