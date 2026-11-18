@@ -1,0 +1,23 @@
+{
+  "source": "dfc9ad753ab97fae0b78104bd72d0392282a4ab5",
+  "tree": "4f8b8f55684e44a997294481768b06b2b64a379f",
+  "preparedKitZIP_SHA256": "8d9b2b27e5e848800d45be7c19cd13c4e74611931c91142b37d07775a1f4981a",
+  "selectedKitFiles": {
+    "catalog.py": "7a2309665db8ed26a032d98c3d1a10cdfeaad7f26092efc2a44c08c1ed1b57a5",
+    "contract.py": "779cee486f7cdc93fc87ef7360e8541be973276ed7f1d8fad27bdb49e4044e1b",
+    "observer.js": "f76d371ef0c83418748164e46ca68ef9cf442a2515e26df84b0710136e5f0935",
+    "prepare.py": "08665183229a103a2cc3bcb80dbf6e90c2febc3e73d01d7558ddabf9a8bd16a2",
+    "run-native.py": "b4b1e321c271d66c78c3771f7c9e24de0e684f533768d68e5676ef3976eace37"
+  },
+  "qaPaths": [
+    ".github/workflows/model-score-package-acceptance.yml",
+    "scripts/score-package-acceptance/README.md",
+    "scripts/score-package-acceptance/hosted.py",
+    "scripts/score-package-acceptance/inputs.json",
+    "scripts/score-package-acceptance/kit/catalog.py",
+    "scripts/score-package-acceptance/kit/contract.py",
+    "scripts/score-package-acceptance/kit/observer.js",
+    "scripts/score-package-acceptance/kit/prepare.py",
+    "scripts/score-package-acceptance/kit/run-native.py"
+  ]
+}

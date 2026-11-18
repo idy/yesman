@@ -1,0 +1,69 @@
+name: Model score package acceptance
+
+# One authorized native acceptance run. No PR, dispatch, release or main trigger.
+on:
+  push:
+    branches: [qa/model-score-package-acceptance]
+    paths:
+      - .github/workflows/model-score-package-acceptance.yml
+      - scripts/score-package-acceptance/**
+
+permissions:
+  contents: read
+
+jobs:
+  native-score-patch:
+    if: github.repository == 'idy/yesman' && github.event_name == 'push' && github.ref == 'refs/heads/qa/model-score-package-acceptance' && github.run_attempt == 1
+    runs-on: macos-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the exact QA commit without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: qa
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Check out the frozen R2 product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dfc9ad753ab97fae0b78104bd72d0392282a4ab5
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up the source's Go toolchain without a shared build cache
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: source/go.mod
+          cache: false
+
+      - name: Admit the fixed inputs and build two private production bundles
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -B qa/scripts/score-package-acceptance/hosted.py build source
+
+      - name: Run the native Models observer with the same private profile
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -B qa/scripts/score-package-acceptance/kit/run-native.py "$RUNNER_TEMP/t212-score-native/plan.json"
+
+      - name: Collect only bounded acceptance records
+        if: always()
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: python3 -B qa/scripts/score-package-acceptance/hosted.py collect source
+
+      - name: Keep the source, image, profile and page evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: model-score-package-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/t212-score-artifact
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: false
