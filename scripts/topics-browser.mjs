@@ -41,7 +41,7 @@ async function fixture() {
 const bridge = () => {
   localStorage.setItem('yesman.info', 'shown');
   const handlers = {};
-  const forwarded = ['State', 'Messages', 'Submit', 'Abort', 'Board', 'Info', 'Topics', 'CreateTopic', 'UpdateTopic', 'SubmitTopic'];
+  const forwarded = ['State', 'Messages', 'Submit', 'SubmitCoalescing', 'Abort', 'Board', 'Info', 'Topics', 'CreateTopic', 'UpdateTopic', 'SubmitTopic'];
   window.fixtureCalls = [];
   window.mygo = {
     locale: localStorage.getItem('fixture.locale') || 'en',
