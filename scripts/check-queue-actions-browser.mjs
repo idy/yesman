@@ -42,7 +42,7 @@ try { for(const [engineName,engine]of Object.entries({chromium,webkit})) for(con
   const row=id=>page.locator(`#thread > [data-delivery="${id}"]`);
   const reload=async()=>{assert.deepEqual(await page.evaluate(()=>window.stopFixturePolling()),[]);await page.reload();await input.waitFor()};
   const upload=async(n)=>{await page.locator('.composer input[type=file]').setInputFiles(Array.from({length:n},(_,i)=>({name:`original-${i}.png`,mimeType:'image/png',buffer:Buffer.from(png,'base64')})));await page.locator('.composer-image').nth(n-1).waitFor()};
-  const submit=async(text,n=0)=>{await input.fill(text);if(n)await upload(n);await page.waitForFunction(()=>!document.querySelector('.composer input[type=file]').disabled&&!document.querySelector('.composer textarea').readOnly);await input.press('Enter');await page.waitForFunction(()=>!document.querySelector('.composer textarea').readOnly&&document.querySelector('.composer textarea').value==='');return page.evaluate(()=>window.sent.filter(s=>s.method==='Yesman.Submit').at(-1).args[1])};
+  const submit=async(text,n=0)=>{await input.fill(text);if(n)await upload(n);await page.waitForFunction(()=>!document.querySelector('.composer input[type=file]').disabled&&!document.querySelector('.composer textarea').readOnly);await input.press('Enter');await page.waitForFunction(()=>!document.querySelector('.composer textarea').readOnly&&document.querySelector('.composer textarea').value==='');return page.evaluate(()=>window.sent.filter(s=>/^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1).args[1])};
   const long='  complete 中文\n'+'full original **text** '.repeat(60)+'END  ';
   const ids=[];ids.push(await submit(long,2));ids.push(await submit('',1));for(let i=2;i<11;i++)ids.push(await submit(`pending ${i}`));
   await page.waitForFunction(id=>document.querySelector(`[data-delivery="${id}"]`)?.dataset.original==='true',ids[0]);
@@ -96,7 +96,7 @@ try { for(const [engineName,engine]of Object.entries({chromium,webkit})) for(con
   await input.fill('');await row(target).locator('.message-recall').click();await page.waitForFunction(text=>document.querySelector('.composer textarea').value===text,long);
   assert.equal(await page.locator('.composer-image').count(),2);assert.equal((await control('NativeSnapshot')).items.some(x=>x.submissionId===target),false);
   await input.fill(long+' edited');await input.press('Enter');await page.waitForFunction(()=>!document.querySelector('.composer textarea').readOnly&&document.querySelector('.composer textarea').value==='');
-  const edited=await page.evaluate(()=>window.sent.filter(s=>s.method==='Yesman.Submit').at(-1).args[1]);assert.notEqual(edited,target);
+  const edited=await page.evaluate(()=>window.sent.filter(s=>/^Yesman\.Submit(Coalescing)?$/.test(s.method)).at(-1).args[1]);assert.notEqual(edited,target);
   await row(follow[0]).locator('.message-copy:not(.message-recall):not(.message-promote)').click();await page.waitForFunction(()=>window.copied.length>0);assert.equal(await page.evaluate(()=>window.copied.at(-1)),'same');
   await control('ReleaseProvider');
   await page.waitForFunction(ids=>ids.every(id=>document.querySelectorAll(`[data-delivery="${id}"][data-bound="true"]`).length===1),[...ids,follow[0],follow[2],edited]);
@@ -124,6 +124,9 @@ try { for(const [engineName,engine]of Object.entries({chromium,webkit})) for(con
   const prepareDeadline=Date.now()+10000;while(!(await control('ContextReady'))){assert(Date.now()<prepareDeadline,'production context gate not entered');await new Promise(r=>setTimeout(r,10))}
   await row(prepareID).locator('.message-recall').waitFor();
   await page.waitForFunction(id=>document.querySelector(`[data-delivery="${id}"] .delivery-status`)?.dataset.state==='steering',prepareID);
+  // Claimed by the idle preparation: Preparing, still recallable, never Taken.
+  await page.waitForFunction(id=>document.querySelector(`[data-delivery="${id}"] .delivery-status`)?.dataset.preparing==='true',prepareID);
+  assert.equal(await row(prepareID).locator('.delivery-status').innerText(),language==='en'?'Preparing · being sent to pi':'准备中 · 正在送入 pi');
   assert.equal(await row(prepareID).getAttribute('data-bound'),null);
   assert.equal(await row(prepareID).locator('.delivery-status').getAttribute('data-state'),'steering');
   assert.equal((await control('State')).agents.find(x=>x.id===a.id).detail ?? '', '', 'preparation created a false attention/error box');

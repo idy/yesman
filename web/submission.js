@@ -11,8 +11,9 @@ export const DELIVERY_LABELS = {
 };
 
 // A receipt's label: a message still in pi's native queue says which queue
-// it waits in rather than its admission.
-export const deliveryLabel = (d) => d.nativePending ? (d.state === 'queued' ? 'Waiting · follow-up' : 'Steering · waiting for input checkpoint') : DELIVERY_LABELS[d.state];
+// it waits in rather than its admission, or that pi's idle preparation has
+// claimed it (being sent, not yet taken).
+export const deliveryLabel = (d) => d.nativePending ? (d.preparing ? 'Preparing · being sent to pi' : d.state === 'queued' ? 'Waiting · follow-up' : 'Steering · waiting for input checkpoint') : DELIVERY_LABELS[d.state];
 
 // A 12-hex millisecond timestamp, then 36 random hex digits.
 export const newSubmissionID = () => Date.now().toString(16).padStart(12, '0') +

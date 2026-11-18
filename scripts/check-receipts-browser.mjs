@@ -148,7 +148,8 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
           case "Repos": case "Clones": return [];
           case "Messages": return structuredClone({ messages: saved.messages[args[0]] ?? [], live: [], seq: saved.seq, deliveries: saved.receipts[args[0]] ?? [], queue: { known: false } });
           case "Models": return { agent: agents.find((a) => a.id === args[0]), models: [{ id: "m", provider: "p", name: "Model" }] };
-          case "Submit": {
+          case "Submit":
+          case "SubmitCoalescing": {
             const [agent, id, text, images] = args;
             window.sent.push({ agent, id, text, images: images.length });
             if (window.fixture.bridgeDown) {

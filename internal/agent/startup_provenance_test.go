@@ -33,7 +33,7 @@ func (w *startupStateWire) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 func TestStartupProvenancePrecedesPostResponseEvents(t *testing.T) {
-	for _, capability := range []int{0, 1, 2, 3, 4, 99} {
+	for _, capability := range []int{0, 1, 2, 3, 4, 5, 99} {
 		t.Run(fmt.Sprint(capability), func(t *testing.T) {
 			p := &proc{pending: map[string]waiter{}, done: make(chan struct{})}
 			wire := &startupStateWire{p: p, capability: capability}
@@ -42,7 +42,7 @@ func TestStartupProvenancePrecedesPostResponseEvents(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := capability == 2 || capability == 3
+			want := capability >= 2 && capability <= 4
 			if state.PendingQueue.Capability != capability || wire.observed != want || p.origins.native != want {
 				t.Fatalf("post-response event ran in wrong provenance mode: capability=%d observed=%v current=%v", capability, wire.observed, p.origins.native)
 			}

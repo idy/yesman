@@ -212,7 +212,8 @@ type agent struct {
 	nativeQueue                    pendingQueue
 	recallPayloads                 map[string]recallPayload
 	recallBytes, recalls           int
-	deliverySettled                uint64 // sequence of last observed settled boundary
+	appendGate                     chan struct{} // serializes composer submissions that may join an occurrence
+	deliverySettled                uint64        // sequence of last observed settled boundary
 	// runEnd is how the run in progress ended so far: its latest assistant
 	// message's error, or nil; runSaid tells whether it had one at all.
 	runEnd  *RunError
@@ -875,12 +876,30 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 			cmd["images"] = images
 		}
 		m.mu.Lock()
+		joining := messageID != "" && origin.Source == OriginUser && a.deliveries[messageID].coalesce && a.nativeQueue.supportsAppend()
+		m.mu.Unlock()
+		if joining {
+			// Held across this RPC: its ordered reply/events update the occurrence
+			// before the next composer input proposes a target revision.
+			release := m.acquireAppendGate(a, p)
+			defer release()
+		}
+		m.mu.Lock()
 		retiring := a.retiring || a.proc != p
-		if a.nativeQueue.Capability == 3 {
-			cmd["hostOrigin"] = origin
+		if a.nativeQueue.supportsInputIdentity() {
+			cmd["hostOrigin"] = hostOriginWire{Origin: origin, Context: a.deliveries[messageID].hostContext}
 		}
 		if messageID != "" && a.nativeQueue.supported() {
 			cmd["submissionId"] = messageID
+		}
+		if joining && !retiring {
+			if d, ok := a.deliveries[messageID]; ok && d.State == "sending" {
+				if target, root := m.appendTargetLocked(a, p, d, behavior); target != nil {
+					cmd["appendTo"] = target
+					d.appendRoot = root
+					a.deliveries[messageID] = d
+				}
+			}
 		}
 		if !a.nativeQueue.supported() {
 			m.forgetRecallLocked(a, messageID)

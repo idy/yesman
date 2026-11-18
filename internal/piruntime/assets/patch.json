@@ -1,6 +1,6 @@
 {
   "upstream": "1.5.2",
-  "revision": 4,
+  "revision": 5,
   "patches": [
     {
       "path": "@earendil-works/pi-coding-agent/dist/bundle/cli.js",
@@ -16,7 +16,7 @@
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.js",
       "before": "f45ae001e2b14fced8ae151f0a00303b5fbdb5fc4b25418d45de6a5546f48a8c",
-      "after": "7d9c8decdefec4c6ef4498374a441c90decc12af82c6626d025ce3d9b1b234d5",
+      "after": "dcc5c03908242daef9f8d389186fd182e157718443dee494abfc447a75dd5ef7",
       "edits": [
         {
           "before": "class PendingMessageQueue {\n    messages = [];\n    mode;\n    constructor(mode) {\n        this.mode = mode;\n    }\n    enqueue(message) {\n        this.messages.push(message);\n    }\n    hasItems() {\n        return this.messages.length > 0;\n    }\n    peek() {\n        if (this.mode === \"all\")\n            return this.messages.slice();\n        const first = this.messages[0];\n        return first ? [first] : [];\n    }\n    drain() {\n        const drained = this.peek();\n        this.messages = this.messages.slice(drained.length);\n        return drained;\n    }\n    clear() {\n        this.messages = [];\n    }\n}\n",
@@ -69,13 +69,29 @@
         {
           "before": "    /** Remove all queued steering messages. */",
           "after": "    async runQueuedInput(epoch, queueId, expectedRevision, prepare, claimed, canCommit, committed) {\n        if (this.activeRun) throw new Error(\"Agent is already processing.\");\n        const before = this.pendingQueue.snapshot();\n        const target = before.items.find(i => i.queueId === queueId);\n        if (before.epoch !== epoch || !target || target.kind !== \"followUp\" || target.itemRevision !== expectedRevision)\n            return { ...before, outcome: before.epoch !== epoch ? \"stale\" : target ? \"stale_item\" : \"not_pending\" };\n        let result, preparationError;\n        await this.runWithLifecycle(async signal => {\n            // The lifecycle lock precedes observers of the committed queue change.\n            result = this.pendingQueue.promote(epoch,queueId,expectedRevision);\n            if (result.outcome !== \"promoted\") return;\n            let plan, prepared;\n            try {\n                const target = this.pendingQueue.pending.get(queueId);\n                const revision = target?.itemRevision;\n                plan = this.steeringQueue.prepareDrain();\n                const valid = () => !signal.aborted && canCommit() && this.pendingQueue.epoch === epoch &&\n                    this.pendingQueue.pending.get(queueId) === target && target?.itemRevision === revision && this.steeringQueue.canCommitDrain(plan);\n                if (!valid()) return;\n                claimed(result); // priority changed; intake has NOT committed\n                prepared = await prepare(plan.messages,signal);\n                if (!prepared || !valid() || !prepared.commit()) return;\n            } catch(error) {\n                // Preparation is not a model turn: keep originals and do not\n                // fabricate an assistant failure/usage record for untaken input.\n                preparationError = error;\n                return;\n            }\n            // All asynchronous preparation is over. No await between validation,\n            // consuming Session nextTurn context and exact native intake.\n            if (!this.steeringQueue.commitDrain(plan)) return;\n            committed();\n            // Intake has committed. Even if a queue observer just requested Stop,\n            // use the normal loop's prompt recording with its aborted signal.\n            // Never reinsert messages after this point or discard them on abort.\n            await runAgentLoop(prepared.messages, this.createContextSnapshot(), this.createLoopConfig({skipInitialSteeringPoll:true}),\n                event => this.processEvents(event), signal, this.streamFunction);\n        });\n        if (preparationError) throw preparationError;\n        return result;\n    }\n    /** Remove all queued steering messages. */"
+        },
+        {
+          "before": "    async runQueuedInput(epoch, queueId, expectedRevision, prepare, claimed, canCommit, committed) {",
+          "after": "    /** Append into one unclaimed pending occurrence, or enqueue as a new occurrence in the same synchronous step. */\n    appendQueuedMessage(target, kind, message, metadata) {\n        const queue = kind === \"steer\" ? this.steeringQueue : kind === \"followUp\" ? this.followUpQueue : undefined;\n        if (!queue) throw new Error(\"Invalid queue kind\");\n        const result = this.pendingQueue.append(target?.epoch, target?.queueId, target?.expectedRevision, kind, message, metadata, target?.fence);\n        if (result.outcome === \"appended\" || result.outcome === \"already_appended\" || result.outcome === \"duplicate\") return result;\n        return { outcome: result.outcome, queueId: queue.enqueue(message, metadata), itemRevision: 0, enqueued: true };\n    }\n    async runQueuedInput(epoch, queueId, expectedRevision, prepare, claimed, canCommit, committed) {"
+        },
+        {
+          "before": "            let plan, prepared;\n            try {",
+          "after": "            let plan, prepared, claim, ready = false;\n            try {"
+        },
+        {
+          "before": "                if (!valid()) return;\n                claimed(result); // priority changed; intake has NOT committed\n                prepared = await prepare(plan.messages,signal);\n                if (!prepared || !valid() || !prepared.commit()) return;\n            } catch(error) {",
+          "after": "                if (!valid()) return;\n                // Captured occurrences and the promoted target stay pending and\n                // cancellable, but cannot be extended until this preparation ends.\n                claim = this.pendingQueue.claim([...plan.entries, target]);\n                claimed(result); // priority changed; intake has NOT committed\n                prepared = await prepare(plan.messages,signal);\n                if (!prepared || !valid() || !prepared.commit()) return;\n                ready = true;\n            } catch(error) {"
+        },
+        {
+          "before": "                preparationError = error;\n                return;\n            }\n            // All asynchronous preparation is over. No await between validation,\n            // consuming Session nextTurn context and exact native intake.\n            if (!this.steeringQueue.commitDrain(plan)) return;",
+          "after": "                preparationError = error;\n                return;\n            } finally {\n                if (!ready) this.pendingQueue.release(claim);\n            }\n            // All asynchronous preparation is over. No await between validation,\n            // consuming Session nextTurn context and exact native intake.\n            const intake = this.steeringQueue.commitDrain(plan);\n            // A claimed target behind the one-at-a-time prefix becomes extendable again.\n            this.pendingQueue.release(claim);\n            if (!intake) return;"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.d.ts",
       "before": "05968f90cf20eec86cfd352c6a87dff94f7e177d8579c3864697e8a7bb773ace",
-      "after": "91a107543925b6fdc8c8a8ba58d05c4e16c1f4623b91e94018e8b629b9e9a392",
+      "after": "8835720618427297f04d453bd282d373ded91ee07d6dc9ed74c2463059c765bd",
       "edits": [
         {
           "before": "export declare class Agent {",
@@ -108,13 +124,41 @@
         {
           "before": "    notifyPendingQueue(): void;",
           "after": "    notifyPendingQueue(): void;\n    runQueuedInput(epoch:string,queueId:string,expectedRevision:number,prepare:(messages:AgentMessage[],signal:AbortSignal)=>Promise<{messages:AgentMessage[];commit:()=>boolean}|undefined>,claimed:(result:PendingPromotionResult)=>void,canCommit:()=>boolean,committed:()=>void):Promise<PendingPromotionResult>;"
+        },
+        {
+          "before": "export interface HostInputIdentity { submissionId?: string;",
+          "after": "export interface HostInputIdentity { submissionId?: string; segments?: string[];"
+        },
+        {
+          "before": "origin?: { source: \"user\"|\"lead\"|\"yesman\"|\"schedule\"; kind?: string; worker?: string; plan?: string; run?: string };",
+          "after": "origin?: { source: \"user\"|\"lead\"|\"yesman\"|\"schedule\"; kind?: string; worker?: string; plan?: string; run?: string; context?: string };"
+        },
+        {
+          "before": "export interface PendingQueueItem { queueId: string; kind: \"steer\" | \"followUp\"; submissionId?: string; itemRevision: number; }",
+          "after": "export interface PendingQueueItem { queueId: string; kind: \"steer\" | \"followUp\"; submissionId?: string; itemRevision: number; segments?: string[]; preparing?: boolean; }\nexport interface PendingAppendTarget { epoch: string; queueId: string; expectedRevision: number; controlGeneration: number; }\nexport interface PendingAppendResult { outcome: \"appended\" | \"already_appended\" | \"duplicate\" | \"stale\" | \"not_pending\" | \"preparing\" | \"stale_item\" | \"stale_control\" | \"kind_mismatch\" | \"not_latest\" | \"ineligible\" | \"limit\" | \"budget\"; queueId?: string; itemRevision?: number; enqueued?: boolean; }"
+        },
+        {
+          "before": "capability: 3;",
+          "after": "capability: 4;"
+        },
+        {
+          "before": "idleResume?: boolean; }",
+          "after": "idleResume?: boolean; appendAllowed?: boolean; }"
+        },
+        {
+          "before": "state: \"pending\" | \"taken\" | \"cancelled\" | \"cleared\" })[]; }",
+          "after": "state: \"pending\" | \"taken\" | \"cancelled\" | \"cleared\" | \"appended\" | \"preparing\"; appendedSubmissionId?: string })[]; }"
+        },
+        {
+          "before": "    notifyPendingQueue(): void;",
+          "after": "    notifyPendingQueue(): void;\n    /** Synchronously append into one unclaimed pending human occurrence; otherwise enqueue as a new occurrence (enqueued: true). */\n    appendQueuedMessage(target: PendingAppendTarget & { fence?: string }, kind: \"steer\" | \"followUp\", message: AgentMessage, metadata: { submissionId: string; hostOrigin?: HostInputIdentity[\"origin\"] }): PendingAppendResult;"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.js",
       "before": "ee756f6f74afe9f8930ebf216c95334605d913a275a0eec2c9702f101baef3c3",
-      "after": "9d2e2c58a70ac50ae2f4c5a63690380cc992f3c321f6a6a40d97420394abb6a7",
+      "after": "c87fe036b81668c8a2e7e44d801e9cd14ba15e1e4d4fcd22b38a27b878968d9e",
       "edits": [
         {
           "before": "            followUp: [...this._followUpMessages],",
@@ -339,13 +383,45 @@
         {
           "before": "        return this._decoratePendingQueue(this.agent.promoteQueuedMessage(epoch, queueId, expectedRevision));\n    }",
           "after": "        if (item.kind === \"steer\" || this.isStreaming)\n            return this._decoratePendingQueue(this.agent.promoteQueuedMessage(epoch, queueId, expectedRevision));\n        // Reserve the Session synchronously; prompt preflights after this point\n        // queue into this run. No input hook is repeated for the target.\n        this._isAgentRunActive = true;\n        this._agentRunAbortRequested = false;\n        let resolveAdmission, rejectAdmission;\n        const admission = new Promise((resolve,reject) => {resolveAdmission=resolve;rejectAdmission=reject});\n        const reservation = { abort: new AbortController() };\n        const admissionTimer = setTimeout(() => reservation.abort.abort(), 15000);\n        this._queuedResume = reservation;\n        this._emit({type:\"queue_resume_start\"});\n        this.agent.notifyPendingQueue();\n        let admitted = false, driven = false, started = false;\n        reservation.done = (async () => {\n            try {\n                if (!this.model) throw new Error(formatNoModelSelectedMessage());\n                const hasAuth = this._modelRuntime.hasConfiguredAuth(this.model.provider) ||\n                    (await Promise.race([\n                        this._modelRuntime.checkAuth(this.model.provider),\n                        new Promise((_,reject) => reservation.abort.signal.addEventListener(\"abort\", () => reject(new Error(\"Queue admission was stopped or timed out\")), {once:true}))\n                    ])) !== undefined;\n                if (!hasAuth) throw new Error(formatNoApiKeyFoundMessage(this.model.provider));\n                if (reservation.abort.signal.aborted || this._agentRunAbortRequested || controlGeneration !== this._queueControlGeneration)\n                    throw new Error(\"Queue admission was stopped\");\n                const result = await this.agent.runQueuedInput(epoch,queueId,expectedRevision,\n                    async (messages,signal) => {\n                        const first = messages[0];\n                        const images = Array.isArray(first?.content) ? first.content.filter(b=>b.type==='image') : undefined;\n                        const prepared = await this._prepareRun({messageType:\"user\",prompt:contentText(first?.content,\"\"),images},messages);\n                        if (signal.aborted || this._agentRunAbortRequested) return undefined;\n                        return prepared;\n                    }, result => {\n                        admitted = true;\n                        // Admission/auth is complete. Context hooks and normal\n                        // pre-run compaction have their own lifecycle, not this deadline.\n                        clearTimeout(admissionTimer);\n                        resolveAdmission(this._decoratePendingQueue(result));\n                    }, () => !reservation.abort.signal.aborted && !this._agentRunAbortRequested &&\n                        this._queuedResume === reservation && controlGeneration === this._queueControlGeneration,\n                    () => {\n                        started = true;\n                        this._queuedResume = undefined;\n                        this.agent.notifyPendingQueue();\n                    });\n                if (!admitted) {resolveAdmission(this._decoratePendingQueue(result));return;}\n                if (!started) return; // aborted/changed preparation never wakes a generic continuation\n                // Core's initial queue run finished. Existing Session recovery,\n                // before-settle, retries and final cleanup remain the sole owner.\n                driven = true;\n                await this._driveOwnedRun(async () => {});\n            } catch(error) {\n                if (!admitted) rejectAdmission(error);\n                else this._emit({type:\"queue_resume_error\",message:String(error)});\n            } finally {\n                clearTimeout(admissionTimer);\n                if (this._queuedResume === reservation) this._queuedResume = undefined;\n                if (!driven && this._isAgentRunActive) {\n                    if (!started) this._agentRunAbortRequested = true;\n                    this._failedResponse = undefined;\n                    this._runSystemPromptOptions = undefined;\n                    await this._emitAgentSettled();\n                }\n            }\n        })();\n        // The promise is retained/observed by the Session and RPC shutdown waits\n        // for waitForIdle. This is not a wake-on-settle background task.\n        void reservation.done.catch(error => this._emit({type:\"queue_resume_error\",message:String(error)}));\n        return admission;\n    }"
+        },
+        {
+          "before": "            if (options.streamingBehavior === \"followUp\") {\n                await this._queueFollowUp(expandedText, currentImages, options?.submissionId, options?.hostOrigin);\n            }\n            else {\n                await this._queueSteer(expandedText, currentImages, options?.submissionId, options?.hostOrigin);\n            }\n            preflightResult?.(\"queued\");",
+          "after": "            const queued = options.streamingBehavior === \"followUp\"\n                ? await this._queueFollowUp(expandedText, currentImages, options?.submissionId, options?.hostOrigin, options?.appendTo)\n                : await this._queueSteer(expandedText, currentImages, options?.submissionId, options?.hostOrigin, options?.appendTo);\n            preflightResult?.(\"queued\", options?.appendTo ? queued : undefined);"
+        },
+        {
+          "before": "async _queueSteer(text, images, submissionId, hostOrigin) {",
+          "after": "async _queueSteer(text, images, submissionId, hostOrigin, appendTo) {"
+        },
+        {
+          "before": "async _queueFollowUp(text, images, submissionId, hostOrigin) {",
+          "after": "async _queueFollowUp(text, images, submissionId, hostOrigin, appendTo) {"
+        },
+        {
+          "before": "        return this.agent.steer(message, { submissionId, hostOrigin });",
+          "after": "        if (appendTo) return this._appendQueued(\"steer\", message, { submissionId, hostOrigin }, appendTo);\n        return this.agent.steer(message, { submissionId, hostOrigin });"
+        },
+        {
+          "before": "        return this.agent.followUp(message, { submissionId, hostOrigin });",
+          "after": "        if (appendTo) return this._appendQueued(\"followUp\", message, { submissionId, hostOrigin }, appendTo);\n        return this.agent.followUp(message, { submissionId, hostOrigin });"
+        },
+        {
+          "before": "        if (queuedMessages) {\n            messages.push(...queuedMessages);\n        }",
+          "after": "        if (queuedMessages) {\n            for (const message of queuedMessages)\n                if (message.role === \"user\")\n                    await this._normalizeQueuedMessageImages(message);\n            messages.push(...queuedMessages);\n        }"
+        },
+        {
+          "before": "    getPendingQueue() { return this._decoratePendingQueue(this.agent.getPendingQueue()); }",
+          "after": "    getPendingQueue() { return this._decoratePendingQueue(this.agent.getPendingQueue()); }\n    _appendQueued(kind, message, metadata, appendTo) {\n        // Stop and settlement are fences: a request prepared before them never\n        // extends an occurrence after them; it is enqueued as a new occurrence.\n        const fenced = !this.isStreaming || this._agentRunAbortRequested || this._isEmittingAgentSettled ||\n            appendTo.controlGeneration !== this._queueControlGeneration;\n        const result = this.agent.appendQueuedMessage(fenced ? { ...appendTo, fence: \"stale_control\" } : appendTo, kind, message, metadata);\n        if (result.outcome === \"appended\" && result.message.content.some(block => block.type === \"image\"))\n            this._queuedMessagesWithImages.add(result.message); // normalized once, at delivery\n        const { message: _merged, ...visible } = result;\n        return visible;\n    }"
+        },
+        {
+          "before": "        return { ...snapshot, controlGeneration: this._queueControlGeneration, promoteAllowed, idleResume: true,",
+          "after": "        return { ...snapshot, controlGeneration: this._queueControlGeneration, promoteAllowed, idleResume: true,\n            appendAllowed: this.isStreaming && !this._agentRunAbortRequested && !this._isEmittingAgentSettled,"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.d.ts",
       "before": "56d24887a400d77a77b428deb1cce25576cac27e18089e722f536d600fa32c3a",
-      "after": "08beaa6820a552980b5c436c5fe80486c49242c8526ba811c3de81af5446da9c",
+      "after": "a719b003a42580f634ce8b64343c432226334047b8a3a9c0260158efe9495358",
       "edits": [
         {
           "before": "export interface PromptOptions {",
@@ -394,13 +470,21 @@
         {
           "before": "promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number, controlGeneration: number): import(\"@earendil-works/pi-agent-core\").PendingPromotionResult;",
           "after": "promoteQueuedMessage(epoch: string, queueId: string, expectedRevision: number, controlGeneration: number): Promise<import(\"@earendil-works/pi-agent-core\").PendingPromotionResult>;"
+        },
+        {
+          "before": "export interface PromptOptions {",
+          "after": "export interface PromptOptions {\n    /** Host-only: while streaming, try to extend this still-pending occurrence; otherwise queue normally. */\n    appendTo?: import(\"@earendil-works/pi-agent-core\").PendingAppendTarget;"
+        },
+        {
+          "before": "    preflightResult?: (disposition: PromptDisposition) => void;",
+          "after": "    preflightResult?: (disposition: PromptDisposition, append?: import(\"@earendil-works/pi-agent-core\").PendingAppendResult) => void;"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js",
       "before": "505297dba2df1de3003c0399b3312fd581359a4e27a5e9262b274b6cb5cb4ef3",
-      "after": "1914c28015294d2931480f666b71ae681412edd0b294032213042cae77a153d3",
+      "after": "f38368df13d2563cc1c48b748a20f882a9f734d3cfe31a125ce57a1dd2e53f98",
       "edits": [
         {
           "before": "                    streamingBehavior: command.streamingBehavior,",
@@ -445,13 +529,29 @@
         {
           "before": "                return success(id, \"promote_queued_message\", session.promoteQueuedMessage(command.epoch, command.queueId, command.expectedRevision, command.controlGeneration));",
           "after": "                activeCommands++;\n                try {\n                    return success(id, \"promote_queued_message\", await session.promoteQueuedMessage(command.epoch, command.queueId, command.expectedRevision, command.controlGeneration));\n                } finally {\n                    void session.waitForIdle().finally(() => { activeCommands--; checkShutdownRequested(); });\n                }"
+        },
+        {
+          "before": "            case \"prompt\": {\n",
+          "after": "            case \"prompt\": {\n                const target = command.appendTo;\n                if (target !== undefined && (typeof target !== \"object\" || target === null || typeof target.epoch !== \"string\" || typeof target.queueId !== \"string\" ||\n                    !Number.isSafeInteger(target.expectedRevision) || target.expectedRevision < 0 ||\n                    !Number.isSafeInteger(target.controlGeneration) || target.controlGeneration < 0))\n                    return error(id, \"prompt\", \"appendTo requires epoch, queueId, expectedRevision and controlGeneration\");\n"
+        },
+        {
+          "before": "                    hostOrigin: command.hostOrigin,\n                    source: \"rpc\",",
+          "after": "                    hostOrigin: command.hostOrigin,\n                    appendTo: target && { epoch: target.epoch, queueId: target.queueId, expectedRevision: target.expectedRevision, controlGeneration: target.controlGeneration },\n                    source: \"rpc\","
+        },
+        {
+          "before": "                    preflightResult: (disposition) => {\n                        preflightSucceeded = true;\n                        output(success(id, \"prompt\", { disposition }));",
+          "after": "                    preflightResult: (disposition, append) => {\n                        preflightSucceeded = true;\n                        output(success(id, \"prompt\", append ? { disposition, append } : { disposition }));"
+        },
+        {
+          "before": "runtime: \"yesman-pi/1.5.2-4\"",
+          "after": "runtime: \"yesman-pi/1.5.2-5\""
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-types.d.ts",
       "before": "68b6dc2e47a3969c09c961a40d0462473407b6786f3bd02715fa035e816e2af1",
-      "after": "fa42b06540d5748dd3d519c3bf1d23af8acba4006569bf388dba0a9988f4e426",
+      "after": "bc92dfa41a091524f58fcce7bb0aa16139eae5157526094512d43a6589caf413",
       "edits": [
         {
           "before": "    type: \"prompt\";\n    message: string;",
@@ -492,13 +592,21 @@
         {
           "before": "    type: \"follow_up\";\n    submissionId?: string;",
           "after": "    type: \"follow_up\";\n    hostOrigin?: import(\"@earendil-works/pi-agent-core\").HostInputIdentity[\"origin\"];\n    submissionId?: string;"
+        },
+        {
+          "before": "    type: \"prompt\";\n    hostOrigin?:",
+          "after": "    type: \"prompt\";\n    appendTo?: import(\"@earendil-works/pi-agent-core\").PendingAppendTarget;\n    hostOrigin?:"
+        },
+        {
+          "before": "    command: \"prompt\";\n    success: true;\n    data: {\n        disposition: PromptDisposition;\n    };",
+          "after": "    command: \"prompt\";\n    success: true;\n    data: {\n        disposition: PromptDisposition;\n        append?: import(\"@earendil-works/pi-agent-core\").PendingAppendResult;\n    };"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-client.js",
       "before": "6cbb7d183db13468af61af733013a97ee6f5547ccd44edb1f85647f8bd6f218c",
-      "after": "6d4eef08b47b86952e836352361c1e1606102a998d247b02e81a998f97b15adc",
+      "after": "fe374e5502d7bc1099529651a97d425f7b7d39b9b8b96980c9d339fb67d4b242",
       "edits": [
         {
           "before": "async prompt(message, images, streamingBehavior)",
@@ -531,13 +639,17 @@
         {
           "before": "    async getMessages() {",
           "after": "    async getHostMessages() { return this.getData(await this.send({ type: \"get_messages\" })); }\n    async getMessages() {"
+        },
+        {
+          "before": "    async prompt(message, images, streamingBehavior, submissionId) {",
+          "after": "    async promptAppend(message, images, streamingBehavior, submissionId, appendTo) {\n        return this.getData(await this.send({ type: \"prompt\", message, images, streamingBehavior, submissionId, appendTo }));\n    }\n    async prompt(message, images, streamingBehavior, submissionId) {"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-client.d.ts",
       "before": "85ec53b3f019e0176bdbb8f843a213d8ae8aa0bba937dce40291e1315b762b1b",
-      "after": "7a4aeab88cca745b258f92da1b1b9b9b7189e6dca082fdd5a9a3542e05575587",
+      "after": "38b8d994a78e4522b731de2632add742f212ed858930597f36b96f14e87c5a64",
       "edits": [
         {
           "before": "streamingBehavior?: \"steer\" | \"followUp\"): Promise<PromptDisposition>;",
@@ -558,6 +670,10 @@
         {
           "before": "    getMessages(): Promise<AgentMessage[]>;",
           "after": "    getMessages(): Promise<AgentMessage[]>;\n    getHostMessages(): Promise<ReturnType<import(\"../../core/agent-session.js\").AgentSession[\"getHostMessages\"]>>;"
+        },
+        {
+          "before": "    prompt(message: string, images?: ImageContent[], streamingBehavior?: \"steer\" | \"followUp\", submissionId?: string): Promise<PromptDisposition>;",
+          "after": "    prompt(message: string, images?: ImageContent[], streamingBehavior?: \"steer\" | \"followUp\", submissionId?: string): Promise<PromptDisposition>;\n    /** Like prompt, but while streaming tries to extend the given still-pending occurrence and reports the outcome. */\n    promptAppend(message: string, images: ImageContent[] | undefined, streamingBehavior: \"steer\" | \"followUp\", submissionId: string, appendTo: import(\"@earendil-works/pi-agent-core\").PendingAppendTarget): Promise<{ disposition: PromptDisposition; append?: import(\"@earendil-works/pi-agent-core\").PendingAppendResult }>;"
         }
       ]
     },

@@ -267,6 +267,8 @@ export default {
   "Move to steering for the next input checkpoint": "转为引导消息，在下一个输入检查点处理",
   "Waiting · follow-up": "等待后续处理",
   "Steering · waiting for input checkpoint": "引导消息 · 等待输入检查点",
+  "Preparing · being sent to pi": "准备中 · 正在送入 pi",
+  "pi has claimed this input for its next turn and is preparing it. It has not been taken yet and can still be recalled.": "pi 已为下一轮认领此输入并正在准备，尚未取走，仍可撤回。",
   "Steering is read at the next eligible input checkpoint, after the current response and tool batch.": "引导消息会在当前回复及整批工具执行结束后的下一个输入检查点读取。",
   "This input was removed from the queue.": "这条输入已从队列中撤回。",
   "pi took this input for processing.": "pi 已取走这条输入进行处理。",

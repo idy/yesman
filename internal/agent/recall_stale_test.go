@@ -78,10 +78,10 @@ func TestStaleCancelDoesNotClaimConsumption(t *testing.T) {
 }
 
 func TestQueueCapabilityNegotiationRejectsFutureVersions(t *testing.T) {
-	for _, capability := range []int{-1, 0, 1, 2, 3, 4, 99} {
+	for _, capability := range []int{-1, 0, 1, 2, 3, 4, 5, 99} {
 		q := pendingQueue{Capability: capability}
 		s := pendingStatus(q)
-		if s.RecallSupported != (capability == 1 || capability == 2 || capability == 3) || s.PromoteSupported != (capability == 2 || capability == 3) {
+		if s.RecallSupported != (capability >= 1 && capability <= 4) || s.PromoteSupported != (capability >= 2 && capability <= 4) || q.supportsAppend() != (capability == 4) {
 			t.Fatalf("unexpected negotiated capability %d: %+v", capability, s)
 		}
 	}
