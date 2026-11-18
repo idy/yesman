@@ -154,7 +154,12 @@ func main() {
 		go func() { _ = a.githubApp.Prepare("") }()
 	}
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
-		BoardChanged:    func(yesman string) { _ = boardEvent.Broadcast(yesman) },
+		BoardChanged: func(yesman string) {
+			_ = boardEvent.Broadcast(yesman)
+			if a.agents != nil {
+				a.agents.TasksChanged(yesman) // a task done may let another go on
+			}
+		},
 		NeedsYouChanged: func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
 		TopicsChanged:   a.topicsChanged,
 		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew, GitHubApp: a.githubApp}
@@ -227,6 +232,10 @@ func main() {
 		}
 		a.setupTray()
 		a.updates.start()
+		// Tell each lead of work nobody carries since the app last ran: a
+		// trigger lost when it quit is not lost. Leads the user stopped,
+		// and tasks told about already, stay as they are.
+		a.agents.Resume()
 		if os.Getenv("YESMAN_HIDDEN") == "" {
 			a.showWindow()
 		}

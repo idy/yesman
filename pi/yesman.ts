@@ -219,11 +219,20 @@ async function refreshHidden(signal?: AbortSignal) {
 	} catch {}
 }
 
+// waitText says what a blocked task waits for (Wait in internal/yesmen).
+function waitText(w: any): string {
+	let s = String(w.kind);
+	if (w.tasks?.length) s += ` ${w.tasks.join(", ")}`;
+	if (w.handoff) s += ` ${w.handoff}`;
+	if (w.reason) s += `: ${String(w.reason).replace(/\n/g, " ")}`;
+	return s;
+}
+
 // publicBoard keeps of a board what the tool shows the model, as text and
-// as details: a task's own fields and, for one that tracks a scheduled run,
-// its scheduled task (plan). The app's API already leaves the scheduler's run
-// handle out; this keeps any other field it might add out of the model's
-// context as well.
+// as details: a task's own fields, what a blocked task waits for and, for one
+// that tracks a scheduled run, its scheduled task (plan). The app's API
+// already leaves the scheduler's run handle out; this keeps any other field
+// it might add out of the model's context as well.
 function publicBoard(board: any): { tasks: any[]; next?: number } {
 	const str = (v: unknown) => (typeof v === "string" ? v : undefined);
 	const tasks = (Array.isArray(board?.tasks) ? board.tasks : []).map((t: any) => {
@@ -234,6 +243,17 @@ function publicBoard(board: any): { tasks: any[]; next?: number } {
 		}
 		const plan = str(t?.schedule?.plan);
 		if (plan && /^s[1-9][0-9]{0,5}$/.test(plan)) out.schedule = { plan };
+		const kind = str(t?.wait?.kind);
+		if (kind) {
+			const wait: Record<string, unknown> = { kind };
+			const ids = Array.isArray(t.wait.tasks) ? t.wait.tasks.filter((id: unknown) => typeof id === "string") : [];
+			if (ids.length) wait.tasks = ids;
+			for (const k of ["handoff", "reason", "since"]) {
+				const v = str(t.wait[k]);
+				if (v !== undefined) wait[k] = v;
+			}
+			out.wait = wait;
+		}
 		return out;
 	});
 	return typeof board?.next === "number" ? { tasks, next: board.next } : { tasks };
@@ -246,6 +266,7 @@ function boardText(board: any): string {
 		let s = `- ${t.id} [${t.status}] ${t.title}`;
 		if (t.owner) s += ` (owner ${t.owner})`;
 		if (t.schedule?.plan) s += ` (a run of scheduled task ${t.schedule.plan})`;
+		if (t.wait) s += `\n  wait: ${waitText(t.wait)}`;
 		if (t.note) s += `\n  note: ${String(t.note).replace(/\n/g, "\n  ")}`;
 		if (t.detail) s += `\n  detail: ${String(t.detail).replace(/\n/g, "\n  ")}`;
 		return s;
@@ -561,6 +582,23 @@ export default function yesman(pi: ExtensionAPI) {
 		owner: Type.Optional(Type.String({ description: "The agent the task is handed to, usually a worker's name; empty to clear" })),
 		detail: Type.Optional(Type.String({ description: "What the task is, in Markdown" })),
 		note: Type.Optional(Type.String({ description: "Where it stands: why it is blocked, or its result with links (branch, PR)" })),
+		wait: Type.Optional(
+			Type.Object(
+				{
+					kind: Type.String({
+						description:
+							"tasks: until the tasks listed are done; user: until the user acts on an open Needs you request for this task; external: something outside yesman, such as CI or another party; paused: the user paused it (lead only; it stays paused until the user says otherwise). Empty to clear.",
+					}),
+					tasks: Type.Optional(Type.Array(Type.String(), { description: "For kind tasks: the IDs of the tasks it waits for" })),
+					handoff: Type.Optional(Type.String({ description: "For kind user: the Needs you request, such as n3, if it is not linked to this task" })),
+					reason: Type.Optional(Type.String({ description: "What it waits for and what lets it go on; required for external and paused" })),
+				},
+				{
+					description:
+						"What a blocked task waits for; setting it makes the task blocked, and any other status clears it. yesman tells the lead when a task's wait is over, and of open tasks no running worker carries.",
+				},
+			),
+		),
 	};
 	pi.registerTool({
 		name: "yesman_board",

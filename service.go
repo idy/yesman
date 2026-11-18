@@ -403,14 +403,16 @@ func (s *service) Context(ctx context.Context, id string) (agent.ContextStats, e
 	return s.app.agents.Context(ctx, id)
 }
 
-// Abort stops an agent's current run.
+// Abort stops an agent's current run. The user stopped it: yesman does not
+// start it again by itself.
 func (s *service) Abort(ctx context.Context, id string) error {
-	return s.app.agents.Abort(ctx, id)
+	return s.app.agents.AbortByUser(ctx, id)
 }
 
-// Stop ends an agent's pi process; its session resumes next time.
+// Stop ends an agent's pi process; its session resumes next time. The user
+// put it to sleep: yesman does not start it again by itself.
 func (s *service) Stop(id string) {
-	s.app.agents.Stop(id)
+	s.app.agents.StopByUser(id)
 }
 
 // Answer answers the question an agent waits on.

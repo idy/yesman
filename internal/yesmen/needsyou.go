@@ -259,6 +259,7 @@ func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 	h.CreatedAt = time.Now().UTC()
 	h.ClosedAt, h.Resolution, h.ClosedBy, h.Note = time.Time{}, "", "", ""
 	hs.Items = append(hs.Items, h)
+	s.changing(name)
 	if err := f.write(hs); err != nil {
 		return Handoff{}, false, err
 	}
@@ -344,6 +345,7 @@ func (s *Store) CloseHandoff(name, id, resolution, by, note string) (Handoff, er
 	h.ClosedAt, h.Resolution, h.ClosedBy, h.Note = time.Now().UTC(), resolution, by, note
 	closed := *h
 	hs.trim()
+	s.changing(name)
 	if err := f.write(hs); err != nil {
 		return Handoff{}, err
 	}
@@ -424,6 +426,7 @@ func (s *Store) ResetCallMemory(name string, hiredAt time.Time, epoch, used, for
 		return CallMemory{}, 0, errors.New("there is nothing to forget: new tool calls are taken")
 	}
 	cleared := hs.forgetCalls(time.Now().UTC())
+	s.changing(name)
 	if err := f.write(hs); err != nil {
 		return CallMemory{}, 0, err
 	}

@@ -311,10 +311,16 @@ func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string
 	release()
 	m.mu.Lock()
 	if m.agents[id] == a && !a.retiring {
-		a.nudged = false
 		a.inbox++
 	}
 	m.mu.Unlock()
+	// The user writing to a lead they stopped lifts its pause; what was kept
+	// for it follows their message. A scheduled run is not the user writing
+	// now: it is sent as before, and leaves their Stop in place.
+	flush := func() {}
+	if origin == nil {
+		flush = m.resumeByUser(id)
+	}
 	// Only the private receipt ID crosses this Go call. The pi command and
 	// user text remain byte-for-byte the same as the original submission path.
 	// Who wrote it is decided from pi's records of this prompt and kept
@@ -324,6 +330,7 @@ func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string
 		written = Origin{Source: origin.Source, Plan: origin.Plan, Run: origin.Run, Submission: messageID}
 	}
 	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, written, images...)
+	flush()
 	m.mu.Lock()
 	current := a.deliveries[messageID]
 	if !a.deliverySealed && err != nil && (current.State == "sending" || current.State == "interrupted" && current.Session == "") {
