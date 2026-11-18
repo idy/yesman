@@ -353,18 +353,15 @@ func sanitize(s string) string {
 	return strings.Trim(b.String(), "-.")
 }
 
-func (s *Server) checkout(_ context.Context, c caller, r *http.Request) (any, error) {
+func (s *Server) checkout(ctx context.Context, c caller, r *http.Request) (any, error) {
 	var req CheckoutRequest
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
-	l := s.worktreeLock(c.yesman.Name)
-	l.Lock()
-	defer l.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	var wt pool.Worktree
-	err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+	err := s.worktreeOperation(ctx, c, func(ctx context.Context, y yesmen.Yesman) error {
 		var err error
 		wt, err = s.checkoutOwned(ctx, c, y, req)
 		return err
@@ -383,11 +380,8 @@ func (s *Server) removeWorktree(ctx context.Context, c caller, r *http.Request) 
 	if !dirRE.MatchString(req.Dir) {
 		return nil, fmt.Errorf("%q is not a worktree directory of this workspace", req.Dir)
 	}
-	l := s.worktreeLock(c.yesman.Name)
-	l.Lock()
-	defer l.Unlock()
 	var out cleanupResult
-	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+	if err := s.worktreeOperation(ctx, c, func(ctx context.Context, y yesmen.Yesman) error {
 		var err error
 		out, err = s.cleanupWorktree(ctx, c, y, req)
 		return err
