@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import subprocess
@@ -21,6 +22,16 @@ import threading
 import time
 import uuid
 from check_macos_bundle import inspect, release_arguments
+
+
+def permission_ids(repo=pathlib.Path(__file__).resolve().parent.parent):
+    """Grant rows in display order, from the Go source of truth (never a copied count)."""
+    source = (repo / 'internal/nativepermissions/permissions.go').read_text()
+    names = dict(re.findall(r'^\s*(\w+)\s+ID = "([a-z-]+)"', source, re.M))
+    order = re.search(r'var ids = \[\.\.\.\]ID\{([^}]*)\}', source).group(1)
+    ids = [names[name.strip()] for name in order.split(',') if name.strip()]
+    assert ids and len(set(ids)) == len(ids), ids
+    return ids
 
 
 def require_hosted_runner():
@@ -99,6 +110,7 @@ def main():
             subprocess.run(['xcrun', 'swiftc', str(pathlib.Path(__file__).with_name('macos-smoke-windows.swift')), '-o', str(helper)], check=True)
             instrumented = temp / 'web'
             shutil.copytree(web, instrumented)
+            expected = permission_ids()
             driver = r'''
 <script>
 (() => {
@@ -120,14 +132,14 @@ def main():
     document.querySelector('#settings-button').click();
     await until(()=>document.querySelector('#settings-nav [data-page="grant"]'));
     document.querySelector('#settings-nav [data-page="grant"]').click();
-    await until(()=>document.querySelectorAll('[data-permission]').length===9 && document.querySelector('[data-grant-focus="refresh"]')?.getAttribute('aria-disabled')==='false');
+    await until(()=>document.querySelectorAll('[data-permission]').length===EXPECTED_ROWS && document.querySelector('[data-grant-focus="refresh"]')?.getAttribute('aria-disabled')==='false');
     const state = await read('Yesman.State');
     const grants = await read('Yesman.Grants');
     await send({ok:true,home:state.home,yesmen:state.yesmen,agents:state.agents,grants,calls,errors,url:location.href,userAgent:navigator.userAgent,visibility:document.visibilityState,viewport:[innerWidth,innerHeight],rows:[...document.querySelectorAll('[data-permission]')].map(el=>({id:el.dataset.permission,text:el.innerText,width:el.getBoundingClientRect().width})),heading:document.querySelector('.grant-toolbar h2').textContent});
   })().catch(async error=>{await send({ok:false,error:String(error),calls,errors});});
 })();
 </script>
-'''.replace('ENDPOINT', json.dumps(endpoint + '/' + token))
+'''.replace('ENDPOINT', json.dumps(endpoint + '/' + token)).replace('EXPECTED_ROWS', str(len(expected)))
             index = instrumented / 'index.html'
             original = index.read_text()
             index.write_text(original.replace('<head>', '<head>' + driver, 1))
@@ -158,7 +170,8 @@ def main():
                         (evidence / 'page.json').write_text(json.dumps(result, indent=2))
                         assert result.get('ok'), result
                         assert result['home'] == str(data) and not result['yesmen'] and not result['agents'], result
-                        assert not result['errors'] and len(result['rows']) == 9
+                        assert not result['errors'] and [row['id'] for row in result['rows']] == expected, (expected, result['rows'])
+                        assert [item['id'] for item in result['grants']['items']] == expected, result['grants']
                         assert result['grants']['platform'] == 'darwin'
                         assert all(not item.get('error') and item['state'] != 'unavailable' for item in result['grants']['items']), result['grants']
                         assert result['calls'] == ['Yesman.State', 'Yesman.Grants']

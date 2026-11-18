@@ -68,7 +68,7 @@ func TestTopicsBrowserBridge(t *testing.T) {
 	a := &app{pool: p, yesmen: store, agents: agents, onTopics: func(n string) { emit("topics", n) }}
 	a.home.Root = tmp
 	svc := reflect.ValueOf(&service{app: a})
-	forwarded := map[string]bool{"State": true, "Messages": true, "Submit": true, "Abort": true, "Board": true, "Info": true,
+	forwarded := map[string]bool{"State": true, "Messages": true, "Submit": true, "SubmitCoalescing": true, "Abort": true, "Board": true, "Info": true,
 		"Topics": true, "CreateTopic": true, "UpdateTopic": true, "SubmitTopic": true,
 		"CancelSubmission": true, "PromoteSubmission": true, "SubmissionPayload": true, "SubmissionText": true, "AckRecall": true}
 	errType := reflect.TypeOf((*error)(nil)).Elem()

@@ -46,9 +46,13 @@ var errExited = errors.New("the agent's pi process has exited")
 // proc is a pi process in RPC mode: JSON records, one per line, on its
 // standard input and output.
 type proc struct {
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-	wmu   sync.Mutex
+	// tests only: run before a record waits for the write lock, and before
+	// its admission is decided.
+	reviewBeforeWrite func(any)
+	reviewBeforeAdmit func()
+	cmd               *exec.Cmd
+	stdin             io.WriteCloser
+	wmu               sync.Mutex
 
 	mu        sync.Mutex
 	pending   map[string]waiter
@@ -174,6 +178,12 @@ func (p *proc) callAt(ctx context.Context, cmd map[string]any, at func()) (respo
 
 // callObserved observes the response on the reader before subsequent events.
 func (p *proc) callObserved(ctx context.Context, cmd map[string]any, at func(response)) (response, error) {
+	return p.callAdmitted(ctx, cmd, nil, at)
+}
+
+// callAdmitted is callObserved where admit, unless nil, decides as the
+// command is written whether it is: refused, nothing is written.
+func (p *proc) callAdmitted(ctx context.Context, cmd map[string]any, admit func() error, at func(response)) (response, error) {
 	id := "y" + strconv.FormatInt(p.seq.Add(1), 10)
 	cmd["id"] = id
 	ch := make(chan response, 1)
@@ -184,7 +194,7 @@ func (p *proc) callObserved(ctx context.Context, cmd map[string]any, at func(res
 	}
 	p.pending[id] = waiter{ch: ch, at: at}
 	p.mu.Unlock()
-	if err := p.send(cmd); err != nil {
+	if err := p.sendAdmitted(cmd, admit); err != nil {
 		p.mu.Lock()
 		delete(p.pending, id)
 		p.mu.Unlock()
@@ -209,9 +219,20 @@ func (p *proc) callObserved(ctx context.Context, cmd map[string]any, at func(res
 
 // send writes one record without waiting for an answer.
 func (p *proc) send(v any) error {
+	return p.sendAdmitted(v, nil)
+}
+
+// sendAdmitted is send where admit, unless nil, runs under the write lock
+// just before the record is written, and refuses it with an error. Records
+// are written in turn, so what is written after admit decided comes after
+// this one. admit must not wait for I/O.
+func (p *proc) sendAdmitted(v any, admit func() error) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
+	}
+	if p.reviewBeforeWrite != nil {
+		p.reviewBeforeWrite(v)
 	}
 	p.wmu.Lock()
 	defer p.wmu.Unlock()
@@ -219,6 +240,14 @@ func (p *proc) send(v any) error {
 	case <-p.done:
 		return errExited
 	default:
+	}
+	if admit != nil {
+		if p.reviewBeforeAdmit != nil {
+			p.reviewBeforeAdmit()
+		}
+		if err := admit(); err != nil {
+			return err
+		}
 	}
 	_, err = p.stdin.Write(append(data, '\n'))
 	return err

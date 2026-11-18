@@ -16,7 +16,7 @@ try {
  });
  assert.equal(p.status,0,p.stderr);
  const reply=p.stdout.trim().split('\n').map(line=>JSON.parse(line)).find(r=>r.id==='public-entry');
- assert.equal(reply?.data?.capability,3,'npm public CLI still reaches an unpatched bundle');
+ assert.equal(reply?.data?.capability,4,'npm public CLI still reaches an unpatched bundle');
 } finally {await rm(cliConfig,{recursive:true,force:true});}
 const {Agent,hostInputRefs}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-agent-core/dist/index.js')));
 const {createAssistantMessageEventStream}=await import(pathToFileURL(resolve(root,'node_modules/@earendil-works/pi-ai/dist/index.js')));

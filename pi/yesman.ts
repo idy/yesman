@@ -2,8 +2,8 @@
 // (`pi -e`), with the address of its local API in the environment.
 //
 // It gives the agent its yesman's context before every run (workspace,
-// worktrees, the repo pool, Knowledge, the task-log path, the board and other
-// agents)
+// worktrees, the repo pool, Knowledge, the task-log path, the board, other
+// agents and, for a lead, the scheduled tasks)
 // and tools to check repositories out of the pool, keep the board and, for
 // a lead, to run workers and hand the user what only they can do (Needs you). Its shell tool sets the user's secrets and
 // variables in every command, asking the app for them each time, and what
@@ -292,12 +292,54 @@ async function refreshHidden(signal?: AbortSignal) {
 	} catch {}
 }
 
+// waitText says what a blocked task waits for (Wait in internal/yesmen).
+function waitText(w: any): string {
+	let s = String(w.kind);
+	if (w.tasks?.length) s += ` ${w.tasks.join(", ")}`;
+	if (w.handoff) s += ` ${w.handoff}`;
+	if (w.reason) s += `: ${String(w.reason).replace(/\n/g, " ")}`;
+	return s;
+}
+
+// publicBoard keeps of a board what the tool shows the model, as text and
+// as details: a task's own fields, what a blocked task waits for and, for one
+// that tracks a scheduled run, its scheduled task (plan). The app's API
+// already leaves the scheduler's run handle out; this keeps any other field
+// it might add out of the model's context as well.
+function publicBoard(board: any): { tasks: any[]; next?: number } {
+	const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+	const tasks = (Array.isArray(board?.tasks) ? board.tasks : []).map((t: any) => {
+		const out: Record<string, unknown> = {};
+		for (const k of ["id", "title", "status", "owner", "detail", "note", "createdAt", "updatedAt"]) {
+			const v = str(t?.[k]);
+			if (v !== undefined) out[k] = v;
+		}
+		const plan = str(t?.schedule?.plan);
+		if (plan && /^s[1-9][0-9]{0,5}$/.test(plan)) out.schedule = { plan };
+		const kind = str(t?.wait?.kind);
+		if (kind) {
+			const wait: Record<string, unknown> = { kind };
+			const ids = Array.isArray(t.wait.tasks) ? t.wait.tasks.filter((id: unknown) => typeof id === "string") : [];
+			if (ids.length) wait.tasks = ids;
+			for (const k of ["handoff", "reason", "since"]) {
+				const v = str(t.wait[k]);
+				if (v !== undefined) wait[k] = v;
+			}
+			out.wait = wait;
+		}
+		return out;
+	});
+	return typeof board?.next === "number" ? { tasks, next: board.next } : { tasks };
+}
+
 function boardText(board: any): string {
 	const tasks: any[] = board?.tasks ?? [];
 	if (!tasks.length) return "The board is empty.";
 	const line = (t: any) => {
 		let s = `- ${t.id} [${t.status}] ${t.title}`;
 		if (t.owner) s += ` (owner ${t.owner})`;
+		if (t.schedule?.plan) s += ` (a run of scheduled task ${t.schedule.plan})`;
+		if (t.wait) s += `\n  wait: ${waitText(t.wait)}`;
 		if (t.note) s += `\n  note: ${String(t.note).replace(/\n/g, "\n  ")}`;
 		if (t.detail) s += `\n  detail: ${String(t.detail).replace(/\n/g, "\n  ")}`;
 		return s;
@@ -359,11 +401,12 @@ function topicIndex(topics: any[]): string {
 	return topics.map((t) => `- ${t.id} [${t.status}] ${t.title} (revision ${t.revision}${t.questions ? `, ${t.questions} open question${t.questions === 1 ? "" : "s"}` : ""})`).join("\n");
 }
 
-// Who wrote a user message: the user, the agent's lead, or yesman telling a
-// lead about its workers. See Origin in internal/agent/origin.go.
-type Origin = { source: "user" | "lead" | "yesman"; kind?: string; worker?: string; submission?: string };
+// Who wrote a user message: the user, the agent's lead, yesman telling a
+// lead about its workers, or a scheduled task's run (with its plan and run).
+// See Origin in internal/agent/origin.go.
+type Origin = { source: "user" | "lead" | "yesman" | "schedule"; kind?: string; worker?: string; submission?: string; plan?: string; run?: string };
 
-const SOURCES = new Set(["user", "lead", "yesman"]);
+const SOURCES = new Set(["user", "lead", "yesman", "schedule"]);
 // The custom entry type origins are recorded under (originEntry in Go).
 const ORIGIN_ENTRY = "yesman-origin";
 
@@ -377,6 +420,9 @@ function validOrigin(o: any): Origin | undefined {
 	if (kind) out.kind = kind;
 	if (worker) out.worker = worker;
 	if (typeof o.submission === "string" && /^[a-f0-9]{48}$/.test(o.submission)) out.submission = o.submission;
+	// A scheduled run's plan and run IDs, as internal/schedule makes them.
+	const plan = match(o.plan, /^s[1-9][0-9]{0,5}$/), run = match(o.run, /^s[1-9][0-9]{0,5}-[a-z0-9-]{1,80}$/);
+	if (o.source === "schedule" && plan && run) Object.assign(out, { plan, run });
 	return out;
 }
 
@@ -632,6 +678,23 @@ export default function yesman(pi: ExtensionAPI) {
 		owner: Type.Optional(Type.String({ description: "The agent the task is handed to, usually a worker's name; empty to clear" })),
 		detail: Type.Optional(Type.String({ description: "What the task is, in Markdown" })),
 		note: Type.Optional(Type.String({ description: "Where it stands: why it is blocked, or its result with links (branch, PR)" })),
+		wait: Type.Optional(
+			Type.Object(
+				{
+					kind: Type.String({
+						description:
+							"tasks: until the tasks listed are done; user: until the user acts on an open Needs you request for this task; external: something outside yesman, such as CI or another party; paused: the user paused it (lead only; it stays paused until the user says otherwise). Empty to clear.",
+					}),
+					tasks: Type.Optional(Type.Array(Type.String(), { description: "For kind tasks: the IDs of the tasks it waits for" })),
+					handoff: Type.Optional(Type.String({ description: "For kind user: the Needs you request, such as n3, if it is not linked to this task" })),
+					reason: Type.Optional(Type.String({ description: "What it waits for and what lets it go on; required for external and paused" })),
+				},
+				{
+					description:
+						"What a blocked task waits for; setting it makes the task blocked, and any other status clears it. yesman tells the lead when a task's wait is over, and of open tasks no running worker carries.",
+				},
+			),
+		),
 	};
 	pi.registerTool({
 		name: "yesman_board",
@@ -649,7 +712,8 @@ export default function yesman(pi: ExtensionAPI) {
 			const board = Object.keys(change).length
 				? await call("POST", "/v1/board", change, signal)
 				: await call("GET", "/v1/board", undefined, signal);
-			return result(boardText(board), board);
+			const view = publicBoard(board);
+			return result(boardText(view), view);
 		},
 	});
 
@@ -821,6 +885,34 @@ export default function yesman(pi: ExtensionAPI) {
 				...view.questions.map((q: any) => `- worker ${q.worker}'s question ${JSON.stringify(q.requestId)}: ${q.title}, since ${q.since}`),
 			];
 			return result(memory + (lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user."), {});
+		},
+	});
+
+	pi.registerTool({
+		name: "yesman_schedules",
+		label: "yesman: scheduled tasks",
+		description:
+			"List this yesman's scheduled tasks: requests the user saved in Tasks that come due at their times, with their recent runs and board tasks. A due run reaches you by itself as a [yesman] Scheduled task message naming its board task. Only when the user explicitly asks you to schedule something, give draft to save it as a plan; it is saved turned off, and runs only once the user reviews it and turns it on in Tasks. Never draft one on your own initiative, or to get work done now.",
+		parameters: Type.Object({
+			draft: Type.Optional(
+				Type.Object(
+					{
+						title: Type.String({ description: "A short title, up to 120 characters" }),
+						instructions: Type.String({ description: "What to ask each time, in the user's words, up to 4000 characters" }),
+						kind: Type.String({ description: "once, daily, weekly or interval" }),
+						date: Type.Optional(Type.String({ description: "once: the date, YYYY-MM-DD" })),
+						time: Type.Optional(Type.String({ description: "once, daily, weekly: the time, HH:MM, 24-hour, in timezone" })),
+						days: Type.Optional(Type.Array(Type.Integer(), { description: "weekly: days, 0 Sunday to 6 Saturday" })),
+						every: Type.Optional(Type.Integer({ description: "interval: minutes, 15 to 10080" })),
+						timezone: Type.String({ description: "The IANA time zone the user means, such as Asia/Shanghai; ask if unclear" }),
+					},
+					{ description: "A plan the user asked for, saved turned off for them to review" },
+				),
+			),
+		}),
+		async execute(_id, params, signal) {
+			const text = params.draft ? await call("POST", "/v1/schedules/draft", params.draft, signal) : await call("GET", "/v1/schedules", undefined, signal);
+			return result(String(text));
 		},
 	});
 

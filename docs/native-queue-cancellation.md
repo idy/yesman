@@ -1,8 +1,8 @@
 # Managed pi and native message recall
 
 yesman's default supported runtime is **pi 1.5.2 with queue protocol patch 1**
-(`1.5.2-yesman.4`). It provides actual per-occurrence pending identity and atomic
-cancellation. Original upstream pi 1.5.2 lacks that API; external runtimes retain
+(`1.5.2-yesman.5`, queue capability 4). It provides actual per-occurrence pending
+identity, atomic cancellation and same-occurrence append. Original upstream pi 1.5.2 lacks that API; external runtimes retain
 normal sending/Copy and only expose recall if they report the supported protocol.
 
 ## Runtime selection and distribution
@@ -167,6 +167,72 @@ receipt. Ordered events reconcile lost ACKs; old initial submission ACKs cannot
 downgrade the changed kind. Restart invalidates live queue authority and never
 replays the original intent. No new payloads or queue authority are persisted.
 
+## Same-occurrence append (capability 4)
+
+A later human input can join a human message that is still pending in pi, so pi
+takes and the model receives one message instead of several. RPC `prompt` accepts
+an optional `appendTo: {epoch, queueId, expectedRevision, controlGeneration}`.
+It applies only while the Session is streaming, where the prompt would otherwise
+be queued. An idle Session ignores it and starts a run as usual.
+
+The input first passes through its own input hooks, skill/template expansion and
+image list. Then one synchronous registry step decides at the exact point pi would
+enqueue it. The input is appended to that occurrence when every condition holds:
+- it is pending and not claimed by an idle preparation;
+- its epoch and item revision match;
+- the Session's control generation matches, and the Session is neither stopping nor settling;
+- it is in the same lane (steer/follow-up);
+- it is the newest pending occurrence in either lane;
+- both inputs carry a 48-hex submission ID and the same host origin, and the origin is the user
+  (a scheduled run's `schedule` origin is never joined);
+- both inputs have the same trusted conversation `context` in their host origin, or neither has
+  one (a topic's messages carry `topic:<id>`, so they never share an occurrence with the
+  composer's or another topic's);
+- fewer than 15 inputs have been appended (at most 16 members: the primary input plus 15);
+- the final combination, after both inputs' hooks, fits one message: at most 4 images, each at
+  most 5 MiB and together at most 10 MiB, decoded.
+
+Otherwise the input is enqueued as a new occurrence in that same step, so it is
+never lost or processed twice. The reply is `{disposition:"queued", append:{outcome,
+queueId, itemRevision, enqueued?}}`. Possible outcomes are `appended`, `already_appended`,
+`duplicate`, `stale`, `not_pending`, `preparing`, `stale_item`, `stale_control`,
+`kind_mismatch`, `not_latest`, `ineligible`, `limit` and `budget` (the final combination would
+exceed the image limits above).
+
+A repeated append of a submission ID that is already a segment, a pending primary or
+recently retired (1024 bound) changes nothing and enqueues nothing.
+
+The merged message keeps pi's queued shape: one text block, then images in their
+original order. The text is the earlier text verbatim, one newline (`"\n"`), then the
+later text verbatim; a trailing newline of the earlier text is kept before the
+separator. Image-only inputs add no separator. The occurrence keeps its
+handle, its primary submission ID, its origin and its timestamp. Its item revision
+increases with each append. Snapshot items list the appended IDs as `segments`.
+`queue_update` reports state `appended` with `appendedSubmissionId`, and the
+eventual `taken` change carries `segments`. The host-only `yesman-input-v1` record
+stores the segments next to the primary ID. None of these IDs appear on an
+AgentMessage, in hooks or in provider context.
+
+An idle preparation (`runQueuedInput`) **claims** its captured occurrences and the
+promoted target. Snapshot items carry `preparing: true` and the transitions are reported as
+`preparing`/`pending`. Claimed items remain pending, cancellable and complete;
+they are **not** taken. Claimed items cannot be extended, so a later input waits for
+its own checkpoint instead of invalidating the preparation. The claim is released
+when the preparation commits or ends without intake.
+
+`get_pending_queue` adds `appendAllowed` as a hint. The SDK exposes
+`Agent.appendQueuedMessage`, `PromptOptions.appendTo` and `RpcClient.promptAppend`.
+Hosts never send `appendTo` to capability ≤3 runtimes. With those runtimes a later
+input simply remains its own message.
+
+yesman proposes a target only for the composer's own submissions
+(`Manager.SubmitCoalescing`), and only an occurrence that is itself a composer
+submission of the same agent generation and session (its receipt's private `coalesce`
+fact, never restored after a restart). A scheduled run (`SubmitFollowUp`), a topic's
+message (`SubmitInContext`), a plain `Submit`, a worker report or a lead's message is
+never a target, and is never appended into one. pi's own checks above apply
+independently.
+
 ## Protocol and atomicity
 
 Core enqueue returns a unique handle for each occurrence, even if two writers
@@ -256,14 +322,38 @@ restored drafts have the same in-memory lifetime as other composer drafts.
 
 Reliable pending human receipt rows show **Cancel and edit**. Their footer uses
 **Waiting · follow-up** or **Steering · waiting for input checkpoint**, never
-Sending after native acceptance. Pending/failure visibility does not depend on
-the eight-entry `Convo.sent` display cache or a later submitted ID. Current
-failures stay visible for their agent generation. Earlier nonactionable unbound
-receipts fold into one default-collapsed group from PR67; they never grant queue
-actions. Receipt binding uses only an explicit recorded submission identity,
-including identical text/images, so late events and reloading do not add a second
-bubble. A recorded message shows **Taken by pi**, which does not promise provider
-execution has finished.
+Sending after native acceptance. The conversation is pi's messages; a receipt
+draws a row only while it is open: sending/accepted/queued/steering or native
+pending, cancelled with a restorable original, `failed`, `interrupted` or
+`unconfirmed` with an error until the person hides it (**Hide**) or this window
+resends its kept draft unchanged and the server registers that resend, or an
+`unconfirmed` answer without an error while it is the latest submission. Other
+later sends, replies and empty queues never retire a problem: its status can
+arrive after them, to a reloaded page. Hiding is page-only: IDs in localStorage
+per conversation, pruned to the receipts Go still keeps; receipts are unchanged
+and nothing is resent. The person sending that ID again, or an accepted update
+(this generation, newer revision, still retained) that is not finished, drops
+the ID from the hidden set and persists that, so the new attempt's outcome shows
+live and after reload; lower revisions and earlier generations cannot. If the
+set cannot be written, the page tries to remove the whole stored key (every
+conversation's Hides); when that works, a reload shows rather than hides. If
+removal is refused too, only the page's memory is reliable, and a reload after
+storage recovers may read the old Hides again.
+Taken (`dispatched`), `handled` and other finished receipts draw
+nothing, including after compaction removes their messages from context; their
+receipts stay in Go for idempotence and audit. Visibility does not depend on the
+eight-entry `Convo.sent` display cache, which only supplies a visible row's exact
+text and images, so live and reloaded windows agree. Receipt binding uses only an
+explicit recorded submission identity, including identical text/images, so late
+events and reloading do not add a second bubble. A recorded message reads as an
+ordinary message without a delivery label; being taken does not promise provider
+execution has finished. A pending occurrence with appended inputs keeps one
+bubble with all member text and images, copied or recalled as a whole. Preparing
+still means pending and recallable, not taken. Topics keep their recorded chip
+and copy only the person's text; scheduled runs retain their Tasks origin rather
+than appearing as a person's typed input. Their canonical request has no
+permanent receipt status either. Topic-pane submission history retains its own
+recorded state labels.
 
 `SubmissionPayload` reads complete text/images from the existing bounded volatile
 Go cache, without changing native membership. A visible unbound row may hydrate
@@ -302,6 +392,11 @@ are not copied to the clipboard. No history rewrite, fork or response rerun exis
   yesman extension plus third-party transform/context audit and local provider;
   both kinds/modes, concurrent writers, middle cancellation, duplicate retries,
   epoch mismatch, survivor order, post-drain failure and metadata isolation.
+- `check-queue-append.mjs`: actual managed CLI/Session/native queue/RPC with the
+  production yesman extension, third-party hook audit and a per-call gated local
+  provider. It checks one merged occurrence and one provider introduction, text and four images
+  in order, duplicate append, every independent outcome, the checkpoint taking the
+  occurrence first, the idle-preparation claim with no stall, and Stop during preparation.
 - `check-queue-sdk.mjs`: actual managed public core SDK; same-object repeated
   enqueue, 100 interleaved occurrences, ordering/race and bounded terminal handles.
 - `TestRecallWithManagedPi`: actual Go Manager and runtime, complete text/images,

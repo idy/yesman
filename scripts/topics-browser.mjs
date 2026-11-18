@@ -41,7 +41,7 @@ async function fixture() {
 const bridge = () => {
   localStorage.setItem('yesman.info', 'shown');
   const handlers = {};
-  const forwarded = ['State', 'Messages', 'Submit', 'Abort', 'Board', 'Info', 'Topics', 'CreateTopic', 'UpdateTopic', 'SubmitTopic'];
+  const forwarded = ['State', 'Messages', 'Submit', 'SubmitCoalescing', 'Abort', 'Board', 'Info', 'Topics', 'CreateTopic', 'UpdateTopic', 'SubmitTopic'];
   window.fixtureCalls = [];
   window.mygo = {
     locale: localStorage.getItem('fixture.locale') || 'en',
@@ -109,14 +109,15 @@ async function run(engineName, engine) {
     const topicsRow = page.locator('#yesman-info [data-info-entry="topics"]');
     await topicsRow.waitFor();
 
-    // The info panel's one card lists Knowledge, Working Logs, Needs You and
-    // Topics, a row each, with what each counts; no Board or Tasks row.
+    // The info panel's one card lists Knowledge, Working Logs, Needs You,
+    // Topics and Tasks, a row each, with what each counts; no Board row.
     await page.waitForFunction(() => /Empty/.test(document.querySelector('#yesman-info [data-info-entry="topics"]')?.innerText ?? ''));
     const entries = await page.$$eval('#yesman-info .info-entries .info-link', (els) => els.map((e) => ({ key: e.dataset.infoEntry, label: e.querySelector('.info-link-label')?.textContent, aside: e.querySelector('.info-aside')?.textContent })));
-    assert.deepEqual(entries.map((e) => e.key), ['knowledge', 'working-logs', 'needs-you', 'topics'], JSON.stringify(entries));
-    assert.deepEqual(entries.map((e) => e.label), ['Knowledge', 'Working Logs', 'Needs You', 'Topics'], JSON.stringify(entries));
+    assert.deepEqual(entries.map((e) => e.key), ['knowledge', 'working-logs', 'needs-you', 'topics', 'tasks'], JSON.stringify(entries));
+    assert.deepEqual(entries.map((e) => e.label), ['Knowledge', 'Working Logs', 'Needs You', 'Topics', 'Tasks'], JSON.stringify(entries));
     assert.equal(entries[0].aside, '1 note');
     assert.equal(entries[3].aside, 'Empty');
+    assert.equal(entries[4].aside, 'None');
     assert.equal(await page.locator('#yesman-info .info-entries').count(), 1, 'one card');
     assert.equal(await page.$eval('#yesman-info', (el) => el.firstElementChild?.classList.contains('info-section--entries') && el.children.length > 1), true, 'Storage and worktrees follow the card');
     await shot(page, `${engineName}-info`);
@@ -245,7 +246,7 @@ async function run(engineName, engine) {
     if (native) {
       // pi took both: each is its native message, tied to its submission.
       await page.waitForFunction(() => [...document.querySelectorAll('#thread .msg-delivery[data-bound="true"]')].filter((el) => el.querySelector('.topic-chip') &&
-        el.querySelector('.delivery-status')?.textContent === 'Taken by pi').length === 2, null, { timeout: 30000 });
+        !el.querySelector('.delivery-status')).length === 2, null, { timeout: 30000 });
     }
 
     // After a reload the native history still names each topic; a chip opens it.

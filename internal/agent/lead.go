@@ -1,15 +1,11 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
-
-	"github.com/idy/yesman/internal/yesmen"
 )
 
 // The lead answers for its yesman: what its workers ask, how their runs end,
@@ -151,137 +147,12 @@ func (d dialog) reply(r DialogReply) (map[string]any, error) {
 	}
 }
 
-// unnudge lets the lead be reminded again: someone wrote to it.
+// unnudge records that a message is on its way to the lead, which settles
+// before yesman tells it about its tasks.
 func (m *Manager) unnudge(id string) {
 	m.mu.Lock()
 	if a := m.agents[id]; a != nil {
-		a.nudged = false
 		a.inbox++
 	}
 	m.mu.Unlock()
-}
-
-// canRemindLocked checks the lead and all its workers under mu. A settled
-// worker still has work under way while its report is read or delivered.
-func (m *Manager) canRemindLocked(lead *agent, p *proc, inbox uint64) bool {
-	if p == nil || lead.proc != p || lead.nudged || lead.stopping || lead.retiring || lead.info.Status != Idle ||
-		lead.prompts != 0 || lead.inbox != inbox || lead.settledInbox != inbox {
-		return false
-	}
-	select {
-	case <-p.done:
-		return false
-	default:
-	}
-	for _, w := range m.agents {
-		if w.info.Yesman != lead.info.Yesman || w.info.Role != RoleWorker {
-			continue
-		}
-		if w.prompts > 0 || w.reports > 0 || w.starting != nil {
-			return false
-		}
-		switch w.info.Status {
-		case Starting, Working, Waiting:
-			return false
-		}
-	}
-	return true
-}
-
-const followLimit = 30
-
-// followThrough runs when the lead ends a run. If no worker is busy and no
-// message is on its way to the lead, but the board still has tasks to do or
-// in progress, it reminds the lead once, so that the work it took on goes on
-// without the user. A reminder is not repeated until the user or a worker
-// writes to the lead again, so a lead that leaves tasks open on purpose is
-// not pressed.
-func (m *Manager) followThrough(lead *agent, p *proc) {
-	m.mu.Lock()
-	yesman, inbox := lead.info.Yesman, lead.inbox
-	ready := m.canRemindLocked(lead, p, inbox)
-	m.mu.Unlock()
-	if !ready {
-		return
-	}
-	board, err := m.cfg.Yesmen.Board(yesman)
-	if err != nil {
-		return
-	}
-	owners := map[string]Info{}
-	for _, i := range m.List() {
-		if i.Yesman == yesman {
-			owners[i.Name] = i
-		}
-	}
-	m.remindOfBoard(lead, p, inbox, board, owners)
-}
-
-// remindOfBoard rechecks after the board read and reserves the prompt before
-// releasing the locks. A new message, worker or handoff takes precedence.
-func (m *Manager) remindOfBoard(lead *agent, p *proc, inbox uint64, board yesmen.Board, owners map[string]Info) {
-	lead.modelMu.Lock()
-	m.mu.Lock()
-	if !m.canRemindLocked(lead, p, inbox) {
-		m.mu.Unlock()
-		lead.modelMu.Unlock()
-		return
-	}
-	yesman := lead.info.Yesman
-	var open []yesmen.Task
-	for _, t := range board.Tasks {
-		if t.Status != yesmen.TaskTodo && t.Status != yesmen.TaskDoing {
-			continue
-		}
-		if w := m.agents[ID(yesman, t.Owner)]; w != nil && w.stopping &&
-			w.info.Status == Stopped && owners[t.Owner].FinishedAt.IsZero() {
-			continue // deliberately put to sleep before finishing
-		}
-		open = append(open, t)
-	}
-	if len(open) == 0 {
-		m.mu.Unlock()
-		lead.modelMu.Unlock()
-		return
-	}
-
-	var b strings.Builder
-	b.WriteString("[yesman] No worker is running, but these tasks are still open:\n")
-	for i, t := range open {
-		if i == followLimit {
-			fmt.Fprintf(&b, "- and %d more (yesman_board lists them)\n", len(open)-followLimit)
-			break
-		}
-		fmt.Fprintf(&b, "- %s [%s] %s", t.ID, t.Status, t.Title)
-		if t.Owner != "" {
-			fmt.Fprintf(&b, " (owner %s: %s)", t.Owner, ownerState(owners, t.Owner))
-		}
-		b.WriteString("\n")
-	}
-	b.WriteString("\nLeave workers deliberately put to sleep by the user asleep, and leave their unfinished tasks alone until the user asks to resume them. Carry on with every listed task you can now. Mark a task that waits on the user's decision blocked, with the question in its note. When only such tasks are left, put those decisions to the user together, each with the options and your recommendation.")
-	lead.nudged = true
-	lead.prompts++
-	m.mu.Unlock()
-	lead.modelMu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	if err := m.sendPrompt(ctx, lead, p, b.String(), "followUp", Origin{Source: OriginYesman, Kind: "tasks"}); err != nil {
-		log.Printf("yesman: remind the lead of %s: %v", yesman, err)
-	}
-}
-
-func ownerState(agents map[string]Info, name string) string {
-	i, ok := agents[name]
-	switch {
-	case !ok:
-		return "no such worker now"
-	case !i.FinishedAt.IsZero():
-		return "finished and closed"
-	case i.Status == Failed:
-		return "failed"
-	case i.Status == Stopped:
-		return "asleep"
-	}
-	return string(i.Status)
 }

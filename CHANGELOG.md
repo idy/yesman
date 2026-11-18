@@ -2,6 +2,41 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.46
+
+- Keep your original messages and images in the conversation without a second Earlier submission records list, its counters or permanent success labels.
+- Show useful pending and error states with their available actions, and let pending items leave as pi takes them.
+- Bring a hidden message back when you explicitly retry its unchanged draft, including from Topics. Keep the available complete original and Copy accessible after a page reload, and show a new failed attempt again.
+
+## 0.1.45
+
+- Keep an unfinished Board goal distinct from a worker finishing its run. Check tasks individually after reports, failures, Board changes, startup and the lead settling, and notify the lead when no running worker carries the work, even while other workers are active.
+- Record why a blocked task waits: other tasks, a Needs You request, an external condition or an explicit user pause. Notify the lead when a recorded wait is ready; leave older blocked tasks with no recorded wait for the lead to assess.
+- Preserve explicit lead and worker Stops across app restarts, report pause-save failures, and fence delayed reports and writes against newer user actions or replacement workers and workspaces. Resuming still requires an explicit message or authorized action.
+- Keep reminder deduplication and finite retry and no-progress budgets across restarts. Notices ask the lead to continue authorized work; they do not complete tasks, start workers themselves, grant approvals or replay earlier user input or uncertain external effects.
+
+## 0.1.44
+
+- Show the macOS app copy and signing type checked by Settings › Grant, with clearer guidance when an ad-hoc build reports no Accessibility, Screen Recording or Input Monitoring access. Keep the reported state unchanged: replacing a build can invalidate an older grant, and the check cannot determine why access is missing.
+- Add a separate System Audio Recording Only row, independent of Microphone and Screen Recording. On macOS 14.2 or later it shows Manual · cannot detect and opens the relevant System Settings pane; earlier versions show Not applicable. The row performs no recording and requests no access; macOS asks when a recording task actually uses that permission.
+- Wrap long app paths within Grant so the full path and permission controls remain accessible, and keep English and Simplified Chinese category names and Settings action labels consistent.
+- Full Disk Access still requires manual verification, and Automation remains specific to each target app. Opening System Settings does not establish authorization. This update does not reset or repair macOS permission records, change certificate signing, or establish that desktop automation access has recovered.
+
+## 0.1.43
+
+- Combine consecutive messages sent from the composer while its latest message is still waiting for pi, updating the same conversation bubble in submission order.
+- Preserve the original text and image order, highlight appended content briefly, and let Cancel and edit restore the combined pending message.
+- Keep later messages separate once pi starts preparing or takes the pending input, when the queue lane changes or combining would exceed message limits, and for Topics, scheduled runs and worker reports.
+- Include managed pi 1.5.2-yesman.5 for pending-input append support. External runtimes without that support continue sending each input separately.
+
+## 0.1.42
+
+- Add Tasks for requests scheduled once, daily, weekly or at an interval in a chosen time zone. Plans run while Yes Man is open and the computer is awake; missed times appear together for a manual catch-up instead of replaying automatically.
+- Show Tasks as a fifth Info entry with the enabled count, next time and attention state. Create, edit, turn off and archive plans, inspect run history, and follow links between a run, its Board task and the lead conversation.
+- Send each run to the lead as an ordinary follow-up, preserving a reply in progress. Skip automatic overlaps while the previous run is being delivered or its Board task remains open; explicit Run now and catch-up actions ask for confirmation when work overlaps.
+- Keep run and submission identities through supported retry, restart and workspace lifecycle paths. Delivery states follow pi's receipt or native queue evidence; uncertain delivery is shown as unknown and is never automatically resent as a new request. These records do not guarantee exactly-once execution.
+- Show the Board task's recorded status and note as the outcome. The lead is asked to record results in Working log; the scheduler keeps its own run records and does not write that log. Lead-created plans stay off until the user turns them on.
+
 ## 0.1.41
 
 - Add Topics to keep questions and discussions, with summaries, confirmed conclusions, open questions and linked sources. Search, filter, edit, resolve, archive and restore topics in their own pane.

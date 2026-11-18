@@ -289,7 +289,7 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 	}
 	for _, stored := range disk.Records {
 		d := stored.Delivery
-		if !deliveryID.MatchString(d.ID) || len(stored.Fingerprint) != 64 || d.ImageCount < 0 || d.ImageCount > 4 {
+		if !deliveryID.MatchString(d.ID) || len(stored.Fingerprint) != 64 || d.ImageCount < 0 || d.ImageCount > 4 || !receiptOrigin(d.Origin) {
 			return nil, 0, errors.New("invalid delivery metadata")
 		}
 		switch d.State {
@@ -297,8 +297,16 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 		default:
 			return nil, 0, errors.New("invalid delivery state")
 		}
+		switch d.Ack {
+		case "", "accepted", "steering", "queued", "handled":
+		default:
+			return nil, 0, errors.New("invalid delivery acknowledgment")
+		}
 		if _, err := hex.DecodeString(stored.Fingerprint); err != nil {
 			return nil, 0, errors.New("invalid delivery fingerprint")
+		}
+		if !validMergeLinks(d) {
+			return nil, 0, errors.New("invalid delivery merge links")
 		}
 		d.fingerprint, d.created, d.expires = stored.Fingerprint, stored.Created, stored.Expires
 		if d.expires == 0 {
@@ -309,7 +317,7 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 		d.Error, _ = deliveryClip(d.Error, maxDeliveryError)
 		d.Session, _ = deliveryClip(d.Session, 160)
 		d.Images = nil
-		d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload = false, false, false, false, false, false
+		d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload, d.Preparing = false, false, false, false, false, false, false
 		if pendingDelivery(d.State) {
 			d.State, d.Error = "interrupted", ""
 			d.expires = now.Add(deliveryRetention).UnixMilli()
@@ -321,19 +329,37 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 	pruneDeliveryRecords(records, &floor, now)
 	return records, floor, nil
 }
+
+// validMergeLinks bounds the private links between inputs pi took as one message.
+func validMergeLinks(d Delivery) bool {
+	if d.MergedInto != "" && (len(d.Merged) > 0 || !deliveryID.MatchString(d.MergedInto) || d.MergedInto == d.ID) || len(d.Merged) > maxMergedInputs {
+		return false
+	}
+	seen := map[string]bool{d.ID: true}
+	for _, id := range d.Merged {
+		if !deliveryID.MatchString(id) || seen[id] {
+			return false
+		}
+		seen[id] = true
+	}
+	return true
+}
 func pruneDeliveryRecords(records map[string]Delivery, floor *int64, now time.Time) []string {
+	// Inputs appended into one occurrence form one family with it: they are
+	// retired together with that occurrence's receipt, never on their own, so
+	// a recall can never lose a member and a member's retry is never resent.
 	var terminal []Delivery
 	for _, d := range records {
-		if !pendingDelivery(d.State) {
+		if _, rooted := records[d.MergedInto]; rooted && d.MergedInto != "" {
+			continue
+		}
+		if !pendingDelivery(d.State) && !familyPending(records, d) {
 			terminal = append(terminal, d)
 		}
 	}
 	sort.Slice(terminal, func(i, j int) bool { return terminal[i].Order < terminal[j].Order })
 	var removed []string
-	for _, d := range terminal {
-		if len(records) <= maxDeliveryRecords && d.expires >= now.UnixMilli() {
-			continue
-		}
+	retire := func(d Delivery) {
 		delete(records, d.ID)
 		removed = append(removed, d.ID)
 		// A legacy ID may not contain a valid timestamp. Its unknown retries are
@@ -349,7 +375,28 @@ func pruneDeliveryRecords(records map[string]Delivery, floor *int64, now time.Ti
 			*floor = stamp
 		}
 	}
+	for _, d := range terminal {
+		if len(records) <= maxDeliveryRecords && d.expires >= now.UnixMilli() {
+			continue
+		}
+		retire(d)
+		for _, id := range d.Merged {
+			if member, ok := records[id]; ok && member.MergedInto == d.ID {
+				retire(member)
+			}
+		}
+	}
 	return removed
+}
+
+// familyPending reports a still-pending input appended into d's occurrence.
+func familyPending(records map[string]Delivery, d Delivery) bool {
+	for _, id := range d.Merged {
+		if member, ok := records[id]; ok && member.MergedInto == d.ID && pendingDelivery(member.State) {
+			return true
+		}
+	}
+	return false
 }
 func (m *Manager) pruneDeliveryEventLocked(a *agent) *Event {
 	if a.retiring {
