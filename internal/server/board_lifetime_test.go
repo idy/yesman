@@ -436,7 +436,7 @@ func TestBoardChangeAdmittedBeforeStopLandsBeforeItReturns(t *testing.T) {
 	if r := f.post(worker.Token, `{"add":[{"title":"Same workspace, other agent"}]}`); r.Code != 200 {
 		t.Fatalf("other agent: %d %s", r.Code, r.Body)
 	}
-	if b, err := f.srv.board(context.Background(), caller{yesman: yesmen.Yesman{Name: "alice"}}, nil); err != nil || len(b.(yesmen.Board).Tasks) != 2 {
+	if b, err := f.srv.board(context.Background(), caller{yesman: yesmen.Yesman{Name: "alice"}}, nil); err != nil || len(b.(agentBoard).Tasks) != 2 {
 		t.Fatalf("read: %v", err)
 	}
 	select {
@@ -635,7 +635,12 @@ func TestBoardChangeByCurrentCaller(t *testing.T) {
 	if len(b.Tasks) != 2 || b.Tasks[0].ID != "t3" || b.Tasks[1].ID != "t1" {
 		t.Fatalf("board: %+v", b.Tasks)
 	}
-	if t1 := b.Tasks[1]; t1.Status != "done" || t1.DoneAt.IsZero() || t1.DoneOwner != "ann" {
+	// The agents' board leaves out who completed a task and when (see
+	// agentBoardOf); the board itself keeps them.
+	if t1 := b.Tasks[1]; t1.Status != "done" || !t1.DoneAt.IsZero() || t1.DoneOwner != "" {
+		t.Fatalf("completion shown to the agent: %+v", t1)
+	}
+	if t1 := keptTask(t, f.store, "alice", "t1"); t1.Status != "done" || t1.DoneAt.IsZero() || t1.DoneOwner != "ann" {
 		t.Fatalf("completion: %+v", t1)
 	}
 	if len(changed) != len(steps) {
@@ -646,7 +651,7 @@ func TestBoardChangeByCurrentCaller(t *testing.T) {
 	if err := json.Unmarshal(reopened.Body.Bytes(), &b); err != nil || reopened.Code != 200 {
 		t.Fatal(reopened.Code, err)
 	}
-	if t1 := b.Tasks[1]; !t1.DoneAt.IsZero() || t1.DoneOwner != "" {
+	if t1 := keptTask(t, f.store, "alice", "t1"); b.Tasks[1].Status != "doing" || t1.Status != "doing" || !t1.DoneAt.IsZero() || t1.DoneOwner != "" {
 		t.Fatalf("reopened task kept completion: %+v", t1)
 	}
 	if res := f.post(lead.Token, `{"update":[{"id":"t9","status":"done"}]}`); res.Code != 400 {
@@ -655,4 +660,20 @@ func TestBoardChangeByCurrentCaller(t *testing.T) {
 	if res := f.post(lead.Token, `{`); res.Code != 400 {
 		t.Fatalf("bad body: %d", res.Code)
 	}
+}
+
+// keptTask is task id as the board of yesman keeps it.
+func keptTask(t *testing.T, store *yesmen.Store, yesman, id string) yesmen.Task {
+	t.Helper()
+	b, err := store.Board(yesman)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range b.Tasks {
+		if task.ID == id {
+			return task
+		}
+	}
+	t.Fatalf("no task %s", id)
+	return yesmen.Task{}
 }

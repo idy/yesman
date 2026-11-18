@@ -14,14 +14,19 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/server"
 	"github.com/idy/yesman/internal/yesmen"
@@ -33,14 +38,37 @@ var webFS embed.FS
 //go:embed pi/yesman.ts
 var extensionSource []byte
 
-// appName names the app, and with it the lock that keeps one instance.
+// appName is the stable single-instance and profile identity. Its display
+// name is set separately, after taking the lock that old releases use.
 var appName = "yesman"
 
 func main() {
+	// MyGo's binding generator only needs method types. Do not initialize
+	// a user's storage, vault, agents, or profile while inspecting that API.
+	if os.Getenv("MYGO_GENERATE") != "" {
+		mygo.BindAs("Yesman", &service{})
+		if err := mygo.App.Run(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if githubapp.IsShim(os.Args) {
+		args := os.Args[1:]
+		if len(args) > 0 && args[0] == "--yesman-github-app-gh" {
+			args = args[1:]
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := githubapp.RunShim(ctx, args, os.Stdin, os.Stdout, os.Stderr)
+		cancel()
+		os.Exit(code)
+	}
 	mygo.App.SetName(appName)
 	mygo.App.SetLanguages(languages...)
 	if !mygo.App.RequestSingleInstanceLock() {
 		return // the running instance shows its window
+	}
+	if err := setAppDisplayName(); err != nil {
+		log.Fatal(err)
 	}
 	importLoginPath()
 
@@ -61,7 +89,7 @@ func main() {
 
 	a := &app{home: h, storage: storage, pool: pool.New(h.Repos()), yesmen: yesmen.New(h.Yesmen(), h.Archive())}
 	if err := a.yesmen.EnsureTaskLogs(); err != nil {
-		log.Print("workspace task logs: ", err)
+		log.Print("workspace working logs: ", err)
 	}
 	a.pi, a.piErr = findPi()
 	var piCommand func(context.Context) (string, []string, error)
@@ -105,6 +133,26 @@ func main() {
 	a.variables = secrets.NewVariables(h.Variables())
 	a.keychain = appKeychain()
 	go a.unlockFromKeychain() // the system may ask the user first
+	gh, ghErr := exec.LookPath("gh")
+	if ghErr != nil {
+		gh = ""
+	} else if absolute, err := filepath.Abs(gh); err == nil {
+		gh = absolute
+	} else {
+		gh = ""
+	}
+	executable, _ := os.Executable()
+	shim, routingErr := a.prepareGitHubAppRouting(gh, executable)
+	if routingErr != nil {
+		log.Print("GitHub App command routing is unavailable: ", routingErr)
+	}
+	routingRequired := ""
+	if shim == "" && a.githubApp.RequiresRouting() {
+		routingRequired = "1"
+	}
+	if a.githubApp.Configured() {
+		go func() { _ = a.githubApp.Prepare("") }()
+	}
 	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
 		BoardChanged: func(yesman string) {
 			_ = boardEvent.Broadcast(yesman)
@@ -113,20 +161,39 @@ func main() {
 			}
 		},
 		NeedsYouChanged: func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
-		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew}
+		TopicsChanged:   a.topicsChanged,
+		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew, GitHubApp: a.githubApp}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}
+	var schedules atomic.Pointer[schedule.Service]
 	a.agents = agent.New(agent.Config{
 		Pi:        a.pi,
 		Command:   piCommand,
 		Extension: extension,
-		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root},
+		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root, "YESMAN_GH_SHIM=" + shim, "YESMAN_GH_REAL=" + gh, "YESMAN_GH_REQUIRED=" + routingRequired},
 		Yesmen:    a.yesmen,
-		OnEvent:   func(e agent.Event) { _ = agentEvent.Broadcast(e) },
-		OnChange:  a.agentsChanged,
+		OnEvent: func(e agent.Event) {
+			_ = agentEvent.Broadcast(e)
+			if s := schedules.Load(); s != nil {
+				s.OnAgentEvent(e) // a scheduled run's receipt
+			}
+		},
+		OnChange: a.agentsChanged,
 	})
 	srv.Agents = a.agents
+	// Scheduled tasks run while the app runs, in the tray too; one app per
+	// data directory runs them.
+	a.schedules = schedule.New(schedule.Config{
+		Yesmen:       a.yesmen,
+		Agents:       a.agents,
+		LockPath:     filepath.Join(h.Runtime(), "schedules.lock"),
+		OnChange:     func(yesman string) { _ = schedulesEvent.Broadcast(yesman) },
+		BoardChanged: func(yesman string) { _ = boardEvent.Broadcast(yesman) },
+	})
+	schedules.Store(a.schedules)
+	srv.Schedules = a.schedules
+	a.schedules.Start()
 	a.countHandoffs() // for the tray, before the first change of the agents
 	a.catalog = newCatalog(func(ctx context.Context) ([]agent.Model, error) {
 		if a.piErr != nil {
@@ -151,6 +218,9 @@ func main() {
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		a.schedules.Close() // no new run starts while the agents stop
+		a.stopGitHubAppSetup()
+		a.githubApp.Close()
 		if managedRuntime != nil {
 			managedRuntime.Close()
 		}

@@ -22,7 +22,9 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/crew"
 	"github.com/idy/yesman/internal/github"
+	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -39,6 +41,8 @@ type Server struct {
 	// NeedsYouChanged is told when what waits on a yesman's user changes,
 	// with the handoff a lead added, if it added one.
 	NeedsYouChanged func(yesman string, added *yesmen.Handoff)
+	// TopicsChanged is told when the lead changes a yesman's topics.
+	TopicsChanged func(yesman string)
 	// AddRepo, when set, clones a GitHub repository into the pool in place
 	// of resolving and cloning it here, so the app can show it cloning.
 	AddRepo func(ctx context.Context, repo string) (pool.Repo, error)
@@ -49,15 +53,28 @@ type Server struct {
 	// Secrets and Variables, when set, are set in agents' commands.
 	Secrets   *secrets.Vault
 	Variables *secrets.Variables
+	// Schedules, when set, are the scheduled tasks a lead hears of and can
+	// list or, when the user asks it, draft.
+	Schedules Schedules
+	// GitHubApp is a backend-only vault/broker, separate from command secrets.
+	GitHubApp *githubapp.Manager
 
 	url           string
 	worktreeMu    sync.Mutex
 	worktreeLocks map[string]*sync.Mutex // serialize lifecycle operations per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
+	// beginChange replaces Agents.BeginChange in tests that run no agent.
+	beginChange func(token string, y yesmen.Yesman) (func(), error)
 	// beforeBoardChange, set only by tests, runs once a board change was
 	// admitted, just before it is written.
 	beforeBoardChange func()
+	// beforeTopicChange, set only by tests, runs as beforeBoardChange does,
+	// once a topic change from an agent was admitted.
+	beforeTopicChange func()
+	// beforeScheduleChange, set only by tests, runs once a lead's draft was
+	// admitted, before the plan is saved.
+	beforeScheduleChange func()
 }
 
 // Start listens on a loopback port and serves in the background.
@@ -89,13 +106,31 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/workers/remove", s.handle(s.removeWorker))
 	mux.HandleFunc("GET /v1/env", s.handle(s.env))
 	mux.HandleFunc("GET /v1/env/describe", s.handle(s.describeEnv))
+	mux.HandleFunc("GET /v1/github-app/mode", s.handle(s.githubAppMode))
+	mux.HandleFunc("POST /v1/github-app/pulls", s.handle(s.githubAppPull))
 	mux.HandleFunc("POST /v1/workers/answer", s.handle(s.answerWorker))
 	mux.HandleFunc("POST /v1/origin", s.origin)
 	mux.HandleFunc("GET /v1/board", s.handle(s.board))
 	mux.HandleFunc("POST /v1/board", s.handle(s.changeBoard))
+	mux.HandleFunc("GET /v1/schedules", s.handle(s.schedules))
+	mux.HandleFunc("POST /v1/schedules/draft", s.handle(s.draftSchedule))
 	mux.HandleFunc("GET /v1/needs-you", s.handle(s.needsYou))
 	mux.HandleFunc("POST /v1/needs-you", s.handle(s.changeNeedsYou))
+	mux.HandleFunc("GET /v1/topics", s.handle(s.topics))
+	mux.HandleFunc("POST /v1/topics", s.handle(s.changeTopics))
 	return mux
+}
+
+// Schedules is what a lead may do with the user's scheduled tasks: read
+// them, and draft one that stays off until the user turns it on.
+type Schedules interface {
+	LeadContext(yesman string) string
+	ListText(yesman string) (string, error)
+	// Draft saves a draft for the lead of the workspace generation since,
+	// once admit admitted it: admit is asked with the workspace held, before
+	// anything is changed, and what it admitted is held until the plan is
+	// saved.
+	Draft(yesman string, since time.Time, admit schedule.Admit, in schedule.PlanInput) (schedule.Plan, error)
 }
 
 // caller is the agent a request comes from, as it was when the request
@@ -104,9 +139,24 @@ func (s *Server) Handler() http.Handler {
 type caller struct {
 	agent  agent.Info
 	yesman yesmen.Yesman
-	// token is checked again before a change commits: by Agents.BeginChange
-	// for the board, by Agents.CallerOperation for Needs you.
+	// token is checked again before mutation by BeginChange, CallerOperation
+	// or the cancellable App BeginOperation. It never leaves this server.
 	token string
+}
+
+// current reports whether the caller is still the running agent it
+// authenticated as.
+// admit admits a change by caller c to its workspace, held as y: y must be
+// the generation c's request came from, and c's process must still run
+// there. Until release, that process cannot finish stopping.
+func (s *Server) admit(c caller, y yesmen.Yesman) (func(), error) {
+	if !y.HiredAt.Equal(c.yesman.HiredAt) {
+		return nil, agent.ErrRetired
+	}
+	if s.beginChange != nil {
+		return s.beginChange(c.token, y)
+	}
+	return s.Agents.BeginChange(c.token, y)
 }
 
 type handlerFunc func(ctx context.Context, c caller, r *http.Request) (any, error)
@@ -483,7 +533,49 @@ func (s *Server) removeWorker(_ context.Context, c caller, r *http.Request) (any
 // board returns the caller's yesman's board. Every agent of the yesman reads
 // and keeps it, so that the lead can hand keeping it to a worker.
 func (s *Server) board(_ context.Context, c caller, _ *http.Request) (any, error) {
-	return s.Yesmen.Board(c.yesman.Name)
+	b, err := s.Yesmen.Board(c.yesman.Name)
+	if err != nil {
+		return nil, err
+	}
+	return agentBoardOf(b), nil
+}
+
+// agentBoard is the board as an agent's tools return it, field by field: a
+// task that tracks a scheduled run names its scheduled task (plan), which
+// the lead's messages name too, and not the scheduler's run handle, which
+// stays between the app and its window. A field the board gains is not
+// shown to agents until it is added here.
+type agentBoard struct {
+	Tasks []agentTask `json:"tasks"`
+	Next  int         `json:"next"`
+}
+
+type agentTask struct {
+	ID        string         `json:"id"`
+	Title     string         `json:"title"`
+	Status    string         `json:"status"`
+	Owner     string         `json:"owner,omitempty"`
+	Detail    string         `json:"detail,omitempty"`
+	Note      string         `json:"note,omitempty"`
+	CreatedAt time.Time      `json:"createdAt"`
+	UpdatedAt time.Time      `json:"updatedAt"`
+	Schedule  *agentSchedule `json:"schedule,omitempty"`
+}
+
+type agentSchedule struct {
+	Plan string `json:"plan"`
+}
+
+func agentBoardOf(b yesmen.Board) agentBoard {
+	out := agentBoard{Tasks: make([]agentTask, 0, len(b.Tasks)), Next: b.Next}
+	for _, t := range b.Tasks {
+		at := agentTask{ID: t.ID, Title: t.Title, Status: t.Status, Owner: t.Owner, Detail: t.Detail, Note: t.Note, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt}
+		if t.Schedule != nil {
+			at.Schedule = &agentSchedule{Plan: t.Schedule.Plan}
+		}
+		out.Tasks = append(out.Tasks, at)
+	}
+	return out
 }
 
 // changeBoard changes the caller's yesman's board, unless the caller was
@@ -498,7 +590,7 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 		return nil, err
 	}
 	if change.Empty() {
-		return s.Yesmen.Board(c.yesman.Name)
+		return s.board(context.Background(), c, r)
 	}
 	var b yesmen.Board
 	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
@@ -521,19 +613,84 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 	if s.BoardChanged != nil {
 		s.BoardChanged(c.yesman.Name)
 	}
-	return b, nil
+	return agentBoardOf(b), nil
 }
 
 func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, error) {
 	board, _ := s.Yesmen.Board(c.yesman.Name)
 	text := BuildContext(ctx, s.Pool, s.Agents, c.yesman, c.agent, board) + s.envContext(c.agent.Role == agent.RoleLead)
+	if s.GitHubApp != nil {
+		text += s.GitHubApp.Context(c.yesman.Name, c.yesman.HiredAt.UTC().Format(time.RFC3339Nano))
+	}
+	if c.agent.Role == agent.RoleLead {
+		topics, err := s.Yesmen.Topics(c.yesman.Name, c.yesman.HiredAt)
+		text += TopicsContext(topics, err)
+	}
 	if c.agent.Role == agent.RoleLead && s.Crew != nil {
 		text += CrewContext(s.Crew(ctx), c.agent)
+	}
+	if c.agent.Role == agent.RoleLead && s.Schedules != nil {
+		text += s.Schedules.LeadContext(c.yesman.Name)
 	}
 	if c.agent.Role == agent.RoleLead {
 		text += s.needsYouContext(c)
 	}
 	return text, nil
+}
+
+var errLeadSchedules = errors.New("only the yesman's lead reads or drafts scheduled tasks")
+
+// schedules lists the user's scheduled tasks and their recent runs.
+func (s *Server) schedules(_ context.Context, c caller, _ *http.Request) (any, error) {
+	if c.agent.Role != agent.RoleLead {
+		return nil, errLeadSchedules
+	}
+	if s.Schedules == nil {
+		return "Scheduled tasks are not available.", nil
+	}
+	return s.Schedules.ListText(c.yesman.Name)
+}
+
+// draftSchedule saves a plan the user asked the lead for. It is always
+// saved off: only the user turns a scheduled task on, in Tasks.
+func (s *Server) draftSchedule(_ context.Context, c caller, r *http.Request) (any, error) {
+	if c.agent.Role != agent.RoleLead {
+		return nil, errLeadSchedules
+	}
+	if s.Schedules == nil {
+		return nil, errors.New("scheduled tasks are not available")
+	}
+	var req struct {
+		Title        string `json:"title"`
+		Instructions string `json:"instructions"`
+		Kind         string `json:"kind"`
+		Date         string `json:"date"`
+		Time         string `json:"time"`
+		Days         []int  `json:"days"`
+		Every        int    `json:"every"`
+		Timezone     string `json:"timezone"`
+	}
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	// The body arrived after authentication: the plan is saved only if the
+	// caller is still the lead of the same workspace generation, and its
+	// process cannot finish stopping until the plan was saved.
+	admit := func(y yesmen.Yesman) (func(), error) {
+		release, err := s.admit(c, y)
+		if err == nil && s.beforeScheduleChange != nil {
+			s.beforeScheduleChange()
+		}
+		return release, err
+	}
+	p, err := s.Schedules.Draft(c.yesman.Name, c.yesman.HiredAt, admit, schedule.PlanInput{
+		Title: req.Title, Instructions: req.Instructions, Timezone: req.Timezone,
+		Schedule: schedule.Spec{Kind: req.Kind, Date: req.Date, Time: req.Time, Days: req.Days, Every: req.Every},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return fmt.Sprintf("Drafted scheduled task %s %q: %s (%s). It is off: tell the user to review it and turn it on in Tasks when they want it to run.", p.ID, p.Title, p.Schedule.Describe(), p.Timezone), nil
 }
 
 const crewLimit = 40
@@ -607,8 +764,8 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
 
 	if me.Role == agent.RoleLead {
-		w("You are the lead of the yesman named %q. You talk with the user, plan, keep the board, Knowledge and task log, and get the work delivered by workers.\n\n", y.Label())
-		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are Knowledge notes under .yesman/knowledge/ and the task log at .yesman/task-log.md. Read files only to answer a quick question or maintain these shared documents from worker reports, not to investigate. ")
+		w("You are the lead of the yesman named %q. You talk with the user, plan, keep the board, Knowledge and Working log, and get the work delivered by workers.\n\n", y.Label())
+		w("Stay free for the user: never do the work yourself. You have no shell, and the only files you may write are Knowledge notes under .yesman/knowledge/ and the Working log TOC .yesman/task-log.md and flat Markdown records .yesman/task-log/<name>.md. Read files only to answer a quick question or maintain these shared documents from worker reports, not to investigate. ")
 		w("Hand everything else to workers with yesman_worker_start (changes, commands, tests, research across many files, reviews, releases), each with a title naming its subject, then end your run. Each worker is its own pi agent in this workspace; several can run at once. ")
 		w("Keep every run short: answer, delegate, end.\n")
 		w("Your text is what the user reads. The window folds your thinking, tool calls, board changes, worker reports and yesman's notices into a collapsed work log, so write text for the user: answers, results, questions and decisions for them, and progress that tells them something new. Do not narrate routine steps such as reading files, checking the board or starting a worker, and do not restate a worker's report: say what it means for the user.\n")
@@ -672,7 +829,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 
 	rel := ".yesman/knowledge"
 	w("\n## Knowledge\n\n")
-	w("Every agent of this yesman shares %s/. Read a note when it bears on your work. Knowledge holds reusable development conventions, user preferences, architecture decisions and known pitfalls. Good: 'Use the project's Phosphor icon helper and local font assets'; 'Keep stable internal IDs when display names change.' Bad: 'PR #42 at head abc123 passed CI'; a release timeline or temporary blocker. Those belong in the task log or board. Finishing a task alone is not a reason to add Knowledge. Keep one note per topic, update rather than duplicate it, and keep %s/INDEX.md a concise catalog of durable notes. Keep secrets out of both stores.\n", rel, rel)
+	w("Every agent of this yesman shares %s/. Read a note when it bears on your work. Knowledge holds reusable development conventions, user preferences, architecture decisions and known pitfalls. Good: 'Use the project's Phosphor icon helper and local font assets'; 'Keep stable internal IDs when display names change.' Bad: 'PR #42 at head abc123 passed CI'; a release timeline or temporary blocker. Those belong in the working log or board. Finishing a task alone is not a reason to add Knowledge. Keep one note per topic, update rather than duplicate it, and keep %s/INDEX.md a concise catalog of durable notes. Keep secrets out of both stores.\n", rel, rel)
 	if me.Role == agent.RoleLead {
 		w("Maintain Knowledge from reusable discoveries in worker reports; do not turn handoffs into notes.\n")
 	} else {
@@ -686,12 +843,12 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 		w("\n%s/INDEX.md:\n\n%s\n", rel, text)
 	}
 
-	w("\n## Task log\n\n")
-	w("The task log is .yesman/task-log.md. It records dated historical facts, not current instructions: task/PR links, changes and reasons, commit/head hashes, CI and validation results, release timelines, outcomes and follow-up work or temporary blockers at the time. Use the board for current status. Read relevant entries on demand; the full history is not included in this context or the Knowledge index. Keep reusable rules such as the icon policy in Knowledge instead of repeating them in every log entry.\n")
+	w("\n## Working log\n\n")
+	w("The Working log starts at .yesman/task-log.md, a short TOC linking to flat Markdown records in .yesman/task-log/. The display name is Working log (工作日志); these compatibility paths and existing API names stay stable. Legacy single-file logs remain readable; never silently rewrite or migrate them. It records dated historical facts, not current instructions: task/PR links, changes and reasons, commit/head hashes, CI and validation results, release timelines, outcomes and follow-up work or temporary blockers at the time. Use the board for current status. Read the TOC and only relevant detail files on demand; neither is included in this context or the Knowledge index. Keep reusable rules such as the icon policy in Knowledge instead of repeating them in every log entry.\n")
 	if me.Role == agent.RoleLead {
-		w("You coordinate and append task-log entries from worker reports. Preserve existing history; do not have multiple workers rewrite this shared file. Use a date/task heading, then Changes, PR, Validation, Outcome and Follow-up. This document maintenance does not permit doing code work yourself.\n")
+		w("You coordinate and append Working log entries from worker reports, as the sole shared-history writer. For a TOC workspace, create YYYY-MM-DD-tNN-topic.md per task/PR/release (16–32 KiB target; before 48 KiB continue in -02.md, -03.md). Add only date, task/version, title/link and one result sentence to the TOC. Keep the TOC below 16 KiB; group older links into flat YYYY-topic-index.md catalogs below 16 KiB, preserving detail paths. Full Changes, PR, Validation, Outcome, Follow-up and recovery refs belong in that detail file, with a ../task-log.md link back. New tasks get new files even on the same day; edit old records only for factual corrections. Utility-generated legacy snapshots, slices and catalogs are immutable; put their corrections in a new linked record. Preserve all legacy history; coordinate any explicit offline migration separately after stopping old writers. Never have concurrent workers rewrite shared history. This document maintenance does not permit doing code work yourself.\n")
 	} else {
-		w("Report task results, PR/commit links, validation, outcomes and follow-up work to your lead, which appends the task log. Keep your board task current; do not rewrite the shared task log alongside other workers.\n")
+		w("Report task results, PR/commit links, validation, outcomes and follow-up work to your lead, which maintains the Working log TOC and detail records. Keep your board task current; do not rewrite shared history alongside other workers.\n")
 	}
 
 	w("\n## Board\n\n")
@@ -766,6 +923,9 @@ func writeBoard(b *strings.Builder, board yesmen.Board) {
 		fmt.Fprintf(b, "- %s [%s] %s", t.ID, t.Status, oneLine(t.Title, 200))
 		if t.Owner != "" {
 			fmt.Fprintf(b, " (owner %s)", t.Owner)
+		}
+		if t.Schedule != nil {
+			fmt.Fprintf(b, " (a run of scheduled task %s)", t.Schedule.Plan)
 		}
 		if w := t.Wait; w != nil {
 			fmt.Fprintf(b, " {waits: %s", w.Kind)

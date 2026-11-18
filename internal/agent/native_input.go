@@ -2,14 +2,16 @@ package agent
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 )
 
 type hostIdentity struct {
-	SubmissionID string `json:"submissionId"`
-	Origin       Origin `json:"origin"`
-	Epoch        string `json:"epoch"`
-	QueueID      string `json:"queueId"`
+	SubmissionID string   `json:"submissionId"`
+	Segments     []string `json:"segments"` // inputs pi appended into this one occurrence
+	Origin       Origin   `json:"origin"`
+	Epoch        string   `json:"epoch"`
+	QueueID      string   `json:"queueId"`
 }
 type hostInputRef struct {
 	Native   bool          `json:"native"`
@@ -94,7 +96,7 @@ func (m *Manager) observeNativeInput(a *agent, p *proc, kind string, raw json.Ra
 }
 func (m *Manager) reconcileRecordedInputs(a *agent, p *proc, session string, refs []hostInputRef) {
 	m.mu.Lock()
-	if m.agents[a.info.ID] != a || a.proc != p || a.retiring || a.removing || a.deliverySealed || a.nativeQueue.Capability != 3 || session == "" || session != p.piSession.Load().(string) {
+	if m.agents[a.info.ID] != a || a.proc != p || a.retiring || a.removing || a.deliverySealed || !a.nativeQueue.supportsInputIdentity() || session == "" || session != p.piSession.Load().(string) {
 		m.mu.Unlock()
 		return
 	}
@@ -110,9 +112,26 @@ func (m *Manager) reconcileRecordedInputs(a *agent, p *proc, session string, ref
 		// A recorded input on the canonical session branch proves intake even when
 		// compaction omitted its message from the current model context. It is not
 		// a replay permission and must never override a cancellation tombstone.
+		d.queueID, d.queuePreparing = "", false
+		final := slices.Clone(d.Merged)
+		for _, segment := range ref.Identity.Segments {
+			if deliveryID.MatchString(segment) && segment != d.ID && !slices.Contains(final, segment) && len(final) < maxMergedInputs {
+				if child, ok := a.deliveries[segment]; ok && child.Session == d.Session && child.AgentSince.Equal(d.AgentSince) {
+					final = append(final, segment)
+				}
+			}
+		}
+		if len(final) != len(d.Merged) {
+			m.setMergedLocked(a, &d, final)
+		}
 		d.State = "dispatched"
-		d.queueID = ""
 		events = append(events, m.deliveryLocked(a, d))
+		root := a.deliveries[d.ID]
+		for _, segment := range root.Merged {
+			if child, ok := a.deliveries[segment]; ok && child.State != "cancelled" && child.State != "dispatched" && child.Session == root.Session {
+				events = append(events, m.mergeChildLocked(a, root, child)...)
+			}
+		}
 	}
 	m.mu.Unlock()
 	for _, event := range events {

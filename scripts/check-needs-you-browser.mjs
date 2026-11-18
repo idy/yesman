@@ -70,6 +70,8 @@ function bridge() {
         case 'Update': return { enabled: false };
         case 'Models': return { models: [], agent: fixtureState.agents.find((a) => a.id === args[0]) };
         case 'Board': return { tasks: [] };
+        // The info panel's Tasks row: this yesman has no scheduled tasks.
+        case 'Schedules': return { plans: [] };
         case 'AgentMenu': return '';
         case 'WatchFiles': case 'Abort': case 'Stop': return;
         // Reading it would start the agent: its context is not measured here.

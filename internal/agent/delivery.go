@@ -15,23 +15,43 @@ import (
 // Therefore no receipt claims that its message was consumed. Native transcript
 // messages remain independent, including transformed inputs and identical text.
 type Delivery struct {
-	ID                  string    `json:"id"`
-	Session             string    `json:"session"`
-	Revision            uint64    `json:"revision"`
-	State               string    `json:"state"`
-	Text                string    `json:"text"`
-	Images              []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
-	ImageCount          int       `json:"imageCount"`
-	Preview             bool      `json:"preview,omitempty"`
-	Error               string    `json:"error,omitempty"`
-	Order               uint64    `json:"order"`
-	AgentSince          time.Time `json:"agentSince,omitzero"`
-	CanCancel           bool      `json:"canCancel,omitempty"` // view only; never persisted as authority
-	CanRestore          bool      `json:"canRestore,omitempty"`
-	OriginalText        bool      `json:"originalText,omitempty"`
-	OriginalPayload     bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
-	NativePending       bool      `json:"nativePending,omitempty"`
-	CanPromote          bool      `json:"canPromote,omitempty"` // live native membership/admission only
+	ID              string    `json:"id"`
+	Session         string    `json:"session"`
+	Revision        uint64    `json:"revision"`
+	State           string    `json:"state"`
+	Text            string    `json:"text"`
+	Images          []Image   `json:"images,omitempty"` // legacy migration/local fixtures only; new receipts never store image bytes
+	ImageCount      int       `json:"imageCount"`
+	Preview         bool      `json:"preview,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	Order           uint64    `json:"order"`
+	AgentSince      time.Time `json:"agentSince,omitzero"`
+	CanCancel       bool      `json:"canCancel,omitempty"` // view only; never persisted as authority
+	CanRestore      bool      `json:"canRestore,omitempty"`
+	OriginalText    bool      `json:"originalText,omitempty"`
+	OriginalPayload bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
+	NativePending   bool      `json:"nativePending,omitempty"`
+	CanPromote      bool      `json:"canPromote,omitempty"` // live native membership/admission only
+	// MergedInto names the still-pending submission this input was appended to;
+	// pi takes both as one message. Merged lists, in order, the inputs appended to
+	// this submission. Both are bounded private receipt links, never pi input.
+	MergedInto string   `json:"mergedInto,omitempty"`
+	Merged     []string `json:"merged,omitempty"`
+	Preparing  bool     `json:"preparing,omitempty"` // view only: claimed by pi's idle preparation, not taken
+	// Ack is how pi's answer accepted it (accepted, queued, steering or
+	// handled); empty until pi answered, or when it refused. It stays when
+	// the state later turns unconfirmed or interrupted.
+	Ack string `json:"ack,omitempty"`
+	// Origin marks a submission the app made for the user, a scheduled
+	// task's run; nil for what a person typed.
+	Origin         *Origin `json:"origin,omitempty"`
+	queuePreparing bool
+	coalesce       bool   // a composer submission that may join a pending occurrence
+	appendRoot     string // the occurrence an in-flight append targeted
+	// hostContext is the trusted conversation context the app sent this
+	// submission in (a topic's), host-only: pi keeps inputs of different
+	// contexts in different occurrences. Never persisted or shown.
+	hostContext         string
 	queueRevision       uint64
 	queueID, queueEpoch string
 	boundSeq            uint64
@@ -74,9 +94,9 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 	if !pendingDelivery(d.State) && (pendingDelivery(previous.State) || d.expires == 0) {
 		d.expires = time.Now().Add(deliveryRetention).UnixMilli()
 	}
-	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload = false, false, false, false, false, false
+	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload, d.Preparing = false, false, false, false, false, false, false
 	if d.State == "dispatched" || d.State == "failed" || d.State == "handled" || d.State == "interrupted" || d.State == "accepted" {
-		d.queueID = ""
+		d.queueID, d.queuePreparing = "", false
 		m.forgetRecallLocked(a, d.ID)
 	}
 	d.Revision++
@@ -102,7 +122,36 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 // Submit registers a stable client ID before dispatch. Repeating an uncertain
 // bridge call returns its existing receipt and never sends the prompt twice.
 func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
-	d, err := m.submit(ctx, id, messageID, text, images, "steer", expectedSince...)
+	d, err := m.submit(ctx, id, messageID, text, images, "steer", nil, expectedSince...)
+	return m.submitView(id, d), err
+}
+
+// SubmitCoalescing is Submit for the composer: while pi still holds this
+// agent's newest composer input pending and unclaimed, in the same lane,
+// session and generation, pi appends this input to that same occurrence
+// instead of queueing another one. pi decides atomically at its own enqueue
+// point; when the occurrence was taken, claimed or changed first, or the
+// runtime predates capability 4, the input is queued exactly once as its own
+// message. Only another composer input can be joined: never a scheduled run,
+// a topic's message, a worker's report or any other submission.
+func (m *Manager) SubmitCoalescing(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
+	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{coalesce: true}, expectedSince...)
+	return m.submitView(id, d), err
+}
+
+// SubmitInContext is Submit for a message the user sends within a trusted
+// conversation context, such as a topic. The context is host-only: pi records
+// it with the input's identity and never lets inputs of different contexts
+// share an occurrence; the text and pi's command are otherwise unchanged.
+func (m *Manager) SubmitInContext(ctx context.Context, id, messageID, text string, images []Image, hostContext string, expectedSince ...time.Time) (Delivery, error) {
+	if !hostContextRE.MatchString(hostContext) {
+		return Delivery{}, errors.New("invalid conversation context")
+	}
+	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{context: hostContext}, expectedSince...)
+	return m.submitView(id, d), err
+}
+
+func (m *Manager) submitView(id string, d Delivery) Delivery {
 	m.mu.Lock()
 	if a := m.agents[id]; a != nil && a.info.Since.Equal(d.AgentSince) {
 		if current, ok := a.deliveries[d.ID]; ok {
@@ -111,14 +160,33 @@ func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images
 		d = a.deliveryView(d)
 	}
 	m.mu.Unlock()
-	return d, err
+	return d
 }
-func (m *Manager) submit(ctx context.Context, id, messageID, text string, images []Image, behavior string, expectedSince ...time.Time) (Delivery, error) {
+func (m *Manager) submit(ctx context.Context, id, messageID, text string, images []Image, behavior string, origin *Origin, expectedSince ...time.Time) (Delivery, error) {
+	return m.submitDelivery(ctx, id, messageID, text, images, behavior, submission{origin: origin}, expectedSince...)
+}
+
+// submission is what a caller states about a submission beyond its content.
+type submission struct {
+	origin   *Origin // a scheduled run's; nil for what a person typed
+	coalesce bool    // the composer's: may join its newest pending occurrence
+	context  string  // a trusted host-only conversation context, such as a topic's
+}
+
+// hostContextRE bounds a host-only conversation context, as pi's
+// pending-queue.js does (CONTEXT_KEY).
+var hostContextRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
+
+func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string, images []Image, behavior string, sub submission, expectedSince ...time.Time) (Delivery, error) {
+	origin := sub.origin
 	if err := ctx.Err(); err != nil {
 		return Delivery{}, err
 	}
 	if !deliveryID.MatchString(messageID) {
 		return Delivery{}, errors.New("invalid message ID")
+	}
+	if !receiptOrigin(origin) {
+		return Delivery{}, errors.New("invalid submission origin")
 	}
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return Delivery{}, errors.New("empty message")
@@ -222,9 +290,14 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	}
 	preview, truncated := deliveryClip(text, maxDeliveryPreview)
 	a.deliveryOrder++
-	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, fingerprint: fingerprint, created: deliveryTimestamp(messageID)}
+	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, Origin: origin, fingerprint: fingerprint, created: deliveryTimestamp(messageID),
+		coalesce: sub.coalesce && origin == nil && sub.context == "", hostContext: sub.context}
 	a.deliveries[messageID] = d
-	m.retainRecallLocked(a, messageID, text, images)
+	// Only what a person typed can be recalled, edited or shown again in
+	// full: a scheduled run's request is the plan's, never the user's draft.
+	if origin == nil {
+		m.retainRecallLocked(a, messageID, text, images)
+	}
 	ev := m.deliveryLocked(a, d)
 	registered := a.deliveryVersion
 	d = a.deliveries[messageID]
@@ -242,11 +315,21 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 	}
 	m.mu.Unlock()
 	// The user writing to a lead they stopped lifts its pause; what was kept
-	// for it follows their message.
-	flush := m.resumeByUser(id)
+	// for it follows their message. A scheduled run is not the user writing
+	// now: it is sent as before, and leaves their Stop in place.
+	flush := func() {}
+	if origin == nil {
+		flush = m.resumeByUser(id)
+	}
 	// Only the private receipt ID crosses this Go call. The pi command and
 	// user text remain byte-for-byte the same as the original submission path.
-	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, Origin{Source: OriginUser, Submission: messageID}, images...)
+	// Who wrote it is decided from pi's records of this prompt and kept
+	// beside the message (originTracker); a scheduled run says so.
+	written := Origin{Source: OriginUser, Submission: messageID}
+	if origin != nil {
+		written = Origin{Source: origin.Source, Plan: origin.Plan, Run: origin.Run, Submission: messageID}
+	}
+	err = m.promptDelivery(context.Background(), id, text, behavior, messageID, a, &y.HiredAt, written, images...)
 	flush()
 	m.mu.Lock()
 	current := a.deliveries[messageID]
@@ -315,17 +398,75 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 	}
 	m.mu.Lock()
 	d, ok := a.deliveries[id]
-	if !ok || a.retiring || a.proc != p || d.Session != p.deliverySession() || d.State != "sending" {
+	if !ok || a.retiring || a.proc != p || d.Session != p.deliverySession() {
 		m.mu.Unlock()
 		return
 	}
 	var data struct {
 		Disposition string `json:"disposition"`
+		Append      *struct {
+			Outcome string `json:"outcome"`
+			QueueID string `json:"queueId"`
+		} `json:"append"`
 	}
 	_ = json.Unmarshal(r.Data, &data)
+	// pi already holds or took this submission ID: nothing was queued again,
+	// and this answer accepted nothing.
+	duplicate := data.Disposition == "queued" && data.Append != nil && data.Append.Outcome == "duplicate"
+	appended := r.Success && data.Disposition == "queued" && data.Append != nil &&
+		(data.Append.Outcome == "appended" || data.Append.Outcome == "already_appended")
+	ack := ""
+	if r.Success && !duplicate {
+		// pi's answer is the one fact of acceptance a receipt has; a later
+		// settle or queue snapshot leaves it standing but proves nothing more.
+		ack = "accepted"
+		switch {
+		case data.Disposition == "handled":
+			ack = "handled"
+		case data.Disposition == "queued" && behavior == "followUp":
+			ack = "queued"
+		case data.Disposition == "queued":
+			ack = "steering"
+		}
+	}
+	if d.State != "sending" {
+		// pi's own queue reported this very submission before pi answered
+		// the command (native queue identity, or the ordered appended event of
+		// an input joined to an occurrence): the answer still records the
+		// acceptance, beside the state its queue reported, which stays.
+		if ack == "" || d.Ack != "" || !nativeIntake(d.State) {
+			m.mu.Unlock()
+			return
+		}
+		d.Ack = ack
+		ev := m.deliveryLocked(a, d)
+		m.mu.Unlock()
+		m.cfg.OnEvent(ev)
+		return
+	}
+	d.Ack = ack
+	if appended {
+		// The ordered appended/taken events normally reached this receipt first;
+		// this covers only their absence. Never a second dispatch.
+		if root, ok := m.appendedRootLocked(a, p, d, data.Append.QueueID); ok {
+			events := m.mergeChildLocked(a, root, d)
+			m.mu.Unlock()
+			for _, ev := range events {
+				m.cfg.OnEvent(ev)
+			}
+			return
+		}
+		d.State = "unconfirmed"
+		ev := m.deliveryLocked(a, d)
+		m.mu.Unlock()
+		m.cfg.OnEvent(ev)
+		return
+	}
 	switch {
 	case !r.Success:
 		d.State, d.Error = "failed", r.Error
+	case duplicate:
+		d.State = "unconfirmed"
 	case data.Disposition == "handled":
 		d.State = "handled"
 	case a.deliverySettled > d.boundSeq:
@@ -344,6 +485,12 @@ func (m *Manager) deliveryResponse(a *agent, p *proc, id, behavior string, r res
 	ev := m.deliveryLocked(a, d)
 	m.mu.Unlock()
 	m.cfg.OnEvent(ev)
+}
+
+// nativeIntake reports whether a receipt's state came from pi's own queue
+// identifying it: in the queue, taken from it, or taken out of it.
+func nativeIntake(state string) bool {
+	return state == "queued" || state == "steering" || state == "dispatched" || state == "cancelled"
 }
 
 // observeDelivery never matches user content to receipts. queue_update is a
@@ -386,7 +533,8 @@ func (m *Manager) observeDelivery(a *agent, p *proc, kind string, raw json.RawMe
 	for _, d := range a.deliveries {
 		uncertain := kind == "agent_settled" && (d.State == "accepted" || d.State == "steering" || d.State == "queued") ||
 			kind == "queue_update" && a.queue.Steering+a.queue.FollowUp == 0 && (d.State == "steering" || d.State == "queued")
-		if d.Session == p.deliverySession() && uncertain && d.queueID == "" {
+		// An appended input follows its occurrence, not run boundaries.
+		if d.Session == p.deliverySession() && uncertain && d.queueID == "" && d.MergedInto == "" {
 			d.State = "unconfirmed"
 			events = append(events, m.deliveryLocked(a, d))
 		}
@@ -405,7 +553,7 @@ func (m *Manager) interruptDeliveriesLocked(a *agent) []Event {
 		if d.State != "cancelled" {
 			m.forgetRecallLocked(a, id)
 		}
-		d.queueID = ""
+		d.queueID, d.queuePreparing = "", false
 		a.deliveries[id] = d
 	}
 	a.nativeQueue = pendingQueue{}

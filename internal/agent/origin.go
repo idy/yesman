@@ -27,18 +27,24 @@ import (
 // to the messages it serves the window, live and from history, under the
 // message's "yesman" field.
 type Origin struct {
-	Source string `json:"source"`         // OriginUser, OriginLead or OriginYesman
+	Source string `json:"source"`         // OriginUser, OriginLead, OriginYesman or OriginSchedule
 	Kind   string `json:"kind,omitempty"` // lead: "task" or "message"; yesman: "report", "question", "stopped", "failed", "tasks" or "needs-you"
 	// Worker names the worker a yesman notice is about.
 	Worker string `json:"worker,omitempty"`
-	// Submission is the receipt ID of a user's submission from the window.
+	// Submission is the receipt ID of a submission: a user's from the
+	// window, or a scheduled run's.
 	Submission string `json:"submission,omitempty"`
+	// Plan and Run name the scheduled task and the run a scheduled message
+	// is (internal/schedule).
+	Plan string `json:"plan,omitempty"`
+	Run  string `json:"run,omitempty"`
 }
 
 const (
-	OriginUser   = "user"   // a person, from the window
-	OriginLead   = "lead"   // a worker's lead: its task, or a message to it
-	OriginYesman = "yesman" // yesman itself, telling a lead about its workers
+	OriginUser     = "user"     // a person, from the window
+	OriginLead     = "lead"     // a worker's lead: its task, or a message to it
+	OriginYesman   = "yesman"   // yesman itself, telling a lead about its workers
+	OriginSchedule = "schedule" // a run of a scheduled task the user saved in Tasks
 )
 
 // originEntry is the custom entry type under which yesman's extension records
@@ -260,7 +266,7 @@ func removedAt(old []*queued, now []string) int {
 }
 
 func sameWriter(a, b Origin) bool {
-	return a.Source == b.Source && a.Kind == b.Kind && a.Worker == b.Worker
+	return a.Source == b.Source && a.Kind == b.Kind && a.Worker == b.Worker && a.Plan == b.Plan
 }
 
 // message decides the origin of a user message as it starts, and gives it to
@@ -555,6 +561,9 @@ var (
 	originKindRE       = regexp.MustCompile(`^[a-z]{1,16}$`)
 	originWorkerRE     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	originSubmissionRE = regexp.MustCompile(`^[a-f0-9]{48}$`)
+	// A scheduled task's plan and run IDs, as internal/schedule makes them.
+	originPlanRE = regexp.MustCompile(`^s[1-9][0-9]{0,5}$`)
+	originRunRE  = regexp.MustCompile(`^s[1-9][0-9]{0,5}-[a-z0-9-]{1,80}$`)
 )
 
 // validOrigin reads an origin a session recorded, keeping only the bounded
@@ -565,9 +574,12 @@ func validOrigin(raw json.RawMessage) (Origin, bool) {
 		return Origin{}, false
 	}
 	switch o.Source {
-	case OriginUser, OriginLead, OriginYesman:
+	case OriginUser, OriginLead, OriginYesman, OriginSchedule:
 	default:
 		return Origin{}, false
+	}
+	if !originPlanRE.MatchString(o.Plan) || !originRunRE.MatchString(o.Run) || o.Source != OriginSchedule {
+		o.Plan, o.Run = "", ""
 	}
 	if !originKindRE.MatchString(o.Kind) {
 		o.Kind = ""

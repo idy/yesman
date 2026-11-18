@@ -39,7 +39,8 @@ func (m *Manager) PromoteSubmission(ctx context.Context, agentID, id string, sin
 		m.mu.Unlock()
 		return PromotionResult{}, errStopped
 	}
-	d, exists := a.deliveries[id]
+	d, exists := a.rootDeliveryLocked(id) // appended inputs move with their occurrence
+	id = d.ID
 	p := a.proc
 	if !exists || p == nil || !a.nativeQueue.supportsPromotion() || !a.deliveryView(d).NativePending || d.Session != p.deliverySession() {
 		m.mu.Unlock()

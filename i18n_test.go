@@ -19,15 +19,15 @@ func TestTranslationsKeepVerbs(t *testing.T) {
 
 func TestTrIn(t *testing.T) {
 	for _, c := range []struct{ locale, msg, want string }{
-		{"en", "Open yesman", "Open yesman"},
-		{"zh-Hans", "Open yesman", "打开 yesman"},
+		{"en", "Open Yes Man", "Open Yes Man"},
+		{"zh-Hans", "Open Yes Man", "打开 Yes Man"},
 		{"zh-Hans", "an untranslated message", "an untranslated message"},
 	} {
 		if got := trIn(c.locale, c.msg); got != c.want {
 			t.Errorf("trIn(%q, %q) = %q, want %q", c.locale, c.msg, got, c.want)
 		}
 	}
-	if got := trIn("zh-Hans", "yesman: %d working, %d waiting for you", 2, 1); got != "yesman：2 个在工作，1 个在等你" {
+	if got := trIn("zh-Hans", "Yes Man: %d working, %d waiting for you", 2, 1); got != "Yes Man：2 个在工作，1 个在等你" {
 		t.Errorf("formatted message = %q", got)
 	}
 	if got := trIn("en", "%s stopped", "demo/lead"); got != "demo/lead stopped" {

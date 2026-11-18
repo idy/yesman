@@ -12,10 +12,12 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/home"
 	"github.com/idy/yesman/internal/nativepermissions"
 	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -38,22 +40,29 @@ var (
 	fetchesEvent = mygo.NewEvent[FetchState]("fetches")
 	// boardEvent names a yesman whose board changed.
 	boardEvent = mygo.NewEvent[string]("board")
+	// schedulesEvent names a yesman whose scheduled tasks or their runs
+	// changed.
+	schedulesEvent = mygo.NewEvent[string]("schedules")
 	// piJobsEvent carries the changes to pi's packages under way, whenever
 	// one starts, finishes or fails.
 	piJobsEvent = mygo.NewEvent[PiJobs]("pi-packages")
 )
 
 type app struct {
-	home      home.Home
-	pool      *pool.Pool
-	clones    *clones
-	fetcher   *fetcher
-	yesmen    *yesmen.Store
-	agents    *agent.Manager
+	home    home.Home
+	pool    *pool.Pool
+	clones  *clones
+	fetcher *fetcher
+	yesmen  *yesmen.Store
+	agents  *agent.Manager
+	// schedules runs the scheduled tasks (Tasks) while the app runs.
+	schedules *schedule.Service
 	pi        string
 	piErr     error
 	managedPi bool
 	piRuntime *piruntime.Runtime
+	// onTopics, when set, replaces broadcasting topic changes, for tests.
+	onTopics func(yesman string)
 	// runPi runs a pi command for the user, outside any workspace.
 	runPi  func(ctx context.Context, args ...string) (string, error)
 	piJobs *piJobs
@@ -68,6 +77,11 @@ type app struct {
 	variables *secrets.Variables
 	keychain  keychain   // keeps the secrets' password; nil for none
 	envmu     sync.Mutex // one change of them at a time
+
+	githubApp         *githubapp.Manager
+	githubSetupMu     sync.Mutex
+	githubSetup       GitHubAppSetup
+	githubSetupCancel context.CancelFunc
 
 	wmu  sync.Mutex
 	win  *mygo.Window
@@ -136,7 +150,7 @@ func (a *app) showWindow() {
 	// while its window is open.
 	mygo.App.SetActivationPolicy(mygo.ActivationPolicyRegular)
 	w := mygo.NewWindow(mygo.WindowOptions{
-		Title:         "yesman",
+		Title:         appDisplayName,
 		URL:           "/",
 		Width:         1180,
 		Height:        780,
@@ -179,7 +193,7 @@ func (a *app) windowFocused() bool {
 }
 
 func (a *app) setupTray() {
-	t, err := mygo.NewTray(mygo.TrayOptions{Icon: trayIcon, IconIsTemplate: true, ToolTip: "yesman"})
+	t, err := mygo.NewTray(mygo.TrayOptions{Icon: trayIcon, IconIsTemplate: true, ToolTip: appDisplayName})
 	if err != nil {
 		log.Print("tray: ", err)
 		return
@@ -219,9 +233,9 @@ func (a *app) showCounts() {
 // trayMenu is the tray's menu, in the language yesman shows.
 func (a *app) trayMenu() *mygo.Menu {
 	return mygo.NewMenu([]*mygo.MenuItem{
-		{Label: tr("Open yesman"), Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
+		{Label: tr("Open Yes Man"), Click: func(*mygo.MenuItem, *mygo.Window) { a.showWindow() }},
 		mygo.Separator(),
-		{Label: tr("Quit yesman"), Click: func(*mygo.MenuItem, *mygo.Window) { mygo.App.Quit() }},
+		{Label: tr("Quit Yes Man"), Click: func(*mygo.MenuItem, *mygo.Window) { mygo.App.Quit() }},
 	})
 }
 
@@ -241,7 +255,7 @@ func (a *app) localeChanged() {
 }
 
 func trayToolTip(working, waiting int) string {
-	return tr("yesman: %d working, %d waiting for you", working, waiting)
+	return tr("Yes Man: %d working, %d waiting for you", working, waiting)
 }
 
 func (a *app) notifyChanged() { _ = changedEvent.Broadcast(true) }

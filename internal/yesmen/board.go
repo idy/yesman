@@ -40,6 +40,9 @@ type Task struct {
 	Note      string    `json:"note,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+	// Schedule links a task that tracks one run of a scheduled task to it.
+	// Only the scheduler sets it; board changes keep it as it is.
+	Schedule *TaskSchedule `json:"schedule,omitempty"`
 	// DoneAt is when the task was last marked done, and DoneOwner the agent
 	// that owned it then, for counting tasks done by model. Both are kept
 	// while it stays done and cleared when it is reopened or dropped. Tasks
@@ -91,6 +94,12 @@ type WaitEdit struct {
 	Tasks   []string `json:"tasks,omitempty"`
 	Handoff string   `json:"handoff,omitempty"`
 	Reason  string   `json:"reason,omitempty"`
+}
+
+// TaskSchedule names the scheduled task (plan) and run a board task tracks.
+type TaskSchedule struct {
+	Plan string `json:"plan"`
+	Run  string `json:"run"`
 }
 
 // Open reports whether the task still needs work.
@@ -342,6 +351,83 @@ func (b *Board) checkWaits(before []Task) error {
 		}
 	}
 	return nil
+}
+
+// AddScheduledTask adds the board task that tracks a run of a scheduled
+// task, or returns the one added for that run before, so that a run retried
+// or recovered after a crash never gets a second task. added reports whether
+// this call added it.
+func (s *Store) AddScheduledTask(name string, link TaskSchedule, title, detail string) (task Task, added bool, err error) {
+	if link.Plan == "" || link.Run == "" {
+		return Task{}, false, errors.New("a scheduled task's board task needs its plan and run")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.board(name)
+	if err != nil {
+		return Task{}, false, err
+	}
+	for _, t := range b.Tasks {
+		if t.Schedule != nil && t.Schedule.Run == link.Run {
+			return t, false, nil
+		}
+	}
+	title = clipBoardText(strings.Join(strings.Fields(title), " "), maxTitleLen)
+	detail = clipBoardText(detail, maxDetailLen)
+	if err := b.apply(BoardChange{Add: []TaskEdit{{Title: &title, Detail: &detail}}}, time.Now().UTC()); err != nil {
+		return Task{}, false, err
+	}
+	i := len(b.Tasks) - 1
+	b.Tasks[i].Schedule = &TaskSchedule{Plan: link.Plan, Run: link.Run}
+	y, _ := s.Get(name)
+	s.changing(name) // counted before it is written, as every board change (see Revision)
+	if err := writeJSON(y.BoardFile(), b); err != nil {
+		return Task{}, false, err
+	}
+	return b.Tasks[i], true, nil
+}
+
+// UpdateScheduledTask changes the board task of a scheduled run when fn
+// reports a change, and returns it. A task no longer on the board is left
+// alone; found reports whether it is there.
+func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task Task, changed bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.board(name)
+	if err != nil {
+		return Task{}, false, err
+	}
+	for i, t := range b.Tasks {
+		if t.Schedule == nil || t.Schedule.Run != run {
+			continue
+		}
+		if !fn(&t) {
+			return b.Tasks[i], false, nil
+		}
+		t.Note = clipBoardText(t.Note, maxNoteLen)
+		if !slices.Contains(TaskStatuses, t.Status) {
+			return b.Tasks[i], false, fmt.Errorf("status %q is not one of %s", t.Status, strings.Join(TaskStatuses, ", "))
+		}
+		t.Schedule = b.Tasks[i].Schedule
+		now := time.Now().UTC()
+		markDone(&t, b.Tasks[i].Status == TaskDone, now)
+		t.UpdatedAt = now
+		b.Tasks[i] = t
+		y, _ := s.Get(name)
+		s.changing(name)
+		if err := writeJSON(y.BoardFile(), b); err != nil {
+			return Task{}, false, err
+		}
+		return t, true, nil
+	}
+	return Task{}, false, nil
+}
+
+func clipBoardText(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
 }
 
 // TaskID reads the ID of a task as agents may write it: t3, T3, #3 or 3.

@@ -29,7 +29,7 @@ func TestPromotionRPCReleasesLeaseAndFencesArchive(t *testing.T) {
 				}
 			}
 			id := deliveryTestID(62001)
-			d, err := m.submit(ctx, "alice/lead", id, "original", nil, "followUp")
+			d, err := m.submit(ctx, "alice/lead", id, "original", nil, "followUp", nil)
 			if err != nil {
 				t.Fatal(err)
 			}

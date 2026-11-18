@@ -19,6 +19,10 @@ const (
 	maxTotalImageBytes = 10 * 1024 * 1024
 )
 
+// ValidateImages checks images as a submission would, before anything is
+// recorded about them.
+func ValidateImages(images []Image) error { return validateImages(images) }
+
 // Enforce limits before starting an agent or writing to its RPC pipe. Check
 // bytes as well as the declared MIME so arbitrary files cannot become images.
 func validateImages(images []Image) error {

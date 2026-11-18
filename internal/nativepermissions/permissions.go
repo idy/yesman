@@ -20,11 +20,13 @@ const (
 	Camera        ID = "camera"
 	Accessibility ID = "accessibility"
 	Screen        ID = "screen"
+	SystemAudio   ID = "system-audio"
 	Input         ID = "input"
 	Automation    ID = "automation"
 )
 
-var ids = [...]ID{Bluetooth, Notifications, FullDisk, Microphone, Camera, Accessibility, Screen, Input, Automation}
+// The native adapter indexes this order; change both together.
+var ids = [...]ID{Bluetooth, Notifications, FullDisk, Microphone, Camera, Accessibility, Screen, SystemAudio, Input, Automation}
 
 type Item struct {
 	ID       ID     `json:"id"`
@@ -35,8 +37,17 @@ type Item struct {
 	Settings bool   `json:"settings"`
 	Busy     bool   `json:"busy"`
 }
+
+// App identifies the running copy macOS evaluates. Signing is "adhoc",
+// "signed" or "unsigned"; it comes from this process's own code signature.
+type App struct {
+	Path    string `json:"path"`
+	Signing string `json:"signing,omitempty"`
+}
 type View struct {
 	Platform string `json:"platform"`
+	OS       string `json:"os,omitempty"` // macOS product version, for System Settings names
+	App      *App   `json:"app,omitempty"`
 	Items    []Item `json:"items"`
 }
 type Result struct {
@@ -48,6 +59,7 @@ type adapter interface {
 	query(context.Context, ID) (Item, error)
 	request(context.Context, ID) error
 	open(context.Context, ID) error
+	identity() *App // nil unless this is the packaged macOS app
 }
 
 // Manager serializes user actions across pages/windows. Native adapters also
@@ -58,6 +70,8 @@ type Manager struct {
 	native   adapter
 	mu       sync.Mutex
 	acting   bool
+	appOnce  sync.Once
+	app      *App
 }
 
 func New() *Manager { return &Manager{platform: runtime.GOOS, native: newAdapter()} }
@@ -69,6 +83,17 @@ func valid(id ID) bool {
 	}
 	return false
 }
+
+// identity is read once: a running process keeps its code signature.
+func (m *Manager) identity() *App {
+	m.appOnce.Do(func() { m.app = m.native.identity() })
+	return m.app
+}
+
+// Ad-hoc builds have code-hash-based designated requirements. Replacing a
+// build can invalidate a previous grant while Settings retains its enabled
+// entry. A Boolean false cannot distinguish that from an off switch.
+func buildBound(id ID) bool { return id == Accessibility || id == Screen || id == Input }
 
 func (m *Manager) read(ctx context.Context, id ID) Item {
 	item, err := m.native.query(ctx, id)
@@ -85,13 +110,19 @@ func (m *Manager) read(ctx context.Context, id ID) Item {
 	if item.State != "not-determined" && item.State != "not-granted" {
 		item.Request = false
 	}
+	if item.State == "not-applicable" {
+		item.Settings = false
+	}
+	if app := m.identity(); item.Error == "" && item.State == "not-granted" && buildBound(id) && app != nil && app.Signing == "adhoc" {
+		item.Detail = "adhoc-build"
+	}
 	return item
 }
 
 func (m *Manager) List(ctx context.Context) View {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	view := View{Platform: m.platform, Items: make([]Item, len(ids))}
+	view := View{Platform: m.platform, OS: osVersion(), App: m.identity(), Items: make([]Item, len(ids))}
 	var wg sync.WaitGroup
 	for i, id := range ids {
 		wg.Add(1)
