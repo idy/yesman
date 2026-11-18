@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.46
+
+- Keep your original messages and images in the conversation without a second Earlier submission records list, its counters or permanent success labels.
+- Show useful pending and error states with their available actions, and let pending items leave as pi takes them.
+- Bring a hidden message back when you explicitly retry its unchanged draft, including from Topics. Keep the available complete original and Copy accessible after a page reload, and show a new failed attempt again.
+
 ## 0.1.45
 
 - Keep an unfinished Board goal distinct from a worker finishing its run. Check tasks individually after reports, failures, Board changes, startup and the lead settling, and notify the lead when no running worker carries the work, even while other workers are active.
