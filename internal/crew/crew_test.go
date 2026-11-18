@@ -9,11 +9,11 @@ import (
 
 func TestEmbedded(t *testing.T) {
 	s := Embedded()
-	if s.Date != "2026-11-14" {
+	if s.Date != "2026-11-18" {
 		t.Errorf("date = %q", s.Date)
 	}
-	if len(s.Scores) != 50 {
-		t.Fatalf("%d scores, want 50", len(s.Scores))
+	if len(s.Scores) != 60 {
+		t.Fatalf("%d scores, want 60", len(s.Scores))
 	}
 	first := s.Scores[0]
 	if first.Name != "Claude Fable 5.2 (max)" || first.Base != "Claude Fable 5.2" || first.Effort != "max" || first.Rank != 1 {
