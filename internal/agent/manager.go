@@ -1379,8 +1379,10 @@ func (m *Manager) StopAll() {
 	}
 	wg.Wait()
 	// A continuation evaluation already running writes the workspace's
-	// record; it ends before StopAll does. Its sends end with the processes
-	// stopped above, and no new one starts once closed.
+	// record: StopAll waits up to ten seconds for it to end. Its sends end
+	// with the processes stopped above, and no new one starts once closed;
+	// one blocked longer may still record an undelivered attempt after
+	// StopAll returns.
 	m.waitEvaluations(10 * time.Second)
 	m.mu.Lock()
 	var writers []*deliveryWriter

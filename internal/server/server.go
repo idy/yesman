@@ -543,8 +543,9 @@ func (s *Server) board(_ context.Context, c caller, _ *http.Request) (any, error
 // agentBoard is the board as an agent's tools return it, field by field: a
 // task that tracks a scheduled run names its scheduled task (plan), which
 // the lead's messages name too, and not the scheduler's run handle, which
-// stays between the app and its window. A field the board gains is not
-// shown to agents until it is added here.
+// stays between the app and its window; a blocked task says what it waits
+// for. A field the board gains is not shown to agents until it is added
+// here.
 type agentBoard struct {
 	Tasks []agentTask `json:"tasks"`
 	Next  int         `json:"next"`
@@ -560,10 +561,21 @@ type agentTask struct {
 	CreatedAt time.Time      `json:"createdAt"`
 	UpdatedAt time.Time      `json:"updatedAt"`
 	Schedule  *agentSchedule `json:"schedule,omitempty"`
+	Wait      *agentWait     `json:"wait,omitempty"`
 }
 
 type agentSchedule struct {
 	Plan string `json:"plan"`
+}
+
+// agentWait is what a blocked task waits for (yesmen.Wait), as agents set
+// it with yesman_board.
+type agentWait struct {
+	Kind    string    `json:"kind"`
+	Tasks   []string  `json:"tasks,omitempty"`
+	Handoff string    `json:"handoff,omitempty"`
+	Reason  string    `json:"reason,omitempty"`
+	Since   time.Time `json:"since"`
 }
 
 func agentBoardOf(b yesmen.Board) agentBoard {
@@ -572,6 +584,9 @@ func agentBoardOf(b yesmen.Board) agentBoard {
 		at := agentTask{ID: t.ID, Title: t.Title, Status: t.Status, Owner: t.Owner, Detail: t.Detail, Note: t.Note, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt}
 		if t.Schedule != nil {
 			at.Schedule = &agentSchedule{Plan: t.Schedule.Plan}
+		}
+		if w := t.Wait; w != nil {
+			at.Wait = &agentWait{Kind: w.Kind, Tasks: slices.Clone(w.Tasks), Handoff: w.Handoff, Reason: w.Reason, Since: w.Since}
 		}
 		out.Tasks = append(out.Tasks, at)
 	}

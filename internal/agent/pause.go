@@ -76,15 +76,7 @@ func (m *Manager) pauseOf(y yesmen.Yesman) *leadPause {
 // y is refused and changes nothing.
 func (m *Manager) ownPause(y yesmen.Yesman) bool {
 	m.mu.Lock()
-	if m.leadPauses == nil {
-		m.leadPauses = map[string]*leadPause{}
-	}
-	lp := m.leadPauses[y.Name]
-	if lp == nil || !lp.hiredAt.Equal(y.HiredAt) && m.liveHireLocked(y) {
-		m.leadPauses[y.Name] = &leadPause{hiredAt: y.HiredAt}
-		lp = nil
-	}
-	if lp == nil || lp.hiredAt.Equal(y.HiredAt) {
+	if m.ownPauseLocked(y) {
 		m.mu.Unlock()
 		return true
 	}
@@ -101,6 +93,20 @@ func (m *Manager) ownPause(y yesmen.Yesman) bool {
 		return nil
 	})
 	return err == nil
+}
+
+// ownPauseLocked is ownPause without I/O, under mu: it reports false when
+// only the workspace can say whether y is its hire.
+func (m *Manager) ownPauseLocked(y yesmen.Yesman) bool {
+	if m.leadPauses == nil {
+		m.leadPauses = map[string]*leadPause{}
+	}
+	lp := m.leadPauses[y.Name]
+	if lp == nil || !lp.hiredAt.Equal(y.HiredAt) && m.liveHireLocked(y) {
+		m.leadPauses[y.Name] = &leadPause{hiredAt: y.HiredAt}
+		return true
+	}
+	return lp.hiredAt.Equal(y.HiredAt)
 }
 
 // liveHireLocked reports, under mu, whether this Manager runs the lead of
@@ -234,20 +240,22 @@ func (m *Manager) currentSettingLocked(y yesmen.Yesman, epoch uint64) bool {
 // hire the caller just read from the workspace; a hire the workspace no
 // longer has sets nothing.
 func (m *Manager) setPause(y yesmen.Yesman, paused bool) ([]func(), func() error) {
-	none := func() error { return nil }
 	if !m.ownPause(y) {
-		return nil, none
+		return nil, func() error { return nil }
 	}
-	at := time.Now().UTC()
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.setPauseLocked(y, paused)
+}
+
+// setPauseLocked is setPause once the pause kept is hire y's, under mu.
+func (m *Manager) setPauseLocked(y yesmen.Yesman, paused bool) ([]func(), func() error) {
 	lp := m.pauseOf(y)
 	if lp == nil {
-		m.mu.Unlock()
-		return nil, none // owned by another hire meanwhile
+		return nil, func() error { return nil } // owned by another hire meanwhile
 	}
 	if lp.known && !lp.paused && !paused && (!lp.local || lp.persisted) {
 		epoch := lp.epoch
-		m.mu.Unlock()
 		// Not paused here: write only if the workspace says otherwise.
 		return nil, func() error {
 			if m.loadPauseRecord(y) {
@@ -258,7 +266,7 @@ func (m *Manager) setPause(y yesmen.Yesman, paused bool) ([]func(), func() error
 	}
 	stamp := time.Time{}
 	if paused {
-		stamp = at
+		stamp = time.Now().UTC()
 	}
 	lp.epoch++
 	epoch := lp.epoch
@@ -267,8 +275,34 @@ func (m *Manager) setPause(y yesmen.Yesman, paused bool) ([]func(), func() error
 	if !paused {
 		deferred, lp.deferred = lp.deferred, nil
 	}
-	m.mu.Unlock()
 	return deferred, func() error { return m.persistPause(y, epoch, paused, stamp) }
+}
+
+// setLeadPause sets the user's pause of lead id, of yesman yesman, as
+// setPause does. The hire is the running lead's when this Manager runs one
+// (see liveHireLocked): then the setting holds at once, in the same
+// section of mu that finds the hire, and no storage is read before it, so
+// a workspace that cannot be read loses nothing the user did; only writing
+// it can fail, which is kept and reported. With no lead running here the
+// workspace names the hire; if it cannot be read, nothing is set, and the
+// write reports why.
+func (m *Manager) setLeadPause(id, yesman string, paused bool) ([]func(), func() error) {
+	m.mu.Lock()
+	if a := m.agents[id]; a != nil && !a.retiring && !a.workspaceSince.IsZero() {
+		y := yesmen.Yesman{Name: yesman, HiredAt: a.workspaceSince}
+		defer m.mu.Unlock()
+		if !m.ownPauseLocked(y) {
+			return nil, func() error { return nil } // cannot be: y is the live hire
+		}
+		return m.setPauseLocked(y, paused)
+	}
+	m.mu.Unlock()
+	y, err := m.cfg.Yesmen.Get(yesman)
+	if err != nil {
+		log.Printf("yesman: find the hire of %s to record the user's setting of its lead: %v", yesman, err)
+		return nil, func() error { return err }
+	}
+	return m.setPause(y, paused)
 }
 
 // loadPauseRecord reports whether the workspace records a pause.
@@ -315,11 +349,7 @@ func (m *Manager) pauseByUser(id string) func() error {
 	if name != yesmen.LeadName {
 		return m.pauseWorker(id, yesman, name)
 	}
-	y, err := m.cfg.Yesmen.Get(yesman)
-	if err != nil {
-		return none
-	}
-	_, persist := m.setPause(y, true)
+	_, persist := m.setLeadPause(id, yesman, true)
 	return persist
 }
 
@@ -545,11 +575,7 @@ func (m *Manager) resumeByUser(id string) func() {
 	if err != nil || name != yesmen.LeadName {
 		return func() {}
 	}
-	y, err := m.cfg.Yesmen.Get(yesman)
-	if err != nil {
-		return func() {}
-	}
-	deferred, persist := m.setPause(y, false)
+	deferred, persist := m.setLeadPause(id, yesman, false)
 	// A failure is logged and tried again; until it lands, a restart still
 	// reads the lead as paused, which waits for the user.
 	_ = persist()
