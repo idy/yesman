@@ -265,6 +265,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 qa/restart-resume/download.py "$RUNNER_TEMP/released-inputs"
+      # Only this fixed-vocabulary status file is retained on failure. It is
+      # separate from successful inputs and is never consumed by later jobs.
+      - name: Retain sanitized release acquisition diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: restart-download-diagnostics
+          path: ${{ runner.temp }}/t199-download-diagnostics.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: restart-released-inputs
@@ -291,6 +300,13 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: python3 qa/restart-resume/public_npm_cache.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/public-npm"
+      - name: Retain sanitized public npm acquisition diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: restart-public-npm-diagnostics
+          path: ${{ runner.temp }}/t199-public-npm-diagnostics.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         id: upload
         with:

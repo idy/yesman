@@ -11,6 +11,7 @@ import shutil
 import subprocess
 from urllib.parse import urlsplit
 from provenance import first_attempt
+from acquisition_diagnostics import Diagnostic
 
 LOCK='805dadc8e1468ae4f0d72fac3936e7a1fc9a97ac3e7b23ab1e3fc18d1e1f5569'
 PACKAGE='ebe3b8eab26c2007d69658c6c42b53ddd29351b805c326777eaf4692d3369626'
@@ -62,22 +63,46 @@ def bootstrap(cache,data,lock):
     return {**receipt,'target':str(target),'productionInstallerStillRequired':True,'npmUserConfig':str(config)}
 
 
-def acquire(source,out):
-    first_attempt()
+def acquisition_environment(work):
+    """Distinct empty config files avoid npm double-loading one /dev/null path."""
+    work=Path(work)
+    user=work/'user-empty.ini';global_config=work/'global-empty.ini'
+    for path in (user,global_config):
+        with path.open('xb')as f:os.chmod(path,0o600)
+    env={k:os.environ[k]for k in ('PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TMPDIR')if k in os.environ}
+    env.update(NPM_CONFIG_USERCONFIG=str(user),NPM_CONFIG_GLOBALCONFIG=str(global_config),
+               NPM_CONFIG_REGISTRY='https://registry.npmjs.org/',NPM_CONFIG_FETCH_RETRIES='0')
+    return env
+
+
+def _acquire(source,out,diagnostic):
+    diagnostic.phase('npm-config')
     source,out=Path(source).resolve(),Path(out).absolute();need(not out.exists(),'new public cache output required')
     lock=(source/'internal/piruntime/assets/package-lock.json').read_bytes();package=(source/'internal/piruntime/assets/package.json').read_bytes();need(sha(package)==PACKAGE,'pinned package changed');selected(lock)
     need(os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted','keyless hosted acquisition only')
     need(not os.environ.get('MYGO_UPDATER_PRIVATE_KEY') and not os.environ.get('GH_TOKEN') and not os.environ.get('GITHUB_TOKEN'),'acquisition must have no credentials')
     work=Path(os.environ['RUNNER_TEMP'])/'t199-public-npm-acquisition';need(not work.exists(),'acquisition must not retry in place');work.mkdir();(work/'package.json').write_bytes(package);(work/'package-lock.json').write_bytes(lock)
-    cache=work/'cache';env={k:os.environ[k]for k in ('PATH','HOME','USER','LOGNAME','LANG','LC_ALL','TMPDIR')if k in os.environ};env.update(NPM_CONFIG_USERCONFIG=os.devnull,NPM_CONFIG_GLOBALCONFIG=os.devnull)
+    cache=work/'cache';env=acquisition_environment(work)
     command=['npm','ci','--ignore-scripts','--no-audit','--no-fund','--cache',str(cache)]
+    diagnostic.phase('tool-version');version=subprocess.run(['npm','--version'],cwd=work,env=env,capture_output=True,timeout=10)
+    diagnostic.command(version);need(version.returncode==0,'installed npm version unavailable');diagnostic.version('npm',version.stdout)
+    diagnostic.phase('npm-ci')
     p=subprocess.run(command,cwd=work,env=env,capture_output=True,timeout=300)
-    out.mkdir(parents=True);(out/'acquisition.log').write_bytes(p.stdout+p.stderr);need(p.returncode==0,'keyless public acquisition failed; no retry')
-    receipt=verify(cache,lock)
+    diagnostic.command(p);need(p.returncode==0,'keyless public acquisition failed; no retry')
+    diagnostic.phase('npm-integrity');receipt=verify(cache,lock)
+    out.mkdir(parents=True)
     for relative in receipt['objects']:
         dest=out/'cache'/relative;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(cache/relative,dest)
     receipt['command']=command;receipt['repository']=os.environ['GITHUB_REPOSITORY'];receipt['workflowCommit']=os.environ['GITHUB_SHA'];receipt['runID']=os.environ['GITHUB_RUN_ID'];receipt['runAttempt']=int(os.environ['GITHUB_RUN_ATTEMPT'])
     (out/'cache-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
+
+
+def acquire(source,out):
+    first_attempt()
+    try:
+        with Diagnostic('public-npm')as diagnostic:_acquire(source,out,diagnostic)
+    except Exception:
+        raise SystemExit('t199 public npm acquisition failed; see sanitized T199_ACQUISITION_STATUS and diagnostics artifact')from None
 
 
 if __name__=='__main__':

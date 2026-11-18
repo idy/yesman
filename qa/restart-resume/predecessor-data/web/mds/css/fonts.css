@@ -1,0 +1,15 @@
+/* Shared idy.dev Latin typefaces, self-hosted. Licenses: ../fonts/*-OFL.txt. */
+@font-face {
+  font-family: Outfit;
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url("../fonts/outfit-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Source Sans 3";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("../fonts/source-sans-3-latin.woff2") format("woff2");
+}

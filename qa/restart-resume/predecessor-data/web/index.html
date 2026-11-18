@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Yes Man</title>
+  <link rel="stylesheet" href="/mds/css/magpie.css">
+  <link rel="stylesheet" href="/icons.css">
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/task-log.css">
+  <link rel="stylesheet" href="/explorer.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="titlebar drag" id="titlebar">
+      <div class="mds-brand titlebar-brand">
+        <span class="mds-brand-mark" aria-hidden="true"></span>
+        <span class="mds-brand-name">Yes Man</span>
+      </div>
+      <div class="mds-titlebar-content titlebar-content">
+        <nav class="mds-crumbs" id="crumbs" aria-label="Breadcrumb"></nav>
+        <div class="mds-titlebar-actions mds-titlebar-actions--balanced" id="bar-actions"></div>
+      </div>
+    </header>
+    <aside class="side" id="side" aria-label="Yesmen">
+      <nav class="side-list" id="yesmen"></nav>
+      <div class="side-foot" id="side-foot"></div>
+    </aside>
+    <main class="main">
+      <div class="body" id="body"></div>
+    </main>
+    <aside class="info-panel" id="yesman-info" aria-label="Info" hidden></aside>
+    <aside class="files" id="files" aria-label="Files" hidden></aside>
+    <aside class="board" id="board" aria-label="Board" hidden></aside>
+    <aside class="board schedules" id="schedules" aria-label="Tasks" hidden></aside>
+    <aside class="board needs-you-pane explorer-pane" id="needs-you" aria-label="Needs You" hidden></aside>
+    <aside class="board topics explorer-pane" id="topics" aria-label="Topics" hidden></aside>
+  </div>
+
+  <dialog class="mds-dialog" id="hire-dialog">
+    <form id="hire-form">
+      <h2 class="mds-heading" data-i18n>Hire a yesman</h2>
+      <p class="dialog-hint" data-i18n>A yesman gets a workspace of its own and a lead you talk to. Name it after the project or the job.</p>
+      <label class="field">
+        <span data-i18n>Name</span>
+        <input class="mds-input" name="name" required autocomplete="off" spellcheck="false"
+               placeholder="GizMoth" aria-describedby="hire-name-hint hire-error">
+      </label>
+      <p class="dialog-hint" id="hire-name-hint" data-i18n>A display name. Uppercase letters, spaces and Chinese characters are welcome.</p>
+      <p class="dialog-hint" id="hire-error" role="alert" hidden></p>
+      <p class="dialog-hint" id="hire-model-hint"></p>
+      <div class="mds-dialog-actions">
+        <button class="mds-button" type="button" id="hire-cancel" data-i18n>Cancel</button>
+        <button class="mds-button mds-button--primary" type="submit" data-i18n>Hire</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="mds-dialog" id="rename-dialog" aria-labelledby="rename-title">
+    <form id="rename-form">
+      <h2 class="mds-heading" id="rename-title" data-i18n>Rename yesman</h2>
+      <label class="field">
+        <span data-i18n>Name</span>
+        <input class="mds-input" name="name" required autocomplete="off" spellcheck="false" aria-describedby="rename-error">
+      </label>
+      <p class="dialog-hint" id="rename-error" role="alert" hidden></p>
+      <div class="mds-dialog-actions">
+        <button class="mds-button" type="button" id="rename-cancel" data-i18n>Cancel</button>
+        <button class="mds-button mds-button--primary" type="submit" data-i18n>Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="mds-dialog" id="checkout-dialog">
+    <form method="dialog" id="checkout-form">
+      <h2 class="mds-heading" data-i18n>Check out a repository</h2>
+      <p class="dialog-hint" data-i18n>A worktree of a pool repository in this yesman's workspace, on a branch of its own. The agents can also check out what they need.</p>
+      <label class="field">
+        <span data-i18n>Repository</span>
+        <select class="mds-select" name="repo" required></select>
+      </label>
+      <label class="field">
+        <span><span data-i18n>Branch</span> <span class="mds-optional" data-i18n>optional</span></span>
+        <input class="mds-input mds-mono" name="branch" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="dialog-hint" data-i18n>An existing branch continues; a new one starts from the default branch. Empty makes a new branch.</p>
+      <div class="mds-dialog-actions">
+        <button class="mds-button" value="cancel" formnovalidate data-i18n>Cancel</button>
+        <button class="mds-button mds-button--primary" value="checkout" data-i18n>Check out</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Filled by app.js: pick repositories to add to the pool. -->
+  <dialog class="mds-dialog repo-dialog" id="repo-dialog" aria-labelledby="repo-dialog-title"></dialog>
+
+  <!-- Filled by app.js: what importing a configuration file would change. -->
+  <dialog class="mds-dialog import-dialog" id="import-dialog" aria-labelledby="import-title"></dialog>
+
+  <!-- Filled by env.js: passwords for the secrets and their files. -->
+  <dialog class="mds-dialog env-dialog" id="env-dialog" aria-labelledby="env-dialog-title"></dialog>
+
+  <!-- Filled by pi.js: a pi package's details, and installing one from a source. -->
+  <dialog class="mds-dialog pkg-dialog" id="pkg-dialog" aria-labelledby="pkg-title"></dialog>
+  <dialog class="mds-dialog crew-dialog" id="crew-dialog"></dialog>
+  <dialog class="mds-dialog pi-source-dialog" id="pi-source-dialog"></dialog>
+
+  <dialog class="mds-dialog schedule-dialog" id="schedule-dialog" aria-labelledby="schedule-dialog-title"></dialog>
+
+  <dialog class="mds-dialog" id="confirm-dialog">
+    <form method="dialog">
+      <h2 class="mds-heading" id="confirm-title"></h2>
+      <p class="dialog-hint" id="confirm-body"></p>
+      <div class="mds-dialog-actions">
+        <button class="mds-button" value="cancel" data-i18n>Cancel</button>
+        <button class="mds-button mds-button--primary" value="ok" id="confirm-ok"></button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
