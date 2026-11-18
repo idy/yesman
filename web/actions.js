@@ -95,8 +95,10 @@ export function registerActions(shortcuts, host) {
     },
     {
       // Unbound: a key is the user's to give it in Settings › Shortcuts.
+      // It opens the Needs you pane of the yesman shown, beside its
+      // conversation.
       id: 'needs-you.show', label: 'Show Needs You', group: 'Go to', keywords: ['requests', 'inbox', 'waiting', 'handoffs'],
-      run: () => host.showNeedsYou(),
+      when: needAgent, run: () => host.showNeedsYou(),
     },
     ...GOTO.map((n) => ({
       id: `yesman.goto.${n}`, label: 'Go to yesman {n}', params: { n }, group: 'Go to', keys: [`Mod+${n}`], palette: false,
@@ -112,6 +114,15 @@ export function registerActions(shortcuts, host) {
     {
       id: 'pane.board', label: 'Show or hide the board', group: 'Panels', keys: ['Mod+Shift+B'], keywords: ['tasks', 'todo'],
       when: needAgent, run: () => host.togglePane('board'),
+    },
+    {
+      // Scheduled tasks: no key of its own by default; one can be set.
+      id: 'pane.tasks', label: 'Show or hide the scheduled tasks', group: 'Panels', keywords: ['tasks', 'schedule', 'recurring', 'timer'],
+      when: needAgent, run: () => host.togglePane('tasks'),
+    },
+    {
+      id: 'pane.topics', label: 'Show or hide the topics', group: 'Panels', keywords: ['questions', 'discussions', 'conclusions', 'qa'],
+      when: needAgent, run: () => host.togglePane('topics'),
     },
     {
       id: 'pane.info', label: 'Show or hide the info', group: 'Panels', keywords: ['worktrees', 'storage', 'panel'],

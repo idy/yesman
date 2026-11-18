@@ -360,7 +360,7 @@ test('the action table registers stable IDs Go accepts, with usable, distinct de
   for (const platform of ['mac', 'windows', 'linux']) {
     const s = actionTable(platform);
     const ids = s.actions().map((a) => a.id);
-    assert.equal(ids.length, 37, platform); // 35 actions (including contextual recall) and two Settings pages here
+    assert.equal(ids.length, 39, platform); // 37 actions (including contextual recall, Topics and Tasks) and two Settings pages here
     for (const id of ids) assert.ok(idRE.test(id) && id.length <= 64, id);
     // The IDs settings.json keeps: the three renamed ones, and none in camelCase.
     for (const id of ['agent.needs-you', 'files.task-log', 'repos.fetch-all']) assert.ok(ids.includes(id), id);
@@ -427,6 +427,13 @@ test('side effect actions run only on the agent shown, and only when it can', ()
   assert.equal(idle.state(idle.action('worker.remove')).enabled, false);
   assert.equal(idle.state(idle.action('agent.sleep')).enabled, true);
   assert.equal(idle.state(idle.action('yesman.goto.2')).reason, 'There is no yesman {n}.');
+});
+
+test('Show Needs You opens the pane of the yesman shown, so it needs a conversation', () => {
+  const none = actionTable('mac');
+  assert.equal(none.state(none.action('needs-you.show')).reason, 'Open a conversation first.');
+  const shown = actionTable('linux', { id: 'bob/lead', yesman: 'bob', role: 'lead', status: 'idle' });
+  assert.equal(shown.state(shown.action('needs-you.show')).enabled, true);
 });
 
 test('loading the keys waits for changes being saved', async () => {

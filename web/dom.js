@@ -85,6 +85,13 @@ export const ICONS = Object.freeze({
   circle: '\ue18a', // circle
   record: '\ue3ee', // record
   pencil: '\ue3b4', // pencil-simple
+  clock: '\ue19a', // clock
+  play: '\ue3d0', // play
+  archive: '\ue00c', // archive
+  topics: '\ue17e', // chats-circle
+  archive: '\ue00c', // archive
+  undo: '\ue038', // arrow-counter-clockwise
+  question: '\ue3e8', // question
   keyboard: '\ue2d8', // keyboard
   chart: '\ue150', // chart-bar
   speaker: '\ue44a', // speaker-high

@@ -244,7 +244,7 @@ try {
      assert.equal(await row('system-audio').locator('.grant-state').innerText(),before);
     }
     const navigation=await page.locator('#settings-nav').evaluate(el=>({items:el.children.length,pages:[...el.children].map(c=>c.dataset.page),height:el.getBoundingClientRect().height,scroll:el.scrollHeight,branch:el.closest('.settings-branch').outerHTML}));
-    assert.deepEqual(navigation.pages,['general','shortcuts','grant','yesman','usage','repositories','secrets','variables','storage','pi','config','about']);
+    assert.deepEqual(navigation.pages,['general','shortcuts','grant','yesman','usage','repositories','github-app','secrets','variables','storage','pi','config','about']);
     assert(navigation.height>250,JSON.stringify({name,lang,theme,width,navigation}));
     results.push({engine:name,lang,theme,width,pathCase,geometry,navigation});
    }

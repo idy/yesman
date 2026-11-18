@@ -291,6 +291,24 @@ test('empty and redacted thinking add nothing; text is kept even when it reads l
   assert.equal(rows[3].text, 'shown');
 });
 
+test('a scheduled run is its own row, bound to its receipt, never a person', () => {
+  const id = sub(7);
+  const messages = [
+    user('[yesman] Scheduled task s1 "Check" is due.', { source: 'schedule', plan: 's1', run: 's1-20261116t0900', submission: id }),
+    user('typed by a person', { source: 'user' }),
+    user('[yesman] Scheduled task s2 is due, but nothing recorded who wrote it'),
+    user('bad plan', { source: 'schedule', plan: '../x' }),
+  ];
+  const deliveries = new Map([[id, { id, state: 'queued', order: 1 }], [sub(8), { id: sub(8), state: 'sending', order: 2, origin: { source: 'schedule', plan: 's1', run: 's1-m-0123456789abcdef' } }]]);
+  const rows = project({ messages, deliveries });
+  assert.deepEqual(rows.map((r) => r.type), ['scheduled', 'user', 'user', 'scheduled', 'receipt']);
+  assert.equal(rows[0].origin.plan, 's1');
+  assert.equal(rows[0].delivery.id, id);
+  assert.equal(rows[3].origin.plan, '');
+  assert.equal(rows[4].delivery.origin.source, 'schedule');
+  assert.equal(originOf(messages[0]).source, 'schedule');
+});
+
 // Receipts outlive the messages they were for: those from before messages were
 // tied to receipts, and those whose message a summary of earlier conversation
 // replaced, are kept by the server for its retention period.
