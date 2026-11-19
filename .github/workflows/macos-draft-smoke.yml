@@ -1,144 +1,252 @@
-name: macOS draft startup
-
-# Publication gate: run on main after the immutable tag and draft assets exist.
-# Download jobs never execute repository/app code; startup jobs remain read-only.
+name: Score CSV final package pair (QA only)
 on:
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: "Draft tag to verify, e.g. v0.1.31"
+      expected_binding:
+        description: Exact publisher-approved QA commit and final draft identities as JSON
         required: true
         type: string
-
 permissions:
   contents: read
-
+concurrency:
+  group: score-csv-release-051
+  cancel-in-progress: false
 jobs:
   download:
+    if: github.ref == 'refs/heads/qa/model-score-release-051' && github.repository == 'idy/yesman' && github.run_attempt == 1
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
     permissions:
-      # Actual GITHUB_TOKEN contents:read gets 403 for unpublished releases and
-      # assets. This GET-only job needs write scope; macOS jobs do not receive it.
       contents: write
-    outputs:
-      tag: ${{ steps.validate.outputs.tag }}
-      source: ${{ steps.download.outputs.source }}
     steps:
-      - name: Validate release tag before resolving any ref
-        id: validate
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          python3 - <<'PY'
-          import os, re
-          tag = os.environ['RELEASE_TAG']
-          assert re.fullmatch(r'v0\.1\.(0|[1-9][0-9]*)', tag), 'Expected a canonical v0.1.x release tag'
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('tag=' + tag + '\n')
-          PY
-      - name: Download the exact draft archives
-        id: download
+      - name: GET-only exact public and draft acquisition (no checkout)
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.validate.outputs.tag }}
+          EXPECTED_BINDING: ${{ inputs.expected_binding }}
         run: |
-          python3 - <<'PY'
-          import hashlib, json, os, pathlib, re, subprocess
-          tag, repo = os.environ['RELEASE_TAG'], os.environ['GITHUB_REPOSITORY']
-          def gh(*args):
-              return json.loads(subprocess.check_output(['gh', *args]))
-          def tag_commit():
-              obj = gh('api', f'repos/{repo}/git/ref/tags/{tag}')['object']
-              for _ in range(8):
-                  assert re.fullmatch(r'[0-9a-f]{40}', obj['sha']), 'Invalid object ID'
-                  if obj['type'] == 'commit': return obj['sha']
-                  assert obj['type'] == 'tag', 'Release ref is not a commit or annotated tag'
-                  obj = gh('api', f'repos/{repo}/git/tags/{obj["sha"]}')['object']
-              raise AssertionError('Tag chain is too deep')
-          source = tag_commit() # Explicit refs/tags lookup: never a branch or moving main.
-          meta = gh('release', 'view', tag, '--repo', repo, '--json', 'databaseId,tagName,isDraft,assets')
-          assert meta['isDraft'] and meta['tagName'] == tag, 'Expected the requested unpublished draft'
-          folder = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft-download'
-          folder.mkdir()
-          for arch in ('arm64', 'amd64'):
-              name = f'yesman-{tag[1:]}-darwin-{arch}.tar.gz'
-              matches = [a for a in meta['assets'] if a['name'] == name]
-              assert len(matches) == 1, 'Expected one exact architecture archive'
-              asset = matches[0]
-              subprocess.run(['gh', 'release', 'download', tag, '--repo', repo, '--pattern', name, '--dir', str(folder)], check=True)
-              digest = hashlib.sha256((folder / name).read_bytes()).hexdigest()
-              assert asset.get('digest') == 'sha256:' + digest, 'Draft asset digest differs'
-              assert (folder / name).stat().st_size == asset['size'] > 0
-              (folder / f'draft-asset-{arch}.json').write_text(json.dumps({'tag': tag, 'arch': arch, 'source': source, 'releaseID': meta['databaseId'], 'asset': asset, 'sha256': digest}, indent=2))
-          assert tag_commit() == source, 'Release tag moved during download'
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('source=' + source + '\n')
-          PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: verified-draft-download
-          path: ${{ runner.temp }}/draft-download
-          if-no-files-found: error
+          python3 -I - <<'PY'
+          """Public identity and data validation shared by the read-only native consumer."""
+          import hashlib,json,os,pathlib,posixpath,re,stat,tarfile
+          KEY='yrQPn0gg1/gASLxIQiUCIiUQ/csWENI0+up1cs3KWO0='
+          OLD_SOURCE='87c3bc4faa0a55313cd68be77058fea166beca82'
+          OLD_TREE='111aeca1331a304acbc90866831e634eb805d981'
+          NEW_TREE='c970394849af0fca550f0150ef14bc1661cb0a60'
+          BASELINE_CSV_SHA='5e9c21eb8f04a75dda06fe5a4f4323aadd99cef6c7cfb8595707bb8576049ed1'
+          OLD={'source':OLD_SOURCE,'releaseID':450776814,'binarySHA256':'fd588ec89b9e8f05951bdc3fb32cfa249ab6c85f34aac4d55dcb094492a74e2e',
+               'archive':{'id':765802737,'name':'yesman-0.1.50-darwin-arm64.tar.gz','size':7829476,'digest':'sha256:c56d0cd18f86cd521197b32a1937c80303861e4ecd511b2f773c5b6b0bb433a1'},
+               'manifest':{'id':765802864,'name':'update-darwin-arm64.json','size':1948,'digest':'sha256:8c616ad3ba2aaeae3c36bf380d25a46369b08313b980dedd3ad4776094864855'}}
+          def require(ok,why):
+           if not ok:raise ValueError(why)
+          def sha(body):return hashlib.sha256(body).hexdigest()
+          def unique(pairs):
+           d={}
+           for k,v in pairs:
+            require(k not in d,'duplicate JSON key');d[k]=v
+           return d
+          def parse(raw):return json.loads(raw,object_pairs_hook=unique)
+          def validate_binding(raw):
+           require(isinstance(raw,str) and len(raw.encode())<=8192,'binding size/type')
+           b=parse(raw)
+           require(isinstance(b,dict) and set(b)=={'qaSource','candidate'},'binding schema')
+           require(isinstance(b['qaSource'],str) and re.fullmatch('[0-9a-f]{40}',b['qaSource']),'QA source')
+           c=b['candidate']
+           require(isinstance(c,dict) and set(c)=={'source','releaseID','archive','manifest','binarySHA256','assetSetSHA256'},'candidate schema')
+           require(isinstance(c['source'],str) and re.fullmatch('[0-9a-f]{40}',c['source']) and c['source'] not in [OLD_SOURCE,b['qaSource']],'candidate source')
+           require(type(c['releaseID']) is int and c['releaseID']>0 and c['releaseID']!=OLD['releaseID'],'candidate release ID')
+           for key in ['binarySHA256','assetSetSHA256']:
+            require(isinstance(c[key],str) and re.fullmatch('[0-9a-f]{64}',c[key]),key)
+           require(c['binarySHA256']!=OLD['binarySHA256'],'candidate reuses old binary')
+           for key,name in [('archive','yesman-0.1.51-darwin-arm64.tar.gz'),('manifest','update-darwin-arm64.json')]:
+            a=c[key];require(isinstance(a,dict) and set(a)=={'id','name','size','digest'},'asset schema')
+            require(type(a['id']) is int and a['id']>0 and a['id']!=OLD[key]['id'],'asset ID')
+            require(a['name']==name and type(a['size']) is int and 0<a['size']<100*1024*1024,'asset name/size')
+            require(isinstance(a['digest'],str) and re.fullmatch('sha256:[0-9a-f]{64}',a['digest']),'asset digest')
+           require(c['archive']['id']!=c['manifest']['id'],'distinct assets')
+           return b
+          def asset_identity(a):return {k:a[k] for k in ['id','name','size','digest']}
+          def asset_set_hash(assets):
+           require(len({a['id'] for a in assets})==len(assets) and len({a['name'] for a in assets})==len(assets),'duplicate assets')
+           return sha(json.dumps(sorted([asset_identity(a) for a in assets],key=lambda x:x['name']),sort_keys=True,separators=(',',':')).encode())
+          def verify_file(p,a):
+           require(p.is_file() and not p.is_symlink() and p.stat().st_nlink==1,'nonprivate regular input')
+           body=p.read_bytes();require(len(body)==a['size'] and 'sha256:'+sha(body)==a['digest'],'asset size/digest');return body
+          def validate_transfer(folder,b,run_id):
+           meta=parse((folder/'transfer.json').read_text())
+           require(meta['qaSource']==b['qaSource'] and meta['runID']==run_id and meta['attempt']=='1','same-run transfer')
+           require(meta['binding']==b and set(meta['stages'])=={'old','new'},'transfer binding')
+           for stage,spec in [('old',OLD),('new',b['candidate'])]:
+            p=folder/stage
+            require(meta['stages'][stage]['source']==spec['source'],'source transfer')
+            for k in ['archive','manifest']:verify_file(p/spec[k]['name'],spec[k])
+            manifest=parse((p/spec['manifest']['name']).read_text())
+            tag='v0.1.50' if stage=='old' else 'v0.1.51'
+            require(manifest['version']==tag[1:] and manifest['size']==spec['archive']['size'],'manifest version/size')
+            require(manifest['url']=='https://github.com/idy/yesman/releases/download/'+tag+'/'+spec['archive']['name'],'manifest URL')
+            require(isinstance(manifest['signature'],str),'manifest signature')
+            web=meta['stages'][stage]['webSHA256']
+            require(0<len(web)<=1000 and 'index.html' in web and 'crew.js' in web,'web inventory')
+            require(inventory(p/'web',files_only=True)==web,'exact web inventory')
+            require(sha((p/'embedded.csv').read_bytes())==BASELINE_CSV_SHA,'embedded CSV')
+           return meta
+          def relative(name):
+           p=pathlib.PurePosixPath(name)
+           require(name and not name.startswith('/') and '\\' not in name and '..' not in p.parts and '\x00' not in name,'unsafe path')
+           return name.removeprefix('./').rstrip('/')
+          def extract_bundle(archive,dest):
+           require(not dest.exists() and not dest.is_symlink(),'extraction destination exists')
+           with tarfile.open(archive) as t:
+            members=t.getmembers();require(0<len(members)<=1000,'archive member budget')
+            names={};total=0
+            for m in members:
+             n=relative(m.name);require(n not in names and (n=='yesman.app' or n.startswith('yesman.app/')),'archive root/duplicate');names[n]=m
+             require(m.isdir() or m.isfile() or m.issym(),'archive member type')
+             require(not m.mode&0o7000,'special file modes')
+             if m.isfile():total+=m.size;require(m.size>=0 and total<=300*1024*1024,'archive bytes budget')
+             if m.issym():
+              require(m.linkname and not m.linkname.startswith('/') and '\\' not in m.linkname,'unsafe link')
+              resolved=posixpath.normpath(posixpath.join(posixpath.dirname(n),m.linkname))
+              require(resolved.startswith('yesman.app/') and '..' not in pathlib.PurePosixPath(resolved).parts,'escaping link')
+            for n in names:
+             for parent in pathlib.PurePosixPath(n).parents:
+              if str(parent) in names:require(names[str(parent)].isdir(),'archive writes through non-directory')
+            require('yesman.app/Contents/MacOS/Yes Man' in names and names['yesman.app/Contents/MacOS/Yes Man'].isfile(),'main image')
+            alias=names.get('yesman.app/Contents/MacOS/yesman')
+            require(alias is not None and alias.issym() and alias.linkname=='Yes Man','CLI symlink')
+            dest.mkdir(mode=0o700)
+            t.extractall(dest,members=members,filter='data')
+           return dest/'yesman.app'
+          def inventory(root,files_only=False):
+           require(root.is_dir() and not root.is_symlink(),'inventory root')
+           result={}
+           for p in sorted(root.rglob('*')):
+            n=p.relative_to(root).as_posix();st=p.lstat();mode=stat.S_IMODE(st.st_mode)
+            if stat.S_ISLNK(st.st_mode):
+             require(not files_only,'linked web file');result[n]={'type':'link','mode':mode,'target':os.readlink(p)}
+            elif stat.S_ISREG(st.st_mode):
+             require(st.st_nlink==1,'hard-linked file');h=sha(p.read_bytes());result[n]=h if files_only else {'type':'file','mode':mode,'sha256':h}
+            elif stat.S_ISDIR(st.st_mode):
+             if not files_only:result[n]={'type':'directory','mode':mode}
+            else:raise ValueError('unexpected filesystem entry')
+           return result
 
-  startup:
-    needs: download # Neither matrix job can bypass tag validation/download.
+          """Inlined into the privileged no-checkout job. Only GH GET/download and data writes."""
+          import io,subprocess,sys
+
+          def gh(path):
+           # Path callers are fixed GitHub metadata endpoints; no POST or shell.
+           return parse(subprocess.check_output(['gh','api','--method','GET',path],timeout=30).decode())
+          def resolve(tag):
+           obj=gh('repos/idy/yesman/git/ref/tags/'+tag)['object']
+           for _ in range(8):
+            require(re.fullmatch('[0-9a-f]{40}',obj['sha']),'tag OID')
+            if obj['type']=='commit':return obj['sha']
+            require(obj['type']=='tag','tag object type')
+            obj=gh('repos/idy/yesman/git/tags/'+obj['sha'])['object']
+           raise ValueError('tag depth')
+          def assets(release_id):
+           result=[]
+           for page in range(1,5):
+            rows=gh('repos/idy/yesman/releases/'+str(release_id)+'/assets?per_page=100&page='+str(page));result.extend(rows)
+            if len(rows)<100:return result
+           raise ValueError('asset page budget')
+          def check_remote(stage,spec):
+           tag='v0.1.50' if stage=='old' else 'v0.1.51'
+           require(resolve(tag)==spec['source'],'tag differs from fixed source')
+           commit=gh('repos/idy/yesman/git/commits/'+spec['source'])
+           require(commit['sha']==spec['source'] and commit['tree']['sha']==(OLD_TREE if stage=='old' else NEW_TREE),'tag tree differs from reviewed tree')
+           r=gh('repos/idy/yesman/releases/'+str(spec['releaseID']))
+           require(r['id']==spec['releaseID'] and r['tag_name']==tag and r['draft']==(stage=='new') and not r['prerelease'],'release state/identity')
+           aa=assets(spec['releaseID'])
+           for k in ['archive','manifest']:
+            found=[a for a in aa if a['name']==spec[k]['name']]
+            require(len(found)==1 and asset_identity(found[0])==spec[k] and found[0]['state']=='uploaded','exact asset identity')
+           if stage=='new':require(asset_set_hash(aa)==spec['assetSetSHA256'],'final asset set changed')
+           return {'source':spec['source'],'releaseID':r['id'],'tag':tag,'draft':r['draft'],'assets':[spec['archive'],spec['manifest']]}
+          def source_data(spec,folder):
+           body=subprocess.check_output(['gh','api','--method','GET','repos/idy/yesman/tarball/'+spec['source']],timeout=60)
+           require(len(body)<30*1024*1024,'source archive budget')
+           with tarfile.open(fileobj=io.BytesIO(body)) as t:
+            members=t.getmembers();require(len(members)<10000,'source member budget')
+            roots={m.name.split('/')[0] for m in members};require(len(roots)==1,'source root');root=roots.pop()
+            seen=set();web={};csvbytes=None;config=None;total=0
+            for m in members:
+             n=relative(m.name);parts=pathlib.PurePosixPath(n).parts;require(parts[0]==root,'source root changed')
+             n='/'.join(parts[1:]);require(n not in seen,'duplicate source path');seen.add(n)
+             wanted=n=='mygo.json' or n=='internal/crew/scores/aa-scores-2026-11-18.csv' or n.startswith('web/')
+             if not wanted or m.isdir():continue
+             require(m.isfile() and m.size<10*1024*1024,'source data type/budget');total+=m.size;require(total<30*1024*1024,'source data total')
+             data=t.extractfile(m).read()
+             if n=='mygo.json':config=parse(data)
+             elif n.endswith('aa-scores-2026-11-18.csv'):csvbytes=data
+             else:
+              target=folder/n;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(data);web[n[4:]]=sha(data)
+            require(config['version']==('0.1.50' if spec['source']==OLD_SOURCE else '0.1.51') and config['identifier']=='dev.idy.yesman' and config['name']=='Yes Man' and config['updates']['publicKey']==KEY,'source config')
+            require(csvbytes is not None and sha(csvbytes)==BASELINE_CSV_SHA,'real embedded CSV')
+            require('index.html' in web and 'crew.js' in web and len(web)<=1000,'source web set')
+            (folder/'embedded.csv').write_bytes(csvbytes)
+           return web
+
+          def acquire(raw,out):
+           # Input is strictly data and must be fully valid before first network/write.
+           b=validate_binding(raw)
+           require(os.environ.get('GITHUB_REPOSITORY')=='idy/yesman' and os.environ.get('GITHUB_REF')=='refs/heads/qa/model-score-release-051','workflow repository/ref')
+           require(os.environ.get('GITHUB_SHA')==b['qaSource'] and os.environ.get('GITHUB_RUN_ATTEMPT')=='1','workflow source/attempt')
+           run=os.environ.get('GITHUB_RUN_ID','');require(run.isdigit(),'workflow run')
+           out=pathlib.Path(out).resolve();require(out.parent==pathlib.Path(os.environ['RUNNER_TEMP']).resolve() and not out.exists(),'fresh transfer path')
+           specs=[('old',OLD),('new',b['candidate'])]
+           remote={stage:check_remote(stage,spec) for stage,spec in specs}
+           out.mkdir(mode=0o700)
+           for stage,spec in specs:
+            folder=out/stage;folder.mkdir()
+            for key in ['archive','manifest']:
+             a=spec[key]
+             subprocess.run(['gh','release','download',remote[stage]['tag'],'--repo','idy/yesman','--pattern',a['name'],'--dir',str(folder)],check=True,timeout=60)
+             verify_file(folder/a['name'],a)
+            remote[stage]['webSHA256']=source_data(spec,folder)
+           for stage,spec in specs:
+            observed=check_remote(stage,spec)
+            require(all(remote[stage][k]==observed[k] for k in observed),'release changed during acquisition')
+           result={'qaSource':b['qaSource'],'runID':run,'attempt':'1','binding':b,'stages':remote}
+           (out/'transfer.json').write_text(json.dumps(result,indent=2)+'\n')
+           print('PASS: exact official .50 and final draft .51 acquired; application execution is in a separate job')
+
+          if __name__=='__main__':
+           acquire(os.environ['EXPECTED_BINDING'],pathlib.Path(os.environ['RUNNER_TEMP'])/'score-pair-inputs')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: score-pair-inputs
+          path: ${{ runner.temp }}/score-pair-inputs
+          if-no-files-found: error
+          retention-days: 7
+  native:
+    needs: download
+    runs-on: macos-latest
+    timeout-minutes: 12
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-latest, arch: arm64 }
-          - { os: macos-15-intel, arch: amd64 }
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.download.outputs.source }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: go.mod
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: verified-draft-download
-          path: ${{ runner.temp }}/draft-download
-      - name: Recheck and extract the selected archive
-        env:
-          RELEASE_TAG: ${{ needs.download.outputs.tag }}
-          RELEASE_SOURCE: ${{ needs.download.outputs.source }}
-          TARGET_ARCH: ${{ matrix.arch }}
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, os, pathlib, shutil, subprocess, tarfile
-          tag, source, arch = os.environ['RELEASE_TAG'], os.environ['RELEASE_SOURCE'], os.environ['TARGET_ARCH']
-          folder = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft-download'
-          proof = json.loads((folder / f'draft-asset-{arch}.json').read_text())
-          name = f'yesman-{tag[1:]}-darwin-{arch}.tar.gz'
-          assert (proof['tag'], proof['source'], proof['arch'], proof['asset']['name']) == (tag, source, arch, name)
-          assert subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip() == source
-          assert 'sha256:' + hashlib.sha256((folder / name).read_bytes()).hexdigest() == proof['asset']['digest'] == 'sha256:' + proof['sha256']
-          target = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft'
-          target.mkdir()
-          with tarfile.open(folder / name) as archive:
-              archive.extractall(target, filter='data')
-          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'startup-evidence'
-          evidence.mkdir()
-          shutil.copyfile(folder / f'draft-asset-{arch}.json', evidence / 'draft-asset.json')
-          PY
-      - name: Verify unchanged final app startup
+          name: score-pair-inputs
+          path: ${{ runner.temp }}/score-pair-inputs
+      - name: Verify official packages, replace private installation, and cold reopen
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          RELEASE_TAG: ${{ needs.download.outputs.tag }}
-          RELEASE_SOURCE: ${{ needs.download.outputs.source }}
-          TARGET_ARCH: ${{ matrix.arch }}
-        run: python3 scripts/check_macos_startup.py "$RUNNER_TEMP/draft/yesman.app" web "$RUNNER_TEMP/startup-evidence" --release-tag "$RELEASE_TAG" --arch "$TARGET_ARCH" --source "$RELEASE_SOURCE"
-      - name: Save the draft gate evidence
+          EXPECTED_BINDING: ${{ inputs.expected_binding }}
+        run: python3 -B qa/score-release051/run-native.py
+      - name: Save bounded native proof
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: draft-startup-${{ matrix.arch }}
-          path: ${{ runner.temp }}/startup-evidence
+          name: score-pair-proof
+          path: ${{ runner.temp }}/score-pair-run/evidence
           if-no-files-found: error
+          retention-days: 14
