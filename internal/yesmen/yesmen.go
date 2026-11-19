@@ -132,9 +132,10 @@ func (w Worker) Subject(b Board) string {
 
 // Store keeps the workspaces under a directory.
 type Store struct {
-	root, archive string
-	mu            sync.Mutex
-	metaMu        sync.Mutex // serialize metadata reads with atomic replacement on Windows
+	root, archive     string
+	mu                sync.Mutex
+	metaMu            sync.Mutex // serialize metadata reads with atomic replacement on Windows
+	syncRelocationDir func(*os.Root) error
 
 	lmu    sync.Mutex
 	locks  map[string]*sync.RWMutex  // per yesman: Use reads, Archive writes
@@ -170,7 +171,7 @@ func (s *Store) changing(name string) { s.rev(name).Add(1) }
 
 // New returns the store of workspaces under root, archiving into archive.
 func New(root, archive string) *Store {
-	return &Store{root: root, archive: archive, locks: map[string]*sync.RWMutex{}}
+	return &Store{root: root, archive: archive, locks: map[string]*sync.RWMutex{}, syncRelocationDir: syncRelocationDirectory}
 }
 
 func (s *Store) lockFor(name string) *sync.RWMutex {

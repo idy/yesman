@@ -104,7 +104,7 @@ func (m *Manager) StopYesmanContext(ctx context.Context, name string) error {
 	// waited for Submit's Use lease, but standalone stop also joins that boundary.
 	var errs []error
 	for _, a := range agents {
-		if err := m.ensureDeliveries(a, filepath.Join(y.SessionDir(a.info.Name), "delivery.json")); err != nil {
+		if err := m.joinDeliveryLoad(a); err != nil {
 			errs = append(errs, err)
 		}
 	}

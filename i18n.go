@@ -71,9 +71,10 @@ func inUseText(reason string) string {
 // zhHans translates the English messages Go shows to Simplified Chinese.
 // Each keeps the verbs of its English message, in their order.
 var zhHans = map[string]string{
-	"Move the primary worktree %q out of this archive with Git before deleting it.":                         "请先用 Git 将主工作树 %q 移出这份归档，再删除归档。",
-	"Could not verify the new location of primary worktree %q. Move it with Git and keep its registration.": "无法确认主工作树 %q 的新位置。请用 Git 移动工作树并保留登记。",
-	"Grant write access to directory %s or move its contents to safety before deleting the workspace.":      "请先为目录 %s 授予写权限，或将其中的文件移到安全位置，再删除工作区。",
+	"Move the primary worktree %q out of this archive with Git before deleting it.":                                            "请先用 Git 将主工作树 %q 移出这份归档，再删除归档。",
+	"Could not verify the new location of primary worktree %q. Move it with Git and keep its registration.":                    "无法确认主工作树 %q 的新位置。请用 Git 移动工作树并保留登记。",
+	"Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.": "无法保存工作树 %q 的迁移记录。请确认对 %s 有写入权限，且文件系统支持同步，然后重试。",
+	"Grant write access to directory %s or move its contents to safety before deleting the workspace.":                         "请先为目录 %s 授予写权限，或将其中的文件移到安全位置，再删除工作区。",
 	// Workspace deletion and its recovery instructions
 	"Move %q out of the workspace first. For a worktree, use Git or its managed cleanup.":                                                   "请先将 %q 移出工作区。如果是 Git 工作树，请用 Git 移动它，或完成受管回收。",
 	"%s contains a Git checkout. Move it with Git or finish its managed cleanup first.":                                                     "%s 包含 Git 工作树。请先用 Git 移动它，或完成受管回收。",

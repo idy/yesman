@@ -469,7 +469,7 @@ func (s *Store) checkWorktreeRecords(ctx context.Context, parent, ws *os.Root, t
 			}
 			original, _, _, _ := deletionEntry(target.Entry, true)
 			if err := s.recordArchiveRelocation(parent, original, target.Instance, record, moved); err != nil {
-				return err
+				return &DeletionIssue{Message: "Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.", Args: []any{r.Dir, filepath.Join(parent.Name(), relocationFolder)}, Cause: err}
 			}
 			continue
 		}

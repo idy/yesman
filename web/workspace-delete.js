@@ -4,7 +4,7 @@ import { t } from './i18n.js';
 // One opening owns its target, buttons and async replies. Only the explicit
 // button click commits. A new hire or another archive of the name must get
 // its own confirmation from the Store.
-export function workspaceDeletion({ call, errorText, fail, refresh, toast, section, row }) {
+export function workspaceDeletion({ call, errorText, onLiveDeleted, toast, section, row }) {
   let opening = null;
   let stored = null;
   let loading = false;
@@ -12,6 +12,7 @@ export function workspaceDeletion({ call, errorText, fail, refresh, toast, secti
   let listError = '';
 
   const storageSelector = '#stored-workspaces button[data-storage-key]';
+  const recordKey = r => `${r.archived}/${r.entry}/${r.instance}`;
   function storageFocus(button = document.activeElement) {
     if (!button?.matches(storageSelector)) return null;
     const key = button.dataset.storageKey;
@@ -86,10 +87,13 @@ export function workspaceDeletion({ call, errorText, fail, refresh, toast, secti
         if (stored !== null) loadStored(true);
         return;
       }
-      if (stored !== null) await loadStored(true);
-      if (!record) await refresh().catch(fail);
       dialog.close('deleted');
       toast(t('Deleted “{name}”.', { name }));
+      if (record && stored) stored = stored.filter(r => recordKey(r) !== recordKey(record));
+      if (!record) onLiveDeleted(workspace);
+      // Keep the list current independently of the completed confirmation. A
+      // visible list can show and focus the surviving rows even during this read.
+      if (stored !== null || loading) void loadStored(true);
     }
   }
 
@@ -104,7 +108,7 @@ export function workspaceDeletion({ call, errorText, fail, refresh, toast, secti
     for (const r of stored ?? []) {
       const label = r.label || r.entry;
       const del = action(t(r.pending ? 'Finish deletion…' : 'Delete…'), e => ask(null, r, storageFocus(e.currentTarget)));
-      del.dataset.storageKey = `${r.archived}/${r.entry}/${r.instance}`;
+      del.dataset.storageKey = recordKey(r);
       del.disabled = !!r.problem;
       del.setAttribute('aria-label', t('Delete {record}…', { record: r.entry }));
       rows.push(row(label, h('div', null, h('p', { class: 'path' }, `${r.archived ? 'archive' : 'yesmen'}/${r.entry}`), r.problem && h('p', { class: 'danger' }, r.problem)), del));
@@ -127,7 +131,7 @@ export function workspaceDeletion({ call, errorText, fail, refresh, toast, secti
       const records = await call('StoredWorkspaces');
       if (sequence === loadSequence) { stored = records; listError = ''; }
     } catch (err) {
-      if (sequence === loadSequence) { stored = null; listError = errorText(err); }
+      if (sequence === loadSequence) listError = errorText(err);
     } finally {
       if (sequence === loadSequence) { loading = false; redraw(); }
     }

@@ -44,13 +44,18 @@ async function run(engine, name, lang) {
           case 'State': { const v=await rpc(m);agents=v.agents??=[];return v; }
           case 'PrepareWorkspaceDeletion': return rpc(m,{name:args[0],since:args[1]});
           case 'DeleteWorkspace': if (window.hold) await new Promise(r=>window.release=r); return rpc(m,{target:args[0]});
-          case 'StoredWorkspaces': if (window.holdList) await new Promise(resolve => window.releaseList = resolve); return rpc(m);
+          case 'StoredWorkspaces': {
+            const records = await rpc(m);
+            if (window.heldLists) await new Promise((resolve, reject) => window.heldLists.push(fail => fail ? reject(Error('Storage read unavailable')) : resolve()));
+            return records;
+          }
           case 'AgentMenu':case 'FilesMenu': return 'delete-workspace';
           case 'Shortcuts': return {'yesman.dismiss':['Mod+Shift+Y']};
           case 'Settings': return {appearance:'system',home:'/fixture',archive:'/fixture/archive',pool:'/fixture/repos',yesmen:'/fixture/yesmen'};
           case 'Repos':case 'Clones':case 'Pulls':case 'Topics':case 'ListFiles': return [];
           case 'Fetches': return {fetching:[],errors:{}};
           case 'Messages':return {messages:[]};
+          case 'Crew':return {members:[],models:[]};
           case 'Models':return {models:[],agent:agents.find(a=>a.id===args[0])};
           case 'Info':return {knowledge:[],worktrees:[]};
           case 'Schedules':return {plans:[]};
@@ -70,6 +75,19 @@ async function run(engine, name, lang) {
     const dialog = page.locator('#delete-workspace-dialog');
     const cancel = dialog.getByRole('button', {name: /^(Cancel|取消)$/});
     const ok = dialog.getByRole('button', {name:/^(Delete permanently|永久删除)$/});
+    const stored = page.locator('#stored-workspaces');
+    const list = stored.locator('[data-storage-key="list"]');
+    const first = stored.getByRole('button', {name:/paper-kites-20260101/});
+    const second = stored.getByRole('button', {name:/paper-kites-20260102/});
+    const openStorage = async () => {
+      await page.locator('#settings-button').click();
+      await page.locator('#settings-nav [data-page="storage"]').click();
+    };
+    const holdLists = () => page.evaluate(() => { window.heldLists = []; });
+    const heldLists = n => page.waitForFunction(n => window.heldLists?.length === n, n);
+    const releaseList = (index, fail = false) => page.evaluate(([i, fail]) => heldLists[i](fail), [index, fail]);
+    const resumeLists = () => page.evaluate(() => { window.heldLists = null; });
+    const listReady = () => page.waitForFunction(() => document.querySelector('[data-storage-key="list"]')?.getAttribute('aria-disabled') === 'false');
     const count = m => page.evaluate(m=>calls.filter(c=>c[0]===m).length,m);
     const screenshot = async suffix => { if(out) await page.screenshot({path:join(out,`${name}-${suffix}.png`)}); };
     await lead.waitFor(); await lead.focus();
@@ -93,32 +111,58 @@ async function run(engine, name, lang) {
     await retained.waitFor();
     await lead.click({button:'right'});await page.waitForFunction(()=>document.querySelector('.delete-permanently:enabled'));
     await page.evaluate(()=>rpc('Rehire'));await ok.click();await dialog.getByRole('alert').waitFor();assert.equal(await ok.isDisabled(),true);
-    await page.reload();await lead.click({button:'right'});await page.evaluate(()=>window.hold=true);await ok.click();
+    await page.reload(); await lead.waitFor();
+    await openStorage(); await list.press('Enter'); await second.waitFor();
+    assert(await list.evaluate(el => el === document.activeElement), 'Show keeps focus on Refresh');
+    await lead.click(); await page.locator('#dock textarea').waitFor();
+    await holdLists();
+    await lead.click({button:'right'});await page.evaluate(()=>window.hold=true);await ok.click();
     await page.waitForFunction(()=>!!window.release);assert.equal(await cancel.isDisabled(),true);assert.equal(await ok.isDisabled(),true);
     await page.keyboard.press('Escape');assert.equal(await dialog.isVisible(),true);
     await screenshot('progress');await page.evaluate(()=>{hold=false;release()});
-    await dialog.waitFor({state:'detached'});await lead.waitFor({state:'detached'});await retained.waitFor();
-    assert(await page.evaluate(() => document.activeElement !== document.body), 'completed deletion leaves a surviving control focused');
-    await page.locator('#settings-button').click();await page.locator('#settings-nav [data-page="storage"]').click();
-    const stored=page.locator('#stored-workspaces');
-    const list=stored.locator('[data-storage-key="list"]');
-    await list.focus(); await page.keyboard.press('Enter');
-    const first=stored.getByRole('button',{name:/paper-kites-20260101/}),second=stored.getByRole('button',{name:/paper-kites-20260102/});
-    await second.waitFor();
-    assert(await list.evaluate(el => el === document.activeElement), 'Show keeps focus on Refresh');
-    await page.evaluate(() => window.holdList = true); await list.press('Enter');
-    await page.waitForFunction(() => !!window.releaseList);
+    await dialog.waitFor({state:'detached'}); await lead.waitFor({state:'detached'});
+    await heldLists(1);
+    assert.deepEqual(await page.evaluate(async () => (await rpc('State')).yesmen.map(y => y.name)), ['retained']);
+    assert.equal(await stored.count(), 0);
+    await page.getByText(lang === 'en' ? 'Deleted “Paper Kites”.' : '已删除“Paper Kites”。', {exact:true}).waitFor();
+    const selected = page.locator('[data-agent="retained/lead"][aria-current="page"]');
+    await selected.waitFor();
+    assert(await page.evaluate(() => document.activeElement?.matches('#dock textarea, [data-agent="retained/lead"]')), 'focus moves to the surviving conversation while the list read waits');
+    const composer = page.locator('#dock textarea');
+    await composer.fill('Retained draft');
+    assert(await composer.evaluate(el => el === document.activeElement));
+    await screenshot('live-deleted');
+    await releaseList(0, true); await resumeLists();
+    assert.equal(await composer.inputValue(), 'Retained draft');
+    await openStorage(); await second.waitFor();
+    await holdLists(); await list.press('Enter'); await heldLists(1);
     const other=page.locator('#settings-nav [data-page="storage"]');
-    await other.focus(); await page.evaluate(() => { holdList=false; releaseList(); });
-    await page.waitForFunction(() => document.querySelector('[data-storage-key="list"]').getAttribute('aria-disabled') === 'false');
+    await other.focus(); await releaseList(0); await resumeLists(); await listReady();
     assert(await other.evaluate(el => el === document.activeElement), 'late list result preserves focus moved elsewhere');
     await screenshot('archives');await first.focus();await first.press('Enter');await cancel.click();await first.waitFor();
+    // This read captured both archives. The following reconciliation captures
+    // only the survivor. Neither response controls the completed action.
+    await holdLists(); await list.press('Enter'); await heldLists(1);
     await first.click();assert.match(await dialog.locator('#deletion-location').innerText(),/archive\/paper-kites-20260101-123456/);await ok.click();
     await first.waitFor({state:'detached'});await second.waitFor();await dialog.waitFor({state:'detached'});
-    assert(await second.evaluate(el => el === document.activeElement), 'the surviving archive is reachable from the removed row');
+    await heldLists(2);
+    assert(await second.evaluate(el => el === document.activeElement), 'the surviving archive is focused during refresh');
+    await screenshot('archive-deleted');
+    await releaseList(1, true); await listReady();
+    await stored.getByText('Storage read unavailable').waitFor();
+    await releaseList(0); await resumeLists();
+    assert.equal(await first.count(), 0, 'older result cannot restore the deleted row');
+    assert(await second.evaluate(el => el === document.activeElement), 'survivor keeps focus after a failed refresh');
+    await second.press('Enter'); await cancel.waitFor(); await ok.click(); await dialog.waitFor({state:'detached'});
+    await listReady(); assert(await list.evaluate(el => el === document.activeElement), 'an empty list returns focus to Refresh');
     await page.reload();await retained.waitFor();assert.equal(await lead.count(),0);
+    await page.evaluate(() => rpc('MoveRetainedFolder'));
+    await retained.click({button:'right'}); await ok.click(); await dialog.waitFor({state:'detached'});
+    const welcome = page.locator('.welcome input[name="name"]');
+    await welcome.waitFor();
+    assert(await welcome.evaluate(el => el === document.activeElement), 'deleting the last workspace focuses the welcome form');
     assert.deepEqual(await page.evaluate(()=>unexpected),[]);assert.deepEqual(errors,[]);
-    console.log(`${name} ${lang}: cancel, old binding, blocker, stale hire, progress, exact active and archive deletion, reopen PASS`);
+    console.log(`${name} ${lang}: named confirmation and cancellation, exact deletion and reopen, immediate live selection and success with the archive read held, visible survivors and empty-list focus, older and failed responses PASS`);
   } finally { await browser?.close(); fixture.stdin.end(); assert.equal(await exited,0,log); }
 }
 try {

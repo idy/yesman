@@ -228,67 +228,93 @@ func deliveryTimestamp(id string) int64 {
 	return stamp
 }
 
-func (m *Manager) ensureDeliveries(a *agent, path string) error {
-	a.deliveryOnce.Do(func() {
-		read := m.cfg.deliveryRead
-		if read == nil {
-			read = readDeliveries
-		}
-		records, floor, err := read(path, time.Now())
-		var drafts map[string]RecallPayload
-		if err == nil {
-			drafts, err = readHumanDrafts(path)
-		}
-		if err == nil {
-			for id, payload := range drafts {
-				d, ok := records[id]
-				if !ok || !retainsHumanDraft(d) || !d.AgentSince.Equal(a.info.Since) || d.Origin != nil {
-					delete(drafts, id)
-					continue
-				}
-				if validateImages(payload.Images) != nil || deliveryFingerprint(payload.Text, payload.Images) != d.fingerprint {
-					err = errors.New("retained message draft does not match its receipt")
-					break
-				}
-			}
-		}
-		if len(drafts) > 0 && len(records) == 0 && floor == 0 {
-			// Orphaned originals cannot create a receipt or authorize replay.
-			drafts = nil
-		}
-		if err == nil {
-			err = retireHumanDraftStage(path)
-		}
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		a.deliveryErr = err
-		if err != nil {
-			return
-		}
-		a.deliveries, a.deliveryFloor = records, floor
-		a.humanDraftStore = drafts != nil
-		for id, payload := range drafts {
-			m.retainRecallLocked(a, id, payload.Text, payload.Images)
-			if _, ok := a.recallPayloads[id]; !ok {
-				m.clearRecallLocked(a)
-				a.deliveryErr = errors.New("there is no room to load retained message drafts")
-				return
-			}
-			d := records[id]
-			d.recoverDraft = true
-			records[id] = d
-		}
-		for _, d := range records {
-			if d.Order > a.deliveryOrder {
-				a.deliveryOrder = d.Order
-			}
-		}
-		a.deliveryWriter = newDeliveryWriter(path, m.cfg.deliveryWrite)
-		if len(records) > 0 || floor > 0 {
-			m.persistDeliveriesLocked(a)
-		}
-	})
+// Retirement closes admission under mu. Join only a load that was admitted:
+// removing a saved worker should never open its conversation to create a writer.
+func (m *Manager) joinDeliveryLoad(a *agent) error {
+	m.mu.Lock()
+	ready := a.deliveryReady
+	m.mu.Unlock()
+	if ready == nil {
+		return nil
+	}
+	<-ready
 	return a.deliveryErr
+}
+
+func (m *Manager) ensureDeliveries(a *agent, path string) error {
+	m.mu.Lock()
+	if m.closed || a.removing || a.retiring || m.agents[a.info.ID] != a {
+		m.mu.Unlock()
+		return errStopped
+	}
+	if ready := a.deliveryReady; ready != nil {
+		m.mu.Unlock()
+		<-ready
+		return a.deliveryErr
+	}
+	a.deliveryReady = make(chan struct{})
+	defer close(a.deliveryReady)
+	since := a.info.Since
+	m.mu.Unlock()
+
+	read := m.cfg.deliveryRead
+	if read == nil {
+		read = readDeliveries
+	}
+	records, floor, err := read(path, time.Now())
+	var drafts map[string]RecallPayload
+	if err == nil {
+		drafts, err = readHumanDrafts(path)
+	}
+	if err == nil {
+		for id, payload := range drafts {
+			d, ok := records[id]
+			if !ok || !retainsHumanDraft(d) || !d.AgentSince.Equal(since) || d.Origin != nil {
+				delete(drafts, id)
+				continue
+			}
+			if validateImages(payload.Images) != nil || deliveryFingerprint(payload.Text, payload.Images) != d.fingerprint {
+				err = errors.New("retained message draft does not match its receipt")
+				break
+			}
+		}
+	}
+	if len(drafts) > 0 && len(records) == 0 && floor == 0 {
+		// Orphaned originals cannot create a receipt or authorize replay.
+		drafts = nil
+	}
+	if err == nil {
+		err = retireHumanDraftStage(path)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a.deliveryErr = err
+	if err != nil {
+		return err
+	}
+	a.deliveries, a.deliveryFloor = records, floor
+	a.humanDraftStore = drafts != nil
+	for id, payload := range drafts {
+		m.retainRecallLocked(a, id, payload.Text, payload.Images)
+		if _, ok := a.recallPayloads[id]; !ok {
+			m.clearRecallLocked(a)
+			a.deliveryErr = errors.New("there is no room to load retained message drafts")
+			return a.deliveryErr
+		}
+		d := records[id]
+		d.recoverDraft = true
+		records[id] = d
+	}
+	for _, d := range records {
+		if d.Order > a.deliveryOrder {
+			a.deliveryOrder = d.Order
+		}
+	}
+	a.deliveryWriter = newDeliveryWriter(path, m.cfg.deliveryWrite)
+	if len(records) > 0 || floor > 0 {
+		m.persistDeliveriesLocked(a)
+	}
+	return nil
 }
 func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, error) {
 	records := map[string]Delivery{}

@@ -224,7 +224,7 @@ type agent struct {
 	calls                          int      // CallerOperations in progress; guarded by mu
 	labels                         map[string]string
 	deliveries                     map[string]Delivery // bounded receipt metadata; pi owns scheduling
-	deliveryOnce                   sync.Once
+	deliveryReady                  chan struct{}       // nil until receipt loading starts, closed when its writer or error is published
 	deliveryErr                    error
 	deliveryWriter                 *deliveryWriter
 	deliveryFloor                  int64
@@ -471,24 +471,17 @@ func (m *Manager) ensureInCtx(ctx context.Context, y yesmen.Yesman, id, name str
 	ys := y.Name
 	role := RoleLead
 	since := y.HiredAt
-	if bound != nil {
-		role, since = RoleWorker, bound.since
-	} else if name != yesmen.LeadName {
-		role = RoleWorker
-		ws, err := m.cfg.Yesmen.Workers(ys)
-		if err != nil {
-			return nil, nil, err
-		}
-		found := false
-		for _, w := range ws {
-			if w.Name == name {
-				found = true
-				since = w.StartedAt
+	if name != yesmen.LeadName {
+		if bound == nil {
+			// Keep an ordinary open pinned through receipt loading and startup.
+			// Removal can then join its loader without the opening recreating it.
+			var err error
+			bound, err = m.bindWorker(ctx, y, name, nil, false)
+			if err != nil {
+				return nil, nil, err
 			}
 		}
-		if !found {
-			return nil, nil, fmt.Errorf("%s has no worker named %s", ys, name)
-		}
+		role, since = RoleWorker, bound.since
 	}
 
 	for {
@@ -1126,12 +1119,9 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 	var endWrite func()
 	if track != nil && track.worker != nil {
 		written = make(chan struct{})
-		endWrite = sync.OnceFunc(func() { close(written) })
+		endWrite = func() { close(written) }
 	}
 	go func() {
-		if endWrite != nil {
-			defer endWrite()
-		}
 		// Cancelling the caller does not cancel the RPC already sent to pi.
 		// Keep it registered until pi answers (or exits), even if the caller
 		// stops waiting, so configuration cannot slip into its startup gap.
@@ -1230,6 +1220,8 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 			case !answered && admitted:
 				state = restart.ReportUncertain // admitted to the pipe, perhaps taken
 			}
+		} else if endWrite != nil {
+			endWrite() // retired before the RPC: release dispatch before bookkeeping
 		}
 		if track != nil && track.result != nil {
 			track.result(state)
@@ -1552,18 +1544,13 @@ func (m *Manager) StopAll() {
 		cancelOperationsLocked(a, a.tokenProc)
 	}
 	m.mu.Unlock()
-	// Initializers already published their agent before leaving the manager
-	// lock. Join them before collecting writers; none may appear after close.
+	// Join admitted receipt loads before collecting their writers.
 	for _, id := range ids {
 		m.mu.Lock()
 		a := m.agents[id]
-		var path string
-		if a != nil && a.dir != "" && a.deliveries == nil {
-			path = filepath.Join(a.dir, ".yesman", "sessions", a.info.Name, "delivery.json")
-		}
 		m.mu.Unlock()
-		if path != "" {
-			_ = m.ensureDeliveries(a, path)
+		if a != nil {
+			_ = m.joinDeliveryLoad(a)
 		}
 	}
 	var wg sync.WaitGroup
@@ -1644,7 +1631,7 @@ func (m *Manager) startWorkerRecord(ctx context.Context, hire yesmen.Yesman, nam
 			return err
 		}
 		var err error
-		command, err = m.bindWorker(ctx, hire, name, w.StartedAt, admitted)
+		command, err = m.bindWorker(ctx, hire, name, &w.StartedAt, admitted)
 		if err != nil {
 			return errors.Join(err, m.cfg.Yesmen.RemoveWorkerOf(hire, name, w.StartedAt))
 		}
@@ -1697,7 +1684,7 @@ func (m *Manager) RemoveWorkerOf(yesman, name string, hiredAt, since time.Time) 
 		if !y.HiredAt.Equal(hiredAt) {
 			return ErrRetired
 		}
-		c, err := m.bindWorker(context.Background(), y, name, since, false)
+		c, err := m.bindWorker(context.Background(), y, name, &since, false)
 		if err != nil {
 			return err
 		}
@@ -1726,7 +1713,7 @@ func (m *Manager) removeWorkerIn(bound *workerCommand) error {
 		m.mu.Unlock()
 		return err
 	}
-	if err := m.ensureDeliveries(a, filepath.Join(y.SessionDir(name), "delivery.json")); err != nil {
+	if err := m.joinDeliveryLoad(a); err != nil {
 		return fail(err)
 	}
 	m.mu.Lock()

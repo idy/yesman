@@ -4381,7 +4381,7 @@ async function confirmAction(title, body, ok) {
   return (await openModal(dialog)) === 'ok';
 }
 
-const deletion = workspaceDeletion({ call, errorText, fail, refresh: refreshState, toast, section: settingsSection, row: preferenceRow });
+const deletion = workspaceDeletion({ call, errorText, onLiveDeleted, toast, section: settingsSection, row: preferenceRow });
 
 async function removeWorker(a) {
   const workspace = yesmanOf(a.id);
@@ -4505,13 +4505,37 @@ function refreshSoon() {
   refreshTimer = setTimeout(refreshState, 150);
 }
 
+let refreshSequence = 0;
 async function refreshState() {
+  const sequence = ++refreshSequence;
   try {
-    [state.snap, state.repos, state.clones] = await Promise.all([call('State'), call('Repos'), call('Clones')]);
+    const snapshot = await Promise.all([call('State'), call('Repos'), call('Clones')]);
+    if (sequence !== refreshSequence) return;
+    [state.snap, state.repos, state.clones] = snapshot;
   } catch (err) {
-    fail(err);
+    if (sequence === refreshSequence) fail(err);
     return;
   }
+  renderSnapshot();
+}
+
+function onLiveDeleted(workspace) {
+  // The bridge has committed this hire's deletion. Select a usable conversation
+  // now, even if a later State or Storage read takes time or fails.
+  ++refreshSequence;
+  const current = state.snap.yesmen.find(y => y.name === workspace.name);
+  if (current && current.hiredAt === workspace.hiredAt) {
+    state.snap.yesmen = state.snap.yesmen.filter(y => y !== current);
+    state.snap.agents = state.snap.agents.filter(a => a.yesman !== workspace.name);
+    renderSnapshot();
+  }
+  if (document.activeElement === document.body) {
+    ($('#dock textarea') ?? $('#settings-nav [aria-current="page"]') ?? $('#yesmen button'))?.focus({ preventScroll: true });
+  }
+  refreshSoon();
+}
+
+function renderSnapshot() {
   pruneCaches();
   if (state.view.kind === 'agent' && !agentById(state.view.id)) state.view = { kind: 'none' };
   if (state.view.kind === 'none' && state.snap.yesmen.length) {

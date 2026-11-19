@@ -143,7 +143,7 @@ func TestWorkerCommandIdentities(t *testing.T) {
 		t.Fatal(err)
 	}
 	bind := func(hire yesmen.Yesman, since time.Time) (*workerCommand, error) {
-		return m.bindWorker(t.Context(), hire, w.Name, since, false)
+		return m.bindWorker(t.Context(), hire, w.Name, &since, false)
 	}
 	original, err := bind(y, w.StartedAt)
 	if err != nil {

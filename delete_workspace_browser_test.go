@@ -57,6 +57,8 @@ func TestDeletionBrowserBridge(t *testing.T) {
 			value, err = s.StoredWorkspaces()
 		case "DeleteWorkspace":
 			err = s.DeleteWorkspace(r.Context(), req.Target)
+		case "MoveRetainedFolder": // the user preserves their synthetic loose folder outside the workspace
+			err = os.Rename(filepath.Join(other.Path, "unfinished-checkout"), filepath.Join(t.TempDir(), "kept"))
 		case "Rehire": // other window, while a confirmation is showing
 			old, e := s.PrepareWorkspaceDeletion(y.Name, y.HiredAt)
 			err = e

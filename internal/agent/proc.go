@@ -191,27 +191,21 @@ func (p *proc) callAdmitted(ctx context.Context, cmd map[string]any, admit func(
 	return p.callTracked(ctx, cmd, admit, at, nil)
 }
 
-// written releases the caller's dispatch lease once the pipe write has returned.
+// writeDone runs once when the write attempt ends, including refusal and exit.
 // The RPC reply and model configuration reservation can outlive that lease.
-func (p *proc) callTracked(ctx context.Context, cmd map[string]any, admit func() error, at func(response), written func()) (response, error) {
+func (p *proc) callTracked(ctx context.Context, cmd map[string]any, admit func() error, at func(response), writeDone func()) (response, error) {
 	id := "y" + strconv.FormatInt(p.seq.Add(1), 10)
 	cmd["id"] = id
 	ch := make(chan response, 1)
-	p.mu.Lock()
-	if p.err != nil {
-		p.mu.Unlock()
-		return response{}, errExited
+	err := p.writeCall(id, waiter{ch: ch, at: at}, cmd, admit)
+	if writeDone != nil {
+		writeDone()
 	}
-	p.pending[id] = waiter{ch: ch, at: at}
-	p.mu.Unlock()
-	if err := p.sendAdmitted(cmd, admit); err != nil {
+	if err != nil {
 		p.mu.Lock()
 		delete(p.pending, id)
 		p.mu.Unlock()
 		return response{}, err
-	}
-	if written != nil {
-		written()
 	}
 	select {
 	case r, ok := <-ch:
@@ -228,6 +222,17 @@ func (p *proc) callTracked(ctx context.Context, cmd map[string]any, admit func()
 		p.mu.Unlock()
 		return response{}, ctx.Err()
 	}
+}
+
+func (p *proc) writeCall(id string, w waiter, cmd map[string]any, admit func() error) error {
+	p.mu.Lock()
+	if p.err != nil {
+		p.mu.Unlock()
+		return errExited
+	}
+	p.pending[id] = w
+	p.mu.Unlock()
+	return p.sendAdmitted(cmd, admit)
 }
 
 // send writes one record without waiting for an answer.

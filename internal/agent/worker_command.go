@@ -21,19 +21,28 @@ type workerCommand struct {
 	admitted bool
 }
 
-func (m *Manager) bindWorker(ctx context.Context, hire yesmen.Yesman, name string, since time.Time, admitted bool) (*workerCommand, error) {
-	c := &workerCommand{m: m, hire: hire, name: name, id: ID(hire.Name, name), since: since, admitted: admitted}
+// selected is the generation supplied by a command or confirmation. An
+// ordinary conversation open selects the current record in this transaction.
+func (m *Manager) bindWorker(ctx context.Context, hire yesmen.Yesman, name string, selected *time.Time, admitted bool) (*workerCommand, error) {
+	c := &workerCommand{m: m, hire: hire, name: name, id: ID(hire.Name, name), admitted: admitted}
 	err := m.cfg.Yesmen.WithWorker(hire, name, func(w yesmen.Worker) error {
-		if !w.StartedAt.Equal(since) {
+		if selected != nil && !w.StartedAt.Equal(*selected) {
 			return ErrRetired
 		}
+		c.since = w.StartedAt
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if m.closed || ctx.Err() != nil {
-			return ErrRetired
+		if m.closed {
+			return errStopped
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if m.worktreeCleanup[c.id] {
+			return errWorktreeCleanup
 		}
 		var err error
-		c.target, err = m.workspaceAgentLocked(hire, Info{ID: c.id, Yesman: hire.Name, Name: name, Role: RoleWorker, Since: since})
+		c.target, err = m.workspaceAgentLocked(hire, Info{ID: c.id, Yesman: hire.Name, Name: name, Role: RoleWorker, Since: c.since})
 		return err
 	})
 	return c, err
@@ -144,7 +153,7 @@ func (m *Manager) manageWorkerBy(ctx context.Context, token string, lead Info, h
 		return err
 	}
 	defer finish()
-	command, err := m.bindWorker(ctx, hire, worker.Name, worker.Since, true)
+	command, err := m.bindWorker(ctx, hire, worker.Name, &worker.Since, true)
 	if err != nil {
 		return err
 	}

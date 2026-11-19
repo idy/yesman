@@ -71,8 +71,31 @@ func TestOriginWithPiFixture(t *testing.T) {
 	if err := m.Prompt(ctx, lead, "FIXTURE-SEND-WORKER"); err != nil {
 		t.Fatal(err)
 	}
-	wait("the worker's second message", func() bool { return len(users(worker)) >= 2 })
+	wait("worker-send tool completion", func() bool {
+		for _, data := range f.recorded(lead) {
+			var event struct {
+				Type, ToolCallID string
+				IsError          bool
+			}
+			if json.Unmarshal(data, &event) == nil && event.Type == "tool_execution_end" && event.ToolCallID == "fixture-send" {
+				if event.IsError {
+					t.Fatalf("worker-send failed: %s", data)
+				}
+				return true
+			}
+		}
+		return false
+	})
+	// Reading a finished conversation opens its process temporarily. Let the
+	// worker finish its second report and exit before opening that history.
+	wait("the worker to settle and stop after its second run", func() bool {
+		current, err := m.Get(worker)
+		return err == nil && f.settled(worker) >= 2 && current.Status == agent.Stopped && !current.FinishedAt.IsZero()
+	})
 	gotWorker := users(worker)
+	if len(gotWorker) < 2 {
+		t.Fatalf("expected the task and message in the worker's history: %+v", gotWorker)
+	}
 	if gotWorker[0].Yesman == nil || *gotWorker[0].Yesman != (agent.Origin{Source: agent.OriginLead, Kind: "task"}) {
 		t.Fatalf("the worker's task records %+v", gotWorker[0].Yesman)
 	}
