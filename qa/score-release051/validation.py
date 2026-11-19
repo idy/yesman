@@ -3,7 +3,8 @@ import hashlib,json,os,pathlib,posixpath,re,stat,tarfile
 KEY='yrQPn0gg1/gASLxIQiUCIiUQ/csWENI0+up1cs3KWO0='
 OLD_SOURCE='87c3bc4faa0a55313cd68be77058fea166beca82'
 OLD_TREE='111aeca1331a304acbc90866831e634eb805d981'
-NEW_TREE='c970394849af0fca550f0150ef14bc1661cb0a60'
+NEW_SOURCE='3b7d9cc50863d27323828a6a75812cdb814cf373'
+NEW_TREE='105dcd89100bc7dc81a5a48c1a9cc14697a717b0'
 BASELINE_CSV_SHA='5e9c21eb8f04a75dda06fe5a4f4323aadd99cef6c7cfb8595707bb8576049ed1'
 OLD={'source':OLD_SOURCE,'releaseID':450776814,'binarySHA256':'fd588ec89b9e8f05951bdc3fb32cfa249ab6c85f34aac4d55dcb094492a74e2e',
      'archive':{'id':765802737,'name':'yesman-0.1.50-darwin-arm64.tar.gz','size':7829476,'digest':'sha256:c56d0cd18f86cd521197b32a1937c80303861e4ecd511b2f773c5b6b0bb433a1'},
@@ -24,7 +25,7 @@ def validate_binding(raw):
  require(isinstance(b['qaSource'],str) and re.fullmatch('[0-9a-f]{40}',b['qaSource']),'QA source')
  c=b['candidate']
  require(isinstance(c,dict) and set(c)=={'source','releaseID','archive','manifest','binarySHA256','assetSetSHA256'},'candidate schema')
- require(isinstance(c['source'],str) and re.fullmatch('[0-9a-f]{40}',c['source']) and c['source'] not in [OLD_SOURCE,b['qaSource']],'candidate source')
+ require(c['source']==NEW_SOURCE and c['source']!=b['qaSource'],'candidate source')
  require(type(c['releaseID']) is int and c['releaseID']>0 and c['releaseID']!=OLD['releaseID'],'candidate release ID')
  for key in ['binarySHA256','assetSetSHA256']:
   require(isinstance(c[key],str) and re.fullmatch('[0-9a-f]{64}',c[key]),key)

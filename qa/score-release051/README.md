@@ -1,11 +1,11 @@
 # Final .50 to .51 score CSV package acceptance
 
-This local correction candidate addresses QA051-1/2/3 and received-operand
-retention. Its `NEW_TREE` still names the earlier metadata tree; it is a
-**provisional source review candidate, not deployable final-release binding**.
-After PR112's fixture repair and independent release readiness are adopted,
-freeze the actual final tree through another normal reviewed QA commit before
-any push or dispatch. No .51 artifact or native PASS is claimed here.
+This local binding candidate retains the independently accepted QA051-1/2/3 and
+received-operand corrections. `NEW_SOURCE` and `NEW_TREE` now pin the immutable
+v0.1.51 tag after PR112's reviewed fixture repair. Final draft asset identities
+must still come from completed package validation. Freeze those identities and
+the exact QA commit/request for independent binding review before any push or
+upgrade dispatch. No .51 artifact or native PASS is claimed by this source kit.
 
 QA-only runner for a disposable GitHub-hosted ARM64 Mac. It never builds,
 modifies or resigns an application, imports credentials, asks for permissions,
@@ -22,8 +22,9 @@ After the immutable .51 tag and final asset validation exist, the publisher
 supplies `expected_binding` as JSON, containing:
 
 - `qaSource`: the independently reviewed full commit of this QA branch.
-- `candidate.source`: exact immutable .51 tag commit, whose tree must equal
-  `c970394849af0fca550f0150ef14bc1661cb0a60`.
+- `candidate.source`: exact immutable .51 tag commit
+  `3b7d9cc50863d27323828a6a75812cdb814cf373`, whose tree must equal
+  `105dcd89100bc7dc81a5a48c1a9cc14697a717b0`.
 - `candidate.releaseID`: exact unpublished final .51 release.
 - `candidate.archive` and `candidate.manifest`: each exactly
   `{id,name,size,digest}`, from the validated final draft. Names must be
