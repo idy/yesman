@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.52
+
+- With the built-in Pi runtime, compatible messages sent while an agent is working join a single pending bubble, with text and images in the order you sent them. Pi takes the combined message at its usual checkpoint. Messages sent after that go separately.
+- Use **Cancel and edit** to bring back the full pending message and its original images. **Stop** keeps a message Pi is still holding available to recall. The separate early-processing button has been removed.
+- After an interruption or restart, **Recover draft** brings retained text and images back to the composer so you can review them and explicitly send them again.
+
 ## 0.1.51
 
 - Add a user score CSV patch in Settings › yesman › Models, with import/replace, export, a blank template and reversible disable. Keep the patch in the selected data directory across app upgrades.
