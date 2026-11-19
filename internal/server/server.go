@@ -38,6 +38,9 @@ type Server struct {
 	Changed func()
 	// BoardChanged is told when a yesman's board changes.
 	BoardChanged func(yesman string)
+	// DeliveryConfirmed runs after the board commit, still within the
+	// caller's admission. It may enqueue audio, but must never wait for it.
+	DeliveryConfirmed func()
 	// NeedsYouChanged is told when what waits on a yesman's user changes,
 	// with the handoff a lead added, if it added one.
 	NeedsYouChanged func(yesman string, added *yesmen.Handoff)
@@ -616,6 +619,9 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 			s.beforeBoardChange()
 		}
 		b, err = s.Yesmen.ChangeBoardBy(y.Name, change, c.agent.Role == agent.RoleLead)
+		if err == nil && change.Delivery != nil && s.DeliveryConfirmed != nil {
+			s.DeliveryConfirmed()
+		}
 		return err
 	}); err != nil {
 		return nil, err
@@ -806,6 +812,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 		w("\n## Seeing it through\n\n")
 		w("You answer for this yesman: what you take on, you see through to the end. The user should not have to look after the workers. ")
 		w("When a report arrives, check it against the board, mark the task, and start the next step yourself (follow-ups, fixes, reviews) until everything the user asked for is done.\n")
+		w("For work you are taking through delivery, keep an existing final delivery task open and take responsibility for marking it done. When you have checked that the whole requested effort succeeded (including release or user verification when required), mark that task done and confirm delivery in the same yesman_board call with delivery.task and the other related board IDs in delivery.related. The app can sound once for that delivery. Leave unrelated work out. Use this for actual delivery, never for an intermediate report, blocked or cancelled work, or to acknowledge old results.\n")
 		w("- A worker's question arrives as a [yesman] message: answer it with yesman_worker_answer, or with yesman_worker_send when the worker asked in its report. If only the user can answer it, hand it to them with yesman_needs_you handOver: it shows under Needs you in their window.\n")
 		w("- A worker whose process failed: message it with yesman_worker_send to start it again, or start a fresh worker. Tell the user only if it keeps failing.\n")
 		w("- A worker's run the user stopped: that was their call. Leave it stopped, unless they say otherwise; when they pause a task, mark it blocked with wait kind paused.\n")

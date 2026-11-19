@@ -49,6 +49,9 @@ type Task struct {
 	// done before yesman recorded this have neither.
 	DoneAt    time.Time `json:"doneAt,omitzero"`
 	DoneOwner string    `json:"doneOwner,omitempty"`
+	// Delivered marks this task as the final step of a confirmed delivery.
+	// It survives a status edit or restart so that delivery cannot replay.
+	Delivered bool `json:"delivered,omitempty"`
 	// OwnerSince is when the worker it was handed to started: a worker of
 	// the same name hired later is not its owner. Zero means whichever
 	// worker has that name now, as for a task handed to a worker before it
@@ -135,11 +138,19 @@ type BoardChange struct {
 	// Order lists task IDs in the order to show them; tasks it leaves out
 	// follow, in their current order.
 	Order []string `json:"order,omitempty"`
+	// Delivery confirms the work behind one existing final task. Only the
+	// lead may confirm it, in the change that marks that task done.
+	Delivery *DeliveryConfirmation `json:"delivery,omitempty"`
+}
+
+type DeliveryConfirmation struct {
+	Task    string   `json:"task"`
+	Related []string `json:"related,omitempty"`
 }
 
 // Empty reports whether the change changes nothing.
 func (c BoardChange) Empty() bool {
-	return len(c.Add) == 0 && len(c.Update) == 0 && len(c.Remove) == 0 && len(c.Order) == 0
+	return len(c.Add) == 0 && len(c.Update) == 0 && len(c.Remove) == 0 && len(c.Order) == 0 && c.Delivery == nil
 }
 
 const (
@@ -217,6 +228,14 @@ func (s *Store) changeBoard(name string, c BoardChange, lead bool) (Board, []Tas
 	}
 	if err := b.checkWaits(before); err != nil {
 		return Board{}, nil, err
+	}
+	if c.Delivery != nil {
+		if !lead {
+			return Board{}, nil, errors.New("only the lead can confirm a delivery")
+		}
+		if err := b.confirmDelivery(*c.Delivery, before); err != nil {
+			return Board{}, nil, err
+		}
 	}
 	if len(b.ownerSet) > 0 {
 		// Bind each task handed over to the worker of that name now.

@@ -2996,7 +2996,87 @@ function renderGeneral(inner) {
     settingsSection(t('Appearance'), null,
       preferenceRow(t('Theme'), h('p', null, t('The window and its menus follow this.')), appearance),
       preferenceRow(t('Language'), h('p', null, t('The window, its menus and notifications use this. Match the system follows the languages of your system settings.')), language)),
+    renderCompletionSound(v.completionSound),
   );
+}
+
+const completionSoundChoices = [
+  ['bell', 'Soft bell'], ['pluck', 'Warm pluck'], ['double', 'Double tone'], ['sparkle', 'Digital sparkle'],
+];
+const completionSound = { preference: null, saving: false, previewing: false, feedback: '' };
+
+function renderCompletionSound(saved) {
+  const s = completionSound;
+  s.preference ??= {
+    enabled: saved?.enabled === true,
+    sound: completionSoundChoices.some(([id]) => id === saved?.sound) ? saved.sound : 'bell',
+  };
+  const save = async (patch) => {
+    if (s.saving) { paintCompletionSound(); return; }
+    const before = s.preference;
+    s.preference = { ...before, ...patch };
+    s.saving = true;
+    s.feedback = '';
+    paintCompletionSound();
+    try {
+      await call('SetCompletionSound', s.preference);
+    } catch {
+      s.preference = before;
+      s.feedback = 'Could not save the completion sound. Try again.';
+    } finally {
+      s.saving = false;
+      paintCompletionSound();
+    }
+  };
+  const enabled = h('input', { id: 'completion-sound-enabled', type: 'checkbox', role: 'switch',
+    'aria-label': t('Completion alert'), 'aria-describedby': 'completion-sound-scope',
+    onchange: (event) => save({ enabled: event.currentTarget.checked }) });
+  const choice = h('select', { id: 'completion-sound-choice', class: 'mds-select', 'aria-label': t('Completion sound'),
+    onchange: (event) => save({ sound: event.currentTarget.value }) },
+    completionSoundChoices.map(([id, name]) => h('option', { value: id }, t(name))));
+  const preview = h('button', { id: 'completion-sound-preview', class: 'mds-button', type: 'button', onclick: async () => {
+    if (s.previewing || s.saving) return;
+    const sound = s.preference.sound;
+    s.previewing = true;
+    s.feedback = '';
+    paintCompletionSound();
+    try {
+      const outcome = await call('PreviewCompletionSound', sound);
+      if (outcome && sound === s.preference.sound) s.feedback = outcome === 'busy' ? 'Another sound is playing. Try again in a moment.' : 'Could not play the sound. Check your audio output and try again.';
+    } catch {
+      if (sound === s.preference.sound) s.feedback = 'Could not play the sound. Check your audio output and try again.';
+    } finally {
+      s.previewing = false;
+      paintCompletionSound();
+    }
+  } }, icon('play'), t('Listen'));
+  const toggle = preferenceRow(t('Completion alert'), h('p', { id: 'completion-sound-scope' }, t('Play when the lead confirms delivery in any workspace.')),
+    h('label', { class: 'mds-switch' }, enabled, h('span', { class: 'mds-switch-track', 'aria-hidden': 'true' })));
+  toggle.classList.add('mds-row--toggle');
+  const sound = preferenceRow(t('Completion sound'), h('p', null, t('You can preview sounds with the alert off.')),
+    h('div', { class: 'completion-sound-actions' }, choice, preview));
+  const section = settingsSection(t('Sounds'), null, toggle, sound);
+  section.id = 'completion-sounds';
+  section.append(h('p', { id: 'completion-sound-feedback', class: 'mds-hint', role: 'status' }));
+  paintCompletionSound(section);
+  return section;
+}
+
+function paintCompletionSound(section = $('#completion-sounds')) {
+  if (!section) return;
+  const s = completionSound;
+  const enabled = $('#completion-sound-enabled', section);
+  const choice = $('#completion-sound-choice', section);
+  const preview = $('#completion-sound-preview', section);
+  const feedback = $('#completion-sound-feedback', section);
+  enabled.checked = s.preference.enabled;
+  choice.value = s.preference.sound;
+  enabled.setAttribute('aria-disabled', String(s.saving));
+  choice.setAttribute('aria-disabled', String(s.saving));
+  preview.setAttribute('aria-disabled', String(s.saving || s.previewing));
+  feedback.textContent = s.feedback ? t(s.feedback) : s.previewing ? t('Playing preview…') : '';
+  if (s.feedback) feedback.dataset.tone = 'error';
+  else delete feedback.dataset.tone;
 }
 
 function renderStorage(inner) {
@@ -3013,7 +3093,7 @@ function renderStorage(inner) {
         ['Secrets', 'The secrets, encrypted, and the key that opens them.', v.secrets],
         ['Variables', 'The variables, in plain text.', v.variables],
         ['Runtime', 'Files yesman generates when it starts.', v.runtime],
-        ['Settings file', 'Appearance and repository fetch preferences.', v.settingsFile],
+        ['Settings file', 'App preferences.', v.settingsFile],
         ['Storage configuration', 'Remembers the data folder across launches.', v.storageConfig],
       ].filter(([, , path]) => path).map(([label, hint, path]) => storagePathRow(t(label), t(hint), path))),
   );

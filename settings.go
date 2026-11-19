@@ -27,6 +27,8 @@ import (
 type Settings struct {
 	// Appearance is light or dark, or system to follow the desktop.
 	Appearance mygo.ThemeSource `json:"appearance,omitempty"`
+	// CompletionSound is a device-local sound preference, off by default.
+	CompletionSound CompletionSoundPreference `json:"completionSound,omitzero"`
 	// AutoFetch is how many minutes apart the pool's repositories are all
 	// fetched; 0 fetches them only when asked or checked out.
 	AutoFetch int `json:"autoFetch,omitempty"`
@@ -166,26 +168,27 @@ func (s Settings) save(path string) error {
 // SettingsView is what the General, Repositories and Storage settings
 // pages show; the pi page has its own, PiView.
 type SettingsView struct {
-	Appearance    mygo.ThemeSource `json:"appearance"`
-	Language      string           `json:"language"`  // a language of languages, or "system"
-	AutoFetch     int              `json:"autoFetch"` // minutes; 0 is off
-	Home          string           `json:"home"`
-	Pool          string           `json:"pool"`
-	Yesmen        string           `json:"yesmen"`
-	Archive       string           `json:"archive"`
-	Runtime       string           `json:"runtime"`
-	SettingsFile  string           `json:"settingsFile"`
-	Secrets       string           `json:"secrets,omitempty"`   // the folder of the secrets and their key
-	Variables     string           `json:"variables,omitempty"` // the variables' file
-	StorageConfig string           `json:"storageConfig,omitempty"`
-	HomeOverride  bool             `json:"homeOverride,omitempty"`
+	Appearance      mygo.ThemeSource          `json:"appearance"`
+	CompletionSound CompletionSoundPreference `json:"completionSound"`
+	Language        string                    `json:"language"`  // a language of languages, or "system"
+	AutoFetch       int                       `json:"autoFetch"` // minutes; 0 is off
+	Home            string                    `json:"home"`
+	Pool            string                    `json:"pool"`
+	Yesmen          string                    `json:"yesmen"`
+	Archive         string                    `json:"archive"`
+	Runtime         string                    `json:"runtime"`
+	SettingsFile    string                    `json:"settingsFile"`
+	Secrets         string                    `json:"secrets,omitempty"`   // the folder of the secrets and their key
+	Variables       string                    `json:"variables,omitempty"` // the variables' file
+	StorageConfig   string                    `json:"storageConfig,omitempty"`
+	HomeOverride    bool                      `json:"homeOverride,omitempty"`
 }
 
 // Settings returns the user's choices and where yesman keeps its data.
 func (s *service) Settings() SettingsView {
 	a := s.app
 	a.setmu.Lock()
-	appearance, autoFetch := a.settings.Appearance, a.settings.AutoFetch
+	appearance, autoFetch, completionSound := a.settings.Appearance, a.settings.AutoFetch, a.settings.CompletionSound.effective()
 	a.setmu.Unlock()
 	if appearance == "" {
 		appearance = mygo.ThemeSystem
@@ -195,15 +198,16 @@ func (s *service) Settings() SettingsView {
 		language = chosenLanguage(a.chosenLocale())
 	}
 	v := SettingsView{
-		Appearance:   appearance,
-		Language:     language,
-		AutoFetch:    autoFetch,
-		Home:         a.home.Root,
-		Pool:         a.home.Repos(),
-		Yesmen:       a.home.Yesmen(),
-		Archive:      a.home.Archive(),
-		Runtime:      a.home.Runtime(),
-		SettingsFile: a.home.Settings(),
+		Appearance:      appearance,
+		CompletionSound: completionSound,
+		Language:        language,
+		AutoFetch:       autoFetch,
+		Home:            a.home.Root,
+		Pool:            a.home.Repos(),
+		Yesmen:          a.home.Yesmen(),
+		Archive:         a.home.Archive(),
+		Runtime:         a.home.Runtime(),
+		SettingsFile:    a.home.Settings(),
 	}
 	if a.vault != nil {
 		v.Secrets = a.vault.Dir()
@@ -278,6 +282,10 @@ func (a *app) putSettingsLocked(next Settings) error {
 	}
 	prev := a.settings
 	a.settings = next
+	if next.CompletionSound != prev.CompletionSound {
+		pref := next.CompletionSound.effective()
+		a.chimes.Configure(pref.Enabled, pref.Sound)
+	}
 	if themeOf(next) != themeOf(prev) && a.setTheme != nil {
 		a.setTheme(next.Appearance)
 	}

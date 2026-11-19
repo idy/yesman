@@ -706,9 +706,14 @@ export default function yesman(pi: ExtensionAPI) {
 			update: Type.Optional(Type.Array(Type.Object({ id: Type.String({ description: "The task's ID, such as t3" }), ...taskFields }), { description: "Changes to tasks: only the fields given change" })),
 			remove: Type.Optional(Type.Array(Type.String(), { description: "IDs of tasks to delete. Mark finished work done or dropped instead; remove only mistakes." })),
 			order: Type.Optional(Type.Array(Type.String(), { description: "Task IDs in the order to show them; tasks left out follow in their current order" })),
+			...(ROLE === "lead" ? { delivery: Type.Optional(Type.Object({
+				task: Type.String({ description: "Existing, open final delivery task ID. Mark it done in this same call." }),
+				related: Type.Optional(Type.Array(Type.String(), { description: "Other existing task IDs for this same delivery. Each must be done after this change. Omit unrelated work." })),
+			}, { description: "Lead only. Confirm one successful delivery of the whole requested effort, once, after checking the result. Use together with the update marking the final delivery task done." })) } : {}),
 		}),
 		async execute(_id, params, signal) {
-			const change = Object.fromEntries(Object.entries(params).filter(([, v]) => Array.isArray(v) && v.length));
+			const change = Object.fromEntries(Object.entries(params).filter(([key, v]) =>
+				key === "delivery" ? ROLE === "lead" && v !== undefined : Array.isArray(v) && v.length));
 			const board = Object.keys(change).length
 				? await call("POST", "/v1/board", change, signal)
 				: await call("GET", "/v1/board", undefined, signal);

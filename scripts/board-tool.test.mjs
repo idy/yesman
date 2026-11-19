@@ -25,7 +25,7 @@ function boardTool(role, answer) {
   const Type = new Proxy({}, { get: () => factory });
   const requests = [];
   const fetch = async (url, init) => {
-    requests.push({ url, method: init.method });
+    requests.push({ url, method: init.method, body: init.body && JSON.parse(init.body) });
     return { ok: true, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(answer) };
   };
   runInNewContext(`${source}\nyesman(pi);`, {
@@ -67,6 +67,17 @@ for (const role of ['lead', 'worker']) {
     }
   });
 }
+
+test('delivery confirmation accompanies a lead board update and is withheld from worker calls', async () => {
+  const params = { update: [{ id: 't2', status: 'done' }], delivery: { task: 't2', related: ['t1'] } };
+  for (const role of ['lead', 'worker']) {
+    const { tool, requests } = boardTool(role, board);
+    await tool.execute('call', params);
+    assert.equal(requests[0].method, 'POST');
+    assert.deepEqual(requests[0].body, role === 'lead' ? params : { update: params.update });
+  }
+});
+
 
 test('a plan ID that is not one is dropped', async () => {
   const { tool } = boardTool('lead', { tasks: [{ id: 't1', title: 'x', status: 'todo', schedule: { plan: RUN } }] });
