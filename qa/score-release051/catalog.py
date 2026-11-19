@@ -9,7 +9,8 @@ if sys.argv[1:] == ['--version']:
     raise SystemExit(0)
 if sys.argv[1:] != ['--mode', 'rpc', '--no-session']:
     raise SystemExit('catalog fixture accepts only --mode rpc --no-session or --version')
-models = [{'provider': 'fixture', 'id': 'codex-remote/codex/gpt-6.2-astra', 'name': 'GPT-6.2 Astra', 'reasoning': True}, {'provider': 'fixture', 'id': 'codex-remote/codex/gpt-6.2-sol', 'name': 'GPT-6.2 Sol', 'reasoning': True}, {'provider': 'fixture', 'id': 'local/patch-only', 'name': 'Patch only', 'reasoning': False}]
+# xhigh is supported only when the catalog explicitly names it.
+models = [{'provider': 'fixture', 'id': 'codex-remote/codex/gpt-6.2-astra', 'name': 'GPT-6.2 Astra', 'reasoning': True, 'thinkingLevelMap': {'xhigh': 'xhigh'}}, {'provider': 'fixture', 'id': 'codex-remote/codex/gpt-6.2-sol', 'name': 'GPT-6.2 Sol', 'reasoning': True, 'thinkingLevelMap': {'xhigh': 'xhigh'}}, {'provider': 'fixture', 'id': 'local/patch-only', 'name': 'Patch only', 'reasoning': False}]
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get('type')
