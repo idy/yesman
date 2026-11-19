@@ -106,6 +106,7 @@ export function createTopics(host) {
     const aside = $('#topics');
     if (!aside) return;
     const y = current();
+    const reopening = aside.hidden;
     aside.hidden = !y;
     aside.setAttribute('aria-label', t('Topics'));
     document.documentElement.dataset.topics = y ? 'open' : 'closed';
@@ -113,6 +114,7 @@ export function createTopics(host) {
     const e = entry(y);
     if (!e) load(y);
     const v = viewOf(y);
+    if (reopening && v.editing) selectEditor(v);
     // Keep focus and caret across a redraw, by the element's data-key.
     const sameWorkspace = aside.dataset.workspace === keyOf(y);
     const active = sameWorkspace && aside.contains(document.activeElement) ? document.activeElement : null;
@@ -171,11 +173,14 @@ export function createTopics(host) {
         h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Close the topics'), 'aria-label': t('Close the topics'), onclick: () => host.setOpen(false) }, icon('x'))));
   }
 
+  function selectEditor(v) {
+    v.selected = v.editing.id === 'new' ? null : v.editing.id;
+    v.focus = 'content';
+  }
+
   // showNew goes back to the new topic being written.
   function showNew(y) {
-    const v = viewOf(y);
-    v.selected = null;
-    v.focus = 'content';
+    selectEditor(viewOf(y));
     render();
     $('#topics [data-key="edit-title"]')?.focus();
   }
@@ -590,8 +595,7 @@ export function createTopics(host) {
         : { title: '', summary: '', conclusions: [], questions: [], addSources: [], removeSources: [] },
       conflict: null, saving: false, error: '', info: '',
     };
-    v.selected = id === 'new' ? null : id;
-    v.focus = 'content';
+    selectEditor(v);
     render();
     $('#topics [data-key="edit-title"]')?.focus();
   }
@@ -892,10 +896,12 @@ export function createTopics(host) {
     return e.index.get(id) ?? null;
   }
 
-  // open shows the pane at a topic of yesman y, or its list.
+  // A chip returns to any edit already in progress. Once that form is
+  // closed, a new chip click can open its topic.
   function open(y, id = null) {
     const v = viewOf(y);
-    if (id) {
+    if (v.editing) selectEditor(v);
+    else if (id) {
       v.selected = id;
       v.notice = null;
       v.focus = 'content';
@@ -905,6 +911,10 @@ export function createTopics(host) {
     }
     host.setOpen(true);
     render();
+    if (v.editing) {
+      $('#topics [data-key="edit-title"]')?.focus();
+      return;
+    }
     // In a narrow pane the back button, as before; else the topic's heading.
     const back = $('#topics [data-key="back"]');
     const target = id ? (back?.getClientRects().length ? 'back' : 'detail-title') : 'search';

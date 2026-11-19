@@ -4148,7 +4148,7 @@ function setPane(pane) {
   let target = null;
   if (pane) {
     target = pane === 'needs-you' ? $('#needs-you .needs-you-heading') : pane === 'board' ? $('#board .files-head-actions button')
-      : pane === 'topics' ? $('#topics .topics-search') ?? $('#topics .files-head-actions button')
+      : pane === 'topics' ? $('#topics [data-key="edit-title"]') ?? $('#topics .topics-search') ?? $('#topics .files-head-actions button')
       : pane === 'tasks' ? $('#schedules .files-head-actions button') : null;
     if (target && !inPane) paneFocusFrom = entry ? { entry } : had;
   } else {
