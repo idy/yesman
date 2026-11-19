@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.54
+
+- Browse Topics in a flat list with Open, Resolved and Archived filters. The discussion and composer appear in the selected topic’s detail pane. Opening a topic from Chat keeps any active topic editor and its draft accessible.
+- Browse Knowledge in collections that follow its folders. Notes outside collections are still available from the navigation.
+- The Working Logs Contents entry now aligns with the dated groups.
+
 ## 0.1.53
 
 - Fixed the alignment of text and the attachment and send buttons in the Topics reply box to match Chat. In narrow windows, the reply box now adjusts its height when the discussion scrollbar reduces the space for text.
