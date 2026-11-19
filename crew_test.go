@@ -57,7 +57,7 @@ func TestCrewView(t *testing.T) {
 	s := &service{app: a}
 	ctx := context.Background()
 	v := s.Crew(ctx)
-	if v.Error != "" || v.Date != "2026-11-14" || v.ReadAt.IsZero() || v.Source == "" || v.Top != 64.6 || len(v.Members) != 0 || v.Yesman != "" {
+	if v.Error != "" || v.Date != "2026-11-18" || v.ReadAt.IsZero() || v.Source == "" || v.Top != 64.6 || len(v.Members) != 0 || v.Yesman != "" {
 		t.Fatalf("view = %+v", v)
 	}
 	if len(v.Models) != 2 || !slices.Equal(v.Models[0].Scored, []string{"low", "xhigh", "max"}) || len(v.Models[1].Scored) != 0 {
