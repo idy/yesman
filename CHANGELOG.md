@@ -2,6 +2,10 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.50
+
+- Add embedded Artificial Analysis scores for GPT-6.2 Astra and GPT-6.2 Sol at low, medium, high, xhigh and max reasoning effort. The crew settings and the lead's model context use the same scores.
+
 ## 0.1.49
 
 - Add Restart and continue in Settings › About, the command palette and the tray. Restart to update uses the same recovery path.
