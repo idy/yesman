@@ -188,6 +188,12 @@ func (p *proc) callObserved(ctx context.Context, cmd map[string]any, at func(res
 // callAdmitted is callObserved where admit, unless nil, decides as the
 // command is written whether it is: refused, nothing is written.
 func (p *proc) callAdmitted(ctx context.Context, cmd map[string]any, admit func() error, at func(response)) (response, error) {
+	return p.callTracked(ctx, cmd, admit, at, nil)
+}
+
+// written releases the caller's dispatch lease once the pipe write has returned.
+// The RPC reply and model configuration reservation can outlive that lease.
+func (p *proc) callTracked(ctx context.Context, cmd map[string]any, admit func() error, at func(response), written func()) (response, error) {
 	id := "y" + strconv.FormatInt(p.seq.Add(1), 10)
 	cmd["id"] = id
 	ch := make(chan response, 1)
@@ -203,6 +209,9 @@ func (p *proc) callAdmitted(ctx context.Context, cmd map[string]any, admit func(
 		delete(p.pending, id)
 		p.mu.Unlock()
 		return response{}, err
+	}
+	if written != nil {
+		written()
 	}
 	select {
 	case r, ok := <-ch:

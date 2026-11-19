@@ -10,10 +10,18 @@ import (
 	"strings"
 )
 
+type deletionWalk uint8
+
+const (
+	inspectDeletion deletionWalk = iota
+	prepareDeletion
+	purgeDeletion
+)
+
 // Walk one verified directory handle at a time. A file or link is unlinked as
 // an entry; only an empty directory is ever removed. This deliberately avoids
 // recursive RemoveAll, which would also erase a nested checkout or mounted disk.
-func walkDeletion(ctx context.Context, ws *os.Root, remove bool) error {
+func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk) error {
 	volume, err := directoryIdentity(ws)
 	if err != nil {
 		return err
@@ -47,6 +55,11 @@ func walkDeletion(ctx context.Context, ws *os.Root, remove bool) error {
 		}
 		if head && objects {
 			return deletionIssue("%s contains Git repository data. Move the repository out of the workspace first.", rel)
+		}
+		if len(entries) > 0 {
+			if err := deletionDirectoryAccess(dir, rel, phase != inspectDeletion); err != nil {
+				return err
+			}
 		}
 		for _, e := range entries {
 			if err := ctx.Err(); err != nil {
@@ -91,7 +104,7 @@ func walkDeletion(ctx context.Context, ws *os.Root, remove bool) error {
 					}
 				}
 			}
-			if remove {
+			if phase == purgeDeletion {
 				now, err := dir.Lstat(name)
 				if err != nil || !os.SameFile(st, now) {
 					return fmt.Errorf("%s changed during deletion", child)

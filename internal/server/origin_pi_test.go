@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,8 +29,15 @@ import (
 //
 //	YESMAN_TEST_PI_FIXTURE=1 go test ./internal/server -run OriginWithPiFixture -v
 func TestOriginWithPiFixture(t *testing.T) {
-	f := startPiFixture(t, nil)
-	srv, m, store := f.srv, f.m, f.store
+	var sent atomic.Bool
+	f := startPiFixture(t, func(body string) []any {
+		if strings.Contains(body, "FIXTURE-SEND-WORKER") && sent.CompareAndSwap(false, true) {
+			call := map[string]any{"type": "toolCall", "id": "fixture-send", "name": "yesman_worker_send", "arguments": map[string]any{"name": "w1", "message": "once more"}}
+			return []any{map[string]any{"type": "toolcall_start", "contentIndex": 0, "id": "fixture-send", "toolName": "yesman_worker_send"}, map[string]any{"type": "toolcall_end", "contentIndex": 0, "toolCall": call}}
+		}
+		return []any{map[string]any{"type": "text_start", "contentIndex": 0}, map[string]any{"type": "text_end", "contentIndex": 0, "content": "fixture reply"}}
+	})
+	m, store := f.m, f.store
 	if _, err := store.Hire("alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -59,17 +67,8 @@ func TestOriginWithPiFixture(t *testing.T) {
 		!strings.Contains(string(got[1].Content), `[yesman] Worker \"w1\" finished a run`) {
 		t.Fatalf("the report records %+v: %s", got[1].Yesman, got[1].Content)
 	}
-	// The lead messages its worker through the API, as its tool does.
-	info, err := m.Get(lead)
-	if err != nil {
-		t.Fatal(err)
-	}
-	y, err := store.Get("alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest("POST", "/v1/workers/send", strings.NewReader(`{"name":"w1","message":"once more"}`))
-	if _, err := srv.sendWorker(ctx, caller{agent: info, yesman: y}, req); err != nil {
+	// The lead invokes its normal authenticated worker tool.
+	if err := m.Prompt(ctx, lead, "FIXTURE-SEND-WORKER"); err != nil {
 		t.Fatal(err)
 	}
 	wait("the worker's second message", func() bool { return len(users(worker)) >= 2 })

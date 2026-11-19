@@ -1407,7 +1407,12 @@ async function openAgentMenu(e, a) {
       case 'abort': await call('Abort', a.id); break;
       case 'sleep': await call('Stop', a.id); break;
       case 'rename': await renameYesman(workspace); break;
-      case 'delete-workspace': await deletion.ask(workspace); break;
+      case 'delete-workspace':
+        await deletion.ask(workspace, null, () => {
+          if (keyOf(agentById(a.id) ?? {}) === keyOf(a)) restoreSidebarFocus(row);
+          else ($('#yesmen .agent-row') ?? $('#yesmen button'))?.focus({ preventScroll: true });
+        });
+        break;
       case 'remove': await removeWorker(a); break;
       case 'hide-done':
       case 'show-done': setHideDone(a.yesman, action === 'hide-done'); break;
@@ -2372,6 +2377,7 @@ function renderBody() {
   const body = $('#body');
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
+  const restoreStored = deletion.storageFocus(active);
   const held = requestFocus($('#dock'));
   const composing = $('#dock .composer textarea');
   if (state.view.kind === 'agent' && composing?._composing && composing._agentKey === keyOf(selectedAgent() ?? {})) {
@@ -2386,6 +2392,7 @@ function renderBody() {
   body.replaceChildren();
   if (state.view.kind === 'settings') {
     renderSettings(body);
+    if (restoreStored && document.activeElement === document.body) restoreStored();
     const again = active?.id && document.getElementById(active.id);
     if (again) {
       again.focus();
@@ -4377,9 +4384,11 @@ async function confirmAction(title, body, ok) {
 const deletion = workspaceDeletion({ call, errorText, fail, refresh: refreshState, toast, section: settingsSection, row: preferenceRow });
 
 async function removeWorker(a) {
+  const workspace = yesmanOf(a.id);
+  if (!workspace) return;
   if (!(await confirmAction(t('Remove {name}?', { name: a.name }), t('It stops and leaves this yesman. Its worktrees and session log stay in the workspace.'), t('Remove')))) return;
   try {
-    await call('RemoveWorker', a.id);
+    await call('RemoveWorkerOf', a.id, workspace.hiredAt ?? null, a.since ?? null);
     // selectAgent loads the lead's conversation if this window has not yet.
     if (state.view.kind === 'agent' && state.view.id === a.id) selectAgent(`${a.yesman}/lead`);
     else render();

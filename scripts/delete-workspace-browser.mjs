@@ -38,13 +38,13 @@ async function run(engine, name, lang) {
         const r=await fetch('/fixture',{method:'POST',body:JSON.stringify({method,...extra})});
         const data=await r.json(); if (data.error) throw Error(data.error); return data.value;
       };
-      window.mygo={platform:'darwin',locale:lang,on(){},async call(method,...args){
+      window.mygo={platform:'darwin',locale:lang,on(event, fn){ (window.listeners ??= {})[event] = fn; },async call(method,...args){
         const m=method.replace('Yesman.',''); window.calls.push([m,...args]);
         switch(m){
           case 'State': { const v=await rpc(m);agents=v.agents??=[];return v; }
           case 'PrepareWorkspaceDeletion': return rpc(m,{name:args[0],since:args[1]});
           case 'DeleteWorkspace': if (window.hold) await new Promise(r=>window.release=r); return rpc(m,{target:args[0]});
-          case 'StoredWorkspaces': return rpc(m);
+          case 'StoredWorkspaces': if (window.holdList) await new Promise(resolve => window.releaseList = resolve); return rpc(m);
           case 'AgentMenu':case 'FilesMenu': return 'delete-workspace';
           case 'Shortcuts': return {'yesman.dismiss':['Mod+Shift+Y']};
           case 'Settings': return {appearance:'system',home:'/fixture',archive:'/fixture/archive',pool:'/fixture/repos',yesmen:'/fixture/yesmen'};
@@ -81,8 +81,12 @@ async function run(engine, name, lang) {
     assert.equal(await cancel.evaluate(n=>document.activeElement===n),true);
     await screenshot('confirmation');
     await page.keyboard.press('Enter'); await dialog.waitFor({state:'detached'});
-    await lead.focus(); await page.keyboard.press('Shift+F10'); await cancel.waitFor(); await page.keyboard.press('Escape');
-    await dialog.waitFor({state:'detached'});assert.equal(await count('DeleteWorkspace'),0);
+    await lead.focus(); await page.keyboard.press('Shift+F10'); await cancel.waitFor();
+    await page.evaluate(async () => listeners.agents((await rpc('State')).agents));
+    await page.keyboard.press('Escape');
+    await dialog.waitFor({state:'detached'});
+    assert(await lead.evaluate(el => el === document.activeElement), 'Escape restores the redrawn sidebar entry');
+    assert.equal(await count('DeleteWorkspace'),0);
     await retained.click({button:'right'});await ok.click();await dialog.getByRole('alert').getByText(/unfinished-checkout/).waitFor();
     if (lang !== 'en') assert.match(await dialog.getByRole('alert').innerText(),/工作树/);
     await screenshot('blocked');await dialog.getByRole('button',{name:/^(Close|关闭)$/}).click();
@@ -94,12 +98,24 @@ async function run(engine, name, lang) {
     await page.keyboard.press('Escape');assert.equal(await dialog.isVisible(),true);
     await screenshot('progress');await page.evaluate(()=>{hold=false;release()});
     await dialog.waitFor({state:'detached'});await lead.waitFor({state:'detached'});await retained.waitFor();
+    assert(await page.evaluate(() => document.activeElement !== document.body), 'completed deletion leaves a surviving control focused');
     await page.locator('#settings-button').click();await page.locator('#settings-nav [data-page="storage"]').click();
-    const stored=page.locator('#stored-workspaces');await stored.getByRole('button',{name:/^(Show workspaces|查看工作区)$/}).click();
+    const stored=page.locator('#stored-workspaces');
+    const list=stored.locator('[data-storage-key="list"]');
+    await list.focus(); await page.keyboard.press('Enter');
     const first=stored.getByRole('button',{name:/paper-kites-20260101/}),second=stored.getByRole('button',{name:/paper-kites-20260102/});
-    await second.waitFor();await screenshot('archives');await first.click();await cancel.click();await first.waitFor();
+    await second.waitFor();
+    assert(await list.evaluate(el => el === document.activeElement), 'Show keeps focus on Refresh');
+    await page.evaluate(() => window.holdList = true); await list.press('Enter');
+    await page.waitForFunction(() => !!window.releaseList);
+    const other=page.locator('#settings-nav [data-page="storage"]');
+    await other.focus(); await page.evaluate(() => { holdList=false; releaseList(); });
+    await page.waitForFunction(() => document.querySelector('[data-storage-key="list"]').getAttribute('aria-disabled') === 'false');
+    assert(await other.evaluate(el => el === document.activeElement), 'late list result preserves focus moved elsewhere');
+    await screenshot('archives');await first.focus();await first.press('Enter');await cancel.click();await first.waitFor();
     await first.click();assert.match(await dialog.locator('#deletion-location').innerText(),/archive\/paper-kites-20260101-123456/);await ok.click();
-    await first.waitFor({state:'detached'});await second.waitFor();
+    await first.waitFor({state:'detached'});await second.waitFor();await dialog.waitFor({state:'detached'});
+    assert(await second.evaluate(el => el === document.activeElement), 'the surviving archive is reachable from the removed row');
     await page.reload();await retained.waitFor();assert.equal(await lead.count(),0);
     assert.deepEqual(await page.evaluate(()=>unexpected),[]);assert.deepEqual(errors,[]);
     console.log(`${name} ${lang}: cancel, old binding, blocker, stale hire, progress, exact active and archive deletion, reopen PASS`);

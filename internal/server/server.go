@@ -415,7 +415,7 @@ func (s *Server) agents(_ context.Context, c caller, _ *http.Request) (any, erro
 
 var errLeadOnly = errors.New("only the yesman's lead manages workers")
 
-func (s *Server) startWorker(_ context.Context, c caller, r *http.Request) (any, error) {
+func (s *Server) startWorker(request context.Context, c caller, r *http.Request) (any, error) {
 	if c.agent.Role != agent.RoleLead {
 		return nil, errLeadOnly
 	}
@@ -429,13 +429,13 @@ func (s *Server) startWorker(_ context.Context, c caller, r *http.Request) (any,
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(request, 2*time.Minute)
 	defer cancel()
 	as, err := s.workerChoice(ctx, c.agent, strings.TrimSpace(req.Crew))
 	if err != nil {
 		return nil, err
 	}
-	return s.Agents.StartWorkerAs(ctx, c.yesman.Name, req.Name, req.Title, req.Task, as)
+	return s.Agents.StartWorkerBy(ctx, c.token, c.agent, c.yesman, req.Name, req.Title, req.Task, as)
 }
 
 // workerChoice is what a lead's new worker runs as: the crew member it
@@ -467,7 +467,34 @@ func (s *Server) workerChoice(ctx context.Context, lead agent.Info, key string) 
 
 var errNoCrew = errors.New("no worker can start: the crew is empty. Ask the user to add the models workers may run as in Settings › yesman")
 
-func (s *Server) sendWorker(_ context.Context, c caller, r *http.Request) (any, error) {
+// workerRequest captures the original hire's worker generations before reading
+// the request body. Nothing holds the workspace while input arrives. The
+// Manager revalidates the selected worker and original caller at admission.
+func (s *Server) workerRequest(c caller, r *http.Request, req any, name *string) (agent.Info, error) {
+	var workers []yesmen.Worker
+	err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+		if !y.HiredAt.Equal(c.yesman.HiredAt) {
+			return agent.ErrRetired
+		}
+		var err error
+		workers, err = s.Yesmen.Workers(y.Name)
+		return err
+	})
+	if err != nil {
+		return agent.Info{}, err
+	}
+	if err := decode(r, req); err != nil {
+		return agent.Info{}, err
+	}
+	for _, w := range workers {
+		if w.Name == *name {
+			return agent.Info{ID: agent.ID(c.yesman.Name, w.Name), Name: w.Name, Role: agent.RoleWorker, Yesman: c.yesman.Name, Since: w.StartedAt}, nil
+		}
+	}
+	return agent.Info{}, fmt.Errorf("no worker named %s in this hire", *name)
+}
+
+func (s *Server) sendWorker(request context.Context, c caller, r *http.Request) (any, error) {
 	if c.agent.Role != agent.RoleLead {
 		return nil, errLeadOnly
 	}
@@ -475,19 +502,13 @@ func (s *Server) sendWorker(_ context.Context, c caller, r *http.Request) (any, 
 		Name    string `json:"name"`
 		Message string `json:"message"`
 	}
-	if err := decode(r, &req); err != nil {
+	worker, err := s.workerRequest(c, r, &req, &req.Name)
+	if err != nil {
 		return nil, err
 	}
-	if req.Name == yesmen.LeadName {
-		return nil, errors.New("that is you")
-	}
-	id := agent.ID(c.yesman.Name, req.Name)
-	if _, err := s.Agents.Get(id); err != nil {
-		return nil, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(request, 2*time.Minute)
 	defer cancel()
-	if err := s.Agents.PromptFromLead(ctx, id, "[from your lead] "+req.Message); err != nil {
+	if err := s.Agents.SendWorkerBy(ctx, c.token, c.agent, c.yesman, worker, "[from your lead] "+req.Message); err != nil {
 		return nil, err
 	}
 	return map[string]bool{"sent": true}, nil
@@ -519,17 +540,18 @@ func (s *Server) answerWorker(_ context.Context, c caller, r *http.Request) (any
 	return map[string]bool{"answered": true}, nil
 }
 
-func (s *Server) removeWorker(_ context.Context, c caller, r *http.Request) (any, error) {
+func (s *Server) removeWorker(ctx context.Context, c caller, r *http.Request) (any, error) {
 	if c.agent.Role != agent.RoleLead {
 		return nil, errLeadOnly
 	}
 	var req struct {
 		Name string `json:"name"`
 	}
-	if err := decode(r, &req); err != nil {
+	worker, err := s.workerRequest(c, r, &req, &req.Name)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.Agents.RemoveWorker(c.yesman.Name, req.Name); err != nil {
+	if err := s.Agents.RemoveWorkerBy(ctx, c.token, c.agent, c.yesman, worker); err != nil {
 		return nil, err
 	}
 	return map[string]bool{"removed": true}, nil

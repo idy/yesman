@@ -420,6 +420,10 @@ func (s *Store) workers(name string) ([]Worker, error) {
 	if err != nil {
 		return nil, err
 	}
+	return workersIn(y)
+}
+
+func workersIn(y Yesman) ([]Worker, error) {
 	var ws []Worker
 	if err := readJSON(filepath.Join(y.MetaDir(), "workers.json"), &ws); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -446,6 +450,30 @@ func number(ws []Worker) {
 	}
 }
 
+// WithWorker binds a short in-memory admission to the current worker record.
+// The callback returns before any process start, stop, or RPC wait.
+func (s *Store) WithWorker(hire Yesman, worker string, fn func(Worker) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	y, err := s.Get(hire.Name)
+	if err != nil {
+		return err
+	}
+	if !y.HiredAt.Equal(hire.HiredAt) {
+		return ErrRehired
+	}
+	ws, err := workersIn(y)
+	if err != nil {
+		return err
+	}
+	for _, w := range ws {
+		if w.Name == worker {
+			return fn(w)
+		}
+	}
+	return fmt.Errorf("%s has no worker named %s", y.Name, worker)
+}
+
 // AddWorker records a new worker.
 func (s *Store) AddWorker(name string, w Worker) error {
 	if err := ValidName(w.Name); err != nil {
@@ -456,7 +484,11 @@ func (s *Store) AddWorker(name string, w Worker) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ws, err := s.workers(name)
+	y, err := s.Get(name)
+	if err != nil {
+		return err
+	}
+	ws, err := workersIn(y)
 	if err != nil {
 		return err
 	}
@@ -467,7 +499,6 @@ func (s *Store) AddWorker(name string, w Worker) error {
 	for _, x := range ws {
 		w.Number = max(w.Number, x.Number+1)
 	}
-	y, _ := s.Get(name)
 	ws = append(ws, w)
 	s.changing(name)
 	if err := writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws); err != nil {
@@ -598,7 +629,11 @@ func (s *Store) FailWorker(name, worker string, since, at time.Time) error {
 func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ws, err := s.workers(name)
+	y, err := s.Get(name)
+	if err != nil {
+		return false, err
+	}
+	ws, err := workersIn(y)
 	if err != nil {
 		return false, err
 	}
@@ -606,7 +641,6 @@ func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, 
 	if i < 0 || !fn(&ws[i]) {
 		return false, nil
 	}
-	y, _ := s.Get(name)
 	s.changing(name)
 	return true, writeJSON(filepath.Join(y.MetaDir(), "workers.json"), ws)
 }
@@ -614,13 +648,32 @@ func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, 
 // RemoveWorker forgets a worker. Its session log stays, and so does when
 // it started (see WorkerStarts).
 func (s *Store) RemoveWorker(name, worker string) error {
+	return s.removeWorker(name, worker, nil, time.Time{})
+}
+
+// RemoveWorkerOf applies failure cleanup and removal to the worker that the
+// caller actually created or selected, including when its name is reused.
+func (s *Store) RemoveWorkerOf(hire Yesman, worker string, since time.Time) error {
+	return s.removeWorker(hire.Name, worker, &hire.HiredAt, since)
+}
+
+func (s *Store) removeWorker(name, worker string, hiredAt *time.Time, since time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ws, err := s.workers(name)
+	y, err := s.Get(name)
 	if err != nil {
 		return err
 	}
-	y, _ := s.Get(name)
+	if hiredAt != nil && !y.HiredAt.Equal(*hiredAt) {
+		return ErrRehired
+	}
+	ws, err := workersIn(y)
+	if err != nil {
+		return err
+	}
+	if hiredAt != nil && !slices.ContainsFunc(ws, func(w Worker) bool { return w.Name == worker && w.StartedAt.Equal(since) }) {
+		return errors.New("the selected worker was removed or replaced")
+	}
 	s.noteStarts(y, ws)
 	// Its tasks stay its own: a worker of the same name hired later does
 	// not own them, whatever it works on. Bound first, under the same lock,

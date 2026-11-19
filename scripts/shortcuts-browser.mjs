@@ -107,7 +107,7 @@ async function answer(m, args) {
   case 'Abort': case 'Stop': case 'WatchFiles': case 'Reveal': case 'FetchAll': return;
   // Called only if a guard were skipped; recorded in calls either way.
   case 'PrepareWorkspaceDeletion': return {entry:args[0],label:'Alice',instance:'fixture'};
-  case 'DeleteWorkspace': case 'RemoveWorker': case 'Rename': case 'HireNamed': return null;
+  case 'DeleteWorkspace': case 'RemoveWorkerOf': case 'Rename': case 'HireNamed': return null;
   default: unmocked.push(m); return null;
   }
 }
@@ -363,7 +363,7 @@ async function palette(x, check) {
   assert.equal(await page.locator('#rename-form input').inputValue(), 'Alice');
   await page.keyboard.press('Escape');
   await page.locator('#rename-dialog').waitFor({ state: 'hidden' });
-  assert.deepEqual([await x.count('RemoveWorker'), await x.count('DeleteWorkspace'), await x.count('Rename')], [0, 0, 0]);
+  assert.deepEqual([await x.count('RemoveWorkerOf'), await x.count('DeleteWorkspace'), await x.count('Rename')], [0, 0, 0]);
   await run('sleep');
   assert.deepEqual(await x.callsOf('Stop'), [['Stop', 'alice/worker-one']]);
   check('remove worker, delete workspace and rename ask first and do nothing on cancel; sleep acts on the worker shown');

@@ -288,7 +288,7 @@ func (s *Store) StoredWorkspaces() ([]DeletionTarget, error) {
 // unlink. A new hire can reserve the old path from then on. Cleanup operates
 // solely on the staged instance. detached reports a committed live removal
 // even when the remaining bytes still need attention.
-func (s *Store) Delete(ctx context.Context, want DeletionTarget, registrations func(context.Context, string) error, stop func(Yesman) error) (detached bool, err error) {
+func (s *Store) Delete(ctx context.Context, want DeletionTarget, registrations func(context.Context, string) error, stop func(Yesman) error, relocated ...RelocatedPrimary) (detached bool, err error) {
 	original, name, staged, ok := deletionEntry(want.Entry, want.Archived)
 	if registrations == nil || (!want.Archived && staged == "" && stop == nil) {
 		return false, errors.New("workspace deletion requires worktree and agent lifecycle checks")
@@ -329,21 +329,21 @@ func (s *Store) Delete(ctx context.Context, want DeletionTarget, registrations f
 	if err := check(); err != nil {
 		return false, err
 	}
-	preflight := func() error {
+	preflight := func(phase deletionWalk) error {
 		ws, err := directDir(parent, want.Entry)
 		if err != nil {
 			return err
 		}
 		defer ws.Close()
-		if err := s.checkWorktreeRecords(ws); err != nil {
-			return err
-		}
 		if err := registrations(ctx, ws.Name()); err != nil {
 			return err
 		}
-		return walkDeletion(ctx, ws, false)
+		if err := walkDeletion(ctx, ws, phase); err != nil {
+			return err
+		}
+		return s.checkWorktreeRecords(ctx, parent, ws, want, relocated)
 	}
-	if err := preflight(); err != nil {
+	if err := preflight(inspectDeletion); err != nil {
 		return false, err
 	}
 	if !want.Archived && staged == "" {
@@ -353,20 +353,32 @@ func (s *Store) Delete(ctx context.Context, want DeletionTarget, registrations f
 		if err := stop(Yesman{Name: name, Path: filepath.Join(parent.Name(), name), HiredAt: want.HiredAt}); err != nil {
 			return false, &DeletionIssue{Message: "The agents could not finish saving. Check the workspace and try again.", Cause: err}
 		}
-		if err := preflight(); err != nil {
-			return false, err
-		}
 	}
 	entry := want.Entry
 	if staged == "" {
-		entry = deletingPrefix + want.Instance + "." + original
-		if _, err := parent.Lstat(entry); !errors.Is(err, fs.ErrNotExist) {
-			return false, fmt.Errorf("%s is occupied or unreadable. Check interrupted deletions in Storage", entry)
-		}
+		// Recheck after draining. Prepare verified cache directories before
+		// detaching, so a permission refusal leaves the original recoverable.
 		if err := check(); err != nil {
 			return false, err
 		}
-		if err := parent.Rename(want.Entry, entry); err != nil {
+		if err := preflight(prepareDeletion); err != nil {
+			return false, err
+		}
+		entry = deletingPrefix + want.Instance + "." + original
+		// Hire, worker metadata and board transactions share this mutex. Keep
+		// their paths valid through the move, then release it before the purge.
+		err := func() error {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if _, err := parent.Lstat(entry); !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("%s is occupied or unreadable. Check interrupted deletions in Storage", entry)
+			}
+			if err := check(); err != nil {
+				return err
+			}
+			return parent.Rename(want.Entry, entry)
+		}()
+		if err != nil {
 			return false, err
 		}
 		detached = !want.Archived
@@ -403,7 +415,7 @@ func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string
 	if now, err := parent.Lstat(entry); err != nil || !os.SameFile(st, now) {
 		return errors.New("the detached directory changed")
 	}
-	if err := walkDeletion(ctx, ws, true); err != nil {
+	if err := walkDeletion(ctx, ws, purgeDeletion); err != nil {
 		return err
 	}
 	if now, err := parent.Lstat(entry); err != nil || !os.SameFile(st, now) {
@@ -412,7 +424,11 @@ func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string
 	return parent.Remove(entry) // empty directory only
 }
 
-func (s *Store) checkWorktreeRecords(ws *os.Root) error {
+// RelocatedPrimary proves the registered checkout now lives outside the selected
+// archive. Callers without access to the pool keep the original refusal.
+type RelocatedPrimary func(context.Context, string, WorktreeRecord) (string, error)
+
+func (s *Store) checkWorktreeRecords(ctx context.Context, parent, ws *os.Root, target DeletionTarget, relocated []RelocatedPrimary) error {
 	meta, err := directDir(ws, ".yesman")
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -428,14 +444,36 @@ func (s *Store) checkWorktreeRecords(ws *os.Root) error {
 	if err != nil {
 		return fmt.Errorf("check .yesman/worktrees.json before deleting: %w", err)
 	}
-	var records []WorktreeRecord
+	var records []json.RawMessage
 	if err := json.Unmarshal(raw, &records); err != nil {
 		return fmt.Errorf("check .yesman/worktrees.json before deleting: %w", err)
 	}
-	for _, r := range records {
-		if !r.Removed {
-			return deletionIssue("Worktree %q (%s, owner %q, task %q) is still recorded. Finish its managed cleanup or recover the checkout and its registration first.", r.Dir, r.Purpose, r.Owner, r.Task)
+	for _, record := range records {
+		var r WorktreeRecord
+		if err := json.Unmarshal(record, &r); err != nil {
+			return fmt.Errorf("check .yesman/worktrees.json before deleting: %w", err)
 		}
+		if r.Removed {
+			continue
+		}
+		if target.Archived && r.Purpose == "primary" && len(relocated) == 1 && relocated[0] != nil {
+			if !filepath.IsLocal(r.Dir) || filepath.Base(r.Dir) != r.Dir || r.Dir == "." {
+				return errors.New("invalid primary worktree directory in archive record")
+			}
+			if _, err := ws.Lstat(r.Dir); !errors.Is(err, fs.ErrNotExist) {
+				return deletionIssue("Move the primary worktree %q out of this archive with Git before deleting it.", r.Dir)
+			}
+			moved, err := relocated[0](ctx, ws.Name(), r)
+			if err != nil {
+				return &DeletionIssue{Message: "Could not verify the new location of primary worktree %q. Move it with Git and keep its registration.", Args: []any{r.Dir}, Cause: err}
+			}
+			original, _, _, _ := deletionEntry(target.Entry, true)
+			if err := s.recordArchiveRelocation(parent, original, target.Instance, record, moved); err != nil {
+				return err
+			}
+			continue
+		}
+		return deletionIssue("Worktree %q (%s, owner %q, task %q) is still recorded. Finish its managed cleanup or recover the checkout and its registration first.", r.Dir, r.Purpose, r.Owner, r.Task)
 	}
 	return nil
 }

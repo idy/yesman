@@ -217,7 +217,13 @@ func (m *Manager) configure(ctx context.Context, id string, cmd map[string]any) 
 	if err != nil {
 		return Info{}, err
 	}
-	a.modelMu.Lock()
+	return m.configureProcess(ctx, a, p, cmd)
+}
+
+func (m *Manager) configureProcess(ctx context.Context, a *agent, p *proc, cmd map[string]any) (Info, error) {
+	if err := lockWithin(ctx, &a.modelMu); err != nil {
+		return Info{}, err
+	}
 	defer a.modelMu.Unlock()
 	if a.prompts != 0 {
 		return Info{}, errors.New("wait for the current run to finish before changing its model or effort")

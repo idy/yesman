@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Interrupt after the atomic detach and an actual unlink. On reopen only
@@ -119,6 +120,47 @@ func TestDeletionAllowsConcurrentSameNameHireAfterDetach(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(fresh.Path, "keep")); err != nil || string(got) != "new hire" {
 		t.Fatal(string(got), err)
+	}
+}
+
+func TestDeletionWaitsForMetadataTransaction(t *testing.T) {
+	s := waitStore(t)
+	y, err := s.Get("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := s.PrepareDeletion(y.Name, y.HiredAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Delete(t.Context(), target, func(context.Context, string) error { return nil }, func(Yesman) error {
+			s.mu.Lock()
+			close(transaction)
+			return nil
+		})
+		done <- err
+	}()
+	select {
+	case <-transaction:
+	case err := <-done:
+		t.Fatalf("expected transaction before rename: %v", err)
+	}
+	select {
+	case err := <-done:
+		s.mu.Unlock()
+		t.Fatalf("deletion overtook metadata: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	_, err = os.Stat(y.Path)
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal("workspace moved while metadata held", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

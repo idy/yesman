@@ -40,7 +40,7 @@ func (s *service) DeleteWorkspace(ctx context.Context, target yesmen.DeletionTar
 			a.schedules.RetireYesman(y.Name, y.HiredAt)
 		}
 		return nil
-	})
+	}, a.pool.RelocatedPrimary)
 	if detached {
 		a.agents.ForgetYesman(target.Entry, target.HiredAt)
 		a.countHandoffs(target.Entry)

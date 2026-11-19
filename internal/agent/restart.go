@@ -35,6 +35,7 @@ func (h reportHandoff) report() *restart.Report {
 // not dispatched or pi refused it, ReportAccepted when pi took it, and
 // ReportUncertain when it was sent and no answer came.
 type sendTrack struct {
+	worker *workerCommand // the exact target of a lead's command, when present
 	admit  func() bool
 	result func(state string)
 	// bounded: the prompt's start and model lock end with its context too,
@@ -340,7 +341,7 @@ func (m *Manager) ResumeAfterRestart(ctx context.Context, r restart.Agent, note 
 			return nil
 		}
 		var err error
-		a, p, err = m.ensureInCtx(ctx, y, id, r.Name, r.Role == RoleLead, false, func() error {
+		a, p, err = m.ensureInCtx(ctx, y, id, r.Name, r.Role == RoleLead, false, nil, func() error {
 			cur := m.agents[id]
 			if m.restartHasInputLocked(r) || m.restartPausedLocked(r) || cur == nil || cur.stopping || cur.restartHandled ||
 				!cur.workspaceSince.Equal(r.WorkspaceHiredAt) || !cur.info.Since.Equal(r.AgentSince) {
