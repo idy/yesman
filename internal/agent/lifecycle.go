@@ -20,6 +20,9 @@ func (m *Manager) workspaceAgentLocked(y yesmen.Yesman, info Info) (*agent, erro
 		if a.proc != nil || a.starting != nil || a.deliveryWriter != nil && !a.deliveryWriter.finished() {
 			return nil, errStopped
 		}
+		// The drained writer already sealed this generation's archive snapshot.
+		// A delayed ForgetYesman can only see the replacement after this point.
+		m.clearRecallLocked(a)
 		a = nil
 	}
 	if a != nil && a.removing {
@@ -66,6 +69,7 @@ func (m *Manager) ForgetYesman(name string, since time.Time) {
 				delete(m.tokens, a.token)
 				a.token, a.tokenProc = "", nil
 			}
+			m.clearRecallLocked(a)
 			delete(m.agents, id)
 		}
 	}
@@ -153,18 +157,25 @@ func (m *Manager) sealDeliveriesLocked(a *agent) []Event {
 	if a.deliverySealed {
 		return nil
 	}
-	m.clearRecallLocked(a)
+	for id, d := range a.deliveries {
+		if !d.recoverDraft {
+			m.forgetRecallLocked(a, id)
+		}
+	}
+	a.nativeQueue = pendingQueue{}
 	var events []Event
 	for _, d := range a.deliveries {
-		if !pendingDelivery(d.State) {
+		if !pendingDelivery(d.State) && !d.AwaitingRecord {
 			continue
 		}
-		d.State, d.Error = "interrupted", ""
+		d.State, d.Error, d.AwaitingRecord = "interrupted", "", false
 		if d.Session == "" {
 			d.State, d.Error = "failed", errStopped.Error()
 		}
 		events = append(events, m.deliveryLocked(a, d))
 	}
+	// Keep the payloads until the workspace is retired. A failed drain or
+	// a second Stop may need to write this snapshot again.
 	m.persistDeliveriesLocked(a)
 	a.deliverySealed = true
 	return events

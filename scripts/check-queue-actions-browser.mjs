@@ -79,13 +79,13 @@ try { for(const [engineName,engine]of Object.entries({chromium,webkit})) for(con
   await input.fill('');await page.locator('.composer-image button').click();await control('ResetShortcuts');await reload();
   const state=await control('State'),a=state.agents.find(a=>a.id==='alice/lead'),follow=[newID(),newID(),newID()];
   for(let i=0;i<3;i++)await control('FixtureFollowUp',a.id,follow[i],i===1?long:'same',[image,image],a.since);
-  const target=follow[1];await row(target).locator('.message-promote').waitFor();
+  const target=follow[1];await row(target).locator('.message-recall').waitFor();
+  assert.equal(await page.locator('.message-promote').count(),0,'follow-up shows no acceleration control');
   await page.waitForFunction(id=>document.querySelector(`[data-delivery="${id}"]`)?.dataset.original==='true',target);
   assert.match(await row(target).locator('.delivery-status').innerText(),language==='en'?/Waiting/:/等待/);
   await page.screenshot({path:`${out}/${engineName}-${language}-pending.png`});
   const before=await control('NativeSnapshot'),item=before.items.find(x=>x.submissionId===target);
-  await row(target).locator('.message-promote').evaluate(el=>{el.click();el.click()});
-  await page.waitForFunction(id=>!document.querySelector(`[data-delivery="${id}"] .message-promote`),target);
+  await control('PromoteSubmission',a.id,target,a.since); // existing native API, independent of this page
   const after=await control('NativeSnapshot'),moved=after.items.find(x=>x.submissionId===target);
   assert.equal(moved.queueId,item.queueId);assert.equal(moved.kind,'steer');
   assert.deepEqual(after.items.filter(x=>x.kind==='followUp').map(x=>x.submissionId),[follow[0],follow[2]]);
@@ -118,9 +118,9 @@ try { for(const [engineName,engine]of Object.entries({chromium,webkit})) for(con
   while(!(await control('ProviderReady'))){assert(Date.now()<setupDeadline,'provider gate not entered');await new Promise(r=>setTimeout(r,10))}
   const prepareID=newID();await control('FixtureFollowUp',a.id,prepareID,long,[image,image],a.since);
   await control('Abort',a.id);
-  await row(prepareID).locator('.message-promote').waitFor();
+  await row(prepareID).locator('.message-recall').waitFor();
   const reserved=(await control('NativeSnapshot')).items.find(i=>i.submissionId===prepareID);
-  await control('HoldContext');await row(prepareID).locator('.message-promote').click();
+  await control('HoldContext');await control('PromoteSubmission',a.id,prepareID,a.since);
   const prepareDeadline=Date.now()+10000;while(!(await control('ContextReady'))){assert(Date.now()<prepareDeadline,'production context gate not entered');await new Promise(r=>setTimeout(r,10))}
   await row(prepareID).locator('.message-recall').waitFor();
   await page.waitForFunction(id=>document.querySelector(`[data-delivery="${id}"] .delivery-status`)?.dataset.state==='steering',prepareID);

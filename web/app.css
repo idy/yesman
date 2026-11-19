@@ -125,7 +125,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
   width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--mds-radius-sm);
   background: transparent; color: var(--mds-muted); cursor: pointer;
 }
-.message-promote, .message-dismiss { width: auto; gap: 4px; padding-inline: 6px; font-size: var(--mds-text-caption); }
+.message-dismiss { width: auto; gap: 4px; padding-inline: 6px; font-size: var(--mds-text-caption); }
 .message-copy .mds-icon, .message-dismiss .mds-icon { width: 16px; height: 16px; font-size: 16px; }
 .message-copy:hover:not(:disabled), .message-dismiss:hover { background: var(--mds-hover); color: var(--mds-ink); }
 .message-copy:focus-visible, .message-dismiss:focus-visible { outline: 2px solid var(--mds-accent); outline-offset: 2px; }

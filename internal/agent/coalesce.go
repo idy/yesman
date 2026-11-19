@@ -13,7 +13,8 @@ import (
 // same RPC; Go only proposes the target and never resubmits. Receipts keep each
 // input's own immutable ID and fingerprint: the first input owns the occurrence
 // and lists the appended IDs in Merged, each appended input names it in
-// MergedInto. Complete payloads stay in the bounded volatile recall cache.
+// MergedInto. Originals use the bounded recall cache and, for managed inputs,
+// the separate draft snapshot.
 const (
 	// pi bounds one occurrence to its primary input plus this many appended ones.
 	maxMergedInputs = 15
@@ -179,9 +180,11 @@ func (m *Manager) mergeChildLocked(a *agent, root, child Delivery) []Event {
 	if state == "sending" || state == "accepted" {
 		state = "steering"
 	}
-	if child.MergedInto != root.ID || child.State != state {
+	awaiting := child.recoverDraft && root.AwaitingRecord
+	if child.MergedInto != root.ID || child.State != state || child.AwaitingRecord != awaiting {
+		child.AwaitingRecord = awaiting
 		child.MergedInto, child.State, child.queueID, child.appendRoot = root.ID, state, "", ""
-		if state == "unconfirmed" || state == "interrupted" {
+		if !child.recoverDraft && recoverableDelivery(state) {
 			m.forgetRecallLocked(a, child.ID)
 		}
 		events = append(events, m.deliveryLocked(a, child))

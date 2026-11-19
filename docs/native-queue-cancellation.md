@@ -1,5 +1,11 @@
 # Managed pi and native message recall
 
+The pinned runtime advertises `humanSteer` alongside queue capability 4. The Go bridge sets the new option only when Pi advertises it. The child serializes human input preparation and makes the single-slot decision synchronously at native admission. A pending occurrence stays available to the native poll while a later input runs hooks. Different trusted contexts, commands, stale Stop generations and budget refusals leave the existing queue intact. `follow_up` and the legacy promotion RPC keep their original behavior. The conversation has a single recall control for a pending human occurrence.
+
+The v2 receipt file keeps private IDs and payload fingerprints. The same per-agent writer saves a bounded, private `human-drafts.json` alongside it before managed dispatch. A taken queue occurrence and a recorded history entry are separate events. Unresolved originals can return to the composer on request. Receipt IDs from the previous process still deduplicate retries. Only an explicit human submission can send recovered content to Pi.
+
+The writer uses one reserved `.human-drafts-v1.stage` file in that agent's session directory. It publishes the complete snapshot by rename. On initialization, a stage with the expected file type, permissions and size is retired as unpublished. Other filenames are left alone. A corrupt or unreadable snapshot, a receipt mismatch, or an unexpected reserved stage blocks submission for that agent and leaves the files in place. The Manager keeps the load error for its lifetime. After reviewing the files and fixing the problem, restart Yes Man to try loading again.
+
 yesman's default supported runtime is **pi 1.5.2 with queue protocol patch 1**
 (`1.5.2-yesman.5`, queue capability 4). It provides actual per-occurrence pending
 identity, atomic cancellation and same-occurrence append. Original upstream pi 1.5.2 lacks that API; external runtimes retain
@@ -139,12 +145,10 @@ or process with a later explicit input. Already-steering retries never start a r
 After intake commits, a Stop uses the normal loop to record the committed inputs
 with its aborted signal; it never discards or re-enqueues them. Input/template
 hooks are not repeated, and the original retry/compaction/settle driver remains the
-sole Session owner. Full process retirement still invalidates volatile queue and
-payload authority rather than replaying old intents. The message footer offers **Send now** only for a confirmed
-follow-up whose live runtime admits promotion. Already-steering messages show
-that they are waiting for an input checkpoint. A pending action reserves that
-item in the page, so repeated clicks cannot issue another mutation; generation
-checks discard late responses after switching to a replacement agent.
+sole Session owner. Process retirement ends native queue authority. Retained
+originals have an explicit draft recovery action. Queue promotion remains
+available to callers of the legacy protocol. The desktop conversation exposes
+recall and shows the native lane under the pending message.
 
 Input identity is carried by batch position and host event envelopes, never on
 AgentMessage. A same-object duplicate has distinct occurrences. After recording a
@@ -306,17 +310,15 @@ are never automatically resent.
 A cancelled submission ID remains bound to its old immutable intent. Submit retry
 returns its existing receipt without another dispatch; edited resend allocates a
 new ID. After terminal receipt eviction, the persisted floor still rejects the old
-ID before starting pi. Full Manager restart retains the tombstone but cannot offer
-full-payload restoration after the volatile cache is lost.
+ID before starting pi. A Manager restart retains the tombstone. Payload recovery
+is available for managed submissions whose originals are still retained.
 
-Original payloads are released when taken, definitively failed/handled, retired,
-evicted, or explicitly acknowledged after the UI restores them. A cancelled
-payload can survive a normal pi-process stop for same-agent recovery, but not
-workspace/worker retirement. Archive/removal continue sealing and joining writers;
-old callbacks cannot attach to a same-name replacement. If the UI disconnects
-before acknowledging restoration, the cancelled row offers **Return recalled
-message to input** while its original payload remains available. Once acknowledged,
-restored drafts have the same in-memory lifetime as other composer drafts.
+Managed originals are released as soon as the user message is recorded, or when
+an extension handles the input, the receipt expires, or the user acknowledges or
+discards recovery. A cancelled input can survive a restart until the UI acknowledges
+restoration. Archive and worker removal seal and join the writer so an old callback
+cannot attach to a replacement agent. An acknowledged composer draft has the same
+in-memory lifetime as any other draft.
 
 ## User behavior
 
@@ -326,12 +328,15 @@ Sending after native acceptance. The conversation is pi's messages; a receipt
 draws a row only while it is open: sending/accepted/queued/steering or native
 pending, cancelled with a restorable original, `failed`, `interrupted` or
 `unconfirmed` with an error until the person hides it (**Hide**) or this window
-resends its kept draft unchanged and the server registers that resend, or an
-`unconfirmed` answer without an error while it is the latest submission. Other
-later sends, replies and empty queues never retire a problem: its status can
-arrive after them, to a reloaded page. Hiding is page-only: IDs in localStorage
-per conversation, pruned to the receipts Go still keeps; receipts are unchanged
-and nothing is resent. The person sending that ID again, or an accepted update
+resends its kept draft unchanged, Pi confirms admission, and any earlier retained
+original is durably released. A refusal or an uncertain retry keeps the earlier
+recovery action available. An `unconfirmed` answer without an error can show while
+it is the latest submission. Other later sends, replies and empty queues never
+retire a problem. Its status can arrive afterwards, even on a reloaded page.
+Hide remembers receipt IDs in localStorage per conversation. If a managed original
+is still available, Hide first waits for the server to remove it from draft storage.
+The receipt remains for deduplication and nothing is resent. The person sending that
+ID again, or an accepted update
 (this generation, newer revision, still retained) that is not finished, drops
 the ID from the hidden set and persists that, so the new attempt's outcome shows
 live and after reload; lower revisions and earlier generations cannot. If the
@@ -355,13 +360,12 @@ than appearing as a person's typed input. Their canonical request has no
 permanent receipt status either. Topic-pane submission history retains its own
 recorded state labels.
 
-`SubmissionPayload` reads complete text/images from the existing bounded volatile
+`SubmissionPayload` reads complete text/images from the bounded original
 Go cache, without changing native membership. A visible unbound row may hydrate
-from it after display-cache eviction or page reload. Only that DOM row holds the
-result; there is no additional full-payload map or disk image store. Missing
-payloads stay previews with an image count. The read rejects retired/sealed
-owners, old generations and worktree cleanup. Full-app restarts cannot restore
-payloads that no longer exist.
+from it after display-cache eviction or page reload. Missing payloads stay previews
+with an image count. The read rejects retired or sealed owners, old generations
+and worktree cleanup. An app restart can restore originals in the managed draft
+snapshot that still match a retained receipt.
 
 Consumed, historical,
 unknown and unsupported-runtime messages offer Copy only. A nonempty draft or

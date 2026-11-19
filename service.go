@@ -334,7 +334,7 @@ func (s *service) Send(ctx context.Context, id, text string) error {
 	if s.app.piErr != nil {
 		return s.app.piErr
 	}
-	return s.app.agents.Prompt(ctx, id, text)
+	return s.app.agents.SendHuman(ctx, id, text, nil)
 }
 
 // SendImages sends text and image content in the same pi prompt.
@@ -342,7 +342,7 @@ func (s *service) SendImages(ctx context.Context, id, text string, images []agen
 	if s.app.piErr != nil {
 		return s.app.piErr
 	}
-	return s.app.agents.PromptImages(ctx, id, text, images)
+	return s.app.agents.SendHuman(ctx, id, text, images)
 }
 
 // Submit gives the page an idempotent, server-owned delivery receipt.

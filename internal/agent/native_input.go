@@ -106,7 +106,7 @@ func (m *Manager) reconcileRecordedInputs(a *agent, p *proc, session string, ref
 			continue
 		}
 		d, ok := a.deliveries[ref.Identity.SubmissionID]
-		if !ok || !strings.HasSuffix(d.Session, ":"+session) || !d.AgentSince.Equal(a.info.Since) || d.State == "cancelled" || d.State == "dispatched" {
+		if !ok || !strings.HasSuffix(d.Session, ":"+session) || !d.AgentSince.Equal(a.info.Since) || d.State == "cancelled" || d.State == "dispatched" && (!d.AwaitingRecord || ref.EntryID == "") {
 			continue
 		}
 		// A recorded input on the canonical session branch proves intake even when
@@ -124,11 +124,11 @@ func (m *Manager) reconcileRecordedInputs(a *agent, p *proc, session string, ref
 		if len(final) != len(d.Merged) {
 			m.setMergedLocked(a, &d, final)
 		}
-		d.State = "dispatched"
+		d.State, d.AwaitingRecord = "dispatched", d.recoverDraft && ref.EntryID == ""
 		events = append(events, m.deliveryLocked(a, d))
 		root := a.deliveries[d.ID]
 		for _, segment := range root.Merged {
-			if child, ok := a.deliveries[segment]; ok && child.State != "cancelled" && child.State != "dispatched" && child.Session == root.Session {
+			if child, ok := a.deliveries[segment]; ok && child.State != "cancelled" && (child.State != "dispatched" || child.AwaitingRecord) && child.Session == root.Session {
 				events = append(events, m.mergeChildLocked(a, root, child)...)
 			}
 		}

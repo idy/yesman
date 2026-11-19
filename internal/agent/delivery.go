@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -28,8 +30,10 @@ type Delivery struct {
 	AgentSince      time.Time `json:"agentSince,omitzero"`
 	CanCancel       bool      `json:"canCancel,omitempty"` // view only; never persisted as authority
 	CanRestore      bool      `json:"canRestore,omitempty"`
+	CanRecover      bool      `json:"canRecover,omitempty"`     // original draft retained after uncertain delivery
+	AwaitingRecord  bool      `json:"awaitingRecord,omitempty"` // native take precedes the session entry
 	OriginalText    bool      `json:"originalText,omitempty"`
-	OriginalPayload bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
+	OriginalPayload bool      `json:"originalPayload,omitempty"` // bounded original payload available for display
 	NativePending   bool      `json:"nativePending,omitempty"`
 	CanPromote      bool      `json:"canPromote,omitempty"` // live native membership/admission only
 	// MergedInto names the still-pending submission this input was appended to;
@@ -46,7 +50,10 @@ type Delivery struct {
 	// task's run; nil for what a person typed.
 	Origin         *Origin `json:"origin,omitempty"`
 	queuePreparing bool
-	coalesce       bool   // a composer submission that may join a pending occurrence
+	coalesce       bool   // legacy capability 4 may append this composer input
+	humanSteer     bool   // the app's human submission, eligible for the single steer slot
+	humanStop      uint64 // Go Stop generation at registration
+	recoverDraft   bool   // originals retained before dispatch to a managed runtime
 	appendRoot     string // the occurrence an in-flight append targeted
 	// hostContext is the trusted conversation context the app sent this
 	// submission in (a topic's), host-only: pi keeps inputs of different
@@ -95,7 +102,8 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 		d.expires = time.Now().Add(deliveryRetention).UnixMilli()
 	}
 	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload, d.Preparing = false, false, false, false, false, false, false
-	if d.State == "dispatched" || d.State == "failed" || d.State == "handled" || d.State == "interrupted" || d.State == "accepted" {
+	d.CanRecover = false
+	if d.State == "dispatched" && !d.AwaitingRecord || d.State == "failed" && !d.recoverDraft || d.State == "handled" || d.State == "interrupted" && !d.recoverDraft || d.State == "accepted" && !d.recoverDraft {
 		d.queueID, d.queuePreparing = "", false
 		m.forgetRecallLocked(a, d.ID)
 	}
@@ -119,23 +127,36 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 	return Event{Agent: a.info.ID, AgentSince: a.info.Since, Seq: a.seq, Data: raw}
 }
 
+// SendHuman gives older desktop Send callers the same native slot policy as
+// the composer. Callers needing retry safety provide their own ID via Submit.
+func (m *Manager) SendHuman(ctx context.Context, id, text string, images []Image) error {
+	var nonce [18]byte
+	rand.Read(nonce[:])
+	d, err := m.Submit(ctx, id, fmt.Sprintf("%012x%x", time.Now().UnixMilli(), nonce), text, images)
+	if err != nil {
+		return err
+	}
+	if d.Error != "" {
+		return errors.New(d.Error)
+	}
+	if d.State == "interrupted" || d.State == "unconfirmed" {
+		return errors.New("Delivery could not be confirmed. Check the conversation before sending again.")
+	}
+	return nil
+}
+
 // Submit registers a stable client ID before dispatch. Repeating an uncertain
 // bridge call returns its existing receipt and never sends the prompt twice.
 func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
-	d, err := m.submit(ctx, id, messageID, text, images, "steer", nil, expectedSince...)
+	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{humanSteer: true}, expectedSince...)
 	return m.submitView(id, d), err
 }
 
-// SubmitCoalescing is Submit for the composer: while pi still holds this
-// agent's newest composer input pending and unclaimed, in the same lane,
-// session and generation, pi appends this input to that same occurrence
-// instead of queueing another one. pi decides atomically at its own enqueue
-// point; when the occurrence was taken, claimed or changed first, or the
-// runtime predates capability 4, the input is queued exactly once as its own
-// message. Only another composer input can be joined: never a scheduled run,
-// a topic's message, a worker's report or any other submission.
+// SubmitCoalescing opts into legacy append on managed runtimes predating the
+// single-slot human steering protocol. On current runtimes all human sends
+// use the same policy and the native queue decides atomically at admission.
 func (m *Manager) SubmitCoalescing(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
-	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{coalesce: true}, expectedSince...)
+	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{coalesce: true, humanSteer: true}, expectedSince...)
 	return m.submitView(id, d), err
 }
 
@@ -147,7 +168,7 @@ func (m *Manager) SubmitInContext(ctx context.Context, id, messageID, text strin
 	if !hostContextRE.MatchString(hostContext) {
 		return Delivery{}, errors.New("invalid conversation context")
 	}
-	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{context: hostContext}, expectedSince...)
+	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{context: hostContext, humanSteer: true}, expectedSince...)
 	return m.submitView(id, d), err
 }
 
@@ -168,9 +189,10 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 
 // submission is what a caller states about a submission beyond its content.
 type submission struct {
-	origin   *Origin // a scheduled run's; nil for what a person typed
-	coalesce bool    // the composer's: may join its newest pending occurrence
-	context  string  // a trusted host-only conversation context, such as a topic's
+	origin     *Origin // a scheduled run's; nil for what a person typed
+	coalesce   bool    // legacy capability 4 append
+	humanSteer bool    // single-slot human admission when advertised by Pi
+	context    string  // a trusted host-only conversation context, such as a topic's
 }
 
 // hostContextRE bounds a host-only conversation context, as pi's
@@ -291,7 +313,15 @@ func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string
 	preview, truncated := deliveryClip(text, maxDeliveryPreview)
 	a.deliveryOrder++
 	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, Origin: origin, fingerprint: fingerprint, created: deliveryTimestamp(messageID),
-		coalesce: sub.coalesce && origin == nil && sub.context == "", hostContext: sub.context}
+		coalesce: sub.coalesce && origin == nil && sub.context == "", humanSteer: sub.humanSteer && origin == nil, humanStop: a.humanStop, hostContext: sub.context}
+	var prior <-chan struct{}
+	var next chan struct{}
+	if d.humanSteer {
+		prior = a.humanTail
+		next = make(chan struct{})
+		a.humanTail = next
+		defer close(next)
+	}
 	a.deliveries[messageID] = d
 	// A new immutable input already owns this generation, even while its
 	// first durable write/start is pending. A duplicate above owns no new work.
@@ -312,7 +342,18 @@ func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string
 		return m.failInitialDelivery(a, messageID, err), nil
 	}
 	release()
+	if prior != nil {
+		select {
+		case <-prior:
+		case <-m.shutdown:
+			return m.failInitialDelivery(a, messageID, errStopped), nil
+		}
+	}
 	m.mu.Lock()
+	if d.humanSteer && a.humanStop != d.humanStop {
+		m.mu.Unlock()
+		return m.failInitialDelivery(a, messageID, errStopped), nil
+	}
 	if m.agents[id] == a && !a.retiring {
 		a.inbox++
 	}
@@ -379,16 +420,37 @@ func (m *Manager) bindDelivery(a *agent, p *proc, id string) error {
 		return err
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	d, ok := a.deliveries[id]
 	if !ok || !d.AgentSince.Equal(info.Since) {
+		m.mu.Unlock()
 		return errors.New("the agent was replaced; reopen its conversation before sending")
 	}
 	if a.proc != p || a.retiring || d.State != "sending" {
+		m.mu.Unlock()
 		return errStopped
+	}
+	var revision uint64
+	writer := a.deliveryWriter
+	if d.humanSteer && a.nativeQueue.HumanSteer {
+		if _, ok := a.recallPayloads[id]; !ok {
+			m.mu.Unlock()
+			return errors.New("There is no room to retain this draft. Clear a recovered draft or shorten this message.")
+		}
+		d.recoverDraft = true
+		a.humanDraftStore = true
 	}
 	d.Session, d.boundSeq = p.deliverySession(), a.seq
 	a.deliveries[id] = d
+	if d.recoverDraft {
+		revision = m.persistDeliveriesLocked(a)
+	}
+	m.mu.Unlock()
+	if revision != 0 {
+		if err := writer.wait(context.Background(), revision, m.shutdown); err != nil {
+			m.deliveryResponse(a, p, id, "steer", response{Error: err.Error()})
+			return err
+		}
+	}
 	return nil
 }
 
@@ -553,7 +615,7 @@ func (m *Manager) interruptDeliveriesLocked(a *agent) []Event {
 	}
 	a.queue = QueueStatus{}
 	for id, d := range a.deliveries {
-		if d.State != "cancelled" {
+		if d.State != "cancelled" && !d.recoverDraft {
 			m.forgetRecallLocked(a, id)
 		}
 		d.queueID, d.queuePreparing = "", false
@@ -567,8 +629,8 @@ func (m *Manager) interruptDeliveriesLocked(a *agent) []Event {
 	}{"delivery_queue", a.queue})
 	events := []Event{{Agent: a.info.ID, AgentSince: a.info.Since, Seq: a.seq, Data: raw}}
 	for _, d := range a.deliveries {
-		if d.Session != "" && pendingDelivery(d.State) {
-			d.State, d.Error = "interrupted", ""
+		if d.Session != "" && (pendingDelivery(d.State) || d.AwaitingRecord) {
+			d.State, d.Error, d.AwaitingRecord = "interrupted", "", false
 			events = append(events, m.deliveryLocked(a, d))
 		}
 	}

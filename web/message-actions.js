@@ -11,7 +11,7 @@ export function receiptText(receipt) {
   return !receipt.preview && typeof receipt.text === 'string' ? receipt.text : null;
 }
 
-export function messageActions({ text, loadText, copy, done, fail, recall, promote, dismiss, busy = false, restoring = false }) {
+export function messageActions({ text, loadText, copy, done, fail, recall, dismiss, busy = false, restoring = false, recovering = false }) {
   const available = typeof text === 'string' || typeof loadText === 'function';
   const hasText = !!loadText || !!text?.length;
   const label = !available ? t('Full message text is unavailable') : hasText ? t('Copy message text') : t('This message has no text to copy');
@@ -36,21 +36,16 @@ export function messageActions({ text, loadText, copy, done, fail, recall, promo
       }
     },
   }, icon('copy'));
-  const recallLabel = restoring ? t('Return recalled message to input') : t('Cancel and edit');
+  const recallLabel = t(recovering ? 'Recover draft' : restoring ? 'Return recalled message to input' : 'Cancel and edit');
   const recallButton = recall ? h('button', {
     class: 'message-copy message-recall', type: 'button', title: recallLabel, 'aria-label': recallLabel,
     onclick: recall, disabled: busy, 'aria-busy': busy ? 'true' : null,
   }, icon('x')) : null;
-  const promoteLabel = t('Send now');
-  const promoteButton = promote ? h('button', {
-    class: 'message-copy message-promote', type: 'button', title: t('Move to steering for the next input checkpoint'), 'aria-label': promoteLabel,
-    onclick: promote, disabled: busy, 'aria-busy': busy ? 'true' : null,
-  }, icon('send'), h('span', null, promoteLabel)) : null;
   // Only stops showing a submission nothing waits on; it is never sent again.
   const dismissLabel = t('Hide');
   const dismissButton = dismiss ? h('button', {
     class: 'message-dismiss', type: 'button', title: t('Stop showing this. Nothing is sent again.'), 'aria-label': dismissLabel,
     onclick: dismiss,
   }, icon('check'), h('span', null, dismissLabel)) : null;
-  return h('div', { class: 'message-actions' }, button, promoteButton, recallButton, dismissButton);
+  return h('div', { class: 'message-actions' }, button, recallButton, dismissButton);
 }

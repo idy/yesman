@@ -23,14 +23,10 @@ function imageBytes(image) {
   const data = typeof image?.data === 'string' ? image.data : '';
   return Math.floor(data.length * 3 / 4) - (data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0);
 }
-function withinImageBudget(images) {
-  let total = 0;
-  for (const image of images) {
-    const bytes = imageBytes(image);
-    if (bytes > MAX_IMAGE_BYTES) return false;
-    total += bytes;
-  }
-  return images.length <= MAX_IMAGES && total <= MAX_TOTAL_IMAGE_BYTES;
+function withinImageBudget(images) { return withinImageSizes(images.map(imageBytes)); }
+function withinImageSizes(sizes) {
+  return sizes.length <= MAX_IMAGES && sizes.every(size => size <= MAX_IMAGE_BYTES) &&
+    sizes.reduce((total, size) => total + size, 0) <= MAX_TOTAL_IMAGE_BYTES;
 }
 export function inputIdentity(metadata) {
   if (!metadata) return undefined;
@@ -162,7 +158,7 @@ export class PendingQueueRegistry {
     const text = (entry) => typeof entry.message.content === 'string' ? entry.message.content :
       (entry.message.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
     const lane = (kind) => (this.queues.get(kind)?.messages ?? []).map(text);
-    return { capability: 4, epoch: this.epoch, revision: this.revision,
+    return { capability: 4, humanSteer: true, epoch: this.epoch, revision: this.revision,
       items: entries.map(entry => this.item(entry)),
       steering: lane('steer'), followUp: lane('followUp') };
   }
@@ -233,10 +229,40 @@ export class PendingQueueRegistry {
     for (const entry of released) delete entry.claim;
     if (released.length) this.change(released, 'pending');
   }
+  steeringHuman() {
+    return this.queues.get('steer').messages.find(e => e.submissionId && e.identity?.origin?.source === 'user');
+  }
+  // This policy runs only for the opt-in human prompt wire. The queue is the
+  // authority, including while a later input awaits its extension hooks.
+  steerHuman(message, metadata, original, registerImages) {
+    const { submissionId } = metadata;
+    if (!SUBMISSION_ID.test(submissionId ?? '') || inputIdentity(metadata)?.origin?.source !== 'user')
+      throw new Error('Invalid human steering input');
+    if (this.retired.has(submissionId) || [...this.pending.values()].some(e =>
+      e.submissionId === submissionId || e.segments.includes(submissionId))) return { outcome: 'duplicate' };
+    const steering = this.queues.get('steer');
+    const root = this.steeringHuman();
+    if (!withinImageBudget(message.content.slice(1))) throw new Error('Prepared images exceed the message limits. Remove an image and try again.');
+    if (!root) {
+      registerImages(message);
+      return steering.enqueue(message, metadata, original);
+    }
+    const unavailable = 'A message is already waiting. Wait for Pi to take it, or recall it before sending this draft.';
+    if (!root.original?.joinable || !original.joinable ||
+        !sameOrigin(root.identity.origin, inputIdentity(metadata)?.origin) ||
+        !withinImageSizes([...root.original.imageSizes, ...original.imageSizes])) throw new Error(unavailable);
+    const result = this.append(this.epoch, root.queueId, root.itemRevision, 'steer', message, metadata, undefined, merged => {
+      root.original.imageSizes.push(...original.imageSizes);
+      registerImages(merged);
+    });
+    if (result.outcome !== 'appended') throw new Error(unavailable);
+    const { message: _merged, ...visible } = result;
+    return visible;
+  }
   // Synchronously extend one unclaimed pending human occurrence with a later
   // human input. Never awaits, so it linearizes with drain/commit/cancel/promote.
   // Only 'appended' mutates; every other outcome leaves the registry unchanged.
-  append(epoch, queueId, expectedRevision, kind, message, metadata, fence) {
+  append(epoch, queueId, expectedRevision, kind, message, metadata, fence, onHumanMerge) {
     const submissionId = metadata?.submissionId, identity = inputIdentity(metadata);
     const target = this.pending.get(queueId);
     if (typeof submissionId !== 'string' || !SUBMISSION_ID.test(submissionId)) return { outcome: 'ineligible' };
@@ -250,7 +276,8 @@ export class PendingQueueRegistry {
     if (target.itemRevision !== expectedRevision) return { outcome: 'stale_item' };
     if (target.kind !== kind) return { outcome: 'kind_mismatch' };
     // Nothing else may be queued between the occurrence and this input.
-    if ([...this.pending.values()].some(e => e.sequence > target.sequence)) return { outcome: 'not_latest' };
+    if (onHumanMerge ? target.queue.messages.at(-1) !== target : [...this.pending.values()].some(e => e.sequence > target.sequence))
+      return { outcome: 'not_latest' };
     if (!target.submissionId || target.identity?.origin?.source !== 'user' || !sameOrigin(target.identity.origin, identity?.origin))
       return { outcome: 'ineligible' };
     if (target.segments.length + 1 >= MAX_SEGMENTS) return { outcome: 'limit' };
@@ -263,6 +290,7 @@ export class PendingQueueRegistry {
     target.segments = [...target.segments, submissionId];
     target.identity = inputIdentity({ submissionId: target.submissionId, hostOrigin: target.identity.origin, segments: target.segments });
     target.itemRevision++;
+    onHumanMerge?.(merged);
     this.change([target], 'appended', { appendedSubmissionId: submissionId });
     return { outcome: 'appended', queueId, itemRevision: target.itemRevision, message: merged };
   }
@@ -275,13 +303,13 @@ export class PendingMessageQueue {
     if (registry.queues.has(kind)) throw new Error('Duplicate queue kind');
     registry.queues.set(kind, this);
   }
-  enqueue(message, metadata) {
+  enqueue(message, metadata, original) {
     const submissionId = metadata?.submissionId;
     if (submissionId !== undefined && (typeof submissionId !== 'string' || !/^[a-f0-9]{48}$/.test(submissionId)))
       throw new Error('Invalid submission ID');
     const sequence = ++this.registry.sequence;
     const entry = { queueId: `${this.registry.epoch}:${sequence}`, sequence, kind: this.kind,
-      submissionId, message, queue: this, itemRevision: 0, identity: inputIdentity(metadata ? { ...metadata, segments: undefined } : metadata), segments: [] };
+      submissionId, message, queue: this, original, itemRevision: 0, identity: inputIdentity(metadata ? { ...metadata, segments: undefined } : metadata), segments: [] };
     this.messages.push(entry);
     this.registry.pending.set(entry.queueId, entry);
     this.registry.change([entry], 'pending');

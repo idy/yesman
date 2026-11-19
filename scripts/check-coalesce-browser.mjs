@@ -283,31 +283,36 @@ try {
       await page.waitForFunction(({ idG, idH }) => !document.querySelector(`#thread [data-delivery="${idH}"]`) && document.querySelector(`#thread [data-delivery="${idG}"] .msg-user`)?.textContent.includes('eta joins gamma'), { idG, idH });
       assert.deepEqual(await pendingRows(), [idG]);
 
-      // 9. Stop keeps the pending message, whole and recallable. The next input
-      //    starts a new turn: while that turn is being prepared the message is
-      //    still pending, never shown as taken, and pi takes it once.
+      // Stop keeps the whole slot recallable. Another draft cannot overtake it.
       await page.locator('.composer .round--stop').click();
       await page.waitForFunction(() => !document.querySelector('.composer .round--stop'));
-      assert.equal((await bubble(idG)).state, 'steering');
-      await control('HoldContext');
-      const kText = 'kappa starts the next turn';
-      const idK = await submit(kText, [], { settle: false });
-      { const end = Date.now() + 10000; while (!(await control('Counts')).contextHeld) { assert(Date.now() < end, 'production context gate not entered'); await new Promise((r) => setTimeout(r, 10)); } }
-      const g = await bubble(idG);
-      assert.equal(g.text, `${gText}\n${hText}`);
-      assert.equal(g.state, 'steering', 'still pending while the next turn is prepared');
-      assert.equal(g.recall, true);
-      assert.deepEqual(await pendingRows(), [idG, idK]);
-      if (out) await page.screenshot({ path: `${out}/${name}-${language}-stopped.png` });
-      await control('ReleaseContext');
-      await control('ReleaseCall', '2');
-      await control('ReleaseCall', '3');
       const ghText = `${gText}\n${hText}`;
-      await waitAudit('received the claimed message and the new turn', (cs) => introductions(cs, ghText).length > 0 && introductions(cs, kText).length > 0);
-      await page.waitForFunction(() => !document.querySelector('.composer textarea').readOnly);
-      await page.waitForTimeout(300);
+      const kText = 'kappa is kept as a draft';
+      const idK = await submit(kText, [], { settle: false });
+      await page.waitForFunction((id) => document.querySelector(`[data-delivery="${id}"] .delivery-status`)?.dataset.state === 'failed', idK);
+      await idle();
+      assert.equal(await input.inputValue(), kText);
+      const g = await bubble(idG);
+      assert.equal(g.text, ghText);
+      assert.equal(g.state, 'steering');
+      assert.equal(g.recall, true);
+      assert.equal(await page.locator('.message-promote').count(), 0);
+      assert.deepEqual(await pendingRows(), [idG, idK]); // one pending row plus the refusal
+      if (out) await page.screenshot({ path: `${out}/${name}-${language}-stopped.png` });
+      await input.fill('');
+      await input.evaluate(el => el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })));
+      await input.press('ArrowUp');
+      assert.equal(await input.inputValue(), '', 'IME must keep ArrowUp');
+      await input.evaluate(el => el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+      await input.press('ArrowUp');
+      await page.waitForFunction(text => document.querySelector('.composer textarea')?.value === text, ghText);
+      assert.equal(await input.evaluate(el => el === document.activeElement), true);
+      await input.press('Enter');
+      await waitAudit('received the recalled and explicitly resent draft', cs => introductions(cs, ghText).length > 0);
+      await control('ReleaseCall', '3');
+      await idle();
       calls = await audit();
-      for (const [text, n] of [[eWhole, 1], [ghText, 1], [kText, 1], [gText, 0], [hText, 0], [aText, 0], [bText, 0], [dText, 0], [abdText, 0], ...fTexts.map((t) => [t, 0])]) {
+      for (const [text, n] of [[eWhole, 1], [ghText, 1], [kText, 0], [gText, 0], [hText, 0], [aText, 0], [bText, 0], [dText, 0], [abdText, 0], ...fTexts.map((t) => [t, 0])]) {
         assert.equal(introductions(calls, text).length, n, `provider introductions of ${JSON.stringify(text.slice(0, 30))}`);
       }
       const raw = JSON.stringify(await control('Audit'));
@@ -319,7 +324,7 @@ try {
       const counts = await control('Counts');
       await stopPolling();
       assert.deepEqual(errors, []);
-      Object.assign(report, { counts, providerCalls: calls.length, mergedImages: 'exact, in order', copy: 'whole message', recall: 'whole message, one cancel', afterStop: 'pending, whole, recallable while the next turn is prepared', afterTake: 'own bubble' });
+      Object.assign(report, { counts, providerCalls: calls.length, mergedImages: 'exact, in order', copy: 'whole message', recall: 'whole message, one cancel', afterStop: 'one recallable slot, later draft retained, explicit resend', afterTake: 'own bubble' });
       reports.push(report);
     } finally {
       if (activePage && !activePage.isClosed()) await activePage.evaluate(() => window.stopFixturePolling?.()).catch(() => {});

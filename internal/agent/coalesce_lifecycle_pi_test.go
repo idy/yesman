@@ -87,15 +87,19 @@ func TestCoalesceFamilyEndsWithArchiveAndSameNameHireWithManagedPi(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.store.Archive("alice", func(yesmen.Yesman) error { return f.m.StopYesman("alice") }); err != nil {
+	archive, err := f.store.Archive("alice", func(yesmen.Yesman) error { return f.m.StopYesman("alice") })
+	if err != nil {
 		t.Fatal(err)
 	}
-	f.m.ForgetYesman("alice", old.HiredAt)
+	archivedReceipt := filepath.Join(archive, ".yesman", "sessions", "lead", "delivery.json")
+	archivedDrafts, err := readHumanDrafts(archivedReceipt)
+	if err != nil || archivedDrafts[idA].Text != "family alpha" || !slices.Equal(archivedDrafts[idA].Images, []Image{image}) || archivedDrafts[idB].Text != "family beta" {
+		t.Fatalf("archive did not retain originals: %v", err)
+	}
 	if _, err = f.store.Hire("alice"); err != nil {
 		t.Fatal(err)
 	}
-	// The archived generation keeps the family honestly: both inputs
-	// interrupted with their link, and no original payload on disk.
+	// The archived receipts keep the interrupted family links and no payload bytes.
 	var archived []byte
 	_ = filepath.WalkDir(filepath.Join(filepath.Dir(f.gate), "archive"), func(path string, d fs.DirEntry, err error) error {
 		if err == nil && d.Name() == "delivery.json" && strings.Contains(path, filepath.Join("sessions", "lead")) {
@@ -142,6 +146,20 @@ func TestCoalesceFamilyEndsWithArchiveAndSameNameHireWithManagedPi(t *testing.T)
 	idC := deliveryTestID(91003)
 	if c, err := f.m.SubmitCoalescing(ctx, fresh.ID, idC, "new generation", nil, fresh.Since); err != nil || c.MergedInto != "" {
 		t.Fatalf("new generation submit %+v %v", c, err)
+	}
+	// Service post-Archive cleanup can arrive after the new hire initializes.
+	f.m.ForgetYesman("alice", old.HiredAt)
+	f.m.mu.Lock()
+	used, accounted := f.m.recallBytes, f.m.agents[fresh.ID].recallBytes
+	f.m.mu.Unlock()
+	if used != accounted {
+		t.Fatalf("retired originals still charged: global %d, current agent %d", used, accounted)
+	}
+	if err := f.m.AckRecall(fresh.ID, idA, f.info.Since); err == nil {
+		t.Fatal("stale acknowledgement accepted")
+	}
+	if got, err := readHumanDrafts(archivedReceipt); err != nil || !slices.Equal(got[idA].Images, []Image{image}) {
+		t.Fatalf("replacement changed the sealed archive: %v", err)
 	}
 	waitFor(t, "new generation input taken", func() bool {
 		f.m.mu.Lock()
@@ -193,15 +211,15 @@ func TestCoalesceFamilyEndsWithNaturalExitWithManagedPi(t *testing.T) {
 	f.m.deliveryResponse(a, p, idB, "steer", response{Success: true, Data: json.RawMessage(`{"disposition":"queued","append":{"outcome":"appended","queueId":"` + stale.Items[0].QueueID + `"}}`)})
 	for _, id := range []string{idA, idB} {
 		d := f.receipt(id)
-		if d.State != "interrupted" || d.NativePending || d.CanCancel || d.CanRestore || d.OriginalPayload || d.Preparing {
+		if d.State != "interrupted" || d.NativePending || d.CanCancel || d.CanRestore || d.CanRecover != (id == idA) || d.OriginalPayload != (id == idA) || d.Preparing {
 			t.Fatalf("%s after the old watcher: %+v", id, d)
 		}
 	}
 	if b := f.receipt(idB); b.MergedInto != idA {
 		t.Fatalf("link lost %+v", b)
 	}
-	// Retrying either old ID returns its honest receipt and sends nothing;
-	// no payload is rebuilt from what the receipt keeps.
+	// Retrying either old ID returns its receipt without dispatch. Recovery
+	// reads the quarantined originals and never advertises native recall.
 	for _, id := range []string{idA, idB} {
 		text, images := "family beta", []Image(nil)
 		if id == idA {
@@ -211,8 +229,9 @@ func TestCoalesceFamilyEndsWithNaturalExitWithManagedPi(t *testing.T) {
 		if err != nil || d.State != "interrupted" {
 			t.Fatalf("retry %s: %+v %v", id, d, err)
 		}
-		if _, err := f.m.SubmissionPayload(f.info.ID, id, f.info.Since); err == nil {
-			t.Fatal("payload rebuilt after the exit")
+		payload, err := f.m.SubmissionPayload(f.info.ID, id, f.info.Since)
+		if err != nil || payload.Text != "family alpha\nfamily beta" || !slices.Equal(payload.Images, []Image{image}) {
+			t.Fatalf("quarantined originals: %+v %v", payload, err)
 		}
 		if _, err := f.m.CancelSubmission(ctx, f.info.ID, id, f.info.Since); err == nil {
 			t.Fatal("interrupted family recalled")

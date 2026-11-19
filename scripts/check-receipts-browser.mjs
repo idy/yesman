@@ -110,6 +110,7 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
     window.sent = [];
     window.payloadReads = [];
     window.promoted = [];
+    window.draftAcks = [];
     const save = () => sessionStorage.setItem("fixture", JSON.stringify(saved));
     const emit = (agent, data) => {
       if (data.type === "message_end") (saved.messages[agent] ??= []).push(data.message);
@@ -184,9 +185,16 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
             return { delivery: window.fixture.set(agent, id, "cancelled", { nativePending: false, canCancel: false, canPromote: false, canRestore: true }), payload: structuredClone(saved.payloads[id]) };
           }
           case "AckRecall": {
-            window.fixture.set(args[0], args[1], "cancelled", { canRestore: false, originalPayload: false, originalText: false });
+            const [agent, id, since] = args;
+            const state = receipt(agent, id).state;
+            window.draftAcks.push({ agent, id, since });
+            if (window.fixture.failDraftAck) throw new Error("fixture: unable to save the acknowledgement");
+            delete saved.payloads[id];
+            window.fixture.set(agent, id, state, { canRestore: false, canRecover: false, originalPayload: false, originalText: false });
             return {};
           }
+          case "Abort": window.fixture.aborted = args[0]; return {};
+          case "Answer": window.fixture.answer = args; return {};
           case "PromoteSubmission": {
             window.promoted.push(args[1]);
             return { delivery: window.fixture.set(args[0], args[1], "steering", { canPromote: false }) };
@@ -196,7 +204,7 @@ async function open(browser, { colorScheme = "light", width = 900, height = 900 
           case "NeedsYou": return { items: [] };
           // Lead conversations read their yesman's topics, to name messages sent from one.
           case "Topics": return [];
-          case "Update": return {};
+          case "RestartStatus": case "Update": return {};
           case "TakeFocus": return "";
           case "CopyValue": window.copied = args[0]; return {};
           case "Shortcuts": return {};
@@ -838,7 +846,7 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await mr(unknown).locator("img, button:not(:disabled)").count(), 0);
     for (const id of ids.filter((_, i) => i !== 3)) {
       assert.equal(await mr(id).locator(".delivery-status").innerText(), "Waiting · follow-up");
-      assert.equal(await mr(id).getByRole("button", { name: "Send now", exact: true }).count(), 1);
+      assert.equal(await mr(id).getByRole("button", { name: "Send now", exact: true }).count(), 0);
       assert.equal(await mr(id).getByRole("button", { name: "Cancel and edit", exact: true }).count(), 1);
     }
     // Reloaded: the same rows, originals read back beyond the display cache.
@@ -854,9 +862,10 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.equal(await mr(ids[0]).locator(".msg-user").evaluate((el) => el.firstChild.textContent), fullText);
     assert.deepEqual(await mr(ids[0]).locator("img").evaluateAll((els) => els.map((el) => el.src)), [`data:image/png;base64,${png}`, `data:image/png;base64,${png1}`]);
     for (const id of [ids[0], ids[3]]) assert((await mp.evaluate(() => window.payloadReads)).includes(id), "originals outside the display cache were not read");
-    await mr(ids[0]).getByRole("button", { name: "Send now", exact: true }).click();
+    // The page can still render an older runtime's native lane change.
+    await mp.evaluate(id => window.fixture.set('alice/lead', id, 'steering', { canPromote: false }), ids[0]);
     await frame(mp);
-    assert.deepEqual(await mp.evaluate(() => window.promoted), [ids[0]]);
+    assert.deepEqual(await mp.evaluate(() => window.promoted), []);
     assert.equal(await mr(ids[0]).locator(".delivery-status").innerText(), "Steering · waiting for input checkpoint");
     results[`${engine}-mixed-current`] = { ...afterReload, people: afterReload.people.length, rows: 14, payloadsRestored: 12, exactPromotion: ids[0] };
     await mp.locator("#scroll").evaluate((el) => (el.scrollTop = el.scrollHeight));
@@ -932,6 +941,96 @@ for (const [engine, type] of Object.entries({ chromium, webkit }).filter(([e]) =
     assert.deepEqual(mixed.unsupported, []);
     assert.deepEqual(mixed.outside, []);
     await mixed.context.close();
+
+    {
+    const repair = await open(browser);
+    const rp = repair.page;
+    rp.on('pageerror', e => console.error(e));
+    rp.setDefaultTimeout(8000);
+    const ri = rp.locator('.composer textarea');
+    const editor = rp.locator('.ask textarea');
+    const setAgent = (extra) => rp.evaluate((extra) => {
+      const agents = structuredClone(window.fixture.agents);
+      Object.assign(agents[0], extra);
+      window.fixture.agents.splice(0, agents.length, ...agents);
+      window.events.agents(structuredClone(agents));
+    }, extra);
+    const request = { id: 'draft-request', method: 'editor', title: 'Fixture editor request', prefill: 'Initial answer' };
+    await setAgent({ status: 'waiting', dialog: request });
+    await editor.fill('Answer draft');
+    await ri.fill('合成草稿');
+    await ri.evaluate(el => {
+      el.setSelectionRange(1, 3);
+      window.composingNode = el;
+      window.requestEditor = document.querySelector('.ask textarea');
+      el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    });
+    await setAgent({ detail: 'A status update while typing' });
+    await rp.getByText('A status update while typing', { exact: true }).waitFor();
+    assert.deepEqual(await ri.evaluate(el => [el === window.composingNode, el._composing, document.activeElement === el, el.selectionStart, el.selectionEnd]), [true, true, true, 1, 3]);
+    assert.equal(await editor.evaluate(el => el === window.requestEditor && el.value === 'Answer draft'), true);
+    await shot(rp, 'editor-during-composition', engine);
+    await editor.focus();
+    await editor.evaluate(el => el.setSelectionRange(2, 5));
+    await setAgent({ detail: 'Another status update' });
+    assert.deepEqual(await editor.evaluate(el => [el === window.requestEditor, document.activeElement === el, el.selectionStart, el.selectionEnd]), [true, true, 2, 5]);
+    await rp.locator('.ask').getByRole('button', { name: 'Submit' }).click();
+    assert.deepEqual(await rp.evaluate(() => window.fixture.answer), ['alice/lead', 'draft-request', { value: 'Answer draft' }]);
+    await rp.getByRole('button', { name: 'Stop', exact: true }).click();
+    assert.equal(await rp.evaluate(() => window.fixture.aborted), 'alice/lead');
+    await setAgent({ status: 'idle', dialog: null, detail: '' });
+    assert.equal(await rp.locator('.ask textarea').count(), 0);
+    await rp.getByRole('button', { name: 'Send', exact: true }).waitFor();
+    assert.equal(await ri.evaluate(el => el === window.composingNode && el._composing), true);
+    await ri.evaluate(el => el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+    await rp.getByRole('button', { name: 'Send', exact: true }).waitFor();
+
+    const text = 'Retained draft retry';
+    await ri.fill(text);
+    const trySend = async (state, extra = {}) => {
+      const index = await rp.evaluate(() => window.sent.length);
+      await ri.press('Enter');
+      await rp.waitForFunction(n => window.sent.length > n, index);
+      const id = await rp.evaluate(n => window.sent[n].id, index);
+      await rp.evaluate(({ id, state, extra }) => window.fixture.ack('alice/lead', id, state, extra), { id, state, extra });
+      await rp.waitForFunction(() => !document.querySelector('.composer textarea').readOnly);
+      return id;
+    };
+    const recoverable = { originalPayload: true, originalText: true, canRecover: true };
+    const first = await trySend('failed', { ...recoverable, error: 'First refusal' });
+    const second = await trySend('failed', { ...recoverable, error: 'Second refusal' });
+    const unsure = await trySend('unconfirmed', recoverable);
+    const rowOf = id => rp.locator(`[data-delivery="${id}"]`);
+    for (const id of [first, second, unsure]) await rowOf(id).getByRole('button', { name: 'Recover draft', exact: true }).waitFor();
+    assert.deepEqual(await rp.evaluate(() => window.draftAcks), []);
+    assert.equal(await ri.inputValue(), text);
+    await rp.evaluate(id => {
+      window.fixture.failDraftAck = true;
+      window.fixture.set('alice/lead', id, 'accepted');
+    }, unsure);
+    const confirmed = await trySend('accepted');
+    assert.equal(confirmed, unsure, 'an ambiguous retry keeps its immutable ID');
+    assert.equal(await ri.inputValue(), '');
+    await rowOf(first).getByRole('button', { name: 'Recover draft', exact: true }).waitFor();
+    assert.deepEqual((await rp.evaluate(() => window.draftAcks)).map(ack => ack.id), [first, second]);
+    await rp.getByText('Message sent, but the earlier draft could not be cleared.', { exact: false }).first().waitFor();
+    await rp.evaluate(() => (window.fixture.failDraftAck = false));
+    for (const id of [first, second]) {
+      await rowOf(id).getByRole('button', { name: 'Hide', exact: true }).click();
+      await rowOf(id).waitFor({ state: 'detached' });
+    }
+    await ri.fill('Another unchanged draft');
+    const later = await trySend('failed', { ...recoverable, error: 'Fixture refusal' });
+    await trySend('accepted');
+    await rowOf(later).waitFor({ state: 'detached' });
+    assert.equal((await rp.evaluate(() => window.draftAcks)).at(-1).id, later);
+    assert.equal(await rp.evaluate(id => Object.hasOwn(window.fixture.saved.payloads, id), later), false);
+    assert.deepEqual(repair.errors, []);
+    assert.deepEqual(repair.outside, []);
+    assert.deepEqual(repair.unsupported, []);
+    results[`${engine}-steer-repair`] = { composition: 'same node, caret, editor reply and Stop', retries: 'failed and ambiguous retained, persisted acknowledgements required', errors: repair.errors };
+    await repair.context.close();
+    }
     console.log(engine, "finished receipts draw nothing/messages and replies whole/no labels/repeats keep place, focus and draft/sent as sent/states/same text/late native/retry/edit/refusal stays/hide and focus/unchanged resend/late refusal after reload/hidden but waiting again/hidden then tried again shows its outcome/stale callbacks keep hidden/images/agents/palette/keys/Settings/reload equals live/i18n/dark/narrow/local icons/cache8/queue actions/taken one by one/late revision/interruption until hidden/restore PASS");
   } finally {
     await browser.close();
