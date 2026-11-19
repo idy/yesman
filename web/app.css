@@ -817,13 +817,26 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .files-note { display: grid; gap: 6px; justify-items: start; padding: 32px 24px; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.55; }
 .files-note strong { color: var(--mds-ink); font-size: var(--mds-text-body); font-weight: 400; }
 .files-notice { position: sticky; left: 0; margin: 0; padding: 6px 14px; border-bottom: 1px solid var(--mds-warn-line); background: var(--mds-warn-bg); color: var(--mds-warn-detail); font-size: var(--mds-text-caption); }
-.files-md { --files-md-inset: 28px; padding: 20px var(--files-md-inset) 40px; }
-/* Keep the prose measure, but let tables use the full reader. Size each
-   column from its content up to a wrapping measure, even in a narrow pane. */
-.files-md > :not(.md-table) { max-inline-size: calc(78ch - 2 * var(--files-md-inset)); }
+.files-md-reader { container-type: inline-size; }
+.files-md { --files-md-inset: 28px; max-width: 78ch; padding: 20px var(--files-md-inset) 40px; }
+/* Only top-level tables break out of the article's original prose measure. */
+.files-md > .files-md-table { inline-size: calc(100cqi - 2 * var(--files-md-inset)); }
+.files-md-table { position: relative; }
+.md * + .files-md-table { margin-top: .7em; }
 .files-md .md-table table { inline-size: max-content; }
 .files-md .md-table :is(th, td) { max-inline-size: 21ch; }
 .files-md .md-table:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: 2px; }
+/* Place each cue outside the scroller, in the reader's existing inset. */
+.files-md-table-cue { display: none; position: absolute; inset-block: 0; inline-size: var(--files-md-inset); pointer-events: none; }
+.files-md-table-cue--left { right: 100%; }
+.files-md-table-cue--right { left: 100%; }
+.files-md-table[data-more-left] > .files-md-table-cue--left,
+.files-md-table[data-more-right] > .files-md-table-cue--right { display: block; }
+.files-md-table-cue .mds-icon {
+  position: sticky; top: 8px; display: grid; place-items: center; margin: 5px auto 0;
+  width: 18px; height: 18px; font-size: 18px; color: var(--mds-accent-ink);
+}
+.files-md-table-cue--left .mds-icon { transform: rotate(180deg); }
 .files-image { display: grid; justify-items: center; gap: 10px; margin: 0; padding: 28px 24px; }
 .files-image img { max-width: 100%; height: auto; border: 1px solid var(--mds-line); border-radius: var(--mds-radius-sm); background: var(--mds-code); }
 .files-image figcaption { color: var(--mds-muted); font-size: var(--mds-text-caption); font-variant-numeric: tabular-nums; }

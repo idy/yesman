@@ -230,7 +230,11 @@ async function tablesPart(page, engine) {
     '| `jp-belt-sushi` | 日式旋转寿司 | Japanese Conveyor-Belt Sushi | 寿司、小食和甜品沿传送带送到餐桌。客人可以直接挑选，也可以通过桌上的屏幕点餐。适合想尝试多种小份菜的朋友。 | Small plates of sushi, snacks and desserts pass each table on a conveyor belt. Pick what looks good or use the screen to order something fresh. The small servings make it easy to try several things. | [候选菜单 / Draft menu](menu.md#menu) |', '',
     '## 快速参考 / Quick reference', '',
     '| 餐段 | Hours |', '| --- | --- |', '| 午餐 | 11:30–14:00 |', '',
-    `This paragraph keeps its normal reading width. ${'UnbrokenProseToken'.repeat(8)}`,
+    `This paragraph keeps its normal reading width. ${'UnbrokenProseToken'.repeat(8)}`, '',
+    '> The comparison also preserves the reading measure and default margins of quotations.', '',
+    '```text', 'archived'.repeat(70), '```', '',
+    '- Read the evidence independently before turning on the next service.',
+    '- Confirm that the status is stable after the change.',
   ].join('\n');
   await page.evaluate((text) => Object.assign(filesFixture.alice, {
     '.yesman/knowledge/draft.md': text,
@@ -241,6 +245,23 @@ async function tablesPart(page, engine) {
   const reader = page.locator('#files-view .files-md');
   const scroller = reader.locator('.md-table').first();
   const compact = reader.locator('.md-table').last();
+  const frame = scroller.locator('..');
+  const assertCues = async (left, right) => {
+    const matches = ([e, sides]) => ['left', 'right'].every((side, i) => {
+      const cue = e.querySelector(`.files-md-table-cue--${side} .mds-icon`);
+      return cue && Boolean(cue.getClientRects().length) === sides[i];
+    });
+    await page.waitForFunction(matches, [await frame.elementHandle(), [left, right]]);
+    assert.equal(await frame.evaluate(e => {
+      const tableBox = e.querySelector('.md-table').getBoundingClientRect();
+      return [...e.querySelectorAll('.files-md-table-cue')].every(cue => {
+        if (!cue.getClientRects().length) return true;
+        const box = cue.getBoundingClientRect();
+        return getComputedStyle(cue).pointerEvents === 'none' &&
+          (box.right <= tableBox.left || box.left >= tableBox.right);
+      });
+    }), true, 'indicators leave the cells, links and scroll surface unobstructed');
+  };
   const visibleWidth = (element) => element.evaluate(e => [e.clientWidth, e.scrollWidth]);
   const noOuterOverflow = () => page.evaluate(() => [document.scrollingElement, document.querySelector('#files'), document.querySelector('#files-view')]
     .every(e => e.scrollWidth === e.clientWidth));
@@ -251,11 +272,15 @@ async function tablesPart(page, engine) {
     assert.ok(width > space, 'the wide table alone can scroll');
     assert.equal(await noOuterOverflow(), true, 'no horizontal page, pane or reader scroll');
     assert.equal(await compact.getAttribute('tabindex'), null, 'compact tables add no tab stop');
+    assert.equal(await compact.locator('..').locator('.files-md-table-cue:visible').count(), 0, 'compact tables do not show cues');
     assert.ok((await box(compact.locator('table'))).w < (await box(compact)).w, 'compact tables size to their content');
   };
   await page.locator('[data-info-entry="knowledge"]').click();
   await page.locator('#files-tree-list [data-path=".yesman/knowledge/draft.md"]').click();
   await assertNarrow();
+  // Simulate overlay scrollbar chrome disappearing while the table remains scrollable.
+  await page.addStyleTag({content: '.files-md .md-table { scrollbar-width: none } .files-md .md-table::-webkit-scrollbar { display: none }'});
+  await assertCues(false, true);
   assert.deepEqual(await scroller.getByRole('columnheader').allTextContents(), headers);
   assert.equal(await scroller.getByRole('cell').count(), 6);
   assert.equal(await scroller.getByRole('cell').first().evaluate(e => getComputedStyle(e).textAlign), 'left');
@@ -272,8 +297,11 @@ async function tablesPart(page, engine) {
   assert.equal(await scroller.evaluate(e => document.activeElement === e), true, 'Tab reaches the scrollable region');
   await page.keyboard.press('ArrowRight');
   await page.waitForFunction(() => document.querySelector('#files-view .md-table').scrollLeft > 0);
+  await assertCues(true, true);
   const menu = scroller.getByRole('link', { name: '候选菜单 / Draft menu' });
   assert.equal(await menu.getAttribute('href'), 'menu.md#menu');
+  await scroller.evaluate(el => { el.scrollLeft = el.scrollWidth; });
+  await assertCues(true, false);
   await menu.focus();
   await shot(page, `${engine}-knowledge-table-narrow-menu`);
   await page.keyboard.press('Enter');
@@ -288,11 +316,33 @@ async function tablesPart(page, engine) {
     const el = document.querySelector('#files-view .md-table');
     return el?.clientWidth && el.scrollWidth === el.clientWidth && !el.hasAttribute('tabindex');
   });
+  await assertCues(false, false);
   assert.equal(await noOuterOverflow(), true);
   assert.equal(await scroller.locator('table').evaluate(e => e.scrollWidth < e.parentElement.clientWidth), true);
+  const [actual, legacy] = await reader.evaluate(article => {
+    const blocks = [...article.querySelectorAll(':scope > :is(h3, h4, p, blockquote, pre, ul)')];
+    const reference = document.createElement('article');
+    reference.className = 'md';
+    reference.style.cssText = 'position:absolute; visibility:hidden; width:100%; max-width:78ch; padding:20px 28px 40px';
+    reference.append(...blocks.map(block => block.cloneNode(true)));
+    article.after(reference);
+    const measures = (els, x) => Array.from(els, el => {
+      const box = el.getBoundingClientRect();
+      return [el.tagName, box.x - x, box.width, box.height, getComputedStyle(el).marginInline];
+    });
+    const result = [measures(blocks, article.getBoundingClientRect().x), measures(reference.children, reference.getBoundingClientRect().x)];
+    reference.remove();
+    return result;
+  });
+  assert.deepEqual(actual, legacy, 'all prose blocks retain the original article measure including margins');
   await shot(page, `${engine}-knowledge-table-wide`);
   await page.setViewportSize({ width: 1080, height: 840 });
   await assertNarrow();
+  await assertCues(false, true);
+  await page.setViewportSize({ width: 1920, height: 980 });
+  await assertCues(false, false);
+  assert.equal(await scroller.getAttribute('tabindex'), null, 'widening the existing table removes the focus stop');
+  await page.setViewportSize({ width: 1080, height: 840 });
   await page.getByRole('button', { name: 'Show the conversation again' }).click();
 
   await page.locator('.files-crumb--scope').click();
