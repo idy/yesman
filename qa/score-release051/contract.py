@@ -1,5 +1,6 @@
 """Final public .50 -> final draft .51 persistence contract; no launch code."""
-import hashlib,json
+import datetime
+import hashlib,json,re
 from pathlib import Path
 BASE_SOURCE='87c3bc4faa0a55313cd68be77058fea166beca82'
 BASE_RELEASE_ID=450776814
@@ -22,6 +23,22 @@ def files(data):
  assert (data/'settings.json').read_bytes()==SETTINGS,'settings bytes changed'
  assert (data/'model-score-patch.csv').read_bytes()==CSV,'CSV bytes changed'
  return {'settingsSHA256':sha(SETTINGS),'csvSHA256':sha(CSV)}
+def catalog_read_at(crew):
+ value=crew.get('readAt')
+ assert isinstance(value,str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})',value), 'missing or invalid catalog readAt'
+ parsed=datetime.datetime.fromisoformat(value.replace('Z','+00:00'))
+ assert parsed.tzinfo is not None and parsed.year>1, 'zero catalog readAt'
+ return value
+
+def stable_crew(crew):
+ catalog_read_at(crew)
+ # readAt is the catalog observation time; every other field stays compared.
+ return {key:value for key,value in crew.items() if key!='readAt'}
+
+def verify_cold(new,cold):
+ assert stable_crew(new['crew'])==stable_crew(cold['crew']) and new['rows']==cold['rows'], 'cold reopened effective values changed'
+ return {'new':catalog_read_at(new['crew']),'cold':catalog_read_at(cold['crew'])}
+
 def verify_page(p,stage,data,source):
  assert stage in ['old','new','cold'] and p['ok'] and not p['errors'],p
  assert p['visibility']=='visible' and 'AppleWebKit/' in p['userAgent']
@@ -29,7 +46,8 @@ def verify_page(p,stage,data,source):
  assert p['state']['home']==str(data) and not p['state']['agents'] and not p['state']['yesmen']
  assert p['settings']['settingsFile']==str(data/'settings.json') and p['settings']['appearance']=='dark' and p['settings']['autoFetch']==0
  assert p['about']['version']==('0.1.50' if stage=='old' else '0.1.51') and p['about']['revision']==source
- c=p['crew'];assert c['date']=='2026-11-18' and not c.get('error') and c['yesman']==KEYS[0]
+ c=p['crew'];catalog_read_at(c)
+ assert c['date']=='2026-11-18' and not c.get('error') and c['yesman']==KEYS[0]
  assert [x['key'] for x in c['members']]==KEYS and len(c['models'])==3
  expected=BASE_VALUES if stage=='old' else FINAL_VALUES
  for i,w in enumerate(expected):
@@ -49,7 +67,10 @@ def verify_page(p,stage,data,source):
   assert partial['score']['speed']==37.125 and partial['score']['minutesPerTask']==0
   assert partial['score'].get('coding') is None and partial['score'].get('costPerTask') is None
   assert partial['fieldSources']=={'speed':'patch','minutesPerTask':'patch'}
- rows=p['rows'];assert [r['key'] for r in rows]==KEYS and all(len(r['metrics'])==5 for r in rows)
+ rows=p['rows'];assert [r['key'] for r in rows]==KEYS
+ assert [len(r['metrics']) for r in rows]==([5,5,5,5,0] if stage=='old' else [5]*5)
+ if stage=='old':
+  assert 'No scores: give yours' in rows[4]['text'] and not c['members'][4].get('source')
  if stage!='old':
   assert rows[0]['metrics'][0].startswith('0') and 'Your CSV' in rows[0]['metrics'][0]
   assert '60.7 tok/s' in rows[0]['metrics'][1] and 'Inherited from AA' in rows[0]['metrics'][1]

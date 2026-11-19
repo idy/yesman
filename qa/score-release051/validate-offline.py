@@ -77,9 +77,10 @@ def main():
    if patch:m.update(fallbackSource='aa',fieldSources={f:('patch' if (i==0 and f in ['intelligence','costPerTask']) or (i==2 and f in ['speed','minutesPerTask']) else 'aa') for f in FIELDS})
    members.append(m)
   members.append({'key':KEYS[4],'source':'patch','score':{'intelligenceMissing':True,'speed':37.125,'minutesPerTask':0},'fieldSources':{'speed':'patch','minutesPerTask':'patch'}} if stage!='old' else {'key':KEYS[4]})
-  crew={'date':'2026-11-18','yesman':KEYS[0],'models':[{}, {}, {}],'members':members}
+  crew={'date':'2026-11-18','readAt':'2026-11-19T03:00:00.123456Z','yesman':KEYS[0],'models':[{}, {}, {}],'members':members}
   if stage!='old':crew['patch']={'path':str(data/'model-score-patch.csv'),'rows':3,'enabled':True}
-  rows=[{'key':k,'metrics':['value']*5} for k in KEYS]
+  rows=[{'key':k,'text':'Scored row','metrics':['value']*5} for k in KEYS]
+  if stage=='old':rows[4].update(text='Patch only · No scores: give yours',metrics=[])
   if stage!='old':
    rows[0]['metrics'][0]='0 Your CSV';rows[0]['metrics'][1]='60.7 tok/s Inherited from AA';rows[2]['metrics'][1]='123.5 tok/s Your CSV';rows[2]['metrics'][4]='0 min Your CSV';rows[4]['metrics'][0]='—';rows[4]['metrics'][1]='37.13 tok/s'
   return {'ok':True,'errors':[],'visibility':'visible','userAgent':'AppleWebKit/offline-synthetic','calls':['Yesman.'+m for m in ['State','Settings','About','Update','Crew']],'state':{'home':str(data),'agents':[],'yesmen':[]},'settings':{'settingsFile':str(data/'settings.json'),'appearance':'dark','autoFetch':0},'about':{'version':'0.1.50' if stage=='old' else '0.1.51','revision':OLD_SOURCE if stage=='old' else candidate['source']},'crew':crew,'rows':rows}

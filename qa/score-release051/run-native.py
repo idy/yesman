@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Hosted-only .50 -> .51 full archive replacement and .51 cold-open proof."""
 import http.server,json,os,pathlib,platform,shlex,shutil,signal,subprocess,sys,threading,time,uuid
-from validation import OLD,validate_binding,validate_transfer,extract_bundle,inventory,require,sha
-from contract import seed,files,verify_page
+from validation import OLD,validate_binding,validate_transfer,extract_bundle,inventory,image_identity,observe_install,require,sha
+from contract import seed,files,verify_page,verify_cold,catalog_read_at
 KIT=pathlib.Path(__file__).resolve().parent
 REPO=KIT.parents[1]
 sys.path.insert(0,str(REPO/'scripts'))
@@ -47,9 +47,10 @@ class Collector(http.server.BaseHTTPRequestHandler):
     self.send_response(200);self.send_header('Access-Control-Allow-Origin','*');self.end_headers();self.server.received.set()
   except (ValueError,UnicodeError):self.send_error(400)
 
-def run_phase(stage,spec,target,web,root,data,helper,catalog,expected_inventory,proof):
+def run_phase(stage,spec,target,web,root,data,helper,catalog,expected_inventory,anchor,shim_required,proof):
  e=root/'evidence';executable=target/'Contents/MacOS/Yes Man'
- require(inventory(target)==expected_inventory,'bundle changed before launch')
+ if stage=='cold':save(e/'shim-before-cold.json',observe_install(target,data,expected_inventory,anchor,shim_required))
+ else:require(inventory(target)==expected_inventory and image_identity(executable)==anchor,'bundle changed before launch')
  before=files(data);server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Collector)
  server.token=uuid.uuid4().hex;server.received=threading.Event();server.payload={};server.blocked=[];server.report_lock=threading.Lock()
  thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
@@ -68,33 +69,51 @@ def run_phase(stage,spec,target,web,root,data,helper,catalog,expected_inventory,
   with (e/('app-'+stage+'.log')).open('w') as log:
    process=subprocess.Popen([str(executable)],cwd=root,env=env,stdout=log,stderr=subprocess.STDOUT)
    phase['pid']=process.pid;save(e/('phase-'+stage+'.json'),phase)
-   require(server.received.wait(45),'No real WebKit/Go observer report')
+   received=server.received.wait(45)
+   if received:
+    report=dict(server.payload);save(e/('page-'+stage+'.json'),report)
+   require(received,'No real WebKit/Go observer report')
    require(process.poll() is None,'App exited or handed off to another instance')
-   report=dict(server.payload);save(e/('page-'+stage+'.json'),report)
    verify_page(report,stage,data,spec['source'])
-   actual=json.loads(subprocess.check_output([str(helper),str(process.pid)],env=env,text=True,timeout=10))
+   phase['catalogReadAt']=catalog_read_at(report['crew'])
+   raw=subprocess.check_output([str(helper),str(process.pid)],env=env,text=True,timeout=10)
+   (e/('process-'+stage+'.json')).write_text(raw)
+   actual=json.loads(raw);phase['actualProcess']=actual;save(e/('phase-'+stage+'.json'),phase)
    require(actual['bundleIdentifier']=='dev.idy.yesman' and actual['localizedName']=='Yes Man','native App identity')
    require(pathlib.Path(actual['executable']).resolve()==executable.resolve(),'native executable path')
    require(any(w['onScreen'] and w['bounds'].get('Width',0)>100 and w['bounds'].get('Height',0)>100 for w in actual['windows']),'native visible window')
    require(sha(pathlib.Path(actual['executable']).read_bytes())==spec['binarySHA256'],'actual native image')
    files(data);process.send_signal(signal.SIGTERM);code=process.wait(timeout=15)
-   phase['exitCode']=code;require(code==0,'normal shutdown required')
-   require(not json.loads(subprocess.check_output([str(helper),str(process.pid)],env=env,text=True,timeout=10))['windows'],'window remains after exit')
+   phase['exitCode']=code;save(e/('phase-'+stage+'.json'),phase);require(code==0,'normal shutdown required')
+   raw=subprocess.check_output([str(helper),str(process.pid)],env=env,text=True,timeout=10)
+   (e/('postexit-process-'+stage+'.json')).write_text(raw)
+   require(not json.loads(raw)['windows'],'window remains after exit')
    process=None
-   require(inventory(target)==expected_inventory,'bundle changed after shutdown')
+   phase['shim']=observe_install(target,data,expected_inventory,anchor,shim_required)
+   save(e/('shim-after-'+stage+'.json'),phase['shim'])
    subprocess.run(['codesign','--verify','--deep','--strict',str(target)],env=env,check=True,timeout=20)
    phase.update(actualProcess=actual,after=files(data),passed=True)
  except BaseException as ex:
   phase['error']=type(ex).__name__+': '+str(ex)
+  save(e/('phase-'+stage+'.json'),phase)
   raise
  finally:
-  if process is not None and process.poll() is None:
-   process.send_signal(signal.SIGTERM)
-   try:process.wait(timeout=5)
-   except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5);phase['forcedCleanup']=True
-  server.shutdown();server.server_close();thread.join(timeout=3);require(not thread.is_alive(),'observer thread drain')
+  cleanup_errors=[]
+  try:
+   if process is not None and process.poll() is None:
+    process.send_signal(signal.SIGTERM)
+    try:phase['cleanupExitCode']=process.wait(timeout=5)
+    except subprocess.TimeoutExpired:process.kill();phase['cleanupExitCode']=process.wait(timeout=5);phase['forcedCleanup']=True
+  except BaseException as ex:cleanup_errors.append('process: '+type(ex).__name__+': '+str(ex))
+  for label,action in [('server shutdown',server.shutdown),('server close',server.server_close),('thread join',lambda:thread.join(timeout=3))]:
+   try:action()
+   except BaseException as ex:cleanup_errors.append(label+': '+type(ex).__name__+': '+str(ex))
+  if thread.is_alive():cleanup_errors.append('observer thread did not drain')
+  phase['cleanupErrors']=cleanup_errors
+  if cleanup_errors:phase['passed']=False
   phase['blockedNetwork']=server.blocked;save(e/('phase-'+stage+'.json'),phase)
   proof['phases'].append(phase);save(e/'proof.json',proof)
+  if cleanup_errors and 'error' not in phase:raise RuntimeError('phase cleanup failed: '+str(cleanup_errors))
  return report
 
 def main():
@@ -141,17 +160,24 @@ def main():
    inventories[stage]=inventory(app);save(e/('bundle-inventory-'+stage+'.json'),inventories[stage]);bundles[stage]=app
   data=root/'data';seed(data);proof['before']=files(data);save(e/'proof.json',proof)
   target=root/'install/yesman.app';shutil.copytree(bundles['old'],target,symlinks=True)
+  old_anchor=image_identity(target/'Contents/MacOS/Yes Man');shim_required=shutil.which('gh') is not None
+  proof['ghAvailable']=shim_required;save(e/'proof.json',proof)
   subprocess.run(['codesign','--verify','--deep','--strict',str(target)],env=buildenv,check=True,timeout=20)
-  old=run_phase('old',OLD,target,folder/'old/web',root,data,helper,catalog,inventories['old'],proof)
+  old=run_phase('old',OLD,target,folder/'old/web',root,data,helper,catalog,inventories['old'],old_anchor,shim_required,proof)
   # Only this run's normally exited, verified private image is renamed.
-  require(inventory(target)==inventories['old'] and files(data)==proof['before'],'pre-replacement state')
+  save(e/'shim-before-replacement.json',observe_install(target,data,inventories['old'],old_anchor,shim_required))
+  require(files(data)==proof['before'],'pre-replacement profile changed')
   backup=root/'install/previous-0.1.50.app';target.rename(backup)
   shutil.copytree(bundles['new'],target,symlinks=True)
-  require(inventory(target)==inventories['new'] and inventory(backup)==inventories['old'],'full package copy identity')
+  require(inventory(target)==inventories['new'],'full package copy identity')
+  new_anchor=image_identity(target/'Contents/MacOS/Yes Man')
+  save(e/'old-shim-before-new-start.json',observe_install(backup,data,inventories['old'],old_anchor,shim_required))
   subprocess.run(['codesign','--verify','--deep','--strict',str(target)],env=buildenv,check=True,timeout=20)
-  new=run_phase('new',b['candidate'],target,folder/'new/web',root,data,helper,catalog,inventories['new'],proof)
-  cold=run_phase('cold',b['candidate'],target,folder/'new/web',root,data,helper,catalog,inventories['new'],proof)
-  require(new['crew']==cold['crew'] and new['rows']==cold['rows'],'cold reopened effective values changed')
+  new=run_phase('new',b['candidate'],target,folder/'new/web',root,data,helper,catalog,inventories['new'],new_anchor,shim_required,proof)
+  # Replacing the shim must release the retained old image's only runtime link.
+  require(inventory(backup)==inventories['old'] and image_identity(backup/'Contents/MacOS/Yes Man')==old_anchor,'old image changed or retained unknown link')
+  cold=run_phase('cold',b['candidate'],target,folder/'new/web',root,data,helper,catalog,inventories['new'],new_anchor,shim_required,proof)
+  proof['coldCatalogReadAt']=verify_cold(new,cold)
   require(len({p['pid'] for p in proof['phases']})==3 and all(p['passed'] and p['exitCode']==0 for p in proof['phases']),'three real processes/normal exits')
   catalog_calls=[json.loads(l) for l in (e/'catalog.jsonl').read_text().splitlines()]
   require(catalog_calls and all(r['method']=='get_available_models' for r in catalog_calls),'catalog-only process')

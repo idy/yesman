@@ -115,7 +115,7 @@ jobs:
             dest.mkdir(mode=0o700)
             t.extractall(dest,members=members,filter='data')
            return dest/'yesman.app'
-          def inventory(root,files_only=False):
+          def inventory(root,files_only=False,linked_main=None):
            require(root.is_dir() and not root.is_symlink(),'inventory root')
            result={}
            for p in sorted(root.rglob('*')):
@@ -123,11 +123,39 @@ jobs:
             if stat.S_ISLNK(st.st_mode):
              require(not files_only,'linked web file');result[n]={'type':'link','mode':mode,'target':os.readlink(p)}
             elif stat.S_ISREG(st.st_mode):
-             require(st.st_nlink==1,'hard-linked file');h=sha(p.read_bytes());result[n]=h if files_only else {'type':'file','mode':mode,'sha256':h}
+             require(st.st_nlink==1 or (not files_only and n=='Contents/MacOS/Yes Man' and linked_main==[st.st_dev,st.st_ino] and st.st_nlink==2),'hard-linked file')
+             h=sha(p.read_bytes());result[n]=h if files_only else {'type':'file','mode':mode,'sha256':h}
             elif stat.S_ISDIR(st.st_mode):
              if not files_only:result[n]={'type':'directory','mode':mode}
             else:raise ValueError('unexpected filesystem entry')
            return result
+
+          def image_identity(path):
+           st=path.lstat();require(stat.S_ISREG(st.st_mode) and st.st_uid==os.getuid(),'image type/owner')
+           return {'device':st.st_dev,'inode':st.st_ino,'owner':st.st_uid,'mode':stat.S_IMODE(st.st_mode),'sha256':sha(path.read_bytes())}
+
+          def observe_install(root,data,expected,anchor,shim_required):
+           """Postlaunch exception only for the proven private gh alias of this image."""
+           main=root/'Contents/MacOS/Yes Man'
+           require(image_identity(main)==anchor,'installed main identity replaced or changed')
+           for parent in [data,data/'.runtime',data/'.runtime/github-app-gh',data/'.runtime/github-app-gh/bin']:
+            if parent.exists() or parent.is_symlink():
+             st=parent.lstat();require(stat.S_ISDIR(st.st_mode) and st.st_uid==os.getuid(),'private shim parent type/owner')
+           shim=data/'.runtime/github-app-gh/bin/gh';linked=None;record={'kind':'absent','path':str(shim),'main':anchor,'mainLinks':main.stat().st_nlink}
+           if shim.exists() or shim.is_symlink():
+            identity=image_identity(shim);st=shim.lstat();ms=main.lstat()
+            require(identity['sha256']==anchor['sha256'],'shim image bytes differ')
+            if (st.st_dev,st.st_ino)==(ms.st_dev,ms.st_ino):
+             require(st.st_nlink==ms.st_nlink==2 and identity==anchor,'unknown main hardlink or changed shim')
+             linked=[ms.st_dev,ms.st_ino];record.update(kind='exact-main-hardlink',alias=identity,aliasLinks=st.st_nlink)
+            else:
+             # InstallShim's explicit cross-volume copy fallback uses mode 0700.
+             require(st.st_nlink==ms.st_nlink==1 and identity['mode']==0o700,'unknown shim link or copy mode')
+             record.update(kind='separate-copy',alias=identity,aliasLinks=st.st_nlink)
+           else:
+            require(not shim_required and main.stat().st_nlink==1,'expected private shim missing or unknown main link')
+           require(inventory(root,linked_main=linked)==expected,'launched bundle inventory changed')
+           return record
 
           """Inlined into the privileged no-checkout job. Only GH GET/download and data writes."""
           import io,subprocess,sys

@@ -1,5 +1,12 @@
 # Final .50 to .51 score CSV package acceptance
 
+This local correction candidate addresses QA051-1/2/3 and received-operand
+retention. Its `NEW_TREE` still names the earlier metadata tree; it is a
+**provisional source review candidate, not deployable final-release binding**.
+After PR112's fixture repair and independent release readiness are adopted,
+freeze the actual final tree through another normal reviewed QA commit before
+any push or dispatch. No .51 artifact or native PASS is claimed here.
+
 QA-only runner for a disposable GitHub-hosted ARM64 Mac. It never builds,
 modifies or resigns an application, imports credentials, asks for permissions,
 or uses a workstation profile. Product source and metadata PR112 are unchanged.
@@ -49,8 +56,16 @@ path, retaining one fresh profile and external data directory. Seed the
 compatible CSV and `scorePatchDisabled:false` outside the bundle. .50 has no
 patch import/application support: its real Models/Go values must show the real
 unpatched AA baseline. After normal .50 exit, retain its old bundle and copy the
-exact .51 bundle with `symlinks=True`. Strict signing and full entry type/mode/
-link/byte inventories remain unchanged. Start .51, then normal exit and cold
+exact .51 bundle with `symlinks=True`. Strict download/extraction admission
+requires single-link regular files. Postlaunch observation qualifies only the
+exact private `<data>/.runtime/github-app-gh/bin/gh` alias of the independently
+hashed main image: either precisely two links with equal device/inode/owner/mode
+and bytes, or the separate mode-0700 copy fallback with both files single-linked.
+The main image's captured device/inode/owner/mode/hash must remain stable. Unknown
+links, changed aliases and replacement images fail. Record old startup, old shim
+before replacement, new shim after startup and cold reopen; the old retained
+image must return to single-link admission after the new shim is installed.
+Start .51, then normal exit and cold
 reopen .51 without replacing its image again.
 
 All three real native processes must show visible windows and return the exact
@@ -68,6 +83,13 @@ and 4.9 minutes. Sol high overrides speed to 123.5 and time to zero, inheriting
 54.9 intelligence, 49.4% coding and 0.56 USD. Both xhigh options are untouched
 effort controls; the partial CSV-only row retains unavailable intelligence,
 37.125 tok/s and explicit zero minutes. Values and bytes must survive cold open.
+The old unscored fifth row must have zero metric cells and its ordinary unscored
+status; the new/cold partial score must have all five cells. Validate and retain
+each catalog `readAt` timestamp separately; cold equality excludes only that
+observation time and keeps every other Crew field and complete displayed row.
+Received pages and raw process/window operands are persisted before their
+assertions, with the first failure and independent cleanup outcomes retained.
+Acquisition/pre-root failures continue to be recorded in job logs.
 
 Both actual releases contain the same AA snapshot. Changed embedded values are
 covered only by the accepted R2 staged test, not this release pair. This runner
@@ -83,6 +105,9 @@ acquisition workflow exactly. `validate-offline.py PRIVATE_TASK_ROOT` checks
 binding, acquisition refusal, archive safety, contract discrimination, credential
 filtering and hosted-only admission. Its root needs the exact .50 archive and
 manifest under `official050/`; it extracts/copies them and calls codesign only.
-It never calls the native entry with fake hosted flags. Use a new private task
+It never calls the native entry with fake hosted flags. `validate-corrections.py`
+uses the exact pure predecessor renderer, actual inert filesystem link/rename
+operations and harmless process doubles to distinguish QA051-1/2/3 and preserve
+known N1 failure operands. Use a new private task
 root per test; no production app is launched. The release evidence directory
 records additional actual signature tamper and loopback/catalog controls.
