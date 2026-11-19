@@ -1,5 +1,23 @@
 # QA-only successor for t214 rereview
 
+## R8: explicit pinned native session capture and comparisons
+
+R7 remains a failed historical run before restart, with its raw origin operands unavailable. Independent review accepted provenance and scoped component/drain evidence only. The separately sealed local paired actual S Manager/Pi/extension diagnosis measured valid `yesman-input-v1` identity before Stop and normal completion. The old immediate `yesman-origin` parent parser rejected all seven measured phases. Those local results do not reconstruct R7 or accept either hosted episode.
+
+`native_session.NativeAdapter` is selected explicitly for both stateful S/Q stages at `Host` construction, bound to runtime `1.5.2-yesman.5-498b685a8d6ccde6` and the exact six-asset aggregate. Existing runtime readiness verifies all six assets, ready record, twelve patch-after hashes and installed queue before actors. Native provenance requires a unique linear v3 canonical chain and the immediate custom `yesman-input-v1` child whose parent and data.entryId equal the exact user entry. Original identity must have the exact 48-hex Submit ID and user origin; restart must have only yesman/restart origin and no submission. Missing/null/malformed/duplicate/foreign identity refuses. Timestamp and text never supply provenance, and invalid native data never falls back to legacy parsing. The three historical dependency packets remain byte-exact; `parse_legacy` exposes their old reader explicitly for older-stage controls only and is unused in these S/Q episodes.
+
+Capture attempts bounded original metadata, continuation, delivery and canonical session bytes through the unchanged stable no-follow reader, then fsyncs available bytes under episode `actor-captures/` before any JSON or session semantics. Up to four candidate sessions are retained on unique-session refusal; enumeration stops at five. Absence, unreadable/unstable/oversized files and capture/persistence budgets remain explicit failures. Maximum32 captures/32MiB raw bytes per episode bound this evidence; no runtime/profile tree is walked. `index.json` is included in small diagnostics, while full raw operands and per-capture status are mandatory full proof. Captures recheck session cwd, HireNamed.hiredAt, exact original ID/payload, receipt session UUID/hire/fingerprint and durable paused state.
+
+The same native reader powers `actor_delta` and `session_delta`, including ordinary reopen. Comparisons retain both sides and non-byte operands before validation, preserve raw prefix/session/actor/pause and original sealed receipt guards, additionally bind immutable receipt links, and still require exactly one original plus one restart only for the eligible actor. Text checks validate the expected fixture payload after native identity is established. Provider marker policy remains an independent deterministic payload oracle. Sequence, Stop/cancellation, provider-complete ledger, final-intent/failed-launch/restore/recovery, no-replay/reopen, provenance and owned teardown guards are unchanged.
+
+Run the inert focused controls from this directory in a fresh Python interpreter:
+
+```
+T199_R7_RAW=/absolute/path/to/sealed/r7-local-diagnosis python3 -B -m unittest -v test_native_session
+```
+
+The explicit input packet must have manifest SHA256 `0f9b5bd07439d507647109b2667483f747193e8aad193c0b93e59e418a986a13`; all88 payload hashes and seven raw phases are checked. Other controls use only fresh synthetic files and dictionaries. No App/Pi/provider/compiler/remote action runs in that suite. This local successor grants no push, dispatch, rerun, signing, draft or publication authority. Both complete original hosted scenarios and independent actual-evidence acceptance remain required.
+
 ## R7: fresh synthetic model admission and observer release
 
 R6 run44415916791/attempt1 remains a failed stateful run. Independent t214 terminal review accepted receipt/provenance, initial S/cold-runtime/fixed-alias observations and diagnostic preservation only. Its first HireNamed refused model admission and its full profile drain failed. Historical effective Crew/catalog operands and PID1620's late incarnation/descriptor remain unproved. Five prior dispatch authorities are spent.

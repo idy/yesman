@@ -12,7 +12,7 @@ TOP = {'compatibility-reused.json', 'consumer-admission.json', 'entry-status.jso
        'attachment-result.json', 'package-validation.json', 'run-inputs.json'}
 EPISODE = {'failure.json', 'teardown.json', 'process-observations.json',
            'image-diagnostics.json', 'provider-complete.json', 'provider-reopen.json',
-           'episode.json', 'production-upgrade-failure.json'}
+           'episode.json', 'production-upgrade-failure.json', 'actor-captures/index.json'}
 DIAGNOSTICS = {'process.jsonl', 'original-failure.json', 'snapshot-failure.json',
                'teardown-failure.json', 'teardown-start.json', 'episode-result.json',
                'seed-overlay.json', 'model-admission.json', 'observer-release.json'}

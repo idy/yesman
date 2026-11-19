@@ -31,6 +31,7 @@ import image_proof
 import process_proof
 import native_diagnostics
 import fixture_admission
+import native_session
 
 HEAD = 'cfaaeec242a7d372669b5e39739b71bbd15ad646'
 TREE = 'c7b0c06488b613c56dd0e52ceba98e343a4e0369'
@@ -314,6 +315,10 @@ class Host:
         self.process = self.controller = self.feed = self.server = self.watcher = None
         self.expect_exit = False; self.command_results = {}; self.events = collections.deque(maxlen=4000)
         self.submissions = {}; self.before = {}; self.old_page = None; self.arm_plan = None; self.final = None
+        # S and Q carry the same pinned native identity contract. The older
+        # adapter remains sealed and is never a fallback after a native refusal.
+        self.a = native_session.NativeAdapter(adapter, evidence / 'actor-captures',
+            self.submissions, contract['runtimeSHA256'])
         self.bound = {}; self.owned_profile = False; self.ledger = ProviderLedger()
         self.staging_attempted = False; self.helper_ownership = None
         self.image_index = 0
@@ -605,8 +610,8 @@ class Host:
         need(now['names'] == ['last.json'] and now['files']['last.json']['sha256'] == self.last['files']['last.json']['sha256'], 'ordinary reopen changed/replayed checkpoint')
         for name in ('active', 'paused'):
             current = self.a.capture_actor(self.data, name, self.runtime['run'])
-            # The sealed comparator checks absolute canonical user/origin counts
-            # and preserved prefixes, so it is valid again after ordinary open.
+            # The explicit native comparator checks absolute canonical identity
+            # counts and preserved prefixes again after ordinary open.
             self.a.actor_delta(self.after[name], current, self.submissions[name], name == 'active')
             need(current['session']['users'] == self.after[name]['session']['users'], 'ordinary reopen added a canonical input')
         need(self.ledger.assert_complete() == self.provider_snapshot, 'ordinary reopen added a provider request or terminal')
