@@ -37,9 +37,10 @@ type FilesChange struct {
 type FileEntry struct {
 	Name string `json:"name"`
 	// Path is relative to the workspace, separated by slashes.
-	Path string `json:"path"`
-	Dir  bool   `json:"dir,omitempty"`
-	Size int64  `json:"size,omitempty"`
+	Path    string `json:"path"`
+	Dir     bool   `json:"dir,omitempty"`
+	Size    int64  `json:"size,omitempty"`
+	Special bool   `json:"special,omitempty"` // link, device, pipe or other non-ordinary entry
 }
 
 // FileView is a file of a workspace, as the preview shows it.
@@ -126,7 +127,7 @@ func (s *service) ListFiles(yesman, dir string) ([]FileEntry, error) {
 		if hiddenFile(de.Name()) {
 			continue
 		}
-		e := FileEntry{Name: de.Name(), Path: path.Join(dir, de.Name()), Dir: de.IsDir()}
+		e := FileEntry{Name: de.Name(), Path: path.Join(dir, de.Name()), Dir: de.IsDir(), Special: !de.IsDir() && !de.Type().IsRegular()}
 		if de.Type()&fs.ModeSymlink != 0 {
 			// A link to a directory lists as one, if it stays inside.
 			if st, err := root.Stat(e.Path); err == nil {

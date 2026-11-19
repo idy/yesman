@@ -140,7 +140,8 @@ export const narrowBack = (label, onclick, key = 'back') => h('button', { class:
   icon('arrowLeft'), label);
 
 // treeView draws nodes as a tree. A node is
-//   { id, label, meta?, icon?, title?, children?: nodes, lazy?: bool, current?: bool, attrs? }
+//   { id, label, meta?, icon?, marker?, title?, children?: nodes, lazy?: bool, current?: bool, attrs? }
+// A leaf can put its marker in the same column as the branch chevron.
 // A node with children (or lazy) expands; selecting a node calls select(node).
 // expanded is a Set of ids the caller keeps; toggle(node, open) changes it.
 // Single click selects, the chevron or Left/Right expand and collapse.
@@ -164,7 +165,8 @@ export function treeView({ id, label, nodes, expanded, selected, select, toggle,
       // The visible line; a branch's group of children follows it inside
       // the treeitem, as WAI-ARIA's tree pattern nests them.
       h('div', { class: 'explorer-line', title: node.title ?? null },
-        branch ? h('span', { class: 'explorer-chevron', 'aria-hidden': 'true', 'data-toggle': 'true' }, icon('chevron', 'mds-icon')) : h('span', { class: 'explorer-chevron', 'aria-hidden': 'true' }),
+        branch ? h('span', { class: 'explorer-marker', 'aria-hidden': 'true', 'data-toggle': 'true' }, icon('chevron', 'mds-icon explorer-chevron'))
+          : h('span', { class: 'explorer-marker', 'aria-hidden': 'true' }, node.marker ? icon(node.marker, 'mds-icon explorer-marker-icon') : null),
         node.icon ? icon(node.icon, 'mds-icon explorer-icon') : null,
         h('span', { class: 'explorer-label' }, node.label),
         node.meta != null && node.meta !== '' ? h('span', { class: 'explorer-meta' }, node.meta) : null));
@@ -248,8 +250,15 @@ export function focusNode(el, id) {
 
 // listView draws an ordinary list of choices: each item a button with
 // aria-current on the selected one; Up/Down/Home/End move between them.
-export function listView({ label, items, cls = '' }) {
+// An optional onActive lets the caller preserve a single tab stop on redraw.
+export function listView({ label, items, cls = '', onActive }) {
   const list = h('ul', { class: `explorer-list ${cls}`.trim(), 'aria-label': label }, items);
+  if (onActive) list.addEventListener('focusin', (e) => {
+    if (!e.target.matches('li > button')) return;
+    for (const button of list.querySelectorAll(':scope > li > button[tabindex="0"]')) button.tabIndex = -1;
+    e.target.tabIndex = 0;
+    onActive(e.target);
+  });
   list.addEventListener('keydown', (e) => {
     const buttons = [...list.querySelectorAll(':scope > li > button')];
     const at = buttons.indexOf(e.target);

@@ -40,13 +40,17 @@ window.filesFixture={alice:{
  '.yesman/task-log/2026-03-02-t8-long.md':rec('Long'),
  ['.yesman/task-log/legacy-'+'a'.repeat(64)+'-original.md']:'# Legacy original'+nl+nl+'## Old heading'+nl,
  ['.yesman/task-log/legacy-'+'a'.repeat(64)+'-index-0001.md']:'# Legacy catalog'+nl,
- '.yesman/knowledge/INDEX.md':'# Knowledge'+nl+nl+'- [Rules](rules.md)'+nl+nl+'## Catalog'+nl+nl+'## Policies'+nl,
+ '.yesman/knowledge/INDEX.md':'# Knowledge'+nl+nl+'- [Rules](rules.md)'+nl+'- [Playbooks](guides/)'+nl+'- [Setup checklist](guides/install/setup.md#steps)'+nl+'- [Local patterns](guides/workflow.md)'+nl+'- [Duplicate title](rules.md#icons)'+nl+'- [Loop](INDEX.md)'+nl+'- [Outside](../../notes.md)'+nl+'- [Missing](guides/gone.md)'+nl+'- [Bad](%zz)'+nl+nl+'## Catalog'+nl+nl+'## Policies'+nl,
  '.yesman/knowledge/rules.md':'# Durable rules'+nl+nl+('Rule text.'+nl+nl).repeat(60)+'## Icons'+nl+nl+'Use Phosphor.'+nl+nl+('More.'+nl+nl).repeat(60)+'### Fill weight'+nl+nl+'Stop is solid.'+nl,
  '.yesman/knowledge/about.md':'# About'+nl,
+ '.yesman/knowledge/guides/workflow.md':'# Workflow'+nl+'## A detail heading'+nl,
+ '.yesman/knowledge/guides/install/setup.md':'# Setup'+nl+nl+('Background.'+nl+nl).repeat(45)+'## Steps'+nl+nl+('Instruction.'+nl+nl).repeat(40),
  'notes.md':'# Plain file'+nl+'Edit me'+nl,
 },bob:{
  '.yesman/task-log.md':'# Bob log'+nl+nl+'- 2025-12-31 · [Bob only record](task-log/2025-12-31-bob.md)'+nl,
  '.yesman/task-log/2025-12-31-bob.md':rec('Bob only record'),
+ '.yesman/knowledge/INDEX.md':'# Bob knowledge'+nl+nl+'- [Bob flat note](only.md)'+nl,
+ '.yesman/knowledge/only.md':'# Only here'+nl+'## Only in the detail'+nl,
 }};
 const long='A topic with a deliberately long title to check wrapping in both the tree and the detail heading of the explorer';
 const topic=(id,status,title,extra={})=>({id,status,title,summary:'**'+title+'** summary.',conclusions:[{id:id+'c1',text:'Content goes left, navigation right.'}],questions:status==='open'?[{id:id+'q1',text:'Which groups are real?'}]:[],sources:[{id:id+'s1',kind:'task',ref:'t192'}],sends:[],revision:1,updatedAt:'2026-03-0'+(id.slice(2)%9+1)+'T00:00:00Z',updatedBy:'user',...extra});
@@ -121,6 +125,12 @@ async function logPart(page, engine) {
   assert.deepEqual(groups, ['2026-03-02', '2026-03-01', '2026-02-27', 'No date'], 'newest day first, explicit no-date group last');
   const day2 = tree.locator('[data-node="d:2026-03-02"]');
   assert.equal(await day2.getAttribute('aria-expanded'), 'true');
+  const contents = tree.locator('[data-node="r:.yesman/task-log.md"]');
+  const dateLine = day2.locator(':scope > .explorer-line');
+  assert.equal((await box(contents.locator('.explorer-line'))).x, (await box(dateLine)).x, 'Contents and date group row edges');
+  for (const selector of ['.explorer-label', '.explorer-marker .mds-icon']) {
+    assert.equal((await box(contents.locator(selector))).x, (await box(dateLine.locator(selector))).x, `Contents and date group align on ${selector}`);
+  }
   assert.deepEqual((await day2.locator('[role="group"] .explorer-label').allInnerTexts()).map((s) => s.slice(0, 18)), ['Release the explor', 'A very long record']);
   const day1 = tree.locator('[data-node="d:2026-03-01"]');
   assert.equal(await day1.getAttribute('aria-expanded'), 'false');
@@ -170,25 +180,42 @@ async function logPart(page, engine) {
 async function knowledgePart(page, engine) {
   await page.locator('[data-info-entry="knowledge"]').click();
   const list = page.locator('#files-tree-list');
-  await list.locator('[data-path=".yesman/knowledge/INDEX.md"]').waitFor();
-  assert.equal(await list.locator('.tree-row:not(.tree-outline)').first().getAttribute('data-path'), '.yesman/knowledge/INDEX.md', 'INDEX first');
-  await list.locator('[data-path=".yesman/knowledge/INDEX.md#catalog"]').waitFor();
-  await list.locator('[data-path=".yesman/knowledge/rules.md"]').click();
-  await page.locator('#files-view [id="durable-rules"]').waitFor();
-  const row = list.locator('[data-path=".yesman/knowledge/rules.md"]');
-  await list.locator('[data-path=".yesman/knowledge/rules.md#fill-weight"]').waitFor();
-  assert.equal(await row.getAttribute('aria-expanded'), 'true');
-  assert.equal(await list.locator('[data-path=".yesman/knowledge/rules.md#fill-weight"]').getAttribute('aria-level'), '4', 'note 1, # 2, ## 3, ### 4');
-  await list.locator('[data-path=".yesman/knowledge/rules.md#icons"]').click();
-  await page.waitForFunction(() => { const v = document.getElementById('files-view'); const h = document.getElementById('icons'); return v.scrollTop > 100 && Math.abs(h.getBoundingClientRect().top - v.getBoundingClientRect().top) < 40; });
-  await row.focus();
-  await page.keyboard.press('ArrowLeft');
-  await page.waitForFunction(() => document.querySelector('#files-tree-list [data-path=".yesman/knowledge/rules.md"]').getAttribute('aria-expanded') === 'false');
-  assert.equal(await list.locator('.tree-outline').count(), 0);
+  const note = (rel) => list.locator(`[data-path=".yesman/knowledge/${rel}"]`);
+  const rules = note('rules.md');
+  const guides = note('guides');
+  await page.locator('#files-view [id="catalog"]').waitFor();
+  assert.deepEqual(await list.locator('.tree-name').allInnerTexts(), ['INDEX.md', 'Rules', 'Playbooks', 'about.md']);
+  assert.equal(await rules.getAttribute('aria-expanded'), null, 'a note is always a leaf');
+  await rules.click();
+  await page.locator('#files-view [id="fill-weight"]').waitFor();
+  assert.deepEqual(await list.locator('.tree-name').allInnerTexts(), ['INDEX.md', 'Rules', 'Playbooks', 'about.md'], 'opening a note adds no headings to navigation');
+  await guides.focus();
   await page.keyboard.press('ArrowRight');
-  await list.locator('.tree-outline').first().waitFor();
-  assert.equal(await page.locator('#files').getByRole('button', { name: 'Source', exact: true }).count(), 0, 'Knowledge stays read as rendered pages');
+  await note('guides/install').waitFor();
+  assert.equal(await guides.getAttribute('aria-expanded'), 'true');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.path), '.yesman/knowledge/guides');
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.path), '.yesman/knowledge/guides/install');
+  await page.keyboard.press('ArrowRight');
+  const setup = note('guides/install/setup.md');
+  await setup.waitFor();
+  assert.equal(await setup.getAttribute('aria-level'), '3');
+  assert.deepEqual(await list.locator('.tree-name').allInnerTexts(), ['INDEX.md', 'Rules', 'Playbooks', 'install', 'Setup checklist', 'Local patterns', 'about.md']);
+  const history = await page.evaluate(() => calls.filter((c) => c[0] === 'ReadFile').map((c) => c[2]));
+  assert.deepEqual([...new Set(history)], ['.yesman/knowledge/INDEX.md', '.yesman/knowledge/rules.md'], 'expanding collections reads only directory entries');
+  await setup.click();
+  await page.locator('#files-view [id="steps"]:focus').waitFor();
+  assert.equal(await setup.getAttribute('aria-selected'), 'true');
+  assert.equal(await page.locator('#files').getByRole('button', { name: 'Source', exact: true }).count(), 0);
   await shot(page, `${engine}-knowledge-wide-en`);
+  await page.locator('[data-agent="bob/lead"]').first().click();
+  await page.locator('[data-info-entry="knowledge"]').click();
+  await page.locator('#files-view [id="bob-knowledge"]').waitFor();
+  await note('only.md').click();
+  await page.locator('#files-view [id="only-in-the-detail"]').waitFor();
+  assert.deepEqual(await list.locator('.tree-name').allInnerTexts(), ['INDEX.md', 'Bob flat note']);
+  assert.deepEqual(await list.locator('.tree-row').evaluateAll((rows) => rows.map((r) => [r.getAttribute('aria-level'), r.hasAttribute('aria-expanded')])), [['1', false], ['1', false]]);
+  await shot(page, `${engine}-knowledge-flat-en`);
 }
 
 async function filesPart(page) {
@@ -207,23 +234,25 @@ async function filesPart(page) {
 async function topicsPart(page, engine) {
   await page.locator('[data-info-entry="topics"]').click();
   const pane = page.locator('#topics');
-  const tree = pane.locator('#topics-tree');
-  await tree.waitFor();
+  const list = pane.locator('#topics-list');
+  const filters = pane.getByRole('group', { name: 'Filter topics by status' });
+  const row = (id) => list.locator(`[data-topic="${id}"]`);
+  await list.waitFor();
   await leftOf(pane.locator('.explorer-content'), pane.locator('.explorer-nav'), 'topics: content left of navigation');
-  assert.deepEqual(await tree.locator(':scope > [data-kind="group"] > .explorer-line .explorer-label').allInnerTexts(), ['Open', 'Resolved', 'Archived']);
-  assert.equal(await tree.locator('[data-node="g:open"]').getAttribute('aria-expanded'), 'true');
-  assert.equal(await tree.locator('[data-node="g:archived"]').getAttribute('aria-expanded'), 'false');
-  assert.deepEqual(await tree.locator('[data-node="g:open"] > [role="group"] > [data-kind="topic"]').evaluateAll((es) => es.map((e) => e.dataset.topic)), ['tp4', 'tp1']);
-  await pane.locator('[data-key="topic-tp1"] > .explorer-line').click();
+  assert.deepEqual(await filters.getByRole('button').allInnerTexts(), ['Open', 'Resolved', 'Archived']);
+  assert.equal(await filters.getByRole('button', { name: 'Open', pressed: true }).count(), 1);
+  assert.deepEqual(await list.locator('li > button').evaluateAll((es) => es.map((e) => e.dataset.topic)), ['tp4', 'tp1']);
+  assert.equal(await list.locator('[aria-expanded], .explorer-chevron').count(), 0);
+  assert.equal((await box(row('tp4').locator('.explorer-label'))).x, (await box(row('tp1').locator('.explorer-label'))).x);
+  await pane.locator('[data-key="search"]').focus();
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
   await pane.locator('h3.topic-title', { hasText: 'deliberately long' }).waitFor();
-  assert.equal(await pane.locator('[data-key="topic-tp1"]').getAttribute('aria-expanded'), 'true');
-  assert.deepEqual(await pane.locator('[data-key="topic-tp1"] [data-kind="section"] .explorer-label').allInnerTexts(),
+  assert.equal(await row('tp1').getAttribute('aria-current'), 'true');
+  assert.deepEqual(await pane.locator('.explorer-content .topic-section .topic-heading').allInnerTexts(),
     ['Summary', 'Confirmed conclusions', 'Open questions', 'Sources', 'In the conversation', 'Continue the discussion']);
-  await pane.locator('[data-key="part-tp1-continue"] > .explorer-line').click();
-  await page.waitForFunction(() => { const c = document.querySelector('#topics .explorer-content'); const s = document.querySelector('#topics [data-section="continue"]'); return s.getBoundingClientRect().top - c.getBoundingClientRect().top < 60 || c.scrollTop + c.clientHeight >= c.scrollHeight - 1; });
-  await pane.locator('[data-key="part-tp1-continue"]').focus();
-  await page.keyboard.press('ArrowUp');
-  assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'part-tp1-conversation');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'topic-tp1');
   await shot(page, `${engine}-topics-wide-en`);
   await pane.locator('[data-key="edit"]').click();
   await pane.locator('[data-key="edit-title"]').fill('Explorer layout');
@@ -241,11 +270,25 @@ async function topicsPart(page, engine) {
   assert.deepEqual(await topicDraft.evaluate((e) => [document.activeElement === e, e.value, e.selectionStart, e.selectionEnd]), [true, 'Is the tree enough?', 3, 7], 'restart result preserves Topics draft and focus');
   await pane.locator('[data-key="send-tp1"]').click();
   await page.waitForFunction(() => calls.some((c) => c[0] === 'SubmitTopic' && c[1] === 'alice' && c[2] === '2026-03-01T08:00:00Z' && c[3] === 'tp1' && c[5] === 'Is the tree enough?'));
-  await pane.locator('[data-key="topic-tp4"] > .explorer-line').click();
+  await row('tp4').click();
+  await pane.locator('[data-key="resolve"]').click();
+  await pane.getByRole('button', { name: 'Reopen', exact: true }).waitFor();
+  assert.equal(await filters.getByRole('button', { name: 'Resolved', pressed: true }).count(), 1);
+  assert.equal(await row('tp4').getAttribute('aria-current'), 'true');
+  await pane.locator('[data-key="resolve"]').click();
+  await pane.getByRole('button', { name: 'Mark resolved', exact: true }).waitFor();
+  assert.equal(await filters.getByRole('button', { name: 'Open', pressed: true }).count(), 1);
   await pane.locator('[data-key="archive"]').click();
-  await pane.locator('[data-node="g:archived"] [data-key="topic-tp4"]').waitFor();
+  await row('tp4').waitFor();
+  assert.equal(await filters.getByRole('button', { name: 'Archived', pressed: true }).count(), 1);
   await pane.locator('[data-key="search"]').fill('Resolved question');
-  assert.deepEqual(await tree.locator('[data-kind="topic"]').evaluateAll((es) => es.map((e) => e.dataset.topic)), ['tp2']);
+  await pane.getByText('No topics match.', { exact: true }).waitFor();
+  assert.equal(await list.count(), 0);
+  await shot(page, `${engine}-topics-empty-en`);
+  await filters.getByRole('button', { name: 'Resolved' }).click();
+  assert.equal(await row('tp2').count(), 1);
+  assert.equal(await row('tp2').getAttribute('aria-current'), null);
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'filter-resolved');
   await pane.locator('[data-key="search"]').fill('');
   await page.evaluate(() => { window.failTopics = 'alice'; });
   await pane.locator('[data-key="refresh"]').click();
@@ -260,8 +303,13 @@ async function topicsPart(page, engine) {
   await page.locator('[data-info-entry="topics"]').click();
   await pane.locator('[data-key="topic-tp1"]').waitFor();
   await page.evaluate(async () => { delayed['Topics:alice'] = false; releases['Topics:alice'](); await new Promise(requestAnimationFrame); });
-  assert.deepEqual(await pane.locator('#topics-tree [data-kind="topic"] .explorer-label').allInnerTexts(), ['Bob topic']);
+  assert.deepEqual(await list.locator('.explorer-label').allInnerTexts(), ['Bob topic']);
+  await filters.getByRole('button', { name: 'Resolved' }).click();
+  await pane.getByText('No topics here.', { exact: true }).waitFor();
   await page.locator('[data-agent="alice/lead"]').first().click();
+  await page.locator('[data-info-entry="topics"]').click();
+  assert.equal(await filters.getByRole('button', { name: 'Resolved', pressed: true }).count(), 1);
+  await row('tp2').waitFor();
 }
 
 async function needsPart(page, engine) {
@@ -308,15 +356,16 @@ async function visualPart(page, engine) {
   await page.setViewportSize({ width: 1100, height: 800 });
   await page.locator('[data-info-entry="topics"]').click();
   const pane = page.locator('#topics');
-  await pane.locator('#topics-tree').waitFor();
-  assert.equal(await pane.locator('.explorer-content').isVisible(), false, 'narrow: the tree first');
-  await pane.locator('[data-key="topic-tp1"] > .explorer-line').click();
+  await pane.locator('#topics-list').waitFor();
+  assert.equal(await pane.locator('.explorer-content').isVisible(), false, 'narrow: the list first');
+  await shot(page, `${engine}-topics-narrow-list-en`);
+  await pane.locator('[data-key="topic-tp1"]').click();
   await pane.locator('h3.topic-title').waitFor();
   assert.equal(await pane.locator('.explorer-nav').isVisible(), false);
   assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'back', 'narrow: focus on the way back, as before');
   await shot(page, `${engine}-topics-narrow-en`);
   await pane.locator('[data-key="back"]').click();
-  await pane.locator('#topics-tree').waitFor();
+  await pane.locator('#topics-list').waitFor();
   assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), 'topic-tp1');
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.emulateMedia({ colorScheme: 'dark' });
@@ -329,7 +378,8 @@ async function visualPart(page, engine) {
   assert.equal(await page.locator('#files-records [data-node="d:none"] .explorer-label').first().innerText(), '无日期');
   await shot(page, `${engine}-log-wide-zh-dark`);
   await page.locator('[data-info-entry="topics"]').click();
-  await page.locator('#topics-tree').waitFor();
+  await page.locator('#topics-list').waitFor();
+  assert.deepEqual(await pane.locator('.topics-filters button').allInnerTexts(), ['未解决', '已解决', '已归档']);
   await shot(page, `${engine}-topics-wide-zh-dark`);
 }
 
@@ -471,26 +521,26 @@ async function keysPart(page, engine) {
   assert.deepEqual(await stops('#files-records'), ['r:.yesman/task-log/2026-03-02-release.md'], 'a click moves the stop');
   // Topics: the same tree.
   await page.locator('[data-info-entry="topics"]').click();
-  await page.locator('#topics-tree').waitFor();
-  await page.locator('#topics [data-key="topic-tp1"] > .explorer-line').click();
+  await page.locator('#topics-list').waitFor();
+  await page.locator('#topics [data-key="topic-tp1"]').click();
   await page.locator('#topics [data-key="topic-tp1"]').focus();
-  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowUp');
   await page.locator('#topics [data-key="refresh"]').click();
   await page.waitForFunction(() => !document.querySelector('#topics [data-key="refresh"]').disabled);
-  assert.deepEqual(await stops('#topics-tree'), ['s:tp1:summary'], 'Topics: one stop, on the row last focused, after a refresh');
-  // Knowledge: Right on an open note enters its outline; Left goes back.
+  assert.equal(await page.locator('#topics-list [tabindex="0"]').getAttribute('data-topic'), 'tp4', 'Topics keeps the one stop on the last focused row');
   await page.locator('[data-info-entry="knowledge"]').click();
   const list = page.locator('#files-tree-list');
-  await list.locator('[data-path=".yesman/knowledge/rules.md"]').click();
-  await list.locator('.tree-outline').first().waitFor();
-  await list.locator('[data-path=".yesman/knowledge/rules.md"]').focus();
+  const collection = list.locator('[data-path=".yesman/knowledge/guides"]');
+  await collection.focus();
   await page.keyboard.press('ArrowRight');
-  assert.equal(await page.evaluate(() => document.activeElement?.dataset.path), '.yesman/knowledge/rules.md#durable-rules');
+  await list.locator('[data-path=".yesman/knowledge/guides/install"]').waitFor();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.path), '.yesman/knowledge/guides/install');
   await page.keyboard.press('ArrowLeft');
-  assert.equal(await page.evaluate(() => document.activeElement?.dataset.path), '.yesman/knowledge/rules.md');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.path), '.yesman/knowledge/guides');
   assert.equal((await stops('#files-tree-list')).length, 1, 'the files tree has one stop');
   await page.keyboard.press('ArrowLeft');
-  await page.waitForFunction(() => document.querySelector('#files-tree-list [data-path=".yesman/knowledge/rules.md"]').getAttribute('aria-expanded') === 'false');
+  assert.equal(await collection.getAttribute('aria-expanded'), 'false');
   // Needs You: an answer typed for alice's open dialog survives bob, State
   // refreshes and alice's workspace being unreadable for a while; it goes
   // once alice is hired again.
@@ -617,9 +667,9 @@ async function resizePart(page, engine) {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.locator('[data-info-entry="topics"]').focus();
   await page.keyboard.press('Enter');
-  await page.locator('#topics-tree').waitFor();
+  await page.locator('#topics-list').waitFor();
   await page.getByRole('button', { name: 'Show the info', exact: true }).click();
-  await page.locator('#topics [data-key="topic-tp1"] > .explorer-line').click();
+  await page.locator('#topics [data-key="topic-tp1"]').click();
   await page.locator('#yesman-info [data-info-entry="topics"]').focus();
   await page.setViewportSize({ width: 1000, height: 780 });
   await frames(page);
@@ -662,7 +712,7 @@ async function resizePart(page, engine) {
   await page.locator('#topics [aria-label="Close the topics"]').click();
   await page.locator('[data-info-entry="topics"]').focus();
   await page.keyboard.press('Enter');
-  await page.locator('#topics [data-key="topic-tp1"] > .explorer-line').click();
+  await page.locator('#topics [data-key="topic-tp1"]').click();
   await page.locator('#yesman-info [data-info-entry="topics"]').focus();
   await page.setViewportSize({ width: 1280, height: 800 });
   await frames(page);
@@ -715,7 +765,7 @@ async function tasksPart(page, engine) {
   const entries = ['knowledge', 'working-logs', 'needs-you', 'topics', 'tasks'];
   assert.deepEqual(await page.locator('[data-info-entry]').evaluateAll((es) => es.map((e) => e.dataset.infoEntry)), entries);
   await page.locator('[data-info-entry="topics"]').click();
-  await page.locator('#topics [data-key="topic-tp1"] > .explorer-line').click();
+  await page.locator('#topics [data-key="topic-tp1"]').click();
   await page.locator('#topics [data-key="compose-tp1"]').fill('Topic draft through Tasks');
   await page.locator('[data-info-entry="needs-you"]').click();
   await page.locator('#needs-you [data-detail-control="answer-text"]').fill('Answer draft through Tasks');

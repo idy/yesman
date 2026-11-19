@@ -41,7 +41,7 @@ async function fixture() {
 const bridge = () => {
   localStorage.setItem('yesman.info', 'shown');
   const handlers = {};
-  const forwarded = ['State', 'Messages', 'Submit', 'SubmitCoalescing', 'Abort', 'Board', 'Info', 'Topics', 'CreateTopic', 'UpdateTopic', 'SubmitTopic'];
+  const forwarded = ['State', 'Messages', 'Submit', 'SubmitCoalescing', 'Abort', 'Board', 'Info', 'Topics', 'CreateTopic', 'UpdateTopic', 'SubmitTopic', 'ListFiles', 'ReadFile'];
   window.fixtureCalls = [];
   window.mygo = {
     locale: localStorage.getItem('fixture.locale') || 'en',
@@ -57,7 +57,7 @@ const bridge = () => {
         return body.value;
       }
       switch (m) {
-        case 'Repos': case 'Clones': case 'Pulls': case 'ListFiles': return [];
+        case 'Repos': case 'Clones': case 'Pulls': return [];
         case 'Settings': return { appearance: 'system', autoFetch: 0 };
         case 'Fetches': return { fetching: [], errors: {} };
         case 'TakeFocus': return '';
@@ -147,7 +147,7 @@ async function run(engineName, engine) {
     const entries = await page.$$eval('#yesman-info .info-entries .info-link', (els) => els.map((e) => ({ key: e.dataset.infoEntry, label: e.querySelector('.info-link-label')?.textContent, aside: e.querySelector('.info-aside')?.textContent })));
     assert.deepEqual(entries.map((e) => e.key), ['knowledge', 'working-logs', 'needs-you', 'topics', 'tasks'], JSON.stringify(entries));
     assert.deepEqual(entries.map((e) => e.label), ['Knowledge', 'Working Logs', 'Needs You', 'Topics', 'Tasks'], JSON.stringify(entries));
-    assert.equal(entries[0].aside, '1 note');
+    assert.equal(entries[0].aside, '2 notes');
     assert.equal(entries[3].aside, 'Empty');
     assert.equal(entries[4].aside, 'None');
     assert.equal(await page.locator('#yesman-info .info-entries').count(), 1, 'one card');
@@ -383,11 +383,27 @@ async function run(engineName, engine) {
     await page.click('#topics [data-key="archive"]');
     await page.locator('#topics .topic-composer[data-archived]').waitFor();
     await page.click('#topics [data-key="back"]');
-    // The tree groups topics by their status: the archived topic moved to
-    // Archived, opened to keep it in view; Open keeps the other.
-    assert.equal(await page.locator('#topics [data-node="g:open"] .topic-row').count(), 1);
-    assert.equal(await page.locator('#topics [data-node="g:archived"] .topic-row').count(), 1);
-    await page.click('#topics [data-key="topic-tp2"] > .explorer-line');
+    // A status change reveals the topic in its new filter.
+    assert.equal(await page.locator('#topics [data-key="filter-archived"]').getAttribute('aria-pressed'), 'true');
+    assert.deepEqual(await page.locator('#topics-list [data-topic]').evaluateAll((rows) => rows.map((r) => r.dataset.topic)), ['tp2']);
+    await page.click('#topics [data-key="topic-tp2"]');
+    await page.click('#topics [data-key="restore"]');
+    await page.locator('#topics [data-key="compose-tp2"]').waitFor();
+    assert.equal(await page.locator('#topics [data-key="filter-open"]').getAttribute('aria-pressed'), 'true');
+
+    // The chip reveals an archived topic even from a mismatched filter/query.
+    await page.click('#topics [data-key="archive"]');
+    await page.locator('#topics .topic-composer[data-archived]').waitFor();
+    await page.click('#topics [data-key="back"]');
+    await page.click('#topics [data-key="filter-resolved"]');
+    await page.fill('#topics [data-key="search"]', 'unrelated query');
+    await page.locator('#thread .msg-user--topic .topic-chip', { hasText: 'tp2' }).click();
+    await page.locator('#topics .topic-composer[data-archived]').waitFor();
+    await page.click('#topics [data-key="back"]');
+    assert.equal(await page.locator('#topics [data-key="filter-archived"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.locator('#topics [data-key="search"]').inputValue(), '');
+    assert.equal(await page.locator('#topics [data-key="topic-tp2"]').getAttribute('aria-current'), 'true');
+    await page.click('#topics [data-key="topic-tp2"]');
     await page.click('#topics [data-key="restore"]');
     await page.locator('#topics [data-key="compose-tp2"]').waitFor();
 
@@ -425,6 +441,20 @@ async function run(engineName, engine) {
     assert.ok(box.width <= boardBox.width && box.x >= boardBox.x, `topics pane ${JSON.stringify(box)} vs board ${JSON.stringify(boardBox)}`);
     // As the board does, it leaves the conversation room (v0.1.37's panes).
     assert.ok(mainBox.width >= 240, `the conversation beside the topics: ${JSON.stringify(mainBox)}`);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.locator('[data-info-entry="knowledge"]').click();
+    const knowledge = page.locator('#files-tree-list');
+    await page.locator('#files-view [id="knowledge"]').waitFor();
+    assert.deepEqual(await knowledge.locator('.tree-name').allInnerTexts(), ['INDEX.md', 'Icon policy', 'Guides'], 'actual disk listing excludes alias and uses catalog order');
+    await knowledge.getByRole('treeitem', { name: 'Guides', exact: true }).click();
+    await knowledge.getByRole('treeitem', { name: 'desktop', exact: true }).click();
+    const note = knowledge.getByRole('treeitem', { name: 'Navigation guide', exact: true });
+    assert.equal(await note.getAttribute('aria-level'), '3');
+    assert.equal(await page.evaluate(() => fixtureCalls.filter((c) => c[0] === 'ReadFile' && c[2] !== '.yesman/knowledge/INDEX.md').length), 0);
+    await note.click();
+    await page.locator('#files-view [id="keyboard"]:focus').waitFor();
+    assert.equal(await knowledge.getByText('Keyboard', { exact: true }).count(), 0);
+    await shot(page, `${engineName}-knowledge-go-bridge`);
     // WebKit reports the fixture's own event poll cancelled by page.reload().
     assert.deepEqual(errors.filter((e) => !/\/fixture\/events\?after=\d+ due to access control checks/.test(e)), []);
     console.log(`${engineName}: PASS`);
