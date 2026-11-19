@@ -1,7 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"image"
+	"image/png"
 	"os"
 	"reflect"
 	"strings"
@@ -116,7 +120,62 @@ func TestHumanSteerPreservesResourcePreparation(t *testing.T) {
 			t.Fatalf("original Pi input semantics changed: %+v %v", d, err)
 		}
 	}
-	f.awaitProvider(t, "Fixture template argument two words", "fixture-hook-error")
+	waitFor(t, "expanded template and original errored input reached the provider", func() bool {
+		calls, _ := f.providerUsers(t)
+		for _, call := range calls {
+			var template, hook bool
+			for _, user := range call {
+				switch strings.TrimSpace(user.text()) {
+				case "Fixture template argument two words":
+					template = true
+				case "fixture-hook-error":
+					hook = true
+				}
+			}
+			if template && hook {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestHumanSteerUsesModelImageNormalization(t *testing.T) {
+	f := newPromotionFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 4096, 16))); err != nil {
+		t.Fatal(err)
+	}
+	wide := Image{Type: "image", MimeType: "image/png", Data: base64.StdEncoding.EncodeToString(encoded.Bytes())}
+	idA, idB := deliveryTestID(96001), deliveryTestID(96002)
+	if d, err := f.m.Submit(ctx, f.info.ID, idA, "model image", nil, f.info.Since); err != nil || d.State != "steering" {
+		t.Fatalf("first input: %+v %v", d, err)
+	}
+	if d, err := f.m.Submit(ctx, f.info.ID, idB, "wide", []Image{wide}, f.info.Since); err != nil || d.MergedInto != idA {
+		t.Fatalf("append image: %+v %v", d, err)
+	}
+	if original, err := f.m.SubmissionPayload(f.info.ID, idA, f.info.Since); err != nil || !reflect.DeepEqual(original.Images, []Image{wide}) {
+		t.Fatalf("original altered before take: %v", err)
+	}
+	f.release(t)
+	waitFor(t, "resized image on the merged message", func() bool {
+		calls, _ := f.providerUsers(t)
+		for _, call := range calls {
+			for _, user := range call {
+				if !strings.HasPrefix(user.text(), "model image\nwide") {
+					continue
+				}
+				images := user.images()
+				if len(images) != 1 || images[0].Data == wide.Data {
+					t.Fatal("merged image skipped Pi normalization")
+				}
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func TestHumanSteerSlotsArePerAgent(t *testing.T) {

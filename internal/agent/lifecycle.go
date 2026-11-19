@@ -66,6 +66,7 @@ func (m *Manager) ForgetYesman(name string, since time.Time) {
 				delete(m.tokens, a.token)
 				a.token, a.tokenProc = "", nil
 			}
+			m.clearRecallLocked(a)
 			delete(m.agents, id)
 		}
 	}
@@ -170,9 +171,9 @@ func (m *Manager) sealDeliveriesLocked(a *agent) []Event {
 		}
 		events = append(events, m.deliveryLocked(a, d))
 	}
-	// The writer holds its final immutable payload snapshot through drain.
+	// Keep the payloads until the workspace is retired. A failed drain or
+	// a second Stop may need to write this snapshot again.
 	m.persistDeliveriesLocked(a)
-	m.clearRecallLocked(a)
 	a.deliverySealed = true
 	return events
 }

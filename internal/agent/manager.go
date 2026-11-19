@@ -1244,6 +1244,7 @@ func (m *Manager) Abort(ctx context.Context, id string) error {
 	var p *proc
 	if a := m.agents[id]; a != nil {
 		a.humanStop++
+		a.humanTail = nil // new submissions do not wait for retired input hooks
 		p = a.proc
 	}
 	m.mu.Unlock()
@@ -1666,6 +1667,7 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 	}
 	m.mu.Lock()
 	if a != nil && m.agents[id] == a {
+		m.clearRecallLocked(a)
 		delete(m.agents, id)
 	}
 	m.mu.Unlock()

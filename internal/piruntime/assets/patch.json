@@ -528,7 +528,7 @@
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js",
       "before": "505297dba2df1de3003c0399b3312fd581359a4e27a5e9262b274b6cb5cb4ef3",
-      "after": "74f08f0d4eb19d447f6563f3c01a5b1910488cf2061c28f255ca43ba9ecc17eb",
+      "after": "aeb1051b5a56249081783ea4635e72fa6cbe18f9add08bc195674f1f0b6b26ba",
       "edits": [
         {
           "before": "                    streamingBehavior: command.streamingBehavior,",
@@ -593,6 +593,10 @@
         {
           "before": "    let activeCommands = 0;",
           "after": "    let activeCommands = 0;\n    let humanPreflight = Promise.resolve();"
+        },
+        {
+          "before": "            case \"abort\": {\n                await session.abort();",
+          "after": "            case \"abort\": {\n                // Abort increments the Session generation before awaiting idle.\n                // New admissions need not wait for input hooks from that generation.\n                const stopped = session.abort();\n                humanPreflight = Promise.resolve();\n                await stopped;"
         },
         {
           "before": "                void session\n                    .prompt(command.message, {",

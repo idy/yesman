@@ -97,7 +97,7 @@ func TestQueueActionsBrowserBridge(t *testing.T) {
 				// needs every input as its own occurrence (order, promotion, cache),
 				// which is also what pi does when it does not join them; joining has
 				// its own real check (scripts/check-coalesce-browser.mjs).
-				value, err = f.m.Submit(r.Context(), text(0), text(1), text(2), images, since(4))
+				value, err = f.m.submit(r.Context(), text(0), text(1), text(2), images, "steer", nil, since(4))
 			}
 		case "PromoteSubmission":
 			mu.Lock()

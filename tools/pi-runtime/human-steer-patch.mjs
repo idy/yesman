@@ -55,6 +55,12 @@ export async function humanSteerPatch(patch, core, app) {
     });
     await patch(app + 'modes/rpc/rpc-mode.js', change => {
         change('    let activeCommands = 0;', '    let activeCommands = 0;\n    let humanPreflight = Promise.resolve();');
+        change('            case "abort": {\n                await session.abort();', `            case "abort": {
+                // Abort increments the Session generation before awaiting idle.
+                // New admissions need not wait for input hooks from that generation.
+                const stopped = session.abort();
+                humanPreflight = Promise.resolve();
+                await stopped;`);
         change(`                void session
                     .prompt(command.message, {`, `                const promptSession = session;
                 const human = command.humanSteer;
