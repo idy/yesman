@@ -468,7 +468,13 @@ export function createTopics(host) {
     const sync = () => {
       send.disabled = (!textarea.value.trim() && !d.items.length) || busy || !lead;
       textarea.style.height = 'auto';
+      // Measure without the textarea's scrollbar. Growing the row can make
+      // the outer column scroll, so measure once more if the field narrowed.
+      textarea.style.overflowY = 'hidden';
+      const width = textarea.clientWidth;
       textarea.style.height = `${textarea.scrollHeight}px`;
+      if (textarea.clientWidth < width) textarea.style.height = `${textarea.scrollHeight}px`;
+      textarea.style.overflowY = '';
       const command = isCommand(textarea.value);
       context.hidden = command;
       commandNote.hidden = !command;

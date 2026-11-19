@@ -128,7 +128,8 @@ async function run(engineName, engine) {
   const backend = await fixture();
   const browser = await engine.launch({ headless: true });
   try {
-    const context = await browser.newContext({ viewport: { width: 1360, height: 860 } });
+    const viewport = { width: 1360, height: 860 };
+    const context = await browser.newContext({ viewport });
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', (err) => errors.push(err.message));
@@ -193,6 +194,38 @@ async function run(engineName, engine) {
     await shot(page, `${engineName}-detail`);
     await page.click('#topics [data-key="back"]');
     await create('Image limits', 'What images can a topic message carry?');
+
+    // With a classic scrollbar, growing the draft can narrow the same field
+    // that just measured its wrapped text. It should still fit below the cap.
+    const topicDraft = page.locator('#topics [data-key="compose-tp2"]');
+    const classicScrollbar = await page.addStyleTag({ content: '#topics .explorer-content::-webkit-scrollbar { width: 18px; }' });
+    const draft = 'A longer draft with normal words that wraps when this panel narrows. It must stay readable when we type, hide, and restore it.';
+    await topicDraft.fill(draft);
+    await page.setViewportSize({ width: 760, height: 798 });
+    const columnScrolls = () => page.locator('#topics .explorer-content').evaluate((el) => el.scrollHeight > el.clientHeight);
+    assert.equal(await columnScrolls(), false, 'the Topics column fits before editing');
+    await topicDraft.press('!');
+    assert.equal(await columnScrolls(), true, 'growing the draft makes the Topics column scroll');
+    const wrapped = await topicDraft.evaluate((el) => ({
+      height: el.clientHeight,
+      content: el.scrollHeight,
+      maxHeight: parseFloat(getComputedStyle(el).maxHeight),
+      focused: document.activeElement === el,
+      selection: [el.selectionStart, el.selectionEnd],
+      value: el.value,
+    }));
+    if (shots) {
+      await page.locator('#topics .explorer-content').evaluate((el) => { el.scrollTop = el.scrollHeight; });
+      await shot(page, `${engineName}-narrow-wrapped-edit`);
+    }
+    assert.ok(wrapped.height < wrapped.maxHeight, 'draft is below the textarea cap');
+    assert.ok(wrapped.content <= wrapped.height + 1, `all wrapped lines fit: ${wrapped.content} px of text in ${wrapped.height} px`);
+    assert.equal(wrapped.focused, true);
+    assert.deepEqual(wrapped.selection, [draft.length + 1, draft.length + 1]);
+    assert.equal(wrapped.value, `${draft}!`);
+    await topicDraft.fill('');
+    await classicScrollbar.evaluate((style) => style.remove());
+    await page.setViewportSize(viewport);
     await page.click('#topics [data-key="back"]');
     // Back returns focus to the row; a redraw from the topic just created may still be settling.
     await page.waitForFunction(() => document.activeElement?.dataset.key === 'topic-tp2', null, { timeout: 5000 });
@@ -260,6 +293,11 @@ async function run(engineName, engine) {
     await main.fill(longDraft);
     await composeA.fill(longDraft);
     await checkComposerLayout(page, 'long multiline', false);
+    const scrollable = await composeA.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+      return el.scrollTop > 0;
+    });
+    assert.equal(scrollable, true, 'long drafts can scroll inside the capped field');
 
     // Send from topics while the lead's run is held: the main draft stays,
     // A then B (with an image) reach the lead's one conversation.
