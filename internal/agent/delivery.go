@@ -28,6 +28,8 @@ type Delivery struct {
 	AgentSince      time.Time `json:"agentSince,omitzero"`
 	CanCancel       bool      `json:"canCancel,omitempty"` // view only; never persisted as authority
 	CanRestore      bool      `json:"canRestore,omitempty"`
+	CanRecover      bool      `json:"canRecover,omitempty"`     // original draft retained after uncertain delivery
+	AwaitingRecord  bool      `json:"awaitingRecord,omitempty"` // native take precedes the session entry
 	OriginalText    bool      `json:"originalText,omitempty"`
 	OriginalPayload bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
 	NativePending   bool      `json:"nativePending,omitempty"`
@@ -48,6 +50,8 @@ type Delivery struct {
 	queuePreparing bool
 	coalesce       bool   // legacy capability 4 may append this composer input
 	humanSteer     bool   // the app's human submission, eligible for the single steer slot
+	humanStop      uint64 // Go Stop generation at registration
+	recoverDraft   bool   // originals retained before dispatch to a managed runtime
 	appendRoot     string // the occurrence an in-flight append targeted
 	// hostContext is the trusted conversation context the app sent this
 	// submission in (a topic's), host-only: pi keeps inputs of different
@@ -96,7 +100,8 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 		d.expires = time.Now().Add(deliveryRetention).UnixMilli()
 	}
 	d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload, d.Preparing = false, false, false, false, false, false, false
-	if d.State == "dispatched" || d.State == "failed" || d.State == "handled" || d.State == "interrupted" || d.State == "accepted" {
+	d.CanRecover = false
+	if d.State == "dispatched" && !d.AwaitingRecord || d.State == "failed" && !d.recoverDraft || d.State == "handled" || d.State == "interrupted" && !d.recoverDraft || d.State == "accepted" && !d.recoverDraft {
 		d.queueID, d.queuePreparing = "", false
 		m.forgetRecallLocked(a, d.ID)
 	}
@@ -288,7 +293,15 @@ func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string
 	preview, truncated := deliveryClip(text, maxDeliveryPreview)
 	a.deliveryOrder++
 	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, Origin: origin, fingerprint: fingerprint, created: deliveryTimestamp(messageID),
-		coalesce: sub.coalesce && origin == nil && sub.context == "", humanSteer: sub.humanSteer && origin == nil, hostContext: sub.context}
+		coalesce: sub.coalesce && origin == nil && sub.context == "", humanSteer: sub.humanSteer && origin == nil, humanStop: a.humanStop, hostContext: sub.context}
+	var prior <-chan struct{}
+	var next chan struct{}
+	if d.humanSteer {
+		prior = a.humanTail
+		next = make(chan struct{})
+		a.humanTail = next
+		defer close(next)
+	}
 	a.deliveries[messageID] = d
 	// A new immutable input already owns this generation, even while its
 	// first durable write/start is pending. A duplicate above owns no new work.
@@ -309,7 +322,18 @@ func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string
 		return m.failInitialDelivery(a, messageID, err), nil
 	}
 	release()
+	if prior != nil {
+		select {
+		case <-prior:
+		case <-m.shutdown:
+			return m.failInitialDelivery(a, messageID, errStopped), nil
+		}
+	}
 	m.mu.Lock()
+	if d.humanSteer && a.humanStop != d.humanStop {
+		m.mu.Unlock()
+		return m.failInitialDelivery(a, messageID, errStopped), nil
+	}
 	if m.agents[id] == a && !a.retiring {
 		a.inbox++
 	}
@@ -376,16 +400,37 @@ func (m *Manager) bindDelivery(a *agent, p *proc, id string) error {
 		return err
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	d, ok := a.deliveries[id]
 	if !ok || !d.AgentSince.Equal(info.Since) {
+		m.mu.Unlock()
 		return errors.New("the agent was replaced; reopen its conversation before sending")
 	}
 	if a.proc != p || a.retiring || d.State != "sending" {
+		m.mu.Unlock()
 		return errStopped
+	}
+	var revision uint64
+	writer := a.deliveryWriter
+	if d.humanSteer && a.nativeQueue.HumanSteer {
+		if _, ok := a.recallPayloads[id]; !ok {
+			m.mu.Unlock()
+			return errors.New("There is no room to retain this draft. Clear a recovered draft or shorten this message.")
+		}
+		d.recoverDraft = true
+		a.humanDraftStore = true
 	}
 	d.Session, d.boundSeq = p.deliverySession(), a.seq
 	a.deliveries[id] = d
+	if d.recoverDraft {
+		revision = m.persistDeliveriesLocked(a)
+	}
+	m.mu.Unlock()
+	if revision != 0 {
+		if err := writer.wait(context.Background(), revision, m.shutdown); err != nil {
+			m.deliveryResponse(a, p, id, "steer", response{Error: err.Error()})
+			return err
+		}
+	}
 	return nil
 }
 
@@ -550,7 +595,7 @@ func (m *Manager) interruptDeliveriesLocked(a *agent) []Event {
 	}
 	a.queue = QueueStatus{}
 	for id, d := range a.deliveries {
-		if d.State != "cancelled" {
+		if d.State != "cancelled" && !d.recoverDraft {
 			m.forgetRecallLocked(a, id)
 		}
 		d.queueID, d.queuePreparing = "", false
@@ -564,8 +609,8 @@ func (m *Manager) interruptDeliveriesLocked(a *agent) []Event {
 	}{"delivery_queue", a.queue})
 	events := []Event{{Agent: a.info.ID, AgentSince: a.info.Since, Seq: a.seq, Data: raw}}
 	for _, d := range a.deliveries {
-		if d.Session != "" && pendingDelivery(d.State) {
-			d.State, d.Error = "interrupted", ""
+		if d.Session != "" && (pendingDelivery(d.State) || d.AwaitingRecord) {
+			d.State, d.Error, d.AwaitingRecord = "interrupted", "", false
 			events = append(events, m.deliveryLocked(a, d))
 		}
 	}

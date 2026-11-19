@@ -21,7 +21,7 @@ export function restoredImages(images) {
 
 export function mayRecallInComposer(textarea, attachments) {
   if (!textarea || !attachments) return false;
-  if (textarea.value !== '' || textarea.selectionStart !== 0 || textarea.selectionEnd !== 0 || textarea.readOnly || attachments.items.length || attachments.reading || attachments.sending || attachments.recalling) return false;
+  if (textarea.value !== '' || textarea.selectionStart !== 0 || textarea.selectionEnd !== 0 || textarea.readOnly || attachments.items.length || attachments.reading || attachments.sending || attachments.recalling || attachments.composing) return false;
   // Native composer only. Editors and overlay consumers keep their own keys.
   for (const el of document.querySelectorAll('dialog[open], [role="dialog"], [role="menu"], [role="listbox"], [data-shortcut-recording="true"]')) {
     if (el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden') return false;

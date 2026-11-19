@@ -236,7 +236,10 @@ type agent struct {
 	nativeQueue                    pendingQueue
 	recallPayloads                 map[string]recallPayload
 	recallBytes, recalls           int
-	appendGate                     chan struct{} // serializes composer submissions that may join an occurrence
+	appendGate                     chan struct{} // legacy managed append serialization
+	humanTail                      chan struct{} // stable submissions in registration order
+	humanStop                      uint64        // Stop fence for submissions preparing in Go
+	humanDraftStore                bool          // at least one snapshot has retained originals on disk
 	deliverySettled                uint64        // sequence of last observed settled boundary
 	// runEnd is how the run in progress ended so far: its latest assistant
 	// message's error, or nil; runSaid tells whether it had one at all.
@@ -1107,8 +1110,9 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 			cmd["images"] = images
 		}
 		m.mu.Lock()
-		joining := messageID != "" && origin.Source == OriginUser && a.deliveries[messageID].coalesce &&
-			a.nativeQueue.supportsAppend() && !a.nativeQueue.HumanSteer
+		d := a.deliveries[messageID]
+		joining := messageID != "" && origin.Source == OriginUser && d.coalesce &&
+			a.nativeQueue.supportsAppend() && (!a.nativeQueue.HumanSteer || !d.humanSteer)
 		m.mu.Unlock()
 		if joining {
 			// Held across this RPC: its ordered reply/events update the occurrence
@@ -1124,7 +1128,8 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 		if messageID != "" && a.nativeQueue.supported() {
 			cmd["submissionId"] = messageID
 		}
-		if d := a.deliveries[messageID]; d.humanSteer && a.nativeQueue.supportsAppend() && a.nativeQueue.HumanSteer && !retiring {
+		d = a.deliveries[messageID]
+		if d.humanSteer && a.nativeQueue.supportsAppend() && a.nativeQueue.HumanSteer && !retiring {
 			_, retained := a.recallPayloads[messageID]
 			cmd["humanSteer"] = map[string]any{
 				"epoch": a.nativeQueue.Epoch, "controlGeneration": a.nativeQueue.ControlGeneration,
@@ -1158,6 +1163,14 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 			answered := false
 			admitted := false
 			_, err = p.callAdmitted(context.Background(), cmd, func() error {
+				if d.humanSteer {
+					m.mu.Lock()
+					rejected := a.proc != p || a.retiring || a.removing || a.humanStop != d.humanStop
+					m.mu.Unlock()
+					if rejected {
+						return errStopped
+					}
+				}
 				if admit != nil {
 					if err := admit(); err != nil {
 						return err
@@ -1177,6 +1190,9 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 			})
 			if !answered {
 				p.origins.answered(origin, behavior, nil)
+				if !admitted && err != nil && d.humanSteer {
+					m.deliveryResponse(a, p, messageID, behavior, response{Error: err.Error()})
+				}
 			}
 			switch {
 			case answered && err == nil:
@@ -1224,7 +1240,13 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 
 // Abort stops the agent's current run.
 func (m *Manager) Abort(ctx context.Context, id string) error {
-	p := m.running(id)
+	m.mu.Lock()
+	var p *proc
+	if a := m.agents[id]; a != nil {
+		a.humanStop++
+		p = a.proc
+	}
+	m.mu.Unlock()
 	if p == nil {
 		return nil
 	}

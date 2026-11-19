@@ -153,19 +153,26 @@ func (m *Manager) sealDeliveriesLocked(a *agent) []Event {
 	if a.deliverySealed {
 		return nil
 	}
-	m.clearRecallLocked(a)
+	for id, d := range a.deliveries {
+		if !d.recoverDraft {
+			m.forgetRecallLocked(a, id)
+		}
+	}
+	a.nativeQueue = pendingQueue{}
 	var events []Event
 	for _, d := range a.deliveries {
-		if !pendingDelivery(d.State) {
+		if !pendingDelivery(d.State) && !d.AwaitingRecord {
 			continue
 		}
-		d.State, d.Error = "interrupted", ""
+		d.State, d.Error, d.AwaitingRecord = "interrupted", "", false
 		if d.Session == "" {
 			d.State, d.Error = "failed", errStopped.Error()
 		}
 		events = append(events, m.deliveryLocked(a, d))
 	}
+	// The writer holds its final immutable payload snapshot through drain.
 	m.persistDeliveriesLocked(a)
+	m.clearRecallLocked(a)
 	a.deliverySealed = true
 	return events
 }

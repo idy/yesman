@@ -179,9 +179,11 @@ func (m *Manager) mergeChildLocked(a *agent, root, child Delivery) []Event {
 	if state == "sending" || state == "accepted" {
 		state = "steering"
 	}
-	if child.MergedInto != root.ID || child.State != state {
+	awaiting := child.recoverDraft && root.AwaitingRecord
+	if child.MergedInto != root.ID || child.State != state || child.AwaitingRecord != awaiting {
+		child.AwaitingRecord = awaiting
 		child.MergedInto, child.State, child.queueID, child.appendRoot = root.ID, state, "", ""
-		if state == "unconfirmed" || state == "interrupted" {
+		if !child.recoverDraft && recoverableDelivery(state) {
 			m.forgetRecallLocked(a, child.ID)
 		}
 		events = append(events, m.deliveryLocked(a, child))

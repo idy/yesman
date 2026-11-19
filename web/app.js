@@ -253,16 +253,15 @@ function updateDelivery(c, d) {
 }
 
 function copyActions(text, c = null, d = null) {
-  const eligible = (d?.canCancel || d?.canRestore) && !c?.recalled.has(d.id);
+  const eligible = (d?.canCancel || d?.canRestore || d?.canRecover) && !c?.recalled.has(d.id);
   const actions = messageActions({ text,
     loadText: text == null && d?.originalText ? () => call('SubmissionText', c.id, d.id, d.agentSince) : null,
     copy: (value) => call('CopyValue', value), done: () => toast(t('Copied.')), fail,
-    recall: eligible ? () => recallMessage(c, d.id) : null, restoring: d?.canRestore,
-    promote: d?.canPromote && d.nativePending && d.state === 'queued' ? () => promoteMessage(c, d.id) : null,
+    recall: eligible ? () => recallMessage(c, d.id) : null, restoring: d?.canRestore, recovering: d?.canRecover,
     busy: c?.actions.has(d?.id), dismiss: c && d && dismissible(d) ? () => dismissReceipt(c, d.id) : null });
   actions._copyText = text;
-  actions._recall = `${!!d?.canCancel}:${!!d?.canRestore}:${!!d?.originalText}`;
-  actions._state = `${eligible}:${!!(d?.canPromote && d.nativePending && d.state === 'queued')}:${!!c?.actions.has(d?.id)}:${!!(c && d && dismissible(d))}`;
+  actions._recall = `${!!d?.canCancel}:${!!d?.canRestore}:${!!d?.canRecover}:${!!d?.originalText}`;
+  actions._state = `${eligible}:${!!c?.actions.has(d?.id)}:${!!(c && d && dismissible(d))}`;
   return actions;
 }
 
@@ -278,6 +277,9 @@ function dismissReceipt(c, id) {
   const after = focused ? [...document.querySelectorAll('#thread > .msg-delivery .message-dismiss')]
     .map((b) => b.closest('.msg-delivery')?.dataset.delivery).filter((other) => other && other !== id &&
       (el.compareDocumentPosition(document.querySelector(`#thread > [data-delivery="${CSS.escape(other)}"]`)) & Node.DOCUMENT_POSITION_FOLLOWING)) : [];
+  if (d.canRecover) {
+    call('AckRecall', c.id, id, d.agentSince).catch(fail);
+  }
   c.handled.add(id);
   saveHandled(c);
   schedulePatch(c);
@@ -286,34 +288,15 @@ function dismissReceipt(c, id) {
   (next ?? document.querySelector('.composer textarea'))?.focus({ preventScroll: true });
 }
 
-async function promoteMessage(c, id) {
-  const a = selectedAgent();
-  const receipt = c.deliveries.get(id);
-  if (!a || keyOf(a) !== c.key || !receipt?.nativePending || !receipt.canPromote || receipt.state !== 'queued' || c.actions.has(id)) return;
-  c.actions.add(id);
-  schedulePatch(c);
-  const current = () => state.convos.get(c.key) === c && keyOf(agentById(a.id) ?? {}) === c.key;
-  try {
-    const result = await call('PromoteSubmission', a.id, id, a.since);
-    if (!current()) return;
-    updateDelivery(c, result.delivery);
-  } catch (error) {
-    if (current() && keyOf(selectedAgent() ?? {}) === c.key) fail(t(errorText(error)));
-  } finally {
-    c.actions.delete(id);
-    if (current()) schedulePatch(c);
-  }
-}
-
 async function recallMessage(c, id) {
   const a = selectedAgent();
   if (!a || keyOf(a) !== c.key) return;
   const key = c.key;
   const attachments = state.attachments.get(key);
-  if (!attachments || attachments.sending || attachments.reading || attachments.recalling) return;
+  if (!attachments || attachments.sending || attachments.reading || attachments.recalling || attachments.composing) return;
   if ((state.drafts.get(key) ?? '') !== '' || attachments.items.length) return fail(t('Send or clear the current draft before recalling a message.'));
   const receipt = c.deliveries.get(id);
-  if ((!receipt?.canCancel && !receipt?.canRestore) || c.recalled.has(id) || c.actions.has(id)) return;
+  if ((!receipt?.canCancel && !receipt?.canRestore && !receipt?.canRecover) || c.recalled.has(id) || c.actions.has(id)) return;
   c.actions.add(id);
   schedulePatch(c);
   attachments.recalling = true;
@@ -324,22 +307,32 @@ async function recallMessage(c, id) {
   const redraw = () => { if (current() && keyOf(selectedAgent() ?? {}) === key) renderDock(); };
   redraw();
   try {
-    const result = await call('CancelSubmission', a.id, id, a.since);
-    if (!current()) return;
-    updateDelivery(c, result.delivery);
-    refreshDelivery(c, c.deliveries.get(id));
-    if (result.delivery?.id !== id || result.delivery?.state !== 'cancelled' || typeof result.payload?.text !== 'string') throw new Error(t('Cancellation could not be confirmed.'));
-    const images = restoredImages(result.payload.images ?? []);
-    if ((state.drafts.get(key) ?? '') !== '' || attachments.items.length) throw new Error(t('The message was recalled. Clear the current draft to return it to the input.'));
-    state.drafts.set(key, result.payload.text);
+    let payload;
+    if (receipt.canRecover) {
+      if (receipt.state !== 'failed' && !await confirmAction(t('Recover this draft?'), t('Pi may already have received this message. Check the conversation before sending it again.'), t('Recover draft'))) return;
+      if (!current() || keyOf(selectedAgent() ?? {}) !== key || !c.deliveries.get(id)?.canRecover) return;
+      payload = await call('SubmissionPayload', a.id, id, a.since);
+      if (!current() || !c.deliveries.get(id)?.canRecover) return;
+    } else {
+      const result = await call('CancelSubmission', a.id, id, a.since);
+      if (!current()) return;
+      updateDelivery(c, result.delivery);
+      refreshDelivery(c, c.deliveries.get(id));
+      if (result.delivery?.id !== id || result.delivery?.state !== 'cancelled') throw new Error(t('Cancellation could not be confirmed.'));
+      payload = result.payload;
+    }
+    if (typeof payload?.text !== 'string') throw new Error(t('Full message text is unavailable'));
+    const images = restoredImages(payload.images ?? []);
+    if ((state.drafts.get(key) ?? '') !== '' || attachments.items.length || attachments.composing) throw new Error(t('Clear the current draft before returning this message to the input.'));
+    state.drafts.set(key, payload.text);
     c.recalled.add(id);
     attachments.items = images;
     attachments.submissionID = null;
     attachments.submission = null;
     attachments.retryOf = null;
     const d = c.deliveries.get(id);
-    if (d) { d.canCancel = false; d.canRestore = false; d.originalText = false; refreshDelivery(c, d); }
-    call('AckRecall', a.id, id, a.since).catch(() => {});
+    if (d) { d.canCancel = false; d.canRestore = false; d.canRecover = false; d.originalText = false; refreshDelivery(c, d); }
+    if (!receipt.canRecover) call('AckRecall', a.id, id, a.since).catch(() => {});
   } catch (error) {
     if (current() && keyOf(selectedAgent() ?? {}) === key) fail(t(errorText(error)));
   } finally {
@@ -504,7 +497,7 @@ function updateReceipt(c, el, d, options = {}) {
   return receiptEl(c, d, options);
 }
 
-const receiptSig = (d, sent, members = []) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}:${!!d.originalPayload}:${!!d.canPromote}:${!!d.canCancel}:${!!d.canRestore}:${!!d.preparing}:${members.join(',')}`;
+const receiptSig = (d, sent, members = []) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}:${!!d.originalPayload}:${!!d.canCancel}:${!!d.canRestore}:${!!d.canRecover}:${!!d.preparing}:${members.join(',')}`;
 
 function renderQueue(c) {
   const thread = $('#thread');
@@ -2401,6 +2394,10 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   const dock = $('#dock');
   const a = selectedAgent();
   const keep = dock?.querySelector('textarea');
+  if (keep?._composing && keep._agentKey === keyOf(a ?? {})) {
+    keep._redrawAfterComposition = true;
+    return;
+  }
   const focused = keep && document.activeElement === keep;
   // Focus on the Needs you pane beside stays there when the conversation is
   // drawn again; opening a request from it moves focus to the request.
@@ -2415,6 +2412,11 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
   if (!dock || !a) return;
+  const previousComposer = dock.querySelector('.composer textarea');
+  if (previousComposer?._composing) {
+    const previousAttachments = state.attachments.get(previousComposer._agentKey);
+    if (previousAttachments) previousAttachments.composing = false;
+  }
   dock.replaceChildren();
 
   // What waits above the composer takes at most part of the window, and
@@ -2483,11 +2485,16 @@ function renderDock({ focusComposer = false, held = null } = {}) {
     textarea.style.height = `${textarea.scrollHeight}px`;
   };
   textarea.addEventListener('input', () => { state.drafts.set(keyOf(a), textarea.value); sync(); });
-  let composing = false;
-  textarea.addEventListener('compositionstart', () => { composing = true; });
-  textarea.addEventListener('compositionend', () => { composing = false; });
+  textarea._agentKey = key;
+  textarea.addEventListener('compositionstart', () => { textarea._composing = attachments.composing = true; });
+  textarea.addEventListener('compositionend', () => {
+    textarea._composing = attachments.composing = false;
+    if (textarea._redrawAfterComposition && textarea.isConnected) requestAnimationFrame(() => {
+      if (textarea.isConnected && keyOf(selectedAgent() ?? {}) === key) renderDock();
+    });
+  });
   textarea.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && !composing) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && !attachments.composing) {
       e.preventDefault();
       form.requestSubmit();
     }
@@ -2574,7 +2581,7 @@ async function sendMessage(a, textarea, submitter = null) {
   const key = keyOf(a);
   const attachments = state.attachments.get(key);
   const text = textarea.value;
-  if ((!text.trim() && !attachments?.items.length) || attachments?.reading || attachments?.sending || attachments?.recalling || state.modelOptions.get(key)?.busy) return;
+  if ((!text.trim() && !attachments?.items.length) || attachments?.reading || attachments?.sending || attachments?.recalling || attachments?.composing || state.modelOptions.get(key)?.busy) return;
   const images = imagePayload(attachments?.items ?? []);
   const c = convo(a);
   // Editing after an uncertain submission is a new user intent. Retrying the
@@ -2650,7 +2657,7 @@ async function sendMessage(a, textarea, submitter = null) {
     // uncertain bridge failure keeps the same ID, so retry cannot duplicate it.
     const d = c.deliveries.get(messageID);
     if (d?.revision === 0) { d.state = 'unconfirmed'; schedulePatch(c); }
-    fail(err);
+    fail(t(errorText(err)));
   } finally {
     attachments.sending = false;
     if (keyOf(selectedAgent() ?? {}) === key) renderDock();

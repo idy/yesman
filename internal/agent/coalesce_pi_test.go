@@ -253,8 +253,8 @@ func TestCoalescePendingFamilyAcrossRestartWithManagedPi(t *testing.T) {
 	if restarted.running(f.info.ID) != nil {
 		t.Fatal("interrupted family started pi")
 	}
-	if _, err := restarted.SubmissionPayload(f.info.ID, idA, f.info.Since); err == nil {
-		t.Fatal("restart reconstructed a payload")
+	if payload, err := restarted.SubmissionPayload(f.info.ID, idA, f.info.Since); err != nil || payload.Text != "alpha\nbeta" || !a.CanRecover {
+		t.Fatalf("restart lost the retained draft: %+v %v", payload, err)
 	}
 }
 
@@ -271,13 +271,16 @@ func TestCoalesceFallbacksWithManagedPi(t *testing.T) {
 		}
 		f.delivery(t, idA, "steering")
 		b, err := f.m.SubmitCoalescing(ctx, f.info.ID, idB, "two", b2, f.info.Since)
-		if err != nil || b.MergedInto != "" || len(f.receipt(idA).Merged) != 0 {
-			t.Fatalf("over-limit input joined: %+v %v", b, err)
+		if err != nil || b.State != "failed" || b.MergedInto != "" || len(f.receipt(idA).Merged) != 0 || len(f.pendingItems()) != 1 {
+			t.Fatalf("over-limit input changed the slot: %+v %v", b, err)
 		}
-		f.delivery(t, idB, "steering")
 		f.release(t)
 		f.delivery(t, idA, "dispatched")
-		f.delivery(t, idB, "dispatched")
+		settledBeforeRetry := func() bool { info, _ := f.m.Get(f.info.ID); return info.Status == Idle }
+		waitFor(t, "original settled", settledBeforeRetry)
+		if retry, err := f.m.SubmitCoalescing(ctx, f.info.ID, deliveryTestID(85003), "two", b2, f.info.Since); err != nil || retry.State == "failed" {
+			t.Fatalf("explicit retry after the slot drained: %+v %v", retry, err)
+		}
 		calls, _ := f.awaitProvider(t, "three", "two")
 		if got := introduced(calls, "three"); len(got) != 1 || !reflect.DeepEqual(got[0].images(), a3) {
 			t.Fatal("A changed")
@@ -286,7 +289,7 @@ func TestCoalesceFallbacksWithManagedPi(t *testing.T) {
 			t.Fatal("B lost or duplicated")
 		}
 	})
-	t.Run("plain Submit and other lanes stay separate", func(t *testing.T) {
+	t.Run("plain Submit joins and other lanes stay separate", func(t *testing.T) {
 		f := newPromotionFixture(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -295,15 +298,15 @@ func TestCoalesceFallbacksWithManagedPi(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.delivery(t, idA, "steering")
-		if b, err := f.m.Submit(ctx, f.info.ID, idB, "plain", nil, f.info.Since); err != nil || b.MergedInto != "" {
-			t.Fatalf("plain Submit joined: %+v %v", b, err)
+		if b, err := f.m.Submit(ctx, f.info.ID, idB, "plain", nil, f.info.Since); err != nil || b.MergedInto != idA {
+			t.Fatalf("plain Submit did not join: %+v %v", b, err)
 		}
 		f.delivery(t, idB, "steering")
 		// A follow-up composer input never joins a steering occurrence.
 		if c, err := f.m.submitDelivery(ctx, f.info.ID, idC, "later", nil, "followUp", submission{coalesce: true}, f.info.Since); err != nil || c.MergedInto != "" {
 			t.Fatalf("follow-up joined steering: %+v %v", c, err)
 		}
-		if items := f.pendingItems(); len(items) != 3 {
+		if items := f.pendingItems(); len(items) != 2 || items[0].SubmissionID != idA || items[1].Kind != "followUp" {
 			t.Fatalf("queue %+v", items)
 		}
 	})
@@ -379,10 +382,10 @@ func TestCoalesceCancelAndPromoteFamilyWithManagedPi(t *testing.T) {
 		if b, err := f.m.SubmitCoalescing(ctx, f.info.ID, idB, "beta", []Image{pB}, f.info.Since); err != nil || b.MergedInto != idA {
 			t.Fatalf("%+v %v", b, err)
 		}
-		if _, err := f.m.Submit(ctx, f.info.ID, idX, "survivor", nil, f.info.Since); err != nil {
+		if _, err := f.m.submit(ctx, f.info.ID, idX, "survivor", nil, "followUp", nil, f.info.Since); err != nil {
 			t.Fatal(err)
 		}
-		f.delivery(t, idX, "steering")
+		f.delivery(t, idX, "queued")
 		waitFor(t, "merge recorded", func() bool { return slices.Equal(f.receipt(idA).Merged, []string{idB}) })
 		result, err := f.m.CancelSubmission(ctx, f.info.ID, idB, f.info.Since)
 		if err != nil || result.Payload.Text != "alpha\nbeta" || !reflect.DeepEqual(result.Payload.Images, []Image{pA, pB}) || result.Delivery.ID != idA {
@@ -478,7 +481,7 @@ func TestCoalescePreparingWinsWithManagedPi(t *testing.T) {
 	if a := f.receipt(idA); a.State == "dispatched" || !a.CanCancel {
 		t.Fatalf("Preparing reported as taken: %+v", a)
 	}
-	b, err := f.m.SubmitCoalescing(ctx, f.info.ID, idB, "later B", nil, f.info.Since)
+	b, err := f.m.submitDelivery(ctx, f.info.ID, idB, "later B", nil, "steer", submission{coalesce: true}, f.info.Since)
 	if err != nil || b.MergedInto != "" {
 		t.Fatalf("B joined a claimed occurrence: %+v %v", b, err)
 	}

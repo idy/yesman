@@ -55,7 +55,20 @@ func newPromotionFixtureWithContext(t *testing.T, onEvent func(Event), beforeCon
 	if err = os.MkdirAll(config, 0700); err != nil {
 		t.Fatal(err)
 	}
-	settings := map[string]any{"packages": []string{}, "extensions": []string{filepath.Join(root, "scripts", "fixtures", "delivery-provider.ts")}, "skills": []string{}, "promptTemplates": []string{}, "themes": []string{}, "defaultProjectTrust": "no", "defaultProvider": "delivery-test", "defaultModel": "m", "compaction": map[string]bool{"enabled": false}, "retry": map[string]bool{"enabled": false}}
+	skill := filepath.Join(config, "skills", "fixture-steer", "SKILL.md")
+	template := filepath.Join(config, "prompts", "fixture-expand.md")
+	for path, contents := range map[string]string{
+		skill:    "---\nname: fixture-steer\ndescription: Exercise local input preparation.\n---\nFixture skill body.\n",
+		template: "Fixture template argument $1\n",
+	} {
+		if err = os.MkdirAll(filepath.Dir(path), 0700); err == nil {
+			err = os.WriteFile(path, []byte(contents), 0600)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings := map[string]any{"packages": []string{}, "extensions": []string{filepath.Join(root, "scripts", "fixtures", "delivery-provider.ts")}, "skills": []string{skill}, "promptTemplates": []string{template}, "themes": []string{}, "defaultProjectTrust": "no", "defaultProvider": "delivery-test", "defaultModel": "m", "compaction": map[string]bool{"enabled": false}, "retry": map[string]bool{"enabled": false}}
 	data, _ := json.Marshal(settings)
 	if err = os.WriteFile(filepath.Join(config, "settings.json"), data, 0600); err != nil {
 		t.Fatal(err)

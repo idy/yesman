@@ -3,8 +3,18 @@ import { appendFileSync, existsSync } from "node:fs";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 
 export default function (pi) {
-  pi.on("input", (event) => {
+  pi.on("input", async (event) => {
     if (event.text === "fixture-ping") return { action: "handled" };
+    if (event.text === "fixture-hook-error") throw new Error("synthetic input hook error");
+    if (event.text === "fixture-delay") {
+      const gate = process.env.DELIVERY_GATE;
+      appendFileSync(`${gate}.input-entered`, `${event.streamingBehavior}\n`);
+      const deadline = Date.now() + 8000;
+      while (!existsSync(`${gate}.input-release`) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return { action: "transform", text: "fixture-delay transformed" };
+    }
   });
   pi.registerProvider("delivery-test", {
     baseUrl: "http://127.0.0.1:1",

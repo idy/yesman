@@ -113,6 +113,7 @@ func (a *agent) deliveryView(d Delivery) Delivery {
 	d.CanPromote = d.NativePending && d.State == "queued" && !d.queuePreparing && a.nativeQueue.supportsPromotion() && a.nativeQueue.PromoteAllowed
 	d.CanCancel = hasPayload && d.NativePending
 	d.CanRestore = hasPayload && d.State == "cancelled" && !a.retiring && !a.removing
+	d.CanRecover = d.recoverDraft && d.OriginalPayload && recoverableDelivery(d.State) && !d.NativePending
 	return d
 }
 
@@ -218,12 +219,14 @@ func (m *Manager) applyPendingLocked(a *agent, p *proc, q pendingQueue) []Event 
 			}
 			switch change.State {
 			case "taken":
-				d.State = "dispatched"
+				d.State, d.AwaitingRecord = "dispatched", d.recoverDraft
 			case "cancelled":
 				d.State = "cancelled"
 			default:
 				d.State = "unconfirmed"
-				m.forgetRecallLocked(a, d.ID)
+				if !d.recoverDraft {
+					m.forgetRecallLocked(a, d.ID)
+				}
 			}
 			ended[d.ID] = d.State
 			events = append(events, m.deliveryLocked(a, d))
@@ -455,9 +458,9 @@ func (m *Manager) AckRecall(agentID, id string, since time.Time) error {
 		return errStopped
 	}
 	d, ok := a.rootDeliveryLocked(id)
-	if !ok || d.State != "cancelled" {
+	if !ok || d.State != "cancelled" && !a.deliveryView(d).CanRecover {
 		m.mu.Unlock()
-		return errors.New("message was not recalled")
+		return errors.New("no retained draft to acknowledge")
 	}
 	for _, member := range d.members() {
 		m.forgetRecallLocked(a, member)

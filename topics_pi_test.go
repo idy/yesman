@@ -136,8 +136,11 @@ func TestTopicsWithLocalPi(t *testing.T) {
 	if rB.Delivery.State != "steering" {
 		t.Fatalf("topic B during the run: %+v", rB.Delivery)
 	}
-	if d, err := svc.Submit(ctx, lead, idMain, "Main line: unrelated note", nil, y.HiredAt); err != nil || d.State != "steering" {
-		t.Fatalf("main composer: %+v %v", d, err)
+	mainText := "Main line: unrelated note"
+	main, err := svc.Submit(ctx, lead, idMain, mainText, nil, y.HiredAt)
+	must(t, err)
+	if main.State != "steering" && main.State != "failed" {
+		t.Fatalf("main composer: %+v", main)
 	}
 	must(t, agents.Prompt(ctx, lead, "[yesman] Worker \"helper\" finished a run. Its final message:\n\nWorker report about Alpha storage."))
 	// An uncertain retry with the same ID dispatches nothing new; the same ID
@@ -151,6 +154,16 @@ func TestTopicsWithLocalPi(t *testing.T) {
 	}
 	must(t, os.WriteFile(gate, []byte("open"), 0o644))
 	mark := settled(0)
+	if main.State == "failed" {
+		if !main.CanRecover || main.NativePending || main.MergedInto != "" {
+			t.Fatalf("different Topic context did not retain the unrelated draft: %+v", main)
+		}
+		// Explicit retry now that topic B has been taken.
+		idMain = id("c4")
+		_, err := svc.Submit(ctx, lead, idMain, mainText, nil, y.HiredAt)
+		must(t, err)
+		mark = settled(mark)
+	}
 
 	// Phase 2: a stale lead tool change loses to the user's edit; a current one is saved.
 	cur, _ := store.Topic("alice", y.HiredAt, tpA.ID)

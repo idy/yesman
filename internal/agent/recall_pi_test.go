@@ -157,10 +157,10 @@ func TestRecallWithManagedPi(t *testing.T) {
 	}
 	// Editing is a fresh intent and sends only once even after an unchanged retry.
 	editedID := deliveryTestID(10007)
-	if _, err = m.Submit(ctx, info.ID, editedID, "edited", []Image{image}, info.Since); err != nil {
+	if _, err = m.submit(ctx, info.ID, editedID, "edited", []Image{image}, "steer", nil, info.Since); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = m.Submit(ctx, info.ID, editedID, "edited", []Image{image}, info.Since); err != nil {
+	if _, err = m.submit(ctx, info.ID, editedID, "edited", []Image{image}, "steer", nil, info.Since); err != nil {
 		t.Fatal(err)
 	}
 	if err = m.AckRecall(info.ID, ids[1], info.Since); err != nil {

@@ -46,6 +46,7 @@ type deliveryDisk struct {
 type deliveryWrite struct {
 	revision uint64
 	state    deliveryDisk
+	drafts   map[string]RecallPayload
 }
 
 // One worker per agent. The mailbox holds only the latest metadata snapshot;
@@ -73,10 +74,14 @@ func newDeliveryWriter(path string, write func(string, []byte) error) *deliveryW
 	go w.run()
 	return w
 }
-func (w *deliveryWriter) request(revision uint64, state deliveryDisk) {
+func (w *deliveryWriter) request(revision uint64, state deliveryDisk, drafts ...map[string]RecallPayload) {
 	w.mu.Lock()
 	if !w.closed {
-		w.latest = &deliveryWrite{revision, state}
+		next := &deliveryWrite{revision: revision, state: state}
+		if len(drafts) > 0 {
+			next.drafts = drafts[0]
+		}
+		w.latest = next
 		w.requested = revision
 	}
 	w.mu.Unlock()
@@ -107,6 +112,9 @@ func (w *deliveryWriter) run() {
 			}
 			if err == nil {
 				err = w.write(w.path, data)
+			}
+			if err == nil && next.drafts != nil {
+				err = writeHumanDrafts(w.path, next.drafts)
 			}
 			w.mu.Lock()
 			w.completed, w.err = next.revision, err
@@ -227,6 +235,27 @@ func (m *Manager) ensureDeliveries(a *agent, path string) error {
 			read = readDeliveries
 		}
 		records, floor, err := read(path, time.Now())
+		var drafts map[string]RecallPayload
+		if err == nil {
+			drafts, err = readHumanDrafts(path)
+		}
+		if err == nil {
+			for id, payload := range drafts {
+				d, ok := records[id]
+				if !ok || !retainsHumanDraft(d) || !d.AgentSince.Equal(a.info.Since) || d.Origin != nil {
+					delete(drafts, id)
+					continue
+				}
+				if validateImages(payload.Images) != nil || deliveryFingerprint(payload.Text, payload.Images) != d.fingerprint {
+					err = errors.New("retained message draft does not match its receipt")
+					break
+				}
+			}
+		}
+		if len(drafts) > 0 && len(records) == 0 && floor == 0 {
+			// Orphaned originals cannot create a receipt or authorize replay.
+			drafts = nil
+		}
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		a.deliveryErr = err
@@ -234,6 +263,18 @@ func (m *Manager) ensureDeliveries(a *agent, path string) error {
 			return
 		}
 		a.deliveries, a.deliveryFloor = records, floor
+		a.humanDraftStore = drafts != nil
+		for id, payload := range drafts {
+			m.retainRecallLocked(a, id, payload.Text, payload.Images)
+			if _, ok := a.recallPayloads[id]; !ok {
+				m.clearRecallLocked(a)
+				a.deliveryErr = errors.New("there is no room to load retained message drafts")
+				return
+			}
+			d := records[id]
+			d.recoverDraft = true
+			records[id] = d
+		}
 		for _, d := range records {
 			if d.Order > a.deliveryOrder {
 				a.deliveryOrder = d.Order
@@ -318,8 +359,8 @@ func readDeliveries(path string, now time.Time) (map[string]Delivery, int64, err
 		d.Session, _ = deliveryClip(d.Session, 160)
 		d.Images = nil
 		d.CanCancel, d.CanRestore, d.OriginalText, d.NativePending, d.CanPromote, d.OriginalPayload, d.Preparing = false, false, false, false, false, false, false
-		if pendingDelivery(d.State) {
-			d.State, d.Error = "interrupted", ""
+		if pendingDelivery(d.State) || d.AwaitingRecord {
+			d.State, d.Error, d.AwaitingRecord = "interrupted", "", false
 			d.expires = now.Add(deliveryRetention).UnixMilli()
 			d.Revision++
 		}
@@ -425,11 +466,20 @@ func (m *Manager) persistDeliveriesLocked(a *agent) uint64 {
 		return a.deliveryVersion
 	}
 	state := deliveryDisk{Version: 2, Floor: a.deliveryFloor, Records: make([]storedDelivery, 0, len(a.deliveries))}
+	var drafts map[string]RecallPayload
+	if a.humanDraftStore {
+		drafts = make(map[string]RecallPayload)
+	}
 	for _, d := range a.deliveries {
 		state.Records = append(state.Records, storedDelivery{d, d.fingerprint, d.created, d.expires})
+		if d.recoverDraft && retainsHumanDraft(d) {
+			if payload, ok := a.recallPayloads[d.ID]; ok {
+				drafts[d.ID] = payload.RecallPayload
+			}
+		}
 	}
 	a.deliveryVersion++
-	a.deliveryWriter.request(a.deliveryVersion, state)
+	a.deliveryWriter.request(a.deliveryVersion, state, drafts)
 	return a.deliveryVersion
 }
 func newDeliveryIDAllowed(id string, floor int64, now time.Time) error {

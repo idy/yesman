@@ -193,15 +193,15 @@ func TestCoalesceFamilyEndsWithNaturalExitWithManagedPi(t *testing.T) {
 	f.m.deliveryResponse(a, p, idB, "steer", response{Success: true, Data: json.RawMessage(`{"disposition":"queued","append":{"outcome":"appended","queueId":"` + stale.Items[0].QueueID + `"}}`)})
 	for _, id := range []string{idA, idB} {
 		d := f.receipt(id)
-		if d.State != "interrupted" || d.NativePending || d.CanCancel || d.CanRestore || d.OriginalPayload || d.Preparing {
+		if d.State != "interrupted" || d.NativePending || d.CanCancel || d.CanRestore || d.CanRecover != (id == idA) || d.OriginalPayload != (id == idA) || d.Preparing {
 			t.Fatalf("%s after the old watcher: %+v", id, d)
 		}
 	}
 	if b := f.receipt(idB); b.MergedInto != idA {
 		t.Fatalf("link lost %+v", b)
 	}
-	// Retrying either old ID returns its honest receipt and sends nothing;
-	// no payload is rebuilt from what the receipt keeps.
+	// Retrying either old ID returns its receipt without dispatch. Recovery
+	// reads the quarantined originals and never advertises native recall.
 	for _, id := range []string{idA, idB} {
 		text, images := "family beta", []Image(nil)
 		if id == idA {
@@ -211,8 +211,9 @@ func TestCoalesceFamilyEndsWithNaturalExitWithManagedPi(t *testing.T) {
 		if err != nil || d.State != "interrupted" {
 			t.Fatalf("retry %s: %+v %v", id, d, err)
 		}
-		if _, err := f.m.SubmissionPayload(f.info.ID, id, f.info.Since); err == nil {
-			t.Fatal("payload rebuilt after the exit")
+		payload, err := f.m.SubmissionPayload(f.info.ID, id, f.info.Since)
+		if err != nil || payload.Text != "family alpha\nfamily beta" || !slices.Equal(payload.Images, []Image{image}) {
+			t.Fatalf("quarantined originals: %+v %v", payload, err)
 		}
 		if _, err := f.m.CancelSubmission(ctx, f.info.ID, id, f.info.Since); err == nil {
 			t.Fatal("interrupted family recalled")
