@@ -3003,28 +3003,36 @@ function renderGeneral(inner) {
 const completionSoundChoices = [
   ['bell', 'Soft bell'], ['pluck', 'Warm pluck'], ['double', 'Double tone'], ['sparkle', 'Digital sparkle'],
 ];
-const completionSound = { preference: null, saving: false, previewing: false, feedback: '' };
+const completionSound = { saved: null, pending: null, previewing: false, feedback: '' };
+
+// A Settings read can arrive after a newer save or configuration import.
+// Only the app's saved revision can replace the saved state shown here.
+function acceptCompletionSound(view) {
+  const s = completionSound;
+  const revision = view?.revision ?? 0;
+  if (s.saved && revision <= s.saved.revision) return;
+  s.saved = {
+    enabled: view?.enabled === true,
+    sound: completionSoundChoices.some(([id]) => id === view?.sound) ? view.sound : 'bell',
+    revision,
+  };
+  s.feedback = '';
+}
 
 function renderCompletionSound(saved) {
   const s = completionSound;
-  s.preference ??= {
-    enabled: saved?.enabled === true,
-    sound: completionSoundChoices.some(([id]) => id === saved?.sound) ? saved.sound : 'bell',
-  };
+  acceptCompletionSound(saved);
   const save = async (patch) => {
-    if (s.saving) { paintCompletionSound(); return; }
-    const before = s.preference;
-    s.preference = { ...before, ...patch };
-    s.saving = true;
+    if (s.pending) { paintCompletionSound(); return; }
+    s.pending = patch;
     s.feedback = '';
     paintCompletionSound();
     try {
-      await call('SetCompletionSound', s.preference);
+      acceptCompletionSound(await call('SetCompletionSound', patch));
     } catch {
-      s.preference = before;
       s.feedback = 'Could not save the completion sound. Try again.';
     } finally {
-      s.saving = false;
+      s.pending = null;
       paintCompletionSound();
     }
   };
@@ -3035,16 +3043,17 @@ function renderCompletionSound(saved) {
     onchange: (event) => save({ sound: event.currentTarget.value }) },
     completionSoundChoices.map(([id, name]) => h('option', { value: id }, t(name))));
   const preview = h('button', { id: 'completion-sound-preview', class: 'mds-button', type: 'button', onclick: async () => {
-    if (s.previewing || s.saving) return;
-    const sound = s.preference.sound;
+    if (s.previewing || s.pending) return;
+    const { sound, revision } = s.saved;
+    const stillCurrent = () => revision === s.saved.revision && !s.pending;
     s.previewing = true;
     s.feedback = '';
     paintCompletionSound();
     try {
       const outcome = await call('PreviewCompletionSound', sound);
-      if (outcome && sound === s.preference.sound) s.feedback = outcome === 'busy' ? 'Another sound is playing. Try again in a moment.' : 'Could not play the sound. Check your audio output and try again.';
+      if (outcome && stillCurrent()) s.feedback = outcome === 'busy' ? 'Another sound is playing. Try again in a moment.' : 'Could not play the sound. Check your audio output and try again.';
     } catch {
-      if (sound === s.preference.sound) s.feedback = 'Could not play the sound. Check your audio output and try again.';
+      if (stillCurrent()) s.feedback = 'Could not play the sound. Check your audio output and try again.';
     } finally {
       s.previewing = false;
       paintCompletionSound();
@@ -3069,11 +3078,11 @@ function paintCompletionSound(section = $('#completion-sounds')) {
   const choice = $('#completion-sound-choice', section);
   const preview = $('#completion-sound-preview', section);
   const feedback = $('#completion-sound-feedback', section);
-  enabled.checked = s.preference.enabled;
-  choice.value = s.preference.sound;
-  enabled.setAttribute('aria-disabled', String(s.saving));
-  choice.setAttribute('aria-disabled', String(s.saving));
-  preview.setAttribute('aria-disabled', String(s.saving || s.previewing));
+  enabled.checked = s.pending?.enabled ?? s.saved.enabled;
+  choice.value = s.pending?.sound ?? s.saved.sound;
+  enabled.setAttribute('aria-disabled', String(!!s.pending));
+  choice.setAttribute('aria-disabled', String(!!s.pending));
+  preview.setAttribute('aria-disabled', String(!!s.pending || s.previewing));
   feedback.textContent = s.feedback ? t(s.feedback) : s.previewing ? t('Playing preview…') : '';
   if (s.feedback) feedback.dataset.tone = 'error';
   else delete feedback.dataset.tone;
@@ -3364,7 +3373,8 @@ async function importConfig() {
     if (mode !== 'merge' && mode !== 'replace') return;
     const result = await call('ImportConfig', path, mode);
     c.imported = { lines: importLines(plan, result) };
-    state.settings = null; // the next General or Repositories page reads them again
+    state.settings = null; // invalidate values read before the import
+    if (state.view.kind === 'settings' && state.view.page === 'general') void loadSettingsPage('general');
     refreshState();
     shortcuts.load().catch(fail); // the file may carry shortcuts
   } catch (err) {

@@ -41,6 +41,29 @@ jobs:
         with:
           node-version: '24.22.1'
 
+      - name: Exercise native completion audio
+        if: runner.os != 'macOS'
+        run: |
+          git show -s --format='checkout=%H tree=%T parents=%P' HEAD
+          go version
+          scratch=$(mktemp -d "$RUNNER_TEMP/yesman-audio.XXXXXX")
+          if [ "$RUNNER_OS" = Windows ]; then
+            sha256sum internal/chime/sound.go internal/chime/play_windows.go internal/chime/audio_smoke_windows_test.go
+            exe="$scratch/chime.test.exe"
+            go test -c -o "$exe" ./internal/chime
+            sha256sum "$exe"
+            YESMAN_WINMM_SMOKE=1 "$exe" -test.v -test.timeout=15s -test.run '^TestWindowsWinMMSmoke$'
+          else
+            sha256sum internal/chime/sound.go internal/chime/play_linux.go internal/chime/audio_smoke_linux_test.go
+            ldconfig -p | grep -F libasound.so.2
+            exe="$scratch/chime.test"
+            go test -c -o "$exe" ./internal/chime
+            sha256sum "$exe"
+            for mode in capture missing-default; do
+              YESMAN_ALSA_SMOKE="$mode" "$exe" -test.v -test.timeout=15s -test.run '^TestLinuxALSASmoke$'
+            done
+          fi
+
       - name: Prepare and check the managed pi runtime
         run: |
           go run ./tools/pi-runtime "$RUNNER_TEMP/yesman-pi" > "$RUNNER_TEMP/yesman-runtime.json"

@@ -1,14 +1,17 @@
 package yesmen
 
 import (
+	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 )
 
-// confirmDelivery validates the lead's explicit scope against the very same
-// board update that closes the final task. No readiness is inferred from the
-// rest of the board, from wait relationships, or from the agents' statuses.
-func (b *Board) confirmDelivery(c DeliveryConfirmation, before []Task) error {
+// confirmDelivery validates the lead's scope, including board prerequisites
+// and recorded Needs You links, before marking the final task delivered.
+func (b *Board) confirmDelivery(c DeliveryConfirmation, before []Task, handoffs Handoffs) error {
 	if len(c.Related) >= maxTasks {
 		return fmt.Errorf("a delivery can cover at most %d tasks", maxTasks)
 	}
@@ -61,6 +64,106 @@ func (b *Board) confirmDelivery(c DeliveryConfirmation, before []Task) error {
 			}
 		}
 	}
+	if err := checkDeliveryHandoffs(members, seen, old, handoffs); err != nil {
+		return err
+	}
 	b.Tasks[finalIndex].Delivered = true
 	return nil
+}
+
+func checkDeliveryHandoffs(members []string, scope map[string]bool, before map[string]Task, handoffs Handoffs) error {
+	closedFor := map[string]bool{}
+	for _, h := range handoffs.Items {
+		if !scope[TaskID(h.Task)] {
+			continue
+		}
+		if err := checkDeliveryHandoff(h); err != nil {
+			return err
+		}
+		closedFor[TaskID(h.Task)] = true
+	}
+	// Changing a task to done clears its wait. Require evidence for an
+	// existing human wait, including explicit IDs on otherwise unlinked
+	// handoffs. An ID whose record is missing cannot establish acceptance.
+	for _, id := range members {
+		w := before[id].Wait
+		if w == nil || w.Kind != WaitUser {
+			continue
+		}
+		if w.Handoff == "" {
+			if !closedFor[id] {
+				return fmt.Errorf("task %s still records a user wait without a closed Needs You request", id)
+			}
+			continue
+		}
+		h, ok := handoffs.Find(w.Handoff)
+		if !ok {
+			return fmt.Errorf("the Needs You request %s for %s cannot be verified", w.Handoff, id)
+		}
+		if err := checkDeliveryHandoff(h); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkDeliveryHandoff(h Handoff) error {
+	if h.Open() {
+		return fmt.Errorf("Needs You request %s still waits on the user", h.ID)
+	}
+	switch h.Resolution {
+	case HandoffDone, HandoffNotNeeded, HandoffResolved:
+		return nil
+	default:
+		return fmt.Errorf("the resolution of Needs You request %s cannot be verified", h.ID)
+	}
+}
+
+// writeDelivery stages the exact Board bytes before final admission. It
+// also checks that the protected Needs You data still belongs to this hire
+// and has the bytes validated above. App writers use the same handoff lock.
+func (s *Store) writeDelivery(y Yesman, b Board, hands *handoffsFile, commit func(func() error) error) error {
+	name := filepath.Base(y.BoardFile())
+	temp := "." + name + "-delivery-" + rand.Text() + ".tmp"
+	data, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return err
+	}
+	out, err := hands.meta.OpenFile(temp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer hands.meta.Remove(temp)
+	_, err = out.Write(append(data, '\n'))
+	if err == nil {
+		err = out.Sync()
+	}
+	if closeErr := out.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	workspace, meta, err := openMeta(s.root, y, &s.metaMu)
+	if workspace != nil {
+		defer workspace.Close()
+	}
+	if meta != nil {
+		defer meta.Close()
+	}
+	if err != nil {
+		return err
+	}
+	old, oldErr := hands.meta.Stat(".")
+	current, curErr := meta.Stat(".")
+	if oldErr != nil || curErr != nil || !os.SameFile(old, current) {
+		return errors.New("workspace metadata changed during delivery confirmation")
+	}
+	if err := hands.unchanged(true); err != nil {
+		return fmt.Errorf("Needs You changed during delivery confirmation: %w", err)
+	}
+	return commit(func() error {
+		s.changing(y.Name)
+		return meta.Rename(temp, name)
+	})
 }

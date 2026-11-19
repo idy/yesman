@@ -69,8 +69,8 @@ type Server struct {
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
 	// beginChange replaces Agents.BeginChange in tests that run no agent.
 	beginChange func(token string, y yesmen.Yesman) (func(), error)
-	// beforeBoardChange, set only by tests, runs once a board change was
-	// admitted, just before it is written.
+	// beforeBoardChange holds an admitted ordinary write or a staged
+	// delivery before its final admission, in tests only.
 	beforeBoardChange func()
 	// beforeTopicChange, set only by tests, runs as beforeBoardChange does,
 	// once a topic change from an agent was admitted.
@@ -145,7 +145,8 @@ type caller struct {
 	yesman yesmen.Yesman
 	// token is checked again before mutation by BeginChange, CallerOperation
 	// or the cancellable App BeginOperation. It never leaves this server.
-	token string
+	token         string
+	deliveryFence agent.DeliveryFence
 }
 
 // current reports whether the caller is still the running agent it
@@ -172,6 +173,12 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, errors.New("no agent credential"))
 			return
 		}
+		var deliveryFence agent.DeliveryFence
+		if r.Pattern == "POST /v1/board" {
+			// Capture before any I/O, including authentication's metadata
+			// reads and the body. A Stop and resume can keep the same token.
+			deliveryFence = s.Agents.CaptureDeliveryFence(token)
+		}
 		info, err := s.Agents.Authenticate(token)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, err)
@@ -182,7 +189,7 @@ func (s *Server) handle(fn handlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, err)
 			return
 		}
-		out, err := fn(r.Context(), caller{agent: info, yesman: y, token: token}, r)
+		out, err := fn(r.Context(), caller{agent: info, yesman: y, token: token, deliveryFence: deliveryFence}, r)
 		if errors.Is(err, agent.ErrRetired) {
 			writeError(w, http.StatusUnauthorized, err)
 			return
@@ -615,13 +622,39 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 			return err
 		}
 		defer release()
-		if s.beforeBoardChange != nil {
-			s.beforeBoardChange()
+		if change.Delivery == nil {
+			if s.beforeBoardChange != nil {
+				s.beforeBoardChange()
+			}
+			b, err = s.Yesmen.ChangeBoardBy(y.Name, change, c.agent.Role == agent.RoleLead)
+			return err
 		}
-		b, err = s.Yesmen.ChangeBoardBy(y.Name, change, c.agent.Role == agent.RoleLead)
-		if err == nil && change.Delivery != nil && s.DeliveryConfirmed != nil {
-			s.DeliveryConfirmed()
+		if c.agent.Role != agent.RoleLead {
+			return errors.New("only the lead can confirm a delivery")
 		}
+		if err := s.Agents.CheckDelivery(c.deliveryFence, y); err != nil {
+			return err
+		}
+		b, err = s.Yesmen.ConfirmBoardDelivery(y, change, func(publish func() error) error {
+			if s.beforeBoardChange != nil {
+				s.beforeBoardChange()
+			}
+			if err := r.Context().Err(); err != nil {
+				return err
+			}
+			finish, err := s.Agents.BeginDeliveryCommit(c.deliveryFence, y)
+			if err != nil {
+				return err
+			}
+			defer finish()
+			if err := publish(); err != nil {
+				return err
+			}
+			if s.DeliveryConfirmed != nil {
+				s.DeliveryConfirmed()
+			}
+			return nil
+		})
 		return err
 	}); err != nil {
 		return nil, err

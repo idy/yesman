@@ -136,7 +136,7 @@ func TestPlayerMuteSwitchAndOutputFailureClearStaleSounds(t *testing.T) {
 			p.mu.Lock()
 			buffered := len(p.pending)
 			p.mu.Unlock()
-			if buffered != 3 {
+			if buffered != maxPending || buffered < 4 {
 				t.Fatalf("queued %d sounds", buffered)
 			}
 			var err error
@@ -159,4 +159,42 @@ func TestPlayerMuteSwitchAndOutputFailureClearStaleSounds(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPlayerExpiresAlertsAndSerializesBurst(t *testing.T) {
+	p, calls := testOutput(t)
+	defer p.Close()
+	p.Configure(true, Bell)
+	p.Notify()
+	first := receive(t, calls, Bell)
+	p.Notify()
+	p.mu.Lock()
+	p.pending[0] = time.Now().Add(-time.Millisecond)
+	p.mu.Unlock()
+	// A fresh alert can use an expired slot. The full live queue rejects
+	// excess arrivals without starting another output.
+	for range 8 {
+		p.Notify()
+	}
+	p.mu.Lock()
+	queued := len(p.pending)
+	if queued > 0 {
+		p.pending[0] = time.Now().Add(-time.Millisecond)
+	}
+	p.mu.Unlock()
+	if queued != 4 {
+		t.Fatalf("queued %d alerts during the burst", queued)
+	}
+	select {
+	case call := <-calls:
+		call.done <- ErrUnavailable
+		first.done <- ErrUnavailable
+		t.Fatal("overlapping output")
+	default:
+	}
+	first.done <- nil
+	for range 3 {
+		receive(t, calls, Bell).done <- nil
+	}
+	awaitIdle(t, p)
 }

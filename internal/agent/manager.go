@@ -1253,6 +1253,10 @@ func (m *Manager) Abort(ctx context.Context, id string) error {
 		return nil
 	}
 	_, err := p.call(ctx, map[string]any{"type": "abort"})
+	// This orders returning from the user's Stop after any delivery whose
+	// rename was already admitted. Normal Board writes use their own gate.
+	p.deliveryCommit.Lock()
+	p.deliveryCommit.Unlock()
 	return err
 }
 

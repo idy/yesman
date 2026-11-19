@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+// Four queued plus one playing covers a live burst of five. Keep older
+// admitted clips in order and discard newer arrivals once the queue is full.
+const (
+	maxPending  = 4
+	maxAlertAge = 4 * time.Second
+)
+
 var (
 	ErrUnavailable = errors.New("audio output is unavailable")
 	ErrBusy        = errors.New("another sound is playing")
@@ -47,8 +54,10 @@ func (p *Player) Notify() {
 		return
 	}
 	if p.busy {
-		if len(p.pending) < 3 {
-			p.pending = append(p.pending, time.Now().Add(3*time.Second))
+		now := time.Now()
+		p.expire(now)
+		if len(p.pending) < maxPending {
+			p.pending = append(p.pending, now.Add(maxAlertAge))
 		}
 		return
 	}
@@ -104,9 +113,7 @@ func (p *Player) run(sound Sound, preview chan error) {
 		if err != nil {
 			p.pending = nil // do not retry on an unavailable output
 		}
-		for len(p.pending) > 0 && !time.Now().Before(p.pending[0]) {
-			p.pending = p.pending[1:]
-		}
+		p.expire(time.Now())
 		if len(p.pending) == 0 {
 			p.busy = false
 			p.pending = nil
@@ -116,5 +123,13 @@ func (p *Player) run(sound Sound, preview chan error) {
 		p.pending = p.pending[1:]
 		sound = p.sound
 		p.mu.Unlock()
+	}
+}
+
+// expire runs under mu both before admitting a new alert and before
+// taking the next one to the output. Nothing waits for a device recovery.
+func (p *Player) expire(now time.Time) {
+	for len(p.pending) > 0 && !now.Before(p.pending[0]) {
+		p.pending = p.pending[1:]
 	}
 }

@@ -25,11 +25,20 @@ try {
     const browser = await engine.launch({headless: true, ...(name === 'chromium' ? {args: ['--mute-audio']} : {})});
     try {
       const page = await browser.newPage({viewport: {width: 1180, height: 780}, colorScheme: theme});
+      page.setDefaultTimeout(5000);
       const errors = [];
       page.on('pageerror', (e) => errors.push(e.message));
       await page.route('**/*', (r) => r.request().url().startsWith(url + '/') ? r.continue() : r.abort());
       await page.addInitScript(({locale, theme}) => {
         const fixture = window.fixture = {writes: [], plays: [], unexpected: [], events: {}};
+        const preference = () => JSON.parse(localStorage.getItem('fixture.completionSound') || '{"enabled":false,"sound":"bell","revision":0}');
+        const patch = (edits) => {
+          const before = preference();
+          const after = {...before, ...edits, revision: (before.revision ?? 0) + 1};
+          localStorage.setItem('fixture.completionSound', JSON.stringify(after));
+          return after;
+        };
+        fixture.patch = patch;
         window.mygo = {locale, on: (event, fn) => fixture.events[event] = fn, async call(method, ...args) {
           const m = method.replace('Yesman.', '');
           switch (m) {
@@ -40,12 +49,20 @@ try {
             case 'Crew': return {members: []};
             case 'Update': return {enabled: false};
             case 'RestartStatus': return {};
-            case 'Settings': return {appearance: theme, language: locale, completionSound: JSON.parse(localStorage.getItem('fixture.completionSound') || '{"enabled":false,"sound":"bell"}')};
-            case 'SetCompletionSound':
-              fixture.writes.push(args);
+            case 'Settings': {
+              const snapshot = {appearance: theme, language: locale, completionSound: preference()};
+              if (fixture.holdSettings) {
+                fixture.holdSettings = false;
+                await new Promise((resolve) => { fixture.releaseSettings = resolve; });
+              }
+              return snapshot;
+            }
+            case 'SetCompletionSound': {
+              fixture.writes.push(args[0]);
               if (fixture.saveError) throw Error('Synthetic save failure');
-              localStorage.setItem('fixture.completionSound', JSON.stringify(args[0]));
-              return;
+              if (fixture.holdSave) await new Promise((resolve) => { fixture.releaseSave = resolve; });
+              return patch(args[0]);
+            }
             case 'PreviewCompletionSound':
               fixture.plays.push(args[0]);
               if (fixture.hold) await new Promise((resolve) => { fixture.release = resolve; });
@@ -99,6 +116,7 @@ try {
       assert.equal(await choice.inputValue(), 'pluck');
       await page.evaluate(() => { fixture.saveError = false; });
       await choice.selectOption('sparkle');
+      await page.waitForFunction(() => document.querySelector('#completion-sound-enabled').getAttribute('aria-disabled') === 'false');
       await toggle.focus();
       await page.keyboard.press('Space');
       assert.equal(await toggle.isChecked(), true);
@@ -134,6 +152,34 @@ try {
       assert.deepEqual((await effects()).unexpected, []);
       assert.deepEqual(errors, []);
       if (out) await page.screenshot({path: `${out}/${name}-narrow.png`});
+
+      // Hold an earlier read while a sound edit is in flight. Another
+      // write turns automatic alerts off before the sound edit commits.
+      await page.evaluate(() => { fixture.holdSettings = true; fixture.holdSave = true; });
+      await page.locator('[data-page="general"]').click();
+      await page.waitForFunction(() => typeof fixture.releaseSettings === 'function');
+      await choice.selectOption('double');
+      await page.waitForFunction(() => typeof fixture.releaseSave === 'function');
+      await page.evaluate(() => {
+        fixture.holdSave = false;
+        fixture.patch({enabled: false});
+        fixture.releaseSave();
+      });
+      await page.waitForFunction(() => document.querySelector('#completion-sound-enabled').getAttribute('aria-disabled') === 'false');
+      assert.equal(await toggle.isChecked(), false);
+      assert.equal(await choice.inputValue(), 'double');
+      await page.evaluate(() => fixture.releaseSettings());
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await toggle.isChecked(), false);
+      assert.equal(await choice.inputValue(), 'double');
+      assert.deepEqual((await effects()).writes, [{sound: 'double'}]);
+      assert.deepEqual((await effects()).plays, ['sparkle']);
+      await toggle.focus();
+      await page.keyboard.press('Space');
+      await page.waitForFunction(() => document.querySelector('#completion-sound-enabled').getAttribute('aria-disabled') === 'false');
+      assert.deepEqual((await effects()).writes, [{sound: 'double'}, {enabled: true}]);
+      assert.equal(await choice.inputValue(), 'double');
+
       await page.evaluate(() => localStorage.setItem('fixture.completionSound', '{"enabled":false,"sound":"old-sound"}'));
       await open();
       assert.equal(await choice.inputValue(), 'bell');

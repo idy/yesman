@@ -18,16 +18,42 @@ func (p CompletionSoundPreference) effective() CompletionSoundPreference {
 	return p
 }
 
-func (s *service) SetCompletionSound(pref CompletionSoundPreference) error {
-	if !pref.Sound.Valid() {
-		return errors.New("unknown completion sound")
+type CompletionSoundState struct {
+	CompletionSoundPreference
+	Revision uint64 `json:"revision"`
+}
+
+// CompletionSoundPatch changes one preference. A false switch is an edit,
+// even when a newer request has saved a different sound in the meantime.
+type CompletionSoundPatch struct {
+	Enabled *bool        `json:"enabled,omitempty"`
+	Sound   *chime.Sound `json:"sound,omitempty"`
+}
+
+func (a *app) completionSoundLocked() CompletionSoundState {
+	return CompletionSoundState{a.settings.CompletionSound.effective(), a.soundRevision}
+}
+
+func (s *service) SetCompletionSound(patch CompletionSoundPatch) (CompletionSoundState, error) {
+	if (patch.Enabled == nil) == (patch.Sound == nil) {
+		return CompletionSoundState{}, errors.New("change either the completion alert or its sound")
+	}
+	if patch.Sound != nil && !patch.Sound.Valid() {
+		return CompletionSoundState{}, errors.New("unknown completion sound")
 	}
 	a := s.app
 	a.setmu.Lock()
 	defer a.setmu.Unlock()
 	next := a.settings
-	next.CompletionSound = pref
-	return a.putSettingsLocked(next)
+	if patch.Enabled != nil {
+		next.CompletionSound.Enabled = *patch.Enabled
+	} else {
+		next.CompletionSound.Sound = *patch.Sound
+	}
+	if err := a.putSettingsLocked(next); err != nil {
+		return CompletionSoundState{}, err
+	}
+	return a.completionSoundLocked(), nil
 }
 
 // PreviewCompletionSound is a desktop bridge action, not an agent API.

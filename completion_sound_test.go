@@ -16,17 +16,20 @@ func TestCompletionPreference(t *testing.T) {
 	if got := s.Settings().CompletionSound; got.Enabled || got.Sound != chime.Bell {
 		t.Fatalf("unexpected default: %+v", got)
 	}
-	wanted := CompletionSoundPreference{Enabled: true, Sound: chime.Double}
-	if err := s.SetCompletionSound(wanted); err != nil {
+	if _, err := s.SetCompletionSound(CompletionSoundPatch{Sound: new(chime.Double)}); err != nil {
 		t.Fatal(err)
+	}
+	wanted := CompletionSoundPreference{Enabled: true, Sound: chime.Double}
+	if got, err := s.SetCompletionSound(CompletionSoundPatch{Enabled: new(true)}); err != nil || got.CompletionSoundPreference != wanted || got.Revision != 2 {
+		t.Fatalf("enable patch: %+v %v", got, err)
 	}
 	if got := loadSettings(h.Settings()).CompletionSound; got != wanted {
 		t.Fatalf("did not persist: %+v", got)
 	}
-	if err := s.SetCompletionSound(CompletionSoundPreference{Sound: "missing"}); err == nil {
+	if _, err := s.SetCompletionSound(CompletionSoundPatch{Sound: new(chime.Sound("missing"))}); err == nil {
 		t.Fatal("saved a stale sound ID")
 	}
-	if s.Settings().CompletionSound != wanted {
+	if s.Settings().CompletionSound.CompletionSoundPreference != wanted {
 		t.Fatal("invalid setting changed the active preference")
 	}
 
@@ -44,12 +47,18 @@ func TestCompletionPreference(t *testing.T) {
 	if err != nil || !strings.Contains(string(file), `"future-tone"`) || !strings.Contains(string(file), `"future": 123`) {
 		t.Fatalf("unrelated save lost a setting: %v %s", err, file)
 	}
-	wanted = CompletionSoundPreference{Sound: chime.Pluck}
-	if err := s.SetCompletionSound(wanted); err != nil {
+	if _, err := s.SetCompletionSound(CompletionSoundPatch{Enabled: new(false)}); err != nil {
 		t.Fatal(err)
 	}
+	if file, err := os.ReadFile(h.Settings()); err != nil || !strings.Contains(string(file), `"future-tone"`) {
+		t.Fatalf("switch patch rewrote an unrelated stored choice: %v %s", err, file)
+	}
+	if _, err := s.SetCompletionSound(CompletionSoundPatch{Sound: new(chime.Pluck)}); err != nil {
+		t.Fatal(err)
+	}
+	wanted = CompletionSoundPreference{Sound: chime.Pluck}
 	cold := &service{app: &app{home: h, settings: loadSettings(h.Settings())}}
-	if cold.Settings().CompletionSound != wanted {
+	if cold.Settings().CompletionSound.CompletionSoundPreference != wanted {
 		t.Fatal("turning off lost the user's selection")
 	}
 }
@@ -57,7 +66,7 @@ func TestCompletionPreference(t *testing.T) {
 func TestCompletionPreferenceSaveFailure(t *testing.T) {
 	a := &app{home: home.Home{Root: t.TempDir() + "/missing"}}
 	s := &service{app: a}
-	if err := s.SetCompletionSound(CompletionSoundPreference{Enabled: true, Sound: chime.Sparkle}); err == nil {
+	if _, err := s.SetCompletionSound(CompletionSoundPatch{Enabled: new(true)}); err == nil {
 		t.Fatal("saved a setting in an absent directory")
 	}
 	if got := s.Settings().CompletionSound; got.Enabled || got.Sound != chime.Bell {

@@ -168,27 +168,27 @@ func (s Settings) save(path string) error {
 // SettingsView is what the General, Repositories and Storage settings
 // pages show; the pi page has its own, PiView.
 type SettingsView struct {
-	Appearance      mygo.ThemeSource          `json:"appearance"`
-	CompletionSound CompletionSoundPreference `json:"completionSound"`
-	Language        string                    `json:"language"`  // a language of languages, or "system"
-	AutoFetch       int                       `json:"autoFetch"` // minutes; 0 is off
-	Home            string                    `json:"home"`
-	Pool            string                    `json:"pool"`
-	Yesmen          string                    `json:"yesmen"`
-	Archive         string                    `json:"archive"`
-	Runtime         string                    `json:"runtime"`
-	SettingsFile    string                    `json:"settingsFile"`
-	Secrets         string                    `json:"secrets,omitempty"`   // the folder of the secrets and their key
-	Variables       string                    `json:"variables,omitempty"` // the variables' file
-	StorageConfig   string                    `json:"storageConfig,omitempty"`
-	HomeOverride    bool                      `json:"homeOverride,omitempty"`
+	Appearance      mygo.ThemeSource     `json:"appearance"`
+	CompletionSound CompletionSoundState `json:"completionSound"`
+	Language        string               `json:"language"`  // a language of languages, or "system"
+	AutoFetch       int                  `json:"autoFetch"` // minutes; 0 is off
+	Home            string               `json:"home"`
+	Pool            string               `json:"pool"`
+	Yesmen          string               `json:"yesmen"`
+	Archive         string               `json:"archive"`
+	Runtime         string               `json:"runtime"`
+	SettingsFile    string               `json:"settingsFile"`
+	Secrets         string               `json:"secrets,omitempty"`   // the folder of the secrets and their key
+	Variables       string               `json:"variables,omitempty"` // the variables' file
+	StorageConfig   string               `json:"storageConfig,omitempty"`
+	HomeOverride    bool                 `json:"homeOverride,omitempty"`
 }
 
 // Settings returns the user's choices and where yesman keeps its data.
 func (s *service) Settings() SettingsView {
 	a := s.app
 	a.setmu.Lock()
-	appearance, autoFetch, completionSound := a.settings.Appearance, a.settings.AutoFetch, a.settings.CompletionSound.effective()
+	appearance, autoFetch, completionSound := a.settings.Appearance, a.settings.AutoFetch, a.completionSoundLocked()
 	a.setmu.Unlock()
 	if appearance == "" {
 		appearance = mygo.ThemeSystem
@@ -283,6 +283,7 @@ func (a *app) putSettingsLocked(next Settings) error {
 	prev := a.settings
 	a.settings = next
 	if next.CompletionSound != prev.CompletionSound {
+		a.soundRevision++
 		pref := next.CompletionSound.effective()
 		a.chimes.Configure(pref.Enabled, pref.Sound)
 	}
