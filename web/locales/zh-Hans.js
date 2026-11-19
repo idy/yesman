@@ -683,6 +683,7 @@ export default {
   "Scored by Artificial Analysis": "由 Artificial Analysis 评分",
   "Scores for {model}": "{model} 的评分",
   "Scores from {source}, {date}, found by each model’s name.": "评分来自 {source}（{date}），按模型名称对应。",
+  "Scrollable table": "可横向滚动的表格",
   "Saved. Agents’ next commands get the change.": "已保存。智能体的下一条命令就会用上这次更改。",
   "Saving…": "正在保存…",
   "Search packages": "搜索包",

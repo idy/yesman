@@ -4,7 +4,7 @@
 // is answered here or recorded as unmocked, which fails the run.
 //
 // YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs \
-//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks,answer,unavailable \
+//   EXPLORER_ENGINES=chromium,webkit EXPLORER_PARTS=log,knowledge,tables,files,topics,needs,visual,layout,keys,capacity,resize,tasks,answer,unavailable \
 //   EXPLORER_SHOTS=/path/for/screenshots node scripts/resource-explorer-browser.mjs
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -16,7 +16,7 @@ const root = fileURLToPath(new URL('../web/', import.meta.url));
 const shots = process.env.EXPLORER_SHOTS;
 if (shots) await mkdir(shots, { recursive: true });
 const engines = (process.env.EXPLORER_ENGINES || 'chromium,webkit').split(',');
-const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,files,topics,needs,visual,layout,keys,capacity,resize,tasks,answer,unavailable').split(','));
+const parts = new Set((process.env.EXPLORER_PARTS || 'log,knowledge,tables,files,topics,needs,visual,layout,keys,capacity,resize,tasks,answer,unavailable').split(','));
 
 const bridge = `<script>
 window.calls=[];window.unmocked=[];window.delayed={};window.releases={};
@@ -216,6 +216,96 @@ async function knowledgePart(page, engine) {
   assert.deepEqual(await list.locator('.tree-name').allInnerTexts(), ['INDEX.md', 'Bob flat note']);
   assert.deepEqual(await list.locator('.tree-row').evaluateAll((rows) => rows.map((r) => [r.getAttribute('aria-level'), r.hasAttribute('aria-expanded')])), [['1', false], ['1', false]]);
   await shot(page, `${engine}-knowledge-flat-en`);
+}
+
+async function tablesPart(page, engine) {
+  await page.setViewportSize({ width: 1080, height: 840 });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  const headers = ['店 ID（草案）', '门店名 zh-CN', 'Name en', '款式与进餐特点 zh-CN', 'Style and dining en', '菜单 / Menu'];
+  const markdown = [
+    '# 候选门店 / Draft restaurants', '',
+    '比较各家门店的用餐方式和菜单，再决定要去哪里。Compare dining formats and menus before choosing a restaurant for the group.', '',
+    `| ${headers.join(' | ')} |`,
+    '| --- | --- | --- | --- | --- | --- |',
+    '| `jp-belt-sushi` | 日式旋转寿司 | Japanese Conveyor-Belt Sushi | 寿司、小食和甜品沿传送带送到餐桌。客人可以直接挑选，也可以通过桌上的屏幕点餐。适合想尝试多种小份菜的朋友。 | Small plates of sushi, snacks and desserts pass each table on a conveyor belt. Pick what looks good or use the screen to order something fresh. The small servings make it easy to try several things. | [候选菜单 / Draft menu](menu.md#menu) |', '',
+    '## 快速参考 / Quick reference', '',
+    '| 餐段 | Hours |', '| --- | --- |', '| 午餐 | 11:30–14:00 |', '',
+    `This paragraph keeps its normal reading width. ${'UnbrokenProseToken'.repeat(8)}`,
+  ].join('\n');
+  await page.evaluate((text) => Object.assign(filesFixture.alice, {
+    '.yesman/knowledge/draft.md': text,
+    '.yesman/knowledge/menu.md': '# Menu\n\nDraft menu details.',
+    '.yesman/task-log/2026-03-02-release.md': text,
+    'notes.md': text,
+  }), markdown);
+  const reader = page.locator('#files-view .files-md');
+  const scroller = reader.locator('.md-table').first();
+  const compact = reader.locator('.md-table').last();
+  const visibleWidth = (element) => element.evaluate(e => [e.clientWidth, e.scrollWidth]);
+  const noOuterOverflow = () => page.evaluate(() => [document.scrollingElement, document.querySelector('#files'), document.querySelector('#files-view')]
+    .every(e => e.scrollWidth === e.clientWidth));
+  const assertNarrow = async () => {
+    await scroller.locator('tbody code').waitFor();
+    await page.waitForFunction(() => document.querySelector('#files-view .md-table')?.tabIndex === 0);
+    const [space, width] = await visibleWidth(scroller);
+    assert.ok(width > space, 'the wide table alone can scroll');
+    assert.equal(await noOuterOverflow(), true, 'no horizontal page, pane or reader scroll');
+    assert.equal(await compact.getAttribute('tabindex'), null, 'compact tables add no tab stop');
+    assert.ok((await box(compact.locator('table'))).w < (await box(compact)).w, 'compact tables size to their content');
+  };
+  await page.locator('[data-info-entry="knowledge"]').click();
+  await page.locator('#files-tree-list [data-path=".yesman/knowledge/draft.md"]').click();
+  await assertNarrow();
+  assert.deepEqual(await scroller.getByRole('columnheader').allTextContents(), headers);
+  assert.equal(await scroller.getByRole('cell').count(), 6);
+  assert.equal(await scroller.getByRole('cell').first().evaluate(e => getComputedStyle(e).textAlign), 'left');
+  assert.equal(await reader.locator('p').last().evaluate(e => getComputedStyle(e).overflowWrap), 'anywhere');
+  const code = scroller.locator('code');
+  const id = await code.boundingBox();
+  await page.mouse.move(id.x + 1, id.y + id.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(id.x + id.width - 1, id.y + id.height / 2, { steps: 10 });
+  await page.mouse.up();
+  assert.equal(await page.evaluate(() => getSelection().toString().trim()), 'jp-belt-sushi');
+  await reader.locator('h3').focus();
+  await page.keyboard.press('Tab');
+  assert.equal(await scroller.evaluate(e => document.activeElement === e), true, 'Tab reaches the scrollable region');
+  await page.keyboard.press('ArrowRight');
+  await page.waitForFunction(() => document.querySelector('#files-view .md-table').scrollLeft > 0);
+  const menu = scroller.getByRole('link', { name: '候选菜单 / Draft menu' });
+  assert.equal(await menu.getAttribute('href'), 'menu.md#menu');
+  await menu.focus();
+  await shot(page, `${engine}-knowledge-table-narrow-menu`);
+  await page.keyboard.press('Enter');
+  await reader.getByText('Draft menu details.').waitFor();
+
+  await page.locator('#files-tree-list [data-path=".yesman/knowledge/draft.md"]').click();
+  await assertNarrow();
+  // Widen the same rendered document, then shrink it without remounting it.
+  await page.setViewportSize({ width: 1920, height: 980 });
+  await page.getByRole('button', { name: 'Widen the preview' }).click();
+  await page.waitForFunction(() => {
+    const el = document.querySelector('#files-view .md-table');
+    return el?.clientWidth && el.scrollWidth === el.clientWidth && !el.hasAttribute('tabindex');
+  });
+  assert.equal(await noOuterOverflow(), true);
+  assert.equal(await scroller.locator('table').evaluate(e => e.scrollWidth < e.parentElement.clientWidth), true);
+  await shot(page, `${engine}-knowledge-table-wide`);
+  await page.setViewportSize({ width: 1080, height: 840 });
+  await assertNarrow();
+  await page.getByRole('button', { name: 'Show the conversation again' }).click();
+
+  await page.locator('.files-crumb--scope').click();
+  await page.locator('.files-menu [role="menuitem"]').first().click();
+  await page.locator('#files-tree-list [data-path="notes.md"]').click();
+  await assertNarrow();
+  await page.locator('#files').getByRole('button', { name: 'Source', exact: true }).click();
+  await page.locator('#files .cm-content').waitFor();
+  assert.equal(await scroller.count(), 0);
+
+  await page.locator('[data-info-entry="working-logs"]').click();
+  await page.locator('#files-records [data-node="r:.yesman/task-log/2026-03-02-release.md"] > .explorer-line').click();
+  await assertNarrow();
 }
 
 async function filesPart(page) {
@@ -915,7 +1005,7 @@ async function unavailablePart(page, engine) {
   assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'ResolveHandoff'].includes(c[0])).length), 0);
 }
 
-const PARTS = { log: logPart, knowledge: knowledgePart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart, tasks: tasksPart, answer: answerPart, unavailable: unavailablePart };
+const PARTS = { log: logPart, knowledge: knowledgePart, tables: tablesPart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart, tasks: tasksPart, answer: answerPart, unavailable: unavailablePart };
 try {
   for (const name of engines) {
     const browser = await pw[name].launch({ headless: true });

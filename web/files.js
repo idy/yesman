@@ -56,6 +56,22 @@ export function createFiles(host) {
   let wide = false;
   let restoredRoute = null;
   let routedWorkspace = null; // only the log reader opened by this router
+  const tableSizes = new ResizeObserver((entries) => {
+    for (const { target } of entries) {
+      const scroller = target.closest('.md-table');
+      const overflows = scroller.scrollWidth > scroller.clientWidth;
+      // Give keyboard users a way to reach all columns, even without links.
+      if (overflows) {
+        scroller.tabIndex = 0;
+        scroller.setAttribute('role', 'region');
+        scroller.setAttribute('aria-label', t('Scrollable table'));
+      } else {
+        scroller.removeAttribute('tabindex');
+        scroller.removeAttribute('role');
+        scroller.removeAttribute('aria-label');
+      }
+    }
+  });
   const logPositions = new Map(); // bounded session positions; no document bodies
   function rememberLogPosition() {
     const section=$('#files-view');
@@ -525,6 +541,7 @@ export function createFiles(host) {
     if (restoreRoute()) return;
     const aside = $('#files');
     const p = current();
+    tableSizes.disconnect();
     aside.hidden = !p;
     aside.toggleAttribute('data-history', Boolean(p && isTaskLog(p.active)));
     const diff = isChanges(p);
@@ -1264,6 +1281,7 @@ export function createFiles(host) {
     const section = $('#files-view');
     const p = current();
     if (!section || !p?.active || isChanges(p)) return;
+    tableSizes.disconnect();
     section.dataset.pane = p.key;
     if (!section.dataset.logScrollListener) {
       section.dataset.logScrollListener='true';
@@ -1312,6 +1330,14 @@ export function createFiles(host) {
     if (rendered) {
       const article = h('article', { class: 'md files-md', html: renderDocument(text) });
       headingAnchors(article);
+      article.addEventListener('keydown', (e) => {
+        if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        if (!e.target.matches('.md-table[tabindex="0"]')) return;
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        // WebKit can focus this region without scrolling it on arrow keys.
+        e.preventDefault();
+        e.target.scrollLeft += e.key === 'ArrowRight' ? 40 : -40;
+      });
       article.addEventListener('click', (e) => {
         const link = e.target.closest('a[href]');
         const href = link?.getAttribute('href');
@@ -1329,6 +1355,10 @@ export function createFiles(host) {
       });
       const legacyNotice = legacy ? h('p', { class: 'files-notice' }, t('Legacy slice: Markdown may continue across files. The complete original preserves its formatting and old anchors.')) : null;
       section.replaceChildren(...[banner, notice, legacyNotice, article].filter(Boolean));
+      for (const scroller of article.querySelectorAll('.md-table')) {
+        tableSizes.observe(scroller);
+        tableSizes.observe(scroller.firstElementChild);
+      }
       renderBanner();
       if (!section.dataset.fresh) section.scrollTop = top;
       const target = p.taskAnchor ? article.querySelector(`[id="${CSS.escape(p.taskAnchor)}"]`) : article.querySelector('h1,h2,h3,h4,h5,h6');
