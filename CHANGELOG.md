@@ -2,6 +2,10 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.53
+
+- Fixed the alignment of text and the attachment and send buttons in the Topics reply box to match Chat. In narrow windows, the reply box now adjusts its height when the discussion scrollbar reduces the space for text.
+
 ## 0.1.52
 
 - With the built-in Pi runtime, compatible messages sent while an agent is working join a single pending bubble, with text and images in the order you sent them. Pi takes the combined message at its usual checkpoint. Messages sent after that go separately.
