@@ -728,7 +728,7 @@ func CrewContext(members []crew.Member, me agent.Info) string {
 		w("your own model, %s, is not in the crew, so name a member for every worker. ", own)
 	}
 	w("Weigh their scores against the task: a smarter member for design, hard bugs and reviews, a faster and cheaper one for simple, mechanical work. ")
-	w("Intelligence is Artificial Analysis's Intelligence Index (higher is smarter); speed is output tokens per second; cost and time are per task of that index. Scores marked as the user's are their own estimate.\n")
+	w("Intelligence is Artificial Analysis's Intelligence Index (higher is smarter); speed is output tokens per second; coding is a percentage; cost and time are per task of that index. User CSV values and estimates are user-provided, not AA measurements. Unavailable figures are unknown, not zero.\n")
 	for i, m := range crew.Smartest(members) {
 		if i == crewLimit {
 			w("… and %d more.\n", len(members)-crewLimit)
@@ -740,18 +740,41 @@ func CrewContext(members []crew.Member, me agent.Info) string {
 		}
 		w("- %s: %s at %s effort", m.Key, crew.ShortName(m.ModelName, m.Model), effort)
 		if s := m.Score; s != nil {
-			w(", intelligence %.1f", s.Intelligence)
-			if s.Speed != nil {
-				w(", %.0f tok/s", *s.Speed)
+			metric := func(key, label, unit string, value *float64) {
+				if value == nil {
+					w(", %s unavailable", label)
+					return
+				}
+				w(", %s %.4g%s", label, *value, unit)
+				if m.Source == crew.SourcePatch {
+					switch m.FieldSource(key) {
+					case crew.SourcePatch:
+						w(" (user CSV)")
+					case crew.SourceAA:
+						w(" (inherited AA)")
+					case crew.SourceUser:
+						w(" (inherited user estimate)")
+					}
+				}
+				if key == "minutesPerTask" && *value == 0 && m.FieldSource(key) == crew.SourceAA {
+					w(" (source record; actual time unverified)")
+				}
 			}
-			if s.Coding != nil {
-				w(", coding %.1f%%", *s.Coding)
+			var intelligence *float64
+			if !s.IntelligenceMissing {
+				intelligence = &s.Intelligence
 			}
-			if s.CostPerTask != nil {
-				w(", $%.2f per task", *s.CostPerTask)
-			}
-			if s.MinutesPerTask != nil {
-				w(", %.0f min per task", *s.MinutesPerTask)
+			metric("intelligence", "intelligence", "", intelligence)
+			metric("speed", "speed", " tok/s", s.Speed)
+			metric("coding", "coding", "%", s.Coding)
+			metric("costPerTask", "cost", " USD per task", s.CostPerTask)
+			metric("minutesPerTask", "time", " min per task", s.MinutesPerTask)
+			if m.Source == crew.SourceAA || slices.ContainsFunc([]string{"intelligence", "speed", "coding", "costPerTask", "minutesPerTask"}, func(k string) bool { return m.FieldSource(k) == crew.SourceAA }) {
+				if s.Effort == "" {
+					w(" (AA effort not specified by source)")
+				} else {
+					w(" (AA source effort: %s)", s.Effort)
+				}
 			}
 		}
 		switch m.Source {

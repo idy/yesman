@@ -112,6 +112,7 @@ func main() {
 	}
 	a.piJobs = newPiJobs(a.runPi, func(j PiJobs) { _ = piJobsEvent.Broadcast(j) })
 	a.settings = loadSettings(h.Settings())
+	a.initScorePatch()
 	a.setTheme = mygo.Theme.SetSource
 	a.chosenLocale, a.setLocale = mygo.App.ChosenLocale, mygo.App.SetLocale
 	a.updates = newUpdates()

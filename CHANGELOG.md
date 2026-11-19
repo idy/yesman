@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.51
+
+- Add a user score CSV patch in Settings › yesman › Models, with import/replace, export, a blank template and reversible disable. Keep the patch in the selected data directory across app upgrades.
+- Apply overrides by exact provider, full model ID and reasoning effort. Blank fields inherit the current built-in Artificial Analysis scores or existing estimate fallback; explicit zero stays zero. The patch supplies scores without adding models or crew members.
+- Show the same effective scores in Models and Lead context, with each field identified as user CSV, inherited AA or inherited estimate. Keep unavailable values distinct from zero.
+- Validate the complete CSV before saving it atomically. Invalid or duplicate rows leave the last valid patch unchanged, and disabling retains the file for later use.
+
 ## 0.1.50
 
 - Add embedded Artificial Analysis scores for GPT-6.2 Astra and GPT-6.2 Sol at low, medium, high, xhigh and max reasoning effort. The crew settings and the lead's model context use the same scores.

@@ -91,6 +91,11 @@ func TestF48HistoryStartupAndIncomingWork(t *testing.T) {
 				store, tmp, y := restartStore(t)
 				r := repairEntry(t, store, y, role, restart.ReasonWorking)
 				m, got := restartInstance(t, store, tmp)
+				if role == RoleWorker && action == "input" {
+					// A normal completion report may start the lead; hold it while
+					// the assertion below counts this startup. StopAll drains it.
+					m.cfg.Env = append(m.cfg.Env, "FAKE_PI_HOLD_REPORTS=1")
+				}
 				finish := m.HoldContinuations()
 				defer finish()
 				entered, release := make(chan struct{}), make(chan struct{})
@@ -160,6 +165,9 @@ func TestF48HistoryStartupAndIncomingWork(t *testing.T) {
 					case <-time.After(3 * time.Second):
 						t.Fatal("input did not end")
 					}
+				}
+				if role == RoleWorker && action == "input" && got.notes(id, "new incoming work") != 1 {
+					t.Fatal("incoming work did not arrive exactly once")
 				}
 				if starts.Load() != 1 {
 					t.Fatalf("started %d processes", starts.Load())
