@@ -1255,7 +1255,6 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 .topic-notice[data-tone="error"] { color: var(--mds-error); }
 .topic-notice[data-tone="warn"] { color: var(--mds-warn); }
 .topic-composer { padding-bottom: 8px; }
-.topic-composer .composer-input { padding: 8px; gap: 8px; }
 .topic-context { margin: 0; color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; overflow-wrap: anywhere; }
 .topic-context[hidden] { display: none; }
 .topic-context code { font-size: var(--mds-text-caption); }
