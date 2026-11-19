@@ -16,8 +16,9 @@ func flushReceiptDir(dir *os.File) error {
 	h, _, err := reopenReceiptDir.Call(dir.Fd(), windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_FLAG_BACKUP_SEMANTICS)
 	if windows.Handle(h) == windows.InvalidHandle {
-		return err
+		return os.NewSyscallError("ReOpenFile(directory)", err)
 	}
 	handle := windows.Handle(h)
-	return errors.Join(windows.FlushFileBuffers(handle), windows.CloseHandle(handle))
+	return errors.Join(os.NewSyscallError("FlushFileBuffers(directory)", windows.FlushFileBuffers(handle)),
+		os.NewSyscallError("CloseHandle(directory)", windows.CloseHandle(handle)))
 }
