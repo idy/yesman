@@ -83,6 +83,31 @@ func TestDeleteArchiveKeepsRelocatedPrimary(t *testing.T) {
 		t.Fatal("different checkout root was accepted")
 	}
 	before := run(t, repo.Path, "for-each-ref", "--format=%(refname) %(objectname)")
+	// An occupied receipt folder fails on every platform, after the real Git
+	// relocation and before deletion. Reopen the Store to retry the same archive.
+	receipts := filepath.Join(archives, ".worktree-relocations")
+	metadata := filepath.Join(archive, ".yesman", "worktrees.json")
+	original, err := os.ReadFile(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receipts, []byte("fixture blocker"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := remove(); err == nil || !strings.Contains(err.Error(), "Could not save the relocation record") {
+		t.Fatalf("expected receipt publication refusal: %v", err)
+	}
+	if b, err := os.ReadFile(metadata); err != nil || string(b) != string(original) {
+		t.Fatal("original archive record changed on refusal", err)
+	}
+	if err := os.Remove(receipts); err != nil {
+		t.Fatal(err)
+	}
+	store = yesmen.New(live, archives)
+	fresh, err := store.StoredWorkspaces()
+	if err != nil || len(fresh) != 1 || fresh[0] != list[0] {
+		t.Fatal("archive identity changed on reopen", fresh, err)
+	}
 	if err := remove(); err != nil {
 		t.Fatal(err)
 	}
@@ -98,12 +123,11 @@ func TestDeleteArchiveKeepsRelocatedPrimary(t *testing.T) {
 	if _, err := os.Stat(archive); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(archives, ".worktree-relocations")
-	files, err := os.ReadDir(dir)
+	files, err := os.ReadDir(receipts)
 	if err != nil || len(files) != 1 {
 		t.Fatal(files, err)
 	}
-	b, err := os.ReadFile(filepath.Join(dir, files[0].Name()))
+	b, err := os.ReadFile(filepath.Join(receipts, files[0].Name()))
 	if err != nil {
 		t.Fatal(err)
 	}

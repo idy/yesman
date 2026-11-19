@@ -55,7 +55,10 @@ async function run(engine, name, lang) {
           case 'Repos':case 'Clones':case 'Pulls':case 'Topics':case 'ListFiles': return [];
           case 'Fetches': return {fetching:[],errors:{}};
           case 'Messages':return {messages:[]};
-          case 'Crew':return {members:[],models:[]};
+          case 'Crew': return rpc(m);
+          case 'HireNamed':
+            if (window.holdHire) await new Promise((resolve, reject) => window.releaseHire = () => reject(Error('Fixture hire unavailable')));
+            return rpc(m, {name:args[0]});
           case 'Models':return {models:[],agent:agents.find(a=>a.id===args[0])};
           case 'Info':return {knowledge:[],worktrees:[]};
           case 'Schedules':return {plans:[]};
@@ -157,12 +160,69 @@ async function run(engine, name, lang) {
     await listReady(); assert(await list.evaluate(el => el === document.activeElement), 'an empty list returns focus to Refresh');
     await page.reload();await retained.waitFor();assert.equal(await lead.count(),0);
     await page.evaluate(() => rpc('MoveRetainedFolder'));
+    // Hold the actual post-delete State reply while the user starts a hire.
+    await page.evaluate(() => {
+      const invoke = mygo.call.bind(mygo);
+      mygo.call = async (...args) => {
+        const value = await invoke(...args);
+        if (args[0] === 'Yesman.State' && window.holdState) await new Promise(resolve => { window.releaseState = resolve; });
+        return value;
+      };
+      window.holdState = true;
+    });
     await retained.click({button:'right'}); await ok.click(); await dialog.waitFor({state:'detached'});
     const welcome = page.locator('.welcome input[name="name"]');
     await welcome.waitFor();
     assert(await welcome.evaluate(el => el === document.activeElement), 'deleting the last workspace focuses the welcome form');
+    await page.waitForFunction(() => typeof window.releaseState === 'function');
+    const modelHint = page.locator('#welcome-model strong');
+    await modelHint.waitFor();
+    const chosen = await modelHint.innerText();
+    const draft = 'Next test project';
+    await welcome.fill(draft);
+    await welcome.evaluate(input => {
+      window.hireField = input;
+      input.setSelectionRange(5, 9, 'backward');
+      input.dispatchEvent(new CompositionEvent('compositionstart', {bubbles:true, data:'项'}));
+    });
+    const finishRead = async () => {
+      const previous = await count('Crew');
+      await page.evaluate(() => { holdState = false; const finish = releaseState; releaseState = null; finish(); });
+      // A completed current State refresh re-reads the selected crew member.
+      await page.waitForFunction(n => calls.filter(c => c[0] === 'Crew').length > n, previous);
+    };
+    const nextRead = async () => {
+      await page.evaluate(() => { holdState = true; listeners.changed(); });
+      await page.waitForFunction(() => typeof window.releaseState === 'function');
+    };
+    await finishRead();
+    assert.deepEqual(await welcome.evaluate(el => [el === hireField, el.value, el.selectionStart, el.selectionEnd, el.selectionDirection, el === document.activeElement]),
+      [true, draft, 5, 9, 'backward', true]);
+    await welcome.evaluate(el => el.dispatchEvent(new CompositionEvent('compositionend', {bubbles:true, data:'项目'})));
+    await screenshot('welcome-draft');
+    assert.equal(await modelHint.innerText(), chosen);
+
+    const hireButton = page.locator('.welcome button[type="submit"]');
+    await page.evaluate(() => { window.holdHire = true; });
+    await hireButton.click(); await page.waitForFunction(() => typeof window.releaseHire === 'function');
+    await nextRead(); await finishRead();
+    assert(await welcome.isDisabled()); assert(await hireButton.isDisabled());
+    await welcome.evaluate(el => el.form.requestSubmit());
+    assert.equal(await count('HireNamed'), 1);
+    await page.evaluate(() => { holdHire = false; releaseHire(); });
+    const feedback = page.locator('#welcome-hire-error');
+    await feedback.getByText('Fixture hire unavailable').waitFor();
+    await nextRead(); await finishRead();
+    assert.equal(await welcome.inputValue(), draft);
+    assert.equal(await feedback.innerText(), 'Fixture hire unavailable');
+    assert(await welcome.evaluate(el => el === document.activeElement));
+    await hireButton.click();
+    await page.locator('[data-agent="next-test-project/lead"][aria-current="page"]').waitFor();
+    assert.equal(await welcome.count(), 0);
+    const hired = await page.evaluate(async () => (await rpc('State')).yesmen[0]);
+    assert.equal(hired.displayName, draft); assert.equal(hired.model, 'magpie/auto/claude-opus-5-5:xhigh');
     assert.deepEqual(await page.evaluate(()=>unexpected),[]);assert.deepEqual(errors,[]);
-    console.log(`${name} ${lang}: named confirmation and cancellation, exact deletion and reopen, immediate live selection and success with the archive read held, visible survivors and empty-list focus, older and failed responses PASS`);
+    console.log(`${name} ${lang} passed deletion, list ordering and welcome form retention with the selected model, name, selection, focus, pending submit, failure and successful hire`);
   } finally { await browser?.close(); fixture.stdin.end(); assert.equal(await exited,0,log); }
 }
 try {

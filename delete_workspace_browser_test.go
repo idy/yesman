@@ -51,6 +51,10 @@ func TestDeletionBrowserBridge(t *testing.T) {
 		switch req.Method {
 		case "State":
 			value, err = s.State(r.Context())
+		case "Crew":
+			value = s.Crew(r.Context())
+		case "HireNamed":
+			value, err = s.HireNamed(r.Context(), req.Name)
 		case "PrepareWorkspaceDeletion":
 			value, err = s.PrepareWorkspaceDeletion(req.Name, req.Since)
 		case "StoredWorkspaces":

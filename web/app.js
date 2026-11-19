@@ -2375,6 +2375,13 @@ function renderBody() {
   if (state.view.kind !== 'settings' || state.view.page !== 'shortcuts') shortcutsPage.leave();
   if (state.view.kind !== 'settings' || state.view.page !== 'grant') grantsPage.leave();
   const body = $('#body');
+  const welcome = body.querySelector('#welcome-hire');
+  if (state.view.kind === 'none' && welcome?.lang === locale()) {
+    // Keep the form mounted while it owns the user's edit, including native
+    // composition, selection and the pending submission's handlers.
+    updateWelcome(welcome);
+    return;
+  }
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
   const restoreStored = deletion.storageFocus(active);
@@ -2795,22 +2802,27 @@ function renderWelcome(body) {
   const error = h('p', { class: 'welcome-hint', id: 'welcome-hire-error', role: 'alert', hidden: true });
   const form = h('form', null, input, h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, t('Hire')));
   bindHireForm(form, error);
-  const hint = h('p', { class: 'welcome-hint' });
+  const welcome = h('div', { class: 'welcome', id: 'welcome-hire', lang: locale() },
+    h('h1', { class: 'mds-title' }, t('Hire a yesman')),
+    h('p', null, t('A yesman takes on a project. It gets a workspace of its own, checks out the repositories it needs from the shared pool, remembers what it learns, and starts workers when the job splits up.')),
+    form,
+    h('p', { class: 'welcome-hint', id: 'welcome-name-hint' }, t('A display name. Uppercase letters, spaces and Chinese characters are welcome.')),
+    error, h('p', { class: 'welcome-hint', id: 'welcome-model' }));
+  body.append(h('div', { class: 'page' }, welcome));
+  updateWelcome(welcome);
+  input.focus();
+}
+
+function updateWelcome(welcome) {
+  const warning = welcome.querySelector('.mds-notice');
+  const message = state.snap.piError;
+  if (!message) warning?.remove();
+  else if (warning) warning.querySelector('p').textContent = message;
+  else welcome.querySelector('form').before(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' },
+    h('div', null, h('strong', null, t('pi was not found')), h('p', null, message))));
+  const hint = welcome.querySelector('#welcome-model');
   crewPage.describe(hint);
   crewPage.load().then(() => { if (hint.isConnected) crewPage.describe(hint); });
-  body.append(
-    h('div', { class: 'page' },
-      h('div', { class: 'welcome' },
-        h('h1', { class: 'mds-title' }, t('Hire a yesman')),
-        h('p', null, t('A yesman takes on a project. It gets a workspace of its own, checks out the repositories it needs from the shared pool, remembers what it learns, and starts workers when the job splits up.')),
-        state.snap.piError ? h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('pi was not found')), h('p', null, state.snap.piError))) : null,
-        form,
-        h('p', { class: 'welcome-hint', id: 'welcome-name-hint' }, t('A display name. Uppercase letters, spaces and Chinese characters are welcome.')),
-        error,
-        hint,
-      )),
-  );
-  input.focus();
 }
 
 // ---------- Settings ----------
