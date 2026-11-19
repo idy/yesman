@@ -1232,6 +1232,22 @@ button.board-owner:hover { background: var(--mds-selected); color: var(--mds-ink
 /* The request opened from Needs you, found where it was asked. */
 .needs-you-target { outline: 2px solid var(--app-focus); outline-offset: 2px; }
 .needs-you-back { justify-self: start; }
+.needs-you-response, .needs-you-field, .needs-you-options { display: grid; gap: 6px; min-inline-size: 0; }
+.needs-you-response { gap: 10px; }
+.needs-you-response .ask-hint { margin: 0; color: var(--mds-ink-soft); font-size: var(--mds-text-caption); }
+.needs-you-response textarea[rows="2"] { min-block-size: 3.8em; }
+.needs-you-field, .needs-you-options legend { color: var(--mds-ink); font-size: var(--mds-text-note); }
+.needs-you-field textarea, .needs-you-ask :is(input, textarea) { box-sizing: border-box; inline-size: 100%; min-inline-size: 0; }
+.needs-you-field textarea { resize: vertical; }
+.needs-you-options { border: 0; margin: 0; padding: 0; }
+.needs-you-options legend { margin-block-end: 4px; padding: 0; }
+.needs-you-options label { display: flex; align-items: baseline; gap: 8px; overflow-wrap: anywhere; cursor: pointer; }
+.needs-you-options input { margin: 0; accent-color: var(--app-focus); }
+:is(.ask, .needs-you-ask, .needs-you-response) [aria-disabled="true"] { opacity: .55; cursor: default; }
+:is(.ask, .needs-you-ask, .needs-you-response) :is(.ask-hint[role="status"], .needs-you-response-error):empty { display: none; }
+:is(.ask, .needs-you-ask, .needs-you-response) .needs-you-response-error { margin: 0; color: var(--mds-error); font-size: var(--mds-text-note); }
+.needs-you-ask-source { justify-self: start; }
+#confirm-body { overflow-wrap: anywhere; }
 .needs-you-memory { flex-wrap: wrap; }
 .needs-you-memory > div { flex: 1 1 40ch; min-width: 0; }
 .needs-you-memory > button { flex: 0 0 auto; }

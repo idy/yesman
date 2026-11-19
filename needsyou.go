@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -40,18 +41,46 @@ func (s *service) ResolveHandoff(yesman string, hiredAt time.Time, id, resolutio
 	if err != nil {
 		return yesmen.Handoff{}, err
 	}
-	a.needsYouChanged(yesman, nil)
-	if a.agents != nil {
-		msg := handoffNotice(h)
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-			if err := a.agents.TellLeadAboutUser(ctx, yesman, since, msg); err != nil {
-				log.Printf("yesman: tell %s's lead about %s: %v", yesman, h.ID, err)
-			}
-		}()
-	}
+	a.needsYouClosed(yesman, since, h)
 	return h, nil
+}
+
+// RespondHandoff records the answer for the exact hire shown in the window.
+// The saved response can be read with yesman_needs_you even after a restart.
+func (s *service) RespondHandoff(yesman string, hiredAt time.Time, id, resolution string, answer *yesmen.HandoffAnswer) error {
+	if resolution != yesmen.HandoffDone && resolution != yesmen.HandoffNotNeeded {
+		return errors.New("choose a way to respond to this request")
+	}
+	a := s.app
+	var h yesmen.Handoff
+	var closed bool
+	err := a.yesmen.Use(yesman, func(y yesmen.Yesman) error {
+		if !y.HiredAt.Equal(hiredAt) {
+			return errors.New("this yesman was replaced: refresh the window")
+		}
+		var err error
+		h, closed, err = a.yesmen.RespondHandoff(y.Name, id, resolution, answer)
+		return err
+	})
+	if err == nil && closed {
+		a.needsYouClosed(yesman, hiredAt, h)
+	}
+	return err
+}
+
+func (a *app) needsYouClosed(yesman string, hiredAt time.Time, h yesmen.Handoff) {
+	a.needsYouChanged(yesman, nil)
+	if a.agents == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := a.agents.TellLeadAboutUser(ctx, yesman, hiredAt, handoffNotice(h)); err != nil {
+			log.Printf("yesman: tell %s's lead about %s: %v", yesman, h.ID, err)
+		}
+		a.agents.TasksChanged(yesman)
+	}()
 }
 
 // ResetCallMemory starts a new memory of a yesman's tool calls, once the
@@ -102,6 +131,15 @@ func handoffNotice(h yesmen.Handoff) string {
 	}
 	if h.Resolution == yesmen.HandoffNotNeeded {
 		return fmt.Sprintf("[yesman] The user marked %s as not needed. Go on without it.", what)
+	}
+	if h.Answer != nil {
+		// JSON preserves the user's content as data in a scoped notice. The
+		// notice starts with a fixed prefix, so a reply cannot be a pi command.
+		answer, _ := json.Marshal(h.Answer)
+		return fmt.Sprintf("[yesman] The user answered %s. Their response data (JSON):\n%s", what, answer)
+	}
+	if h.Response != nil && h.Response.Kind == yesmen.ResponseAction {
+		return fmt.Sprintf("[yesman] The user marked %s as done. That is their own confirmation: check it worked before relying on it.", what)
 	}
 	switch h.Type {
 	case yesmen.HandoffDecision, yesmen.HandoffInput:

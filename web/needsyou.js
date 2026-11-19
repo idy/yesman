@@ -18,7 +18,13 @@ export const TYPE_LABELS = {
   decision: 'Decision', information: 'Information', login: 'Log in', install: 'Install', manual: 'Manual step',
 };
 // A handoff of type "input" asks for information, unlike a text dialog.
-export const typeLabel = (item) => TYPE_LABELS[item.kind === 'handoff' && item.type === 'input' ? 'information' : item.type] ?? 'Other request';
+export const responseKind = (h) => h.response?.kind ?? (['input', 'decision'].includes(h.type) ? 'text' : 'action');
+export const typeLabel = (item) => {
+  if (item.kind === 'handoff' && item.handoff?.response?.kind === 'choice') return TYPE_LABELS.select;
+  return TYPE_LABELS[item.kind === 'handoff' && item.type === 'input' ? 'information' : item.type] ?? 'Other request';
+};
+
+export const dialogKey = (a, hiredAt = '') => `d:${a.id}@${a.since ?? ''}:${a.dialogAt ?? ''}:${a.dialog?.id ?? ''}@${hiredAt}`;
 
 const time = (s) => {
   const v = Date.parse(s ?? '');
@@ -35,8 +41,9 @@ export function needsYouItems(snap) {
     if (a.role !== 'lead' && !(a.handedOver && a.dialog?.id)) continue;
     const d = a.dialog ?? {};
     items.push({
-      key: `d:${a.id}@${a.since ?? ''}:${d.id ?? ''}`,
+      key: dialogKey(a, yesmen.get(a.yesman).hiredAt), requestId: d.id,
       kind: 'dialog', yesman: a.yesman, agent: a.id, agentSince: a.since ?? '', role: a.role,
+      hiredAt: yesmen.get(a.yesman).hiredAt ?? '', dialog: d,
       type: d.method ?? '', title: d.title || '', summary: d.message || '',
       since: a.dialogAt || '', timeout: d.timeout || 0,
     });

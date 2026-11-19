@@ -844,7 +844,7 @@ export default function yesman(pi: ExtensionAPI) {
 			"What waits on the user, under Needs you in their window. Call it with no arguments to list it in short, or with id for one handoff in full. " +
 			"add registers something only the user can do or decide: a decision, information, logging in, installing, or another manual step; link it to the board task that waits on it, which you mark blocked. " +
 			"handOver gives the user a worker's question you cannot answer yourself (its requestId from the [yesman] message); you can still answer it. " +
-			"resolve closes a handoff that was settled otherwise. When the user marks one done or not needed, you hear of it. " +
+			"resolve closes a handoff that was settled otherwise. The user can send a reply, confirm an action they performed, or mark the request not needed. Read a saved reply with id. " +
 			"Never ask for passwords, keys, tokens or codes this way or in chat: point the user to Settings › Secrets.",
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "A handoff's ID, such as n3, to read it in full" })),
@@ -852,7 +852,12 @@ export default function yesman(pi: ExtensionAPI) {
 				Type.Object({
 					type: Type.String({ description: "decision, input, login, install or manual" }),
 					title: Type.String({ description: "What the user needs to do, in one line, up to 200 characters" }),
-					detail: Type.Optional(Type.String({ description: "How, in Markdown: the options and your recommendation, where to log in, what to install" })),
+					detail: Type.Optional(Type.String({ description: "Context or instructions in Markdown. Do not include executable actions or ask for credentials." })),
+					response: Type.Optional(Type.Object({
+						kind: Type.Union([Type.Literal("text"), Type.Literal("choice"), Type.Literal("action")], { description: "Use text for a written reply, choice when the user must select one offered option, or action to acknowledge work they did. Login, install and manual use action." }),
+						options: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }), { minItems: 2, maxItems: 8, description: "Distinct, predefined choices, only for kind choice. Use the user's language." })),
+						allowNote: Type.Optional(Type.Boolean({ description: "Whether a choice can include an optional note" })),
+					}, { description: "Set this explicitly so the card has the right response controls. Do not hide choice options in detail." })),
 					task: Type.Optional(Type.String({ description: "The board task waiting on it, such as t5" })),
 					worker: Type.Optional(Type.String({ description: "The worker whose work it concerns" })),
 				}),
@@ -889,7 +894,9 @@ export default function yesman(pi: ExtensionAPI) {
 				...view.handoffs.map(handoffLine),
 				...view.questions.map((q: any) => `- worker ${q.worker}'s question ${JSON.stringify(q.requestId)}: ${q.title}, since ${q.since}`),
 			];
-			return result(memory + (lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user."), {});
+			const recent = (view.recent ?? []).map((h: any) => `- ${h.id} (${h.outcome}): ${h.title}${h.task ? `, task ${h.task}` : ""}`);
+			const handled = recent.length ? `\n\nRecently handled by the user. Read the outcome or reply with id:\n${recent.join("\n")}` : "";
+			return result(memory + (lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user.") + handled, {});
 		},
 	});
 

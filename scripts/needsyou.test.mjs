@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { needsYouItems, requestsOf, closedHandoffs, summary, typeLabel } from '../web/needsyou.js';
+import { needsYouItems, requestsOf, closedHandoffs, summary, typeLabel, responseKind, dialogKey } from '../web/needsyou.js';
 
 const snap = (agents, yesmen) => ({ agents, yesmen });
 const alice = { name: 'alice', hiredAt: '2026-01-01T00:00:00Z', handoffs: [] };
@@ -21,8 +21,8 @@ test('only structured requests reach Needs you', () => {
   ] }]));
   assert.deepEqual(items.map((i) => i.key), [
     'h:bob@2026-02-01T00:00:00Z:n1',
-    'd:bob/w2@2026-03-01T00:00:00Z:q3',
-    'd:alice/lead@2026-01-01T00:00:00Z:q1',
+    'd:bob/w2@2026-03-01T00:00:00Z:2026-03-01T00:00:01Z:q3@2026-02-01T00:00:00Z',
+    'd:alice/lead@2026-01-01T00:00:00Z:2026-03-01T00:00:02Z:q1@2026-01-01T00:00:00Z',
   ]);
   assert.equal(items[0].agent, 'bob/lead');
   assert.equal(typeLabel(items[0]), 'Log in');
@@ -36,7 +36,15 @@ test('an archived yesman has nothing waiting; a waiting lead always does', () =>
     { id: 'alice/lead', yesman: 'alice', role: 'lead', status: 'waiting', since: alice.hiredAt },
     { id: 'alice/w1', yesman: 'alice', role: 'worker', status: 'waiting', handedOver: true },
   ], [alice]));
-  assert.deepEqual(items.map((i) => i.key), ['d:alice/lead@2026-01-01T00:00:00Z:']);
+  assert.deepEqual(items.map((i) => i.agent), ['alice/lead']);
+});
+
+test('response kinds are explicit or use the legacy type, and a repeated dialog ID gets a new key', () => {
+  assert.equal(responseKind({ type: 'decision', detail: 'Choose a, b or c' }), 'text');
+  assert.equal(responseKind({ type: 'login' }), 'action');
+  assert.equal(responseKind({ type: 'decision', response: { kind: 'choice', options: ['a', 'b'] } }), 'choice');
+  const a = { id: 'alice/lead', since: alice.hiredAt, dialog: { id: 'repeated' }, dialogAt: '2026-05-03T00:00:00Z' };
+  assert.notEqual(dialogKey(a, alice.hiredAt), dialogKey({ ...a, dialogAt: '2026-05-03T00:00:01Z' }, alice.hiredAt));
 });
 
 test('a same-name yesman hired again has new keys', () => {
@@ -59,7 +67,7 @@ test('a yesman\'s requests are its own, for its current hire', () => {
     { id: 'bob/w1', yesman: 'bob', role: 'worker', status: 'waiting', since: '2026-03-01T10:00:00.124Z', handedOver: true, dialog },
   ];
   const s = snap(agents, [alice, bobNow]);
-  assert.deepEqual(requestsOf(s, bobNow).map((i) => i.key).sort(), [`d:bob/w1@2026-03-01T10:00:00.124Z:q`, `h:bob@${hired}:n1`]);
+  assert.deepEqual(requestsOf(s, bobNow).map((i) => i.key).sort(), [`d:bob/w1@2026-03-01T10:00:00.124Z::q@${hired}`, `h:bob@${hired}:n1`]);
   assert.deepEqual(requestsOf(s, alice).map((i) => i.agent), ['alice/lead']);
   // This Bob's own lead, started when he was hired, to the nanosecond.
   const lead = { ...agents[1], since: hired };
