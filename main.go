@@ -112,6 +112,8 @@ func main() {
 	}
 	a.piJobs = newPiJobs(a.runPi, func(j PiJobs) { _ = piJobsEvent.Broadcast(j) })
 	a.settings = loadSettings(h.Settings())
+	pref := a.settings.CompletionSound.effective()
+	a.chimes.Configure(pref.Enabled, pref.Sound)
 	a.initScorePatch()
 	a.setTheme = mygo.Theme.SetSource
 	a.chosenLocale, a.setLocale = mygo.App.ChosenLocale, mygo.App.SetLocale
@@ -163,9 +165,10 @@ func main() {
 				a.agents.TasksChanged(yesman) // a task done may let another go on
 			}
 		},
-		NeedsYouChanged: func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
-		TopicsChanged:   a.topicsChanged,
-		Secrets:         a.vault, Variables: a.variables, Crew: a.leadCrew, GitHubApp: a.githubApp}
+		DeliveryConfirmed: a.chimes.Notify,
+		NeedsYouChanged:   func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
+		TopicsChanged:     a.topicsChanged,
+		Secrets:           a.vault, Variables: a.variables, Crew: a.leadCrew, GitHubApp: a.githubApp}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}
@@ -222,6 +225,7 @@ func main() {
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		a.chimes.Close()
 		a.schedules.Close() // no new run starts while the agents stop
 		a.stopGitHubAppSetup()
 		a.githubApp.Close()

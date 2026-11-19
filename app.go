@@ -12,6 +12,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/chime"
 	"github.com/idy/yesman/internal/crew"
 	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/home"
@@ -112,9 +113,11 @@ type app struct {
 	fmu          sync.Mutex
 	pendingFocus string // the agent a notification click asked to show
 
-	setmu    sync.Mutex
-	settings Settings
-	storage  *storageLocation
+	setmu         sync.Mutex
+	settings      Settings
+	soundRevision uint64 // orders Settings reads and patches within this app process
+	chimes        chime.Player
+	storage       *storageLocation
 	// setTheme puts an appearance into effect: mygo.Theme.SetSource, or
 	// nil in tests, which have no window to paint.
 	setTheme func(mygo.ThemeSource)

@@ -344,6 +344,17 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .settings-section .mds-section-heading { margin-bottom: 10px; }
 .settings-section .mds-section-heading h2 { font-size: var(--mds-text-body); }
 .row-end { display: flex; justify-content: flex-end; }
+.completion-sound-actions { display: flex; align-items: center; gap: 8px; width: 100%; }
+.completion-sound-actions .mds-select { flex: 1; min-width: 0; }
+.completion-sound-actions .mds-button { flex: none; }
+#completion-sounds :is(select, button)[aria-disabled="true"] { opacity: .55; cursor: default; }
+#completion-sound-feedback { margin-inline: 2px; }
+#completion-sound-feedback:empty { margin-top: 0; }
+@container mds-group (max-width: 250px) {
+  #completion-sounds .mds-row--toggle { grid-template-columns: minmax(0, 1fr); }
+  .completion-sound-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .completion-sound-actions .mds-select { flex-basis: 100%; }
+}
 .storage-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .storage-edit { display: grid; gap: 8px; padding: 16px; border-top: 1px solid var(--mds-line); }
 .storage-edit p { margin: 0; font-size: var(--mds-text-note); }

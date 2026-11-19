@@ -2996,7 +2996,96 @@ function renderGeneral(inner) {
     settingsSection(t('Appearance'), null,
       preferenceRow(t('Theme'), h('p', null, t('The window and its menus follow this.')), appearance),
       preferenceRow(t('Language'), h('p', null, t('The window, its menus and notifications use this. Match the system follows the languages of your system settings.')), language)),
+    renderCompletionSound(v.completionSound),
   );
+}
+
+const completionSoundChoices = [
+  ['bell', 'Soft bell'], ['pluck', 'Warm pluck'], ['double', 'Double tone'], ['sparkle', 'Digital sparkle'],
+];
+const completionSound = { saved: null, pending: null, previewing: false, feedback: '' };
+
+// A Settings read can arrive after a newer save or configuration import.
+// Only the app's saved revision can replace the saved state shown here.
+function acceptCompletionSound(view) {
+  const s = completionSound;
+  const revision = view?.revision ?? 0;
+  if (s.saved && revision <= s.saved.revision) return;
+  s.saved = {
+    enabled: view?.enabled === true,
+    sound: completionSoundChoices.some(([id]) => id === view?.sound) ? view.sound : 'bell',
+    revision,
+  };
+  s.feedback = '';
+}
+
+function renderCompletionSound(saved) {
+  const s = completionSound;
+  acceptCompletionSound(saved);
+  const save = async (patch) => {
+    if (s.pending) { paintCompletionSound(); return; }
+    s.pending = patch;
+    s.feedback = '';
+    paintCompletionSound();
+    try {
+      acceptCompletionSound(await call('SetCompletionSound', patch));
+    } catch {
+      s.feedback = 'Could not save the completion sound. Try again.';
+    } finally {
+      s.pending = null;
+      paintCompletionSound();
+    }
+  };
+  const enabled = h('input', { id: 'completion-sound-enabled', type: 'checkbox', role: 'switch',
+    'aria-label': t('Completion alert'), 'aria-describedby': 'completion-sound-scope',
+    onchange: (event) => save({ enabled: event.currentTarget.checked }) });
+  const choice = h('select', { id: 'completion-sound-choice', class: 'mds-select', 'aria-label': t('Completion sound'),
+    onchange: (event) => save({ sound: event.currentTarget.value }) },
+    completionSoundChoices.map(([id, name]) => h('option', { value: id }, t(name))));
+  const preview = h('button', { id: 'completion-sound-preview', class: 'mds-button', type: 'button', onclick: async () => {
+    if (s.previewing || s.pending) return;
+    const { sound, revision } = s.saved;
+    const stillCurrent = () => revision === s.saved.revision && !s.pending;
+    s.previewing = true;
+    s.feedback = '';
+    paintCompletionSound();
+    try {
+      const outcome = await call('PreviewCompletionSound', sound);
+      if (outcome && stillCurrent()) s.feedback = outcome === 'busy' ? 'Another sound is playing. Try again in a moment.' : 'Could not play the sound. Check your audio output and try again.';
+    } catch {
+      if (stillCurrent()) s.feedback = 'Could not play the sound. Check your audio output and try again.';
+    } finally {
+      s.previewing = false;
+      paintCompletionSound();
+    }
+  } }, icon('play'), t('Listen'));
+  const toggle = preferenceRow(t('Completion alert'), h('p', { id: 'completion-sound-scope' }, t('Play when the lead confirms delivery in any workspace.')),
+    h('label', { class: 'mds-switch' }, enabled, h('span', { class: 'mds-switch-track', 'aria-hidden': 'true' })));
+  toggle.classList.add('mds-row--toggle');
+  const sound = preferenceRow(t('Completion sound'), h('p', null, t('You can preview sounds with the alert off.')),
+    h('div', { class: 'completion-sound-actions' }, choice, preview));
+  const section = settingsSection(t('Sounds'), null, toggle, sound);
+  section.id = 'completion-sounds';
+  section.append(h('p', { id: 'completion-sound-feedback', class: 'mds-hint', role: 'status' }));
+  paintCompletionSound(section);
+  return section;
+}
+
+function paintCompletionSound(section = $('#completion-sounds')) {
+  if (!section) return;
+  const s = completionSound;
+  const enabled = $('#completion-sound-enabled', section);
+  const choice = $('#completion-sound-choice', section);
+  const preview = $('#completion-sound-preview', section);
+  const feedback = $('#completion-sound-feedback', section);
+  enabled.checked = s.pending?.enabled ?? s.saved.enabled;
+  choice.value = s.pending?.sound ?? s.saved.sound;
+  enabled.setAttribute('aria-disabled', String(!!s.pending));
+  choice.setAttribute('aria-disabled', String(!!s.pending));
+  preview.setAttribute('aria-disabled', String(!!s.pending || s.previewing));
+  feedback.textContent = s.feedback ? t(s.feedback) : s.previewing ? t('Playing preview…') : '';
+  if (s.feedback) feedback.dataset.tone = 'error';
+  else delete feedback.dataset.tone;
 }
 
 function renderStorage(inner) {
@@ -3013,7 +3102,7 @@ function renderStorage(inner) {
         ['Secrets', 'The secrets, encrypted, and the key that opens them.', v.secrets],
         ['Variables', 'The variables, in plain text.', v.variables],
         ['Runtime', 'Files yesman generates when it starts.', v.runtime],
-        ['Settings file', 'Appearance and repository fetch preferences.', v.settingsFile],
+        ['Settings file', 'App preferences.', v.settingsFile],
         ['Storage configuration', 'Remembers the data folder across launches.', v.storageConfig],
       ].filter(([, , path]) => path).map(([label, hint, path]) => storagePathRow(t(label), t(hint), path))),
   );
@@ -3284,7 +3373,8 @@ async function importConfig() {
     if (mode !== 'merge' && mode !== 'replace') return;
     const result = await call('ImportConfig', path, mode);
     c.imported = { lines: importLines(plan, result) };
-    state.settings = null; // the next General or Repositories page reads them again
+    state.settings = null; // invalidate values read before the import
+    if (state.view.kind === 'settings' && state.view.page === 'general') void loadSettingsPage('general');
     refreshState();
     shortcuts.load().catch(fail); // the file may carry shortcuts
   } catch (err) {
