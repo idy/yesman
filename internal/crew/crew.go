@@ -48,6 +48,9 @@ type Score struct {
 	Rank    int    `json:"rank,omitempty"`
 	// Intelligence is AA's Intelligence Index: higher is smarter.
 	Intelligence float64 `json:"intelligence"`
+	// IntelligenceMissing distinguishes a partial CSV-only score from zero.
+	// Existing AA scores and estimates always have an intelligence figure.
+	IntelligenceMissing bool `json:"intelligenceMissing,omitempty"`
 	// Speed is the output speed, in tokens per second.
 	Speed *float64 `json:"speed,omitempty"`
 	// Coding is the mean of AA's coding evaluations, in percent.
@@ -386,9 +389,14 @@ type Member struct {
 	Effort   string `json:"effort,omitempty"`
 	// ModelName is pi's name for the model.
 	ModelName string `json:"modelName,omitempty"`
-	// Score is AA's, else the user's, else nil; Source says which.
+	// Score starts with AA's, else the user's estimate, else nil. Resolve
+	// overlays CSV metrics; Source and FieldSources identify their origins.
 	Score  *Score `json:"score,omitempty"`
 	Source string `json:"source,omitempty"`
+	// A CSV patch may mix its own metrics with the current fallback.
+	FieldSources   map[string]string `json:"fieldSources,omitempty"`
+	FallbackSource string            `json:"fallbackSource,omitempty"`
+	Estimate       *Score            `json:"estimate,omitempty"`
 	// Missing: pi no longer has the model, or it no longer takes the
 	// effort, so no agent can run as it.
 	Missing bool `json:"missing,omitempty"`
@@ -420,6 +428,12 @@ func ParseKey(key string) (provider, model, effort string, ok bool) {
 // models is pi's catalog, nil when it is not known, which marks no member
 // Missing.
 func Members(c Config, models []Model, snap Snapshot) []Member {
+	return Resolve(c, models, snap, nil)
+}
+
+// Resolve is the shared Settings/Lead score path. A patch never adds members
+// or catalog models; it only changes scores of exactly matching options.
+func Resolve(c Config, models []Model, snap Snapshot, patch Patch) []Member {
 	out := []Member{}
 	for _, o := range c.Options {
 		m := Model{Provider: o.Provider, ID: o.Model}
@@ -438,6 +452,7 @@ func Members(c Config, models []Model, snap Snapshot) []Member {
 			s := *o.Score
 			mem.Score, mem.Source = &s, SourceUser
 		}
+		patch.apply(&mem, o)
 		out = append(out, mem)
 	}
 	return out
@@ -448,12 +463,14 @@ func Members(c Config, models []Model, snap Snapshot) []Member {
 func Smartest(members []Member) []Member {
 	out := slices.Clone(members)
 	slices.SortStableFunc(out, func(a, b Member) int {
+		missingA := a.Score == nil || a.Score.IntelligenceMissing
+		missingB := b.Score == nil || b.Score.IntelligenceMissing
 		switch {
-		case a.Score == nil && b.Score == nil:
+		case missingA && missingB:
 			return 0
-		case a.Score == nil:
+		case missingA:
 			return 1
-		case b.Score == nil:
+		case missingB:
 			return -1
 		}
 		return cmp.Compare(b.Score.Intelligence, a.Score.Intelligence)
