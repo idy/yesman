@@ -40,16 +40,28 @@ function bridge() {
   window.handlers = {};
   window.calls = [];
   window.unmocked = []; // the page called something this fixture does not answer
-  const forward = ['State', 'Messages', 'Answer', 'ResolveHandoff', 'ResetCallMemory', 'Info', 'Usage', 'Shortcuts', 'ListFiles', 'ReadFile'];
+  window.fixtureActive = 0;
+  const forward = ['State', 'Messages', 'Answer', 'ResolveHandoff', 'RespondHandoff', 'ResetCallMemory', 'Info', 'Usage', 'Shortcuts', 'ListFiles', 'ReadFile'];
   window.mygo = {
     locale: localStorage.getItem('fixture.locale') || 'en',
     on: (name, fn) => { handlers[name] = fn; },
     async call(method, ...args) {
+      if (window.fixtureNavigating) return new Promise(() => {});
       const m = method.replace('Yesman.', '');
       calls.push([m, ...args]);
       if (forward.includes(m)) {
-        const response = await fetch('/fixture/call', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ method: m, args }) });
-        const body = await response.json();
+        if (m === 'RespondHandoff' && window.failResponse === 'before') {
+          window.failResponse = null;
+          throw Error('synthetic bridge failure before write');
+        }
+        window.fixtureActive++;
+        let body;
+        try {
+          const response = await fetch('/fixture/call', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ method: m, args }) });
+          body = await response.json();
+        } finally {
+          window.fixtureActive--;
+        }
         // A test can hold a response read already, to return it late.
         if (m === 'Messages' && window.holdMessages) {
           window.heldSeq = body.value?.seq ?? 0;
@@ -59,6 +71,10 @@ function bridge() {
         // A test can hold a reset's answer, the reset already made.
         if (m === 'ResetCallMemory' && window.holdReset) await new Promise((resolve) => { window.releaseReset = resolve; });
         if (body.error) throw Error(body.error);
+        if (m === 'RespondHandoff' && window.failResponse === 'after') {
+          window.failResponse = null;
+          throw Error('synthetic lost bridge reply after write');
+        }
         if (m === 'State') { body.value.agents ??= []; window.fixtureState = body.value; }
         return body.value;
       }
@@ -67,6 +83,7 @@ function bridge() {
         case 'Settings': return { appearance: 'system', autoFetch: 0 };
         case 'Fetches': return { fetching: [], errors: {} };
         case 'TakeFocus': return '';
+        case 'RestartStatus': return {};
         case 'Update': return { enabled: false };
         case 'Models': return { models: [], agent: fixtureState.agents.find((a) => a.id === args[0]) };
         case 'Board': return { tasks: [] };
@@ -107,6 +124,9 @@ async function scenario(engineName, page) {
   };
   const agentIs = (id, ok) => until(`${id} state`, async () => ok(await ctl('agent', { agent: id })));
   const observed = () => ctl('observed');
+  const scopeFor = (a, hiredAt) => ({ hiredAt, since: a.since, askedAt: a.dialogAt, handedOverOnly: true });
+  const scope = async (id, name = id.split('/')[0]) => scopeFor(await ctl('agent', { agent: id }),
+    await page.evaluate((name) => fixtureState.yesmen.find((y) => y.name === name).hiredAt, name));
   const prompted = (id, prefix) => until(`${id} prompted ${prefix}`, async () => ((await observed()).prompts[id] ?? []).some((p) => p.startsWith(prefix)));
   const prompts = async (id, prefix) => ((await observed()).prompts[id] ?? []).filter((p) => p.startsWith(prefix)).length;
   const pane = page.locator('#needs-you');
@@ -140,11 +160,17 @@ async function scenario(engineName, page) {
     if (request) return `${request.closest('#needs-you') ? 'pane' : request.closest('#dock') ? 'dock' : 'other'}:${request.dataset.request}`;
     if (a?.matches('#needs-you .needs-you-heading')) return 'heading';
     if (a?.dataset?.paneControl) return `pane-${a.dataset.paneControl}`;
-    if (a?.matches('#dock textarea')) return 'composer';
+    if (a?.matches('#dock .composer textarea')) return 'composer';
     if (a?.dataset?.infoEntry) return `info:${a.dataset.infoEntry}`;
     return a?.tagName ?? null;
   });
   const called = (m) => page.evaluate((m) => calls.filter((c) => c[0] === m).length, m);
+  const reload = async () => {
+    // Keep the WebKit bridge from tearing down a fetch at navigation.
+    await page.evaluate(() => { window.fixtureNavigating = true; });
+    await page.waitForFunction(() => window.fixtureActive === 0);
+    await page.reload();
+  };
   const palette = async (label) => {
     await page.keyboard.press('ControlOrMeta+KeyK');
     await page.locator('.palette-input').waitFor();
@@ -334,6 +360,12 @@ async function scenario(engineName, page) {
   await rowsAre(1);
   await rows.first().click();
   await page.locator('.ask.handoff').getByRole('button', { name: 'Mark done' }).click();
+  const dockConfirm = page.getByRole('dialog', { name: 'Mark this request done?' });
+  await dockConfirm.waitFor();
+  await page.evaluate(() => { window.openingCard = document.querySelector('#dock .handoff'); });
+  await refresh();
+  assert.equal(await page.evaluate(() => openingCard.isConnected), false, 'State rebuilt the dock');
+  await dockConfirm.getByRole('button', { name: 'Mark done' }).click();
   await settle(0);
   await prompted('alice/lead', '[yesman] The user marked n1 (login) "Log in to the npm registry", for task t1 as done. That is their own confirmation');
   assert.equal(await composer.inputValue(), 'unsent alice draft');
@@ -347,9 +379,10 @@ async function scenario(engineName, page) {
   await settle(1);
   await rowsAre(1);
   assert.match(await pane.innerText(), /Pick a tag[\s\S]*Text[\s\S]*Goes on without you after 4s/);
+  const expired = await scope('alice/lead');
   await settle(0);
   await rowsAre(0);
-  await assert.rejects(page.evaluate(() => mygo.call('Yesman.Answer', 'alice/lead', 'qt', { value: 'late' })), /no longer waiting/);
+  await assert.rejects(page.evaluate((scope) => mygo.call('Yesman.Answer', 'alice/lead', scope, { requestId: 'qt', value: 'late' }), expired), /no longer open/);
 
   // In the pane's detail, through the real service: a text answer typed
   // there survives showing Bob and coming back, and Submit answers that very
@@ -372,31 +405,120 @@ async function scenario(engineName, page) {
   assert.equal(await called('Answer'), answers);
   await pane.locator('.needs-you-ask [data-detail-control="answer-0"]').click();
   await agentIs('alice/lead', (i) => i.status !== 'waiting');
-  assert.ok(await page.evaluate(() => calls.some((c) => c[0] === 'Answer' && c[1] === 'alice/lead' && c[2] === 'qpane' && c[3]?.value === 'pane-branch')));
+  assert.ok(await page.evaluate(() => calls.some((c) => c[0] === 'Answer' && c[1] === 'alice/lead' && c[3]?.requestId === 'qpane' && c[3]?.value === 'pane-branch')));
   await settle(0);
   await rowsAre(0);
   await ctl('prompt', { agent: 'alice/lead', message: needsYou({ add: { type: 'decision', title: 'Pick the pane width' } }) });
   await ctl('prompt', { agent: 'alice/lead', message: needsYou({ add: { type: 'manual', title: 'Plug in the pane phone' } }) });
   await settle(2);
   await rowsAre(2);
-  const resolves = await called('ResolveHandoff');
+  const resolves = await called('RespondHandoff');
   await pane.locator('.needs-you-item[data-type="decision"] [data-request]').click();
   await pane.locator('.needs-you-detail-title', { hasText: 'Pick the pane width' }).waitFor();
   await pane.locator('[data-detail-control="not-needed"]').click();
   await settle(1);
   await rowsAre(1);
   await pane.locator('.needs-you-detail-title', { hasText: 'Plug in the pane phone' }).waitFor();
-  await pane.locator('[data-detail-control="done"]').click();
+  await pane.locator('[data-detail-control="respond"]').click();
+  const confirm = page.getByRole('dialog', { name: 'Mark this request done?' });
+  await confirm.waitFor();
+  await shot('action-confirm');
+  await page.keyboard.press('Escape');
+  await confirm.waitFor({ state: 'hidden' });
+  assert.equal(await called('RespondHandoff'), resolves + 1);
+  await rowsAre(1);
+  await pane.locator('[data-detail-control="respond"]').click();
+  await confirm.getByRole('button', { name: 'Mark done' }).click();
   await settle(0);
   await rowsAre(0);
-  assert.equal(await called('ResolveHandoff'), resolves + 2);
+  assert.equal(await called('RespondHandoff'), resolves + 2);
   const hired = await page.evaluate(() => fixtureState.yesmen.find((y) => y.name === 'alice').hiredAt);
-  assert.ok(await page.evaluate((hired) => calls.filter((c) => c[0] === 'ResolveHandoff').slice(-2).every((c) => c[1] === 'alice' && c[2] === hired), hired));
+  assert.ok(await page.evaluate((hired) => calls.filter((c) => c[0] === 'RespondHandoff').slice(-2).every((c) => c[1] === 'alice' && c[2] === hired), hired));
   const told = (title, how) => until(`alice/lead told ${title}`, async () => ((await observed()).prompts['alice/lead'] ?? []).some((p) => p.startsWith('[yesman] The user marked ') && p.includes(`"${title}"`) && p.includes(how)));
   await told('Pick the pane width', 'not needed');
   await told('Plug in the pane phone', 'as done');
   assert.match(await pane.locator('.needs-you-history').innerText(), /Plug in the pane phone[\s\S]*Marked done[\s\S]*Pick the pane width[\s\S]*Marked not needed/);
   await shot('detail-resolved');
+
+  // Durable text and choice use explicit data from the lead's tool. A
+  // failed bridge attempt and an unrelated redraw leave the editor mounted.
+  const add = (add, toolCall) => ctl('prompt', { agent: 'alice/lead', message: needsYou({ add, toolCall }) });
+  await add({ type: 'input', title: 'Describe the result', task: 't1', response: { kind: 'text' } }, 'call-text');
+  await settle(1);
+  await rows.first().click();
+  const reply = pane.getByRole('textbox', { name: 'Your reply' });
+  const send = pane.getByRole('button', { name: 'Send reply' });
+  const responseCount = await called('RespondHandoff');
+  await send.click();
+  assert.match(await pane.locator('.needs-you-response-error').innerText(), /Enter a reply/);
+  assert.equal(await called('RespondHandoff'), responseCount);
+  const dockReply = page.locator('#dock .handoff textarea');
+  await dockReply.fill('editing 中文');
+  await dockReply.evaluate((el) => {
+    el.focus();
+    el.setSelectionRange(1, 3);
+    window.composingReply = el;
+    el.dispatchEvent(new CompositionEvent('compositionstart', { data: '中' }));
+  });
+  await refresh();
+  assert.deepEqual(await dockReply.evaluate(el => [el === composingReply, el === document.activeElement, el.selectionStart, el.selectionEnd]), [true, true, 1, 3]);
+  await dockReply.evaluate(el => el.dispatchEvent(new CompositionEvent('compositionend', { data: '中' })));
+  await reply.fill('已检查\nSecond line');
+  await reply.evaluate((el) => {
+    el.dataset.imeTest = 'same';
+    el.setSelectionRange(1, 3);
+    el.dispatchEvent(new CompositionEvent('compositionstart', { data: '' }));
+  });
+  await refresh();
+  assert.equal(await reply.getAttribute('data-ime-test'), 'same');
+  assert.deepEqual(await reply.evaluate((el) => [document.activeElement === el, el.selectionStart, el.selectionEnd]), [true, 1, 3]);
+  await send.evaluate((el) => el.click());
+  assert.equal(await called('RespondHandoff'), responseCount);
+  await reply.evaluate((el) => el.dispatchEvent(new CompositionEvent('compositionend', { data: '已检查' })));
+  await page.evaluate(() => { window.failResponse = 'before'; });
+  await send.click();
+  assert.match(await pane.locator('.needs-you-response-error').innerText(), /Your edits are kept/);
+  assert.equal(await reply.inputValue(), '已检查\nSecond line');
+  await shot('text-retry');
+  // A lost reply after the durable write is also recoverable. Two same-tick
+  // activations create a single write invocation. The next one retries it.
+  await page.evaluate(() => { window.failResponse = 'after'; });
+  await send.evaluate((el) => { el.click(); el.click(); });
+  await until('lost response displayed', async () => (await pane.locator('.needs-you-response-error').innerText()).includes('Your edits'));
+  assert.equal(await called('RespondHandoff'), responseCount + 2);
+  await send.click();
+  await settle(0);
+  const textNotice = '[yesman] The user answered';
+  const notice = async (title) => ((await observed()).prompts['alice/lead'] ?? []).filter((p) => p.startsWith(textNotice) && p.includes(`"${title}"`));
+  await until('the lead receives the text once', async () => (await notice('Describe the result')).length === 1);
+  assert.deepEqual(JSON.parse((await notice('Describe the result'))[0].split('\n').at(-1)), { text: '已检查\nSecond line' });
+  assert.equal(await page.evaluate(() => fixtureState.yesmen[0].handoffs.some((h) => h.answer)), false, 'State does not broadcast response bodies');
+
+  await add({ type: 'decision', title: 'What is visible on the demo screen?', task: 't1',
+    response: { kind: 'choice', options: ['已恢复', '背光全灭', '背光亮但无画面'], allowNote: true } }, 'call-choice');
+  await settle(1);
+  await rows.first().click();
+  const selected = pane.getByRole('radio', { name: '背光亮但无画面' });
+  const note = pane.getByRole('textbox', { name: 'Optional note' });
+  await pane.getByRole('radio', { name: '背光全灭' }).check();
+  await pane.getByRole('radio', { name: '背光全灭' }).focus();
+  await page.keyboard.press('ArrowDown');
+  assert.equal(await selected.isChecked(), true);
+  await note.fill('Synthetic bench note');
+  await refresh();
+  assert.equal(await selected.isChecked(), true);
+  assert.equal(await note.inputValue(), 'Synthetic bench note');
+  await shot('choice');
+  await page.setViewportSize({ width: 760, height: 760 });
+  assert.equal(await selected.isChecked(), true);
+  assert.equal(await pane.locator('.explorer-content').evaluate((el) => el.scrollWidth <= el.clientWidth), true);
+  await shot('choice-narrow');
+  await page.setViewportSize({ width: 1600, height: 780 });
+  await send.click();
+  await settle(0);
+  await until('the lead receives the choice once', async () => (await notice('What is visible on the demo screen?')).length === 1);
+  assert.deepEqual(JSON.parse((await notice('What is visible on the demo screen?'))[0].split('\n').at(-1)), { choice: '背光亮但无画面', note: 'Synthetic bench note' });
+  assert.equal(((await observed()).prompts['bob/lead'] ?? []).some((p) => p.startsWith(textNotice)), false);
 
   // While the user composes in the message box, with an IME, a request
   // that arrives redraws the pane only: the message box keeps its focus,
@@ -431,7 +553,7 @@ async function scenario(engineName, page) {
   await rows.first().focus();
   await refresh();
   assert.match(await focused(), /^pane:d:alice\/lead@/);
-  await page.evaluate(() => mygo.call('Yesman.Answer', 'alice/lead', 'qfocus', { confirmed: false }));
+  await page.evaluate((scope) => mygo.call('Yesman.Answer', 'alice/lead', scope, { requestId: 'qfocus', confirmed: false }), await scope('alice/lead'));
   await agentIs('alice/lead', (i) => i.status !== 'waiting');
   await settle(0);
   await rowsAre(0);
@@ -466,7 +588,9 @@ async function scenario(engineName, page) {
   assert.equal(await focused(), 'heading');
   await shot('rehired-stale-agents');
   await refresh();
-  await assert.rejects(page.evaluate((hired) => mygo.call('Yesman.ResolveHandoff', 'bob', hired, 'n1', 'done'), oldHired), /replaced|no handoff/);
+  await assert.rejects(page.evaluate((hired) => mygo.call('Yesman.RespondHandoff', 'bob', hired, 'n1', 'done', null), oldHired), /replaced|no handoff/);
+  const staleLead = stale.find((a) => a.id === 'bob/lead');
+  await assert.rejects(page.evaluate((scope) => mygo.call('Yesman.Answer', 'bob/lead', scope, { requestId: 'qold', confirmed: true }), scopeFor(staleLead, oldHired)), /replaced/);
   assert.deepEqual(await page.evaluate(() => fixtureState.yesmen.find((y) => y.name === 'bob').handoffs), []);
 
   // Removing a worker ends its handed-over question.
@@ -483,7 +607,7 @@ async function scenario(engineName, page) {
   // A reload counts what the app knows: persisted handoffs.
   await ctl('prompt', { agent: 'alice/lead', message: needsYou({ add: { type: 'decision', title: 'Choose the release channel', detail: 'Stable or beta. I recommend beta.' }, toolCall: 'call-channel' }) });
   await settle(1);
-  await page.reload();
+  await reload();
   await lead('alice').click();
   await showInfo();
   await until('count after reload', async () => /1 waiting/.test(await infoRow('needs-you').innerText()));
@@ -535,7 +659,7 @@ async function scenario(engineName, page) {
 
   // Chinese, dark and narrow: the pane takes the info panel's place.
   await page.evaluate(() => localStorage.setItem('fixture.locale', 'zh-Hans'));
-  await page.reload();
+  await reload();
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.setViewportSize({ width: 760, height: 760 });
   await lead('alice').click();
@@ -594,7 +718,7 @@ async function scenario(engineName, page) {
   // confirmation shown before the lead took another call forgets nothing
   // either and shows the memory again; confirming that one resets it.
   await page.evaluate(() => localStorage.removeItem('fixture.locale'));
-  await page.reload();
+  await reload();
   await page.emulateMedia({ colorScheme: 'light' });
   await lead('bob').click();
   await showInfo();
@@ -713,7 +837,7 @@ try {
       assert.deepEqual(errors, []);
       assert.deepEqual(await page.evaluate(() => window.unmocked), []);
       results.push(`${engineName}: PASS`);
-      console.log(`${engineName}: Needs you pane from Info and the palette beside the conversation (no gathered sidebar entry), Board and Needs you sharing the place, close by keyboard, the yesman shown only (Alice, then Bob), sources, retried and stale calls, count, open a handoff or a handed-over question without answering it, draft and image kept, back to the pane, answer, done, the pane detail's own answer kept across yesmen, Not needed and Mark done, history, expiry, IME and refresh focus, archive/rehire with a late older agent list, remove, reload, an unreadable file, long rows, zh/dark/narrow, request memory near/full/pre-release with a keyboard reset, a stale confirmation, the lead told, a cancelled reset never answered by another's confirmation and a late reset not taking focus passed`);
+      console.log(`${engineName}: Needs you pane from Info and the palette beside the conversation (no gathered sidebar entry), Board and Needs you sharing the place, close by keyboard, the yesman shown only (Alice, then Bob), sources, retried and stale calls, count, open a handoff or a handed-over question without answering it, draft and image kept, back to the pane, answer, done, the pane detail's own answer kept across yesmen, bounded text and explicit choice with an optional note, retry before and after a saved write, IME draft preserved during refresh, Not needed and deliberate Mark done, history, expiry, IME and refresh focus, archive/rehire with a late older agent list, remove, reload, an unreadable file, long rows, zh/dark/narrow, request memory near/full/pre-release with a keyboard reset, a stale confirmation, the lead told, a cancelled reset never answered by another's confirmation and a late reset not taking focus passed`);
     } finally {
       await browser?.close();
       await backend.close();

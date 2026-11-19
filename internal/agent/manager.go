@@ -811,12 +811,10 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			_ = json.Unmarshal(raw, &d)
 			m.mu.Lock()
 			current := a.proc == p || a.proc == nil
+			now := time.Now()
 			if current {
-				now := time.Now()
 				a.info.Status, a.info.Dialog, a.info.DialogAt, a.info.UpdatedAt = Waiting, raw, now, now
-				if a.handedOver != d.ID {
-					a.handedOver = ""
-				}
+				a.handedOver = ""
 			}
 			worker := a.info.Role == RoleWorker
 			m.mu.Unlock()
@@ -824,7 +822,7 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			if current && d.Timeout > 0 && d.ID != "" {
 				// pi answers a dialog itself when its timeout passes, and says
 				// nothing: stop offering it then, so no late answer is taken.
-				time.AfterFunc(time.Duration(d.Timeout)*time.Millisecond, func() { m.expireDialog(a, p, d.ID) })
+				time.AfterFunc(dialogTimeout(d.Timeout), func() { m.expireDialog(a, p, d.ID, now) })
 			}
 			if current && worker {
 				// The lead answers for its workers; the user hears of it only
@@ -1339,44 +1337,82 @@ func (m *Manager) Messages(ctx context.Context, id string) (Conversation, error)
 	return conv, nil
 }
 
-// Answer answers the dialog an agent waits on. answer holds the response's
-// fields: value, confirmed or cancelled.
+// Answer is the internal shorthand for a native response.
 func (m *Manager) Answer(id, requestID string, answer map[string]any) error {
-	m.mu.Lock()
-	a := m.agents[id]
-	if a == nil || a.proc == nil {
-		m.mu.Unlock()
-		return fmt.Errorf("%s is not running", id)
-	}
-	var d dialog
-	if a.info.Status != Waiting || json.Unmarshal(a.info.Dialog, &d) != nil || d.ID == "" || d.ID != requestID {
-		m.mu.Unlock()
-		return fmt.Errorf("%s is no longer waiting on question %q", id, requestID)
-	}
-	p, raw := a.proc, a.info.Dialog
-	// Reserve the question before sending. A second answer cannot consume
-	// it, and events after the response (including a new question) stay put.
-	handedOver := a.handedOver
-	a.givenWork = true // an explicit answer owns the run, unlike a history read
-	a.info.Status, a.info.Dialog, a.info.UpdatedAt = Working, nil, time.Now()
-	m.mu.Unlock()
-	msg := map[string]any{}
-	for k, v := range answer {
-		msg[k] = v
-	}
-	msg["type"], msg["id"] = "extension_ui_response", requestID
-	if err := p.send(msg); err != nil {
-		m.mu.Lock()
-		if a.proc == p && a.info.Status == Working && a.info.Dialog == nil {
-			a.info.Status, a.info.Dialog = Waiting, raw
-			a.handedOver = handedOver
-		}
-		m.mu.Unlock()
-		m.changed()
+	b, err := json.Marshal(answer)
+	if err != nil {
 		return err
 	}
-	m.changed()
-	return nil
+	var r DialogReply
+	if err := json.Unmarshal(b, &r); err != nil {
+		return err
+	}
+	r.RequestID = requestID
+	return m.answerDialog(id, nil, r)
+}
+
+func (m *Manager) answerDialog(id string, scope *DialogScope, r DialogReply) error {
+	if r.RequestID == "" {
+		return errors.New("give the original question's requestId")
+	}
+	stale := errors.New("this question is no longer open")
+	m.mu.Lock()
+	a := m.agents[id]
+	if a == nil || a.proc == nil || a.info.Status != Waiting {
+		m.mu.Unlock()
+		return stale
+	}
+	p, raw, askedAt := a.proc, a.info.Dialog, a.info.DialogAt
+	m.mu.Unlock()
+	var d dialog
+	if json.Unmarshal(raw, &d) != nil || d.ID != r.RequestID {
+		return stale
+	}
+	var answer map[string]any
+	var err error
+	if scope != nil {
+		answer, err = d.windowReply(r)
+	} else {
+		answer, err = d.reply(r)
+	}
+	if err != nil {
+		return err
+	}
+	answer["type"], answer["id"] = "extension_ui_response", d.ID
+	var reserved bool
+	var handedOver string
+	var givenWork bool
+	// Check after obtaining the pipe write lock: an earlier write can hold
+	// it beyond the deadline or while the agent changes. The exact dialog
+	// is consumed at admission, so another click cannot write it twice.
+	err = p.sendAdmitted(answer, func() error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.closed || m.agents[id] != a || a.proc != p || a.stopping || a.retiring || a.removing || a.info.Status != Waiting ||
+			!a.info.DialogAt.Equal(askedAt) || dialogID(a.info.Dialog) != d.ID || dialogTimedOut(d.Timeout, askedAt) {
+			return stale
+		}
+		if scope != nil && (scope.AskedAt.IsZero() || !a.workspaceSince.Equal(scope.HiredAt) || !a.info.Since.Equal(scope.Since) ||
+			!askedAt.Equal(scope.AskedAt) || (scope.HandedOverOnly && a.info.Role == RoleWorker && a.handedOver != d.ID)) {
+			return stale
+		}
+		reserved, handedOver, givenWork = true, a.handedOver, a.givenWork
+		a.givenWork = true // an explicit answer owns the run, unlike a history read
+		a.info.Status, a.info.Dialog, a.info.UpdatedAt = Working, nil, time.Now()
+		a.handedOver = ""
+		return nil
+	})
+	if err != nil && reserved {
+		m.mu.Lock()
+		if a.proc == p && a.info.Status == Working && a.info.Dialog == nil && a.info.DialogAt.Equal(askedAt) && !dialogTimedOut(d.Timeout, askedAt) {
+			a.info.Status, a.info.Dialog, a.handedOver, a.givenWork = Waiting, raw, handedOver, givenWork
+		}
+		m.mu.Unlock()
+	}
+	if reserved {
+		m.changed()
+	}
+	return err
 }
 
 // Stop ends the agent's process, including one that is starting, and

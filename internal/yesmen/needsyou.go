@@ -46,6 +46,10 @@ type Handoff struct {
 	Type   string `json:"type"`
 	Title  string `json:"title"`            // what to do, in a line
 	Detail string `json:"detail,omitempty"` // how, in Markdown
+	// Response is absent on legacy cards. Answer is written only by the
+	// window, atomically with the resolution.
+	Response *HandoffResponse `json:"response,omitempty"`
+	Answer   *HandoffAnswer   `json:"answer,omitempty"`
 	// Task is the board task waiting on it, when there is one.
 	Task string `json:"task,omitempty"`
 	// Worker and WorkerSince name the worker whose work it concerns.
@@ -62,8 +66,10 @@ type Handoff struct {
 	ClosedBy   string    `json:"closedBy,omitempty"`
 	Note       string    `json:"note,omitempty"`
 	// extra keeps the fields of the file this version does not know; only
-	// the file has them, never the API.
-	extra map[string]json.RawMessage
+	// the file has them, never the API. Keep the original nested objects
+	// for the same reason. Once saved, both are immutable.
+	extra                  map[string]json.RawMessage
+	responseRaw, answerRaw json.RawMessage
 }
 
 // Open reports whether the handoff still waits on the user.
@@ -212,6 +218,11 @@ func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 	if !utf8.ValidString(h.Title + h.Detail) {
 		return Handoff{}, false, errors.New("the handoff is not valid UTF-8")
 	}
+	if h.Response != nil {
+		if err := h.Response.valid(h.Type); err != nil {
+			return Handoff{}, false, err
+		}
+	}
 	if len(h.ToolCall) > maxHandoffToolLen {
 		return Handoff{}, false, errors.New("the tool call ID is too long")
 	}
@@ -257,7 +268,8 @@ func (s *Store) AddHandoff(name string, h Handoff) (Handoff, bool, error) {
 	hs.Next = max(hs.Next, highestHandoff(hs.Items)) + 1
 	h.ID = "n" + strconv.Itoa(hs.Next)
 	h.CreatedAt = time.Now().UTC()
-	h.ClosedAt, h.Resolution, h.ClosedBy, h.Note = time.Time{}, "", "", ""
+	h.ClosedAt, h.Resolution, h.ClosedBy, h.Note, h.Answer = time.Time{}, "", "", "", nil
+	h.responseRaw, h.answerRaw = nil, nil
 	hs.Items = append(hs.Items, h)
 	s.changing(name)
 	if err := f.write(hs); err != nil {
@@ -314,42 +326,61 @@ func highestHandoff(items []Handoff) int {
 // error for a handoff that is gone or already closed, which is never
 // reopened.
 func (s *Store) CloseHandoff(name, id, resolution, by, note string) (Handoff, error) {
+	h, _, err := s.closeHandoff(name, id, resolution, by, note, nil, false)
+	return h, err
+}
+
+// RespondHandoff records the user's response once. An unchanged retry can
+// recover the result after the window misses its reply. Only the first caller
+// may announce it. The caller holds the workspace's use lease.
+func (s *Store) RespondHandoff(name, id, resolution string, answer *HandoffAnswer) (Handoff, bool, error) {
+	return s.closeHandoff(name, id, resolution, "user", "", answer, true)
+}
+
+func (s *Store) closeHandoff(name, id, resolution, by, note string, answer *HandoffAnswer, retry bool) (Handoff, bool, error) {
 	switch resolution {
 	case HandoffDone, HandoffNotNeeded, HandoffResolved:
 	default:
-		return Handoff{}, fmt.Errorf("%q is not a way to close a handoff", resolution)
+		return Handoff{}, false, fmt.Errorf("%q is not a way to close a handoff", resolution)
 	}
 	if by != "user" && by != "lead" {
-		return Handoff{}, fmt.Errorf("%q cannot close a handoff", by)
+		return Handoff{}, false, fmt.Errorf("%q cannot close a handoff", by)
 	}
 	note = strings.TrimSpace(note)
 	if utf8.RuneCountInString(note) > maxHandoffNote {
-		return Handoff{}, fmt.Errorf("the note is longer than %d characters", maxHandoffNote)
+		return Handoff{}, false, fmt.Errorf("the note is longer than %d characters", maxHandoffNote)
 	}
 	l := s.handoffLock(name)
 	l.Lock()
 	defer l.Unlock()
 	f, hs, err := s.openHandoffs(name)
 	if err != nil {
-		return Handoff{}, err
+		return Handoff{}, false, err
 	}
 	defer f.close()
 	i := slices.IndexFunc(hs.Items, func(h Handoff) bool { return h.ID == id })
 	if i < 0 {
-		return Handoff{}, fmt.Errorf("%s has no handoff %s", name, id)
-	}
-	if !hs.Items[i].Open() {
-		return hs.Items[i], fmt.Errorf("handoff %s was already closed", id)
+		return Handoff{}, false, fmt.Errorf("%s has no handoff %s", name, id)
 	}
 	h := &hs.Items[i]
-	h.ClosedAt, h.Resolution, h.ClosedBy, h.Note = time.Now().UTC(), resolution, by, note
+	if !h.Open() {
+		same := h.Answer == nil && answer == nil || h.Answer != nil && answer != nil && *h.Answer == *answer
+		if retry && h.ClosedBy == by && h.Resolution == resolution && same {
+			return *h, false, nil
+		}
+		return *h, false, fmt.Errorf("handoff %s was already closed", id)
+	}
+	if err := h.checkAnswer(resolution, answer); err != nil {
+		return Handoff{}, false, err
+	}
+	h.ClosedAt, h.Resolution, h.ClosedBy, h.Note, h.Answer = time.Now().UTC(), resolution, by, note, answer
 	closed := *h
 	hs.trim()
 	s.changing(name)
 	if err := f.write(hs); err != nil {
-		return Handoff{}, err
+		return Handoff{}, false, err
 	}
-	return closed, nil
+	return closed, true, nil
 }
 
 // trim keeps every open handoff and the keptClosed most recently closed,

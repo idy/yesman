@@ -40,7 +40,8 @@ func (m *Manager) HandOver(id, requestID string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("%s is not waiting on a question", id)
 	}
-	if dialogID(a.info.Dialog) != requestID {
+	var d dialog
+	if json.Unmarshal(a.info.Dialog, &d) != nil || d.ID != requestID || dialogTimedOut(d.Timeout, a.info.DialogAt) {
 		m.mu.Unlock()
 		return fmt.Errorf("%s is no longer waiting on question %q", id, requestID)
 	}
@@ -117,9 +118,17 @@ func (m *Manager) CallerOperation(token string, want Info, fn func() error) erro
 
 // expireDialog stops offering a dialog once pi has answered it itself, at
 // its timeout, unless it was answered or replaced meanwhile.
-func (m *Manager) expireDialog(a *agent, p *proc, requestID string) {
+func dialogTimeout(ms int) time.Duration {
+	return time.Duration(min(int64(ms), int64((1<<63-1)/time.Millisecond))) * time.Millisecond
+}
+
+func dialogTimedOut(ms int, askedAt time.Time) bool {
+	return ms > 0 && !time.Now().Before(askedAt.Add(dialogTimeout(ms)))
+}
+
+func (m *Manager) expireDialog(a *agent, p *proc, requestID string, askedAt time.Time) {
 	m.mu.Lock()
-	if a.proc != p || a.info.Status != Waiting || dialogID(a.info.Dialog) != requestID {
+	if a.proc != p || a.info.Status != Waiting || !a.info.DialogAt.Equal(askedAt) || dialogID(a.info.Dialog) != requestID {
 		m.mu.Unlock()
 		return
 	}
@@ -134,7 +143,11 @@ func (m *Manager) expireDialog(a *agent, p *proc, requestID string) {
 // workspace's HiredAt: a new yesman of the same name is never told.
 func (m *Manager) TellLeadAboutUser(ctx context.Context, yesman string, since time.Time, msg string) error {
 	lead := ID(yesman, yesmen.LeadName)
-	m.unnudge(lead)
+	m.mu.Lock()
+	if a := m.agents[lead]; a != nil && a.workspaceSince.Equal(since) && !a.retiring {
+		a.inbox++
+	}
+	m.mu.Unlock()
 	err := m.promptDelivery(ctx, lead, msg, "followUp", "", nil, &since, Origin{Source: OriginYesman, Kind: "needs-you"})
 	if errors.Is(err, errLeadPaused) && m.deferForLead(yesman, since, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

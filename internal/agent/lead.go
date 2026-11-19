@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -82,33 +83,42 @@ func describeQuestion(worker string, d dialog) string {
 	return b.String()
 }
 
+// DialogScope binds a window's answer to the exact workspace, agent and
+// question instance it displayed. HandedOverOnly is used by Needs You.
+type DialogScope struct {
+	HiredAt        time.Time `json:"hiredAt"`
+	Since          time.Time `json:"since"`
+	AskedAt        time.Time `json:"askedAt"`
+	HandedOverOnly bool      `json:"handedOverOnly,omitempty"`
+}
+
 // AnswerDialog answers the dialog a worker waits on, once the reply fits
 // its question.
 func (m *Manager) AnswerDialog(id string, r DialogReply) error {
-	if r.RequestID == "" {
-		return errors.New("give the original question's requestId")
+	return m.answerDialog(id, nil, r)
+}
+
+func (m *Manager) AnswerWindowDialog(id string, scope DialogScope, r DialogReply) error {
+	return m.answerDialog(id, &scope, r)
+}
+
+func (d dialog) windowReply(r DialogReply) (map[string]any, error) {
+	switch {
+	case r.Cancelled && r.Value == nil && r.Confirmed == nil:
+		return map[string]any{"cancelled": true}, nil
+	case !r.Cancelled && d.Method == "confirm" && r.Confirmed != nil && r.Value == nil:
+		return map[string]any{"confirmed": *r.Confirmed}, nil
+	case !r.Cancelled && r.Confirmed == nil && r.Value != nil:
+		if d.Method == "select" && slices.Contains(d.Options, *r.Value) {
+			return map[string]any{"value": *r.Value}, nil
+		}
+		// Native Pi dialogs can return entire documents. The durable
+		// handoff's short-answer budget does not apply to this RPC.
+		if d.Method == "input" || d.Method == "editor" {
+			return map[string]any{"value": *r.Value}, nil
+		}
 	}
-	m.mu.Lock()
-	var raw json.RawMessage
-	if a := m.agents[id]; a != nil && a.info.Status == Waiting {
-		raw = a.info.Dialog
-	}
-	m.mu.Unlock()
-	if raw == nil {
-		return fmt.Errorf("%s is not waiting for an answer", id)
-	}
-	var d dialog
-	if err := json.Unmarshal(raw, &d); err != nil || d.ID == "" {
-		return fmt.Errorf("the question %s waits on cannot be read", id)
-	}
-	if r.RequestID != d.ID {
-		return fmt.Errorf("%s is no longer waiting on question %q", id, r.RequestID)
-	}
-	answer, err := d.reply(r)
-	if err != nil {
-		return err
-	}
-	return m.Answer(id, d.ID, answer)
+	return nil, errors.New("the reply does not fit this question")
 }
 
 func (d dialog) reply(r DialogReply) (map[string]any, error) {

@@ -108,12 +108,12 @@
 
   <dialog class="mds-dialog schedule-dialog" id="schedule-dialog" aria-labelledby="schedule-dialog-title"></dialog>
 
-  <dialog class="mds-dialog" id="confirm-dialog">
+  <dialog class="mds-dialog" id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-body">
     <form method="dialog">
       <h2 class="mds-heading" id="confirm-title"></h2>
       <p class="dialog-hint" id="confirm-body"></p>
       <div class="mds-dialog-actions">
-        <button class="mds-button" value="cancel" data-i18n>Cancel</button>
+        <button class="mds-button" value="cancel" data-i18n autofocus>Cancel</button>
         <button class="mds-button mds-button--primary" value="ok" id="confirm-ok"></button>
       </div>
     </form>

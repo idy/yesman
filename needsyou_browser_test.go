@@ -244,14 +244,26 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 				}
 			}
 		case "Answer":
-			var requestID string
-			var payload map[string]any
+			var scope agent.DialogScope
+			var payload agent.DialogReply
 			if err = arg(req.Args, 0, &id); err == nil {
-				if err = arg(req.Args, 1, &requestID); err == nil {
+				if err = arg(req.Args, 1, &scope); err == nil {
 					if err = arg(req.Args, 2, &payload); err == nil {
-						err = s.Answer(id, requestID, payload)
+						err = s.Answer(id, scope, payload)
 					}
 				}
+			}
+		case "RespondHandoff":
+			var name, handoff, resolution string
+			var hiredAt time.Time
+			var answer *yesmen.HandoffAnswer
+			for i, target := range []any{&name, &hiredAt, &handoff, &resolution, &answer} {
+				if err = arg(req.Args, i, target); err != nil {
+					break
+				}
+			}
+			if err == nil {
+				err = s.RespondHandoff(name, hiredAt, handoff, resolution, answer)
 			}
 		case "ResolveHandoff":
 			var name, handoff, resolution string

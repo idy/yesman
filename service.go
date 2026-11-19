@@ -35,14 +35,20 @@ type State struct {
 // handed the user to do, open and recently closed (Needs you).
 type YesmanView struct {
 	yesmen.Yesman
-	Worktrees []pool.Worktree  `json:"worktrees"`
-	Handoffs  []yesmen.Handoff `json:"handoffs"`
+	Worktrees []pool.Worktree `json:"worktrees"`
+	Handoffs  []HandoffView   `json:"handoffs"`
 	// HandoffsError says why its handoffs cannot be read; the page shows it
 	// rather than an empty list.
 	HandoffsError string `json:"handoffsError,omitempty"`
 	// CallMemory is how full the memory of its lead's tool calls is, and
 	// what the user may reset: counts only.
 	CallMemory *yesmen.CallMemory `json:"callMemory,omitempty"`
+}
+
+// HandoffView carries only the outcome of a saved response, not its contents.
+type HandoffView struct {
+	yesmen.Handoff
+	Answered bool `json:"answered,omitempty"`
 }
 
 // State returns the yesmen, their worktrees and agents.
@@ -66,11 +72,15 @@ func (s *service) State(ctx context.Context) (State, error) {
 			snapshot.Worktrees = nil
 		}
 		for _, y := range ys {
-			view := YesmanView{Yesman: y, Worktrees: snapshot.Under(y.Path), Handoffs: []yesmen.Handoff{}}
+			view := YesmanView{Yesman: y, Worktrees: snapshot.Under(y.Path), Handoffs: []HandoffView{}}
 			if hs, err := a.yesmen.Handoffs(y.Name); err != nil {
 				view.HandoffsError = err.Error()
 			} else {
-				view.Handoffs = hs.Items
+				for _, h := range hs.Items {
+					answered := h.Answer != nil
+					h.Answer = nil
+					view.Handoffs = append(view.Handoffs, HandoffView{Handoff: h, Answered: answered})
+				}
 				m := hs.CallMemory()
 				view.CallMemory = &m
 			}
@@ -415,9 +425,24 @@ func (s *service) Stop(id string) {
 	s.app.agents.StopByUser(id)
 }
 
-// Answer answers the question an agent waits on.
-func (s *service) Answer(id, requestID string, answer map[string]any) error {
-	return s.app.agents.Answer(id, requestID, answer)
+// Answer answers the exact question the window displayed, within its hire.
+func (s *service) Answer(id string, scope agent.DialogScope, answer agent.DialogReply) error {
+	name, _, err := agent.SplitID(id)
+	if err != nil {
+		return err
+	}
+	y, err := s.app.yesmen.Get(name)
+	if err != nil {
+		return err
+	}
+	// Legacy workspaces can have a zero HiredAt. This is an exact match,
+	// and the live dialog still has to match the active process and request.
+	if !y.HiredAt.Equal(scope.HiredAt) {
+		return errors.New("this yesman was replaced: refresh the window")
+	}
+	// The manager rechecks this hire against the exact live process at
+	// write admission. Do not hold a workspace lease across pipe I/O.
+	return s.app.agents.AnswerWindowDialog(id, scope, answer)
 }
 
 // RemoveWorker stops a worker and removes it from its yesman.
