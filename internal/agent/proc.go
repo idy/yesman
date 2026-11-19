@@ -76,6 +76,10 @@ type proc struct {
 	// after which no change begins. See Manager.BeginChange.
 	changes       sync.RWMutex
 	changesClosed bool // guarded by changes
+
+	// Abort leaves the process credential live. It drains only the
+	// delivery commits that already passed their final Stop check.
+	deliveryCommit sync.Mutex
 }
 
 // startProc starts pi. Records that are not answers to commands, the

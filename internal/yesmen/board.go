@@ -49,6 +49,9 @@ type Task struct {
 	// done before yesman recorded this have neither.
 	DoneAt    time.Time `json:"doneAt,omitzero"`
 	DoneOwner string    `json:"doneOwner,omitempty"`
+	// Delivered marks this task as the final step of a confirmed delivery.
+	// It survives a status edit or restart so that delivery cannot replay.
+	Delivered bool `json:"delivered,omitempty"`
 	// OwnerSince is when the worker it was handed to started: a worker of
 	// the same name hired later is not its owner. Zero means whichever
 	// worker has that name now, as for a task handed to a worker before it
@@ -135,11 +138,19 @@ type BoardChange struct {
 	// Order lists task IDs in the order to show them; tasks it leaves out
 	// follow, in their current order.
 	Order []string `json:"order,omitempty"`
+	// Delivery confirms the work behind one existing final task. Only the
+	// lead may confirm it, in the change that marks that task done.
+	Delivery *DeliveryConfirmation `json:"delivery,omitempty"`
+}
+
+type DeliveryConfirmation struct {
+	Task    string   `json:"task"`
+	Related []string `json:"related,omitempty"`
 }
 
 // Empty reports whether the change changes nothing.
 func (c BoardChange) Empty() bool {
-	return len(c.Add) == 0 && len(c.Update) == 0 && len(c.Remove) == 0 && len(c.Order) == 0
+	return len(c.Add) == 0 && len(c.Update) == 0 && len(c.Remove) == 0 && len(c.Order) == 0 && c.Delivery == nil
 }
 
 const (
@@ -189,7 +200,24 @@ func (s *Store) ChangeBoard(name string, c BoardChange) (Board, error) {
 // ChangeBoardBy is ChangeBoard for the lead, or for a worker, which cannot
 // pause a task, lift a pause or change a paused task.
 func (s *Store) ChangeBoardBy(name string, c BoardChange, lead bool) (Board, error) {
-	b, before, err := s.changeBoard(name, c, lead)
+	if c.Delivery != nil {
+		return Board{}, errors.New("a delivery needs the lead's commit admission")
+	}
+	return s.changeBoardAndForget(name, c, lead, nil, nil)
+}
+
+// ConfirmBoardDelivery changes the Board and records a lead's confirmation.
+// The caller holds Use for y. Commit admits the final rename and only then
+// announces the delivery, while both the Board and handoffs are held.
+func (s *Store) ConfirmBoardDelivery(y Yesman, c BoardChange, commit func(publish func() error) error) (Board, error) {
+	if c.Delivery == nil || commit == nil {
+		return Board{}, errors.New("a delivery needs a confirmation and commit admission")
+	}
+	return s.changeBoardAndForget(y.Name, c, true, &y, commit)
+}
+
+func (s *Store) changeBoardAndForget(name string, c BoardChange, lead bool, scope *Yesman, commit func(func() error) error) (Board, error) {
+	b, before, err := s.changeBoard(name, c, lead, scope, commit)
 	if err != nil {
 		return Board{}, err
 	}
@@ -201,7 +229,22 @@ func (s *Store) ChangeBoardBy(name string, c BoardChange, lead bool) (Board, err
 	return b, nil
 }
 
-func (s *Store) changeBoard(name string, c BoardChange, lead bool) (Board, []Task, error) {
+func (s *Store) changeBoard(name string, c BoardChange, lead bool, scope *Yesman, commit func(func() error) error) (Board, []Task, error) {
+	var handoffs Handoffs
+	var file *handoffsFile
+	if scope != nil {
+		// AddHandoff takes the same order when it validates a task link.
+		// Do the initial bounded Needs You read outside the Store mutex.
+		lock := s.handoffLock(name)
+		lock.Lock()
+		defer lock.Unlock()
+		var err error
+		file, handoffs, err = openHandoffs(s.root, *scope, &s.metaMu)
+		if err != nil {
+			return Board{}, nil, fmt.Errorf("cannot confirm delivery without reading Needs You: %w", err)
+		}
+		defer file.close()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, err := s.board(name)
@@ -217,6 +260,11 @@ func (s *Store) changeBoard(name string, c BoardChange, lead bool) (Board, []Tas
 	}
 	if err := b.checkWaits(before); err != nil {
 		return Board{}, nil, err
+	}
+	if c.Delivery != nil {
+		if err := b.confirmDelivery(*c.Delivery, before, handoffs); err != nil {
+			return Board{}, nil, err
+		}
 	}
 	if len(b.ownerSet) > 0 {
 		// Bind each task handed over to the worker of that name now.
@@ -236,6 +284,12 @@ func (s *Store) changeBoard(name string, c BoardChange, lead bool) (Board, []Tas
 			}
 		}
 		b.ownerSet = nil
+	}
+	if scope != nil {
+		if err := s.writeDelivery(*scope, b, file, commit); err != nil {
+			return Board{}, nil, err
+		}
+		return b, before, nil
 	}
 	y, _ := s.Get(name)
 	s.changing(name)

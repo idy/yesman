@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.55
+
+- Yes Man can play a sound when the lead confirms that a project's requested work is complete, even with the app window closed while Yes Man is running.
+- Turn on completion sounds in **Settings › General › Sounds**. Choose Soft bell, Warm pluck, Double tone, or Digital sparkle. Use **Listen** to preview any sound even when automatic alerts are off. The setting applies to all workspaces and is off by default.
+- On Linux, playback uses the default ALSA output and requires `libasound.so.2`.
+
 ## 0.1.54
 
 - Browse Topics in a flat list with Open, Resolved and Archived filters. The discussion and composer appear in the selected topic’s detail pane. Opening a topic from Chat keeps any active topic editor and its draft accessible.
