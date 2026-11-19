@@ -2,6 +2,10 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.56
+
+- Keep Markdown table columns readable in Knowledge, Working Logs, and Files previews. Wide tables scroll horizontally in place.
+
 ## 0.1.55
 
 - Yes Man can play a sound when the lead confirms that a project's requested work is complete, even with the app window closed while Yes Man is running.
