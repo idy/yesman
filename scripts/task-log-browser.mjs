@@ -55,7 +55,7 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
    if(text===undefined)throw Error('no such file: '+path);
    return {path,kind:'text',text,size:path.endsWith('/large.md')?6*1024*1024:text.length,hash:'fixture-'+text.length,truncated:path.endsWith('/large.md')};
  }
- case 'WriteFile':filesFixture[args[1]]=args[2];return {path:args[1],kind:'text',text:args[2],hash:'saved',size:args[2].length};
+ case 'SaveWorkspaceFile':filesFixture[args[1]]=args[2];return {path:args[1],kind:'text',text:args[2],hash:'saved',size:args[2].length};
  case 'ListFiles':{
    const dir=args[1]==='.'?'':args[1]+'/';const paths=Object.keys(filesFixture).filter(p=>p.startsWith(dir));const map=new Map();
    for(const p of paths){const rest=p.slice(dir.length),base=rest.split('/')[0],full=dir+base;map.set(full,{name:base,path:full,dir:rest.includes('/')});}return [...map.values()];
@@ -198,7 +198,7 @@ try {
    await files.locator('.cm-content').waitFor();
    await files.locator('.cm-content').fill('# Edited plain');
    await page.keyboard.press(process.platform==='darwin'?'Meta+s':'Control+s');
-   await page.waitForFunction(()=>calls.some(c=>c[0]==='WriteFile'&&c[2]==='notes.md'&&c[3].includes('Edited plain')));
+   await page.waitForFunction(()=>calls.some(c=>c[0]==='SaveWorkspaceFile'&&c[2]==='notes.md'&&c[3].includes('Edited plain')));
    // Browser history without a log destination never closes ordinary Files.
    await page.evaluate(()=>history.pushState({ordinaryFixture:true},'','#ordinary-reading'));
    await page.goBack();await page.waitForFunction(()=>location.hash==='');
@@ -209,7 +209,7 @@ try {
    await files.getByRole('link',{name:'Backup',exact:true}).click();
    await files.locator('.cm-content').waitFor();await files.locator('.cm-content').fill('edited backup');
    await page.keyboard.press(process.platform==='darwin'?'Meta+s':'Control+s');
-   await page.waitForFunction(()=>calls.some(c=>c[0]==='WriteFile'&&c[2]==='notes.md.bak'&&c[3]==='edited backup'));
+   await page.waitForFunction(()=>calls.some(c=>c[0]==='SaveWorkspaceFile'&&c[2]==='notes.md.bak'&&c[3]==='edited backup'));
    await page.getByRole('button',{name:'Working Logs',exact:true}).click();
    await files.getByRole('link',{name:'Custom history',exact:true}).click();
    await files.getByText('Existing custom history',{exact:true}).waitFor();
@@ -277,7 +277,7 @@ try {
    assert.deepEqual(errors,[]);
    assert.deepEqual(await page.evaluate(()=>unmocked),[]);
    assert.equal((await page.locator('body').innerText()).includes('NaN'),false,'fixture DTOs render valid values');
-   assert.equal(await page.evaluate(()=>calls.some(c=>c[0]==='WriteFile'&&c[2].startsWith('.yesman/task-log'))),false);
+   assert.equal(await page.evaluate(()=>calls.some(c=>c[0]==='SaveWorkspaceFile'&&c[2].startsWith('.yesman/task-log'))),false);
    report.push({engine:name,pass:true,readCalls:await page.evaluate(()=>calls.filter(c=>c[0]==='ReadFile').length),scope:'production DOM; controlled bridge, synthetic files; Go filesystem tested separately'});
   } finally {await browser.close();}
  }

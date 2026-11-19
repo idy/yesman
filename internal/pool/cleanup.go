@@ -43,6 +43,36 @@ func (p *Pool) HasWorktreeRegistration(ctx context.Context, repo, path string) (
 	return false, nil
 }
 
+type RegisteredWorktreeError struct{ Repo, Path string }
+
+func (e *RegisteredWorktreeError) Error() string {
+	return fmt.Sprintf("%s has a registered worktree at %s. Finish its managed cleanup or move the checkout with Git first.", e.Repo, e.Path)
+}
+
+// CheckWorkspaceDeletion refuses even a missing/prunable worktree. The display
+// snapshot intentionally omits those registrations. Git's NUL format preserves
+// names containing whitespace or newlines. This operation changes no Git state.
+func (p *Pool) CheckWorkspaceDeletion(ctx context.Context, workspace string) error {
+	repos, err := p.List()
+	if err != nil {
+		return err
+	}
+	root := realPath(workspace)
+	for _, r := range repos {
+		text, err := git(ctx, r.Path, "worktree", "list", "--porcelain", "-z")
+		if err != nil {
+			return fmt.Errorf("check worktrees of %s: %w", r.Name, err)
+		}
+		for field := range strings.SplitSeq(text, "\x00") {
+			path, ok := strings.CutPrefix(field, "worktree ")
+			if ok && (within(path, workspace) || within(path, root) || within(realPath(path), root)) {
+				return &RegisteredWorktreeError{r.Name, path}
+			}
+		}
+	}
+	return nil
+}
+
 // CheckTemporaryWorktree validates source identity without freezing a cleanup
 // authorization or changing refs. Remove rechecks the same instance under lock.
 func (p *Pool) CheckTemporaryWorktree(ctx context.Context, workspace string, expected Worktree) error {

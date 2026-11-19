@@ -178,8 +178,14 @@ func (d *Dir) OpenFile(name string, flag int, _ os.FileMode) (*os.File, error) {
 // index (which carries a sequence number) and its creation time, if the
 // file system keeps one.
 func (d *Dir) Identity() (Identity, error) {
+	return handleIdentity(d.h)
+}
+
+func identity(f *os.File) (Identity, error) { return handleIdentity(windows.Handle(f.Fd())) }
+
+func handleIdentity(h windows.Handle) (Identity, error) {
 	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(d.h, &info); err != nil {
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
 		return Identity{}, err
 	}
 	birth, ok := birthFromFiletime(info.CreationTime.LowDateTime, info.CreationTime.HighDateTime)

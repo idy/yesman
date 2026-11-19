@@ -13,6 +13,7 @@ import { renderMarkdown } from './markdown.js';
 import { project, originOf, FINISHED, dismissible, familyOf, joinInputs } from './conversation.js';
 import { $, h, icon, openModal } from './dom.js';
 import { createFiles } from './files.js';
+import { workspaceDeletion } from './workspace-delete.js';
 import { logRoute } from './task-log.js';
 import { createInfo } from './info.js';
 import { createBoard } from './board.js';
@@ -1388,11 +1389,11 @@ async function openAgentMenu(e, a) {
   const pointer = e.type === 'contextmenu' && (e.clientX !== 0 || e.clientY !== 0);
   const x = Math.round(pointer ? e.clientX : rect.left + 20);
   const y = Math.round(pointer ? e.clientY : rect.bottom);
+  const workspace = yesmanOf(a.id);
   try {
     const action = await call('AgentMenu', a.id, x, y, state.hideDone.has(a.yesman));
     const current = agentById(a.id);
-    if (!current || keyOf(current) !== keyOf(a)) return;
-    const workspace = yesmanOf(a.id);
+    if (!current || keyOf(current) !== keyOf(a) || yesmanOf(a.id)?.hiredAt !== workspace?.hiredAt) return;
     switch (action) {
       case 'open': selectAgent(a.id); break;
       case 'workspace':
@@ -1406,7 +1407,7 @@ async function openAgentMenu(e, a) {
       case 'abort': await call('Abort', a.id); break;
       case 'sleep': await call('Stop', a.id); break;
       case 'rename': await renameYesman(workspace); break;
-      case 'archive': await dismiss(a.yesman); break;
+      case 'delete-workspace': await deletion.ask(workspace); break;
       case 'remove': await removeWorker(a); break;
       case 'hide-done':
       case 'show-done': setHideDone(a.yesman, action === 'hide-done'); break;
@@ -3094,6 +3095,7 @@ function renderStorage(inner) {
   inner.append(
     settingsSection(t('Data folder'), t('Choose where yesman keeps its data.'), ...storageRows(v)),
     storageUsageSection(),
+    deletion.storedSection(),
     settingsSection(t('Locations'), t('What yesman keeps, and where. Hover over a row for its full path.'),
       ...[
         ['Repositories', 'The shared pool of bare Git repositories.', v.pool],
@@ -3954,11 +3956,11 @@ const files = createFiles({
   selectWorkspace: (name) => { if (agentById(`${name}/lead`)) selectAgent(`${name}/lead`); },
   setOpen: (on) => setPane(on ? 'files' : state.pane === 'files' ? null : state.pane),
   checkout: (y) => openCheckout(y),
-  dismiss: (name) => dismiss(name),
+  deleteWorkspace: (y) => deletion.ask(y),
   confirm: (title, body, ok) => confirmAction(title, body, ok),
   shown: () => info.render(),
   worktrees: (y) => info.worktrees(y),
-  keys: () => ({ 'files.find': shortcuts.primary('files.find'), 'files.tree': shortcuts.primary('files.tree') }),
+  keys: () => ({ 'files.find': shortcuts.primary('files.find'), 'files.tree': shortcuts.primary('files.tree'), 'yesman.delete': shortcuts.primary('yesman.delete') }),
 });
 
 // ---------- Info panel ----------
@@ -4372,17 +4374,7 @@ async function confirmAction(title, body, ok) {
   return (await openModal(dialog)) === 'ok';
 }
 
-async function dismiss(name) {
-  if (!(await confirmAction(t('Dismiss {name}?', { name: yesmanLabel(name) }), t('Its agents stop and its workspace moves to the archive. Branches stay in the repo pool.'), t('Dismiss')))) return;
-  try {
-    const dest = await call('Dismiss', name);
-    toast(t('Archived to {path}', { path: dest }));
-    // A view of its agents falls back to the first yesman once they are gone.
-    await refreshState();
-  } catch (err) {
-    fail(err);
-  }
-}
+const deletion = workspaceDeletion({ call, errorText, fail, refresh: refreshState, toast, section: settingsSection, row: preferenceRow });
 
 async function removeWorker(a) {
   if (!(await confirmAction(t('Remove {name}?', { name: a.name }), t('It stops and leaves this yesman. Its worktrees and session log stay in the workspace.'), t('Remove')))) return;
@@ -4458,7 +4450,7 @@ const actionHost = {
   openCheckout,
   renameYesman,
   removeWorker,
-  dismiss,
+  deleteWorkspace: deletion.ask,
   addRepos() {
     showSettings('repositories');
     openAddRepos();

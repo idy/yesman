@@ -31,6 +31,37 @@ func newTestCheckout(t *testing.T) (*Pool, Repo, Worktree, string) {
 	return p, r, wt, workspace
 }
 
+// Deletion never calls worktree remove/prune, even for a clean or missing
+// checkout. A missing registration can still be recovered by its owner.
+func TestCheckWorkspaceDeletionRetainsGitState(t *testing.T) {
+	p, r, wt, workspace := newTestCheckout(t)
+	ctx := t.Context()
+	refs := run(t, r.Path, "for-each-ref", "--format=%(refname) %(objectname)")
+	blocked := func() {
+		t.Helper()
+		if err := p.CheckWorkspaceDeletion(ctx, workspace); err == nil || !strings.Contains(err.Error(), wt.Dir) {
+			t.Fatalf("expected blocker naming %q, got %v", wt.Dir, err)
+		}
+		if got := run(t, r.Path, "for-each-ref", "--format=%(refname) %(objectname)"); got != refs {
+			t.Fatal("refs changed")
+		}
+	}
+	blocked()
+	for _, name := range []string{"README.md", "untracked", ".gitignore", "ignored"} {
+		if err := os.WriteFile(filepath.Join(wt.Path, name), []byte("ignored\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blocked()
+	if err := os.Rename(wt.Path, filepath.Join(t.TempDir(), "kept")); err != nil {
+		t.Fatal(err)
+	}
+	blocked()
+	if err := p.CheckWorkspaceDeletion(ctx, workspace+"-another"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A new checkout records the identity of the directory it was made in.
 func TestWorktreeRegistrationRecordsRootIdentity(t *testing.T) {
 	_, _, wt, _ := newTestCheckout(t)
