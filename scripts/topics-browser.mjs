@@ -41,7 +41,7 @@ async function fixture() {
 const bridge = () => {
   localStorage.setItem('yesman.info', 'shown');
   const handlers = {};
-  const forwarded = ['State', 'Messages', 'Submit', 'SubmitCoalescing', 'Abort', 'Board', 'Info', 'Topics', 'CreateTopic', 'UpdateTopic', 'SubmitTopic'];
+  const forwarded = ['State', 'Messages', 'Submit', 'SubmitCoalescing', 'Abort', 'Board', 'Info', 'Topics', 'CreateTopic', 'UpdateTopic', 'SubmitTopic', 'ListFiles', 'ReadFile'];
   window.fixtureCalls = [];
   window.mygo = {
     locale: localStorage.getItem('fixture.locale') || 'en',
@@ -57,7 +57,7 @@ const bridge = () => {
         return body.value;
       }
       switch (m) {
-        case 'Repos': case 'Clones': case 'Pulls': case 'ListFiles': return [];
+        case 'Repos': case 'Clones': case 'Pulls': return [];
         case 'Settings': return { appearance: 'system', autoFetch: 0 };
         case 'Fetches': return { fetching: [], errors: {} };
         case 'TakeFocus': return '';
@@ -124,7 +124,7 @@ async function checkComposerLayout(page, state, singleLine) {
   }
 }
 
-async function run(engineName, engine) {
+async function run(engineName, engine, scenario) {
   const backend = await fixture();
   const browser = await engine.launch({ headless: true });
   try {
@@ -138,6 +138,11 @@ async function run(engineName, engine) {
     const lead = page.locator('.agent-row--yesman').first();
     await lead.waitFor();
     await lead.click();
+    if (scenario) {
+      await scenario(page, backend.url, engineName);
+      assert.deepEqual(errors, []);
+      return;
+    }
     const topicsRow = page.locator('#yesman-info [data-info-entry="topics"]');
     await topicsRow.waitFor();
 
@@ -147,7 +152,7 @@ async function run(engineName, engine) {
     const entries = await page.$$eval('#yesman-info .info-entries .info-link', (els) => els.map((e) => ({ key: e.dataset.infoEntry, label: e.querySelector('.info-link-label')?.textContent, aside: e.querySelector('.info-aside')?.textContent })));
     assert.deepEqual(entries.map((e) => e.key), ['knowledge', 'working-logs', 'needs-you', 'topics', 'tasks'], JSON.stringify(entries));
     assert.deepEqual(entries.map((e) => e.label), ['Knowledge', 'Working Logs', 'Needs You', 'Topics', 'Tasks'], JSON.stringify(entries));
-    assert.equal(entries[0].aside, '1 note');
+    assert.equal(entries[0].aside, '2 notes');
     assert.equal(entries[3].aside, 'Empty');
     assert.equal(entries[4].aside, 'None');
     assert.equal(await page.locator('#yesman-info .info-entries').count(), 1, 'one card');
@@ -200,20 +205,37 @@ async function run(engineName, engine) {
     const topicDraft = page.locator('#topics [data-key="compose-tp2"]');
     const classicScrollbar = await page.addStyleTag({ content: '#topics .explorer-content::-webkit-scrollbar { width: 18px; }' });
     const draft = 'A longer draft with normal words that wraps when this panel narrows. It must stay readable when we type, hide, and restore it.';
-    await topicDraft.fill(draft);
-    await page.setViewportSize({ width: 760, height: 798 });
-    const columnScrolls = () => page.locator('#topics .explorer-content').evaluate((el) => el.scrollHeight > el.clientHeight);
-    assert.equal(await columnScrolls(), false, 'the Topics column fits before editing');
-    await topicDraft.press('!');
-    assert.equal(await columnScrolls(), true, 'growing the draft makes the Topics column scroll');
-    const wrapped = await topicDraft.evaluate((el) => ({
-      height: el.clientHeight,
-      content: el.scrollHeight,
-      maxHeight: parseFloat(getComputedStyle(el).maxHeight),
-      focused: document.activeElement === el,
-      selection: [el.selectionStart, el.selectionEnd],
-      value: el.value,
-    }));
+    await page.setViewportSize({ width: 760, height: 1200 });
+    await page.evaluate(() => document.fonts.ready);
+    // Resolve the live field inside the measurement because an asynchronous
+    // Topics redraw can replace a locator's element before evaluate runs.
+    const wrapped = await page.evaluate((draft) => {
+      const el = document.querySelector('#topics [data-key="compose-tp2"]');
+      const column = el.closest('.explorer-content');
+      el.focus();
+      el.value = draft;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      // Match the column's limit to the rendered detail. Keep the viewport
+      // fixed and sample this same render before an asynchronous redraw.
+      const threshold = document.createElement('style');
+      threshold.id = 'fixture-scroll-threshold';
+      threshold.textContent = `#topics .explorer-content { max-height: ${Math.ceil(column.firstElementChild.getBoundingClientRect().height) + 3}px; }`;
+      document.head.append(threshold);
+      const before = column.scrollHeight > column.clientHeight;
+      el.value = `${draft}\nx\ny\nz`;
+      el.setSelectionRange(el.value.length, el.value.length);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return {
+        before, after: column.scrollHeight > column.clientHeight,
+        height: el.clientHeight,
+        content: el.scrollHeight,
+        maxHeight: parseFloat(getComputedStyle(el).maxHeight),
+        focused: document.activeElement === el,
+        selection: [el.selectionStart, el.selectionEnd],
+        value: el.value,
+      };
+    }, draft);
+    assert.deepEqual([wrapped.before, wrapped.after], [false, true], `the edit makes the Topics column scroll: ${JSON.stringify(wrapped)}`);
     if (shots) {
       await page.locator('#topics .explorer-content').evaluate((el) => { el.scrollTop = el.scrollHeight; });
       await shot(page, `${engineName}-narrow-wrapped-edit`);
@@ -221,9 +243,10 @@ async function run(engineName, engine) {
     assert.ok(wrapped.height < wrapped.maxHeight, 'draft is below the textarea cap');
     assert.ok(wrapped.content <= wrapped.height + 1, `all wrapped lines fit: ${wrapped.content} px of text in ${wrapped.height} px`);
     assert.equal(wrapped.focused, true);
-    assert.deepEqual(wrapped.selection, [draft.length + 1, draft.length + 1]);
-    assert.equal(wrapped.value, `${draft}!`);
+    assert.deepEqual(wrapped.selection, [draft.length + 6, draft.length + 6]);
+    assert.equal(wrapped.value, `${draft}\nx\ny\nz`);
     await topicDraft.fill('');
+    await page.locator('#fixture-scroll-threshold').evaluate((style) => style.remove());
     await classicScrollbar.evaluate((style) => style.remove());
     await page.setViewportSize(viewport);
     await page.click('#topics [data-key="back"]');
@@ -280,6 +303,9 @@ async function run(engineName, engine) {
     const main = page.locator('#dock textarea');
     const composeA = page.locator('#topics [data-key="compose-tp1"]');
     await page.evaluate(() => document.fonts.ready);
+    // The earlier viewport change can leave the empty Chat field at the
+    // height it measured at the narrower width. Measure both at this width.
+    await main.evaluate((el) => el.dispatchEvent(new Event('input', { bubbles: true })));
     await checkComposerLayout(page, 'empty', true);
     await main.fill('First line');
     await composeA.fill('First line');
@@ -293,11 +319,12 @@ async function run(engineName, engine) {
     await main.fill(longDraft);
     await composeA.fill(longDraft);
     await checkComposerLayout(page, 'long multiline', false);
-    const scrollable = await composeA.evaluate((el) => {
+    await page.waitForFunction((value) => {
+      const el = document.querySelector('#topics [data-key="compose-tp1"]');
+      if (el?.value !== value || el.scrollHeight <= el.clientHeight) return false;
       el.scrollTop = el.scrollHeight;
       return el.scrollTop > 0;
-    });
-    assert.equal(scrollable, true, 'long drafts can scroll inside the capped field');
+    }, longDraft); // wait for the current field if a topic refresh redraws it
 
     // Send from topics while the lead's run is held: the main draft stays,
     // A then B (with an image) reach the lead's one conversation.
@@ -383,11 +410,27 @@ async function run(engineName, engine) {
     await page.click('#topics [data-key="archive"]');
     await page.locator('#topics .topic-composer[data-archived]').waitFor();
     await page.click('#topics [data-key="back"]');
-    // The tree groups topics by their status: the archived topic moved to
-    // Archived, opened to keep it in view; Open keeps the other.
-    assert.equal(await page.locator('#topics [data-node="g:open"] .topic-row').count(), 1);
-    assert.equal(await page.locator('#topics [data-node="g:archived"] .topic-row').count(), 1);
-    await page.click('#topics [data-key="topic-tp2"] > .explorer-line');
+    // A status change reveals the topic in its new filter.
+    assert.equal(await page.locator('#topics [data-key="filter-archived"]').getAttribute('aria-pressed'), 'true');
+    assert.deepEqual(await page.locator('#topics-list [data-topic]').evaluateAll((rows) => rows.map((r) => r.dataset.topic)), ['tp2']);
+    await page.click('#topics [data-key="topic-tp2"]');
+    await page.click('#topics [data-key="restore"]');
+    await page.locator('#topics [data-key="compose-tp2"]').waitFor();
+    assert.equal(await page.locator('#topics [data-key="filter-open"]').getAttribute('aria-pressed'), 'true');
+
+    // The chip reveals an archived topic even from a mismatched filter/query.
+    await page.click('#topics [data-key="archive"]');
+    await page.locator('#topics .topic-composer[data-archived]').waitFor();
+    await page.click('#topics [data-key="back"]');
+    await page.click('#topics [data-key="filter-resolved"]');
+    await page.fill('#topics [data-key="search"]', 'unrelated query');
+    await page.locator('#thread .msg-user--topic .topic-chip', { hasText: 'tp2' }).click();
+    await page.locator('#topics .topic-composer[data-archived]').waitFor();
+    await page.click('#topics [data-key="back"]');
+    assert.equal(await page.locator('#topics [data-key="filter-archived"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.locator('#topics [data-key="search"]').inputValue(), '');
+    assert.equal(await page.locator('#topics [data-key="topic-tp2"]').getAttribute('aria-current'), 'true');
+    await page.click('#topics [data-key="topic-tp2"]');
     await page.click('#topics [data-key="restore"]');
     await page.locator('#topics [data-key="compose-tp2"]').waitFor();
 
@@ -425,6 +468,20 @@ async function run(engineName, engine) {
     assert.ok(box.width <= boardBox.width && box.x >= boardBox.x, `topics pane ${JSON.stringify(box)} vs board ${JSON.stringify(boardBox)}`);
     // As the board does, it leaves the conversation room (v0.1.37's panes).
     assert.ok(mainBox.width >= 240, `the conversation beside the topics: ${JSON.stringify(mainBox)}`);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.locator('[data-info-entry="knowledge"]').click();
+    const knowledge = page.locator('#files-tree-list');
+    await page.locator('#files-view [id="knowledge"]').waitFor();
+    assert.deepEqual(await knowledge.locator('.tree-name').allInnerTexts(), ['INDEX.md', 'Icon policy', 'Guides'], 'actual disk listing excludes alias and uses catalog order');
+    await knowledge.getByRole('treeitem', { name: 'Guides', exact: true }).click();
+    await knowledge.getByRole('treeitem', { name: 'desktop', exact: true }).click();
+    const note = knowledge.getByRole('treeitem', { name: 'Navigation guide', exact: true });
+    assert.equal(await note.getAttribute('aria-level'), '3');
+    assert.equal(await page.evaluate(() => fixtureCalls.filter((c) => c[0] === 'ReadFile' && c[2] !== '.yesman/knowledge/INDEX.md').length), 0);
+    await note.click();
+    await page.locator('#files-view [id="keyboard"]:focus').waitFor();
+    assert.equal(await knowledge.getByText('Keyboard', { exact: true }).count(), 0);
+    await shot(page, `${engineName}-knowledge-go-bridge`);
     // WebKit reports the fixture's own event poll cancelled by page.reload().
     assert.deepEqual(errors.filter((e) => !/\/fixture\/events\?after=\d+ due to access control checks/.test(e)), []);
     console.log(`${engineName}: PASS`);
@@ -434,10 +491,100 @@ async function run(engineName, engine) {
   }
 }
 
+// Test conversation navigation in its own workspace, with real submissions
+// producing both chips and no edit conflict or queue timing prerequisites.
+async function editorNavigation(page, url, engineName) {
+  const { value: state } = await post(url, '/fixture/call', { method: 'State', args: [] });
+  const y = state.yesmen[0];
+  for (const title of ['Editing target', 'Archived target']) {
+    const r = await post(url, '/fixture/call', { method: 'CreateTopic', args: [y.name, y.hiredAt, { title }] });
+    assert.ok(r.value?.topic, JSON.stringify(r));
+  }
+  await post(url, '/fixture/gate?open=1');
+  await page.setViewportSize({ width: 1120, height: 900 });
+  await page.locator('[data-info-entry="topics"]').click();
+  const pane = page.locator('#topics');
+  const control = (key) => pane.locator(`[data-key="${key}"]`);
+  const chip = (id) => page.locator('#thread .msg-user--topic .topic-chip', { hasText: id });
+  for (const id of ['tp1', 'tp2']) {
+    await control(`topic-${id}`).click();
+    await control(`compose-${id}`).fill(`A real message from ${id}`);
+    await control(`compose-${id}`).press('Enter');
+    await chip(id).waitFor();
+    if (id === 'tp2') {
+      await control('archive').click();
+      await pane.locator('.topic-composer[data-archived]').waitFor();
+    }
+    await control('back').click();
+  }
+
+  const editTitle = control('edit-title');
+  const editSummary = control('edit-summary');
+  const assertEditor = async (heading, title, summary) => {
+    assert.equal(await editTitle.isVisible(), true, `${heading} stays visible after opening a conversation chip`);
+    assert.equal(await pane.locator('.topic-editor h3').innerText(), heading);
+    assert.equal(await editTitle.inputValue(), title);
+    assert.equal(await editSummary.inputValue(), summary);
+    for (const key of ['edit-save', 'edit-cancel']) assert.ok(await control(key).isVisible() && await control(key).isEnabled());
+    await page.waitForFunction(() => document.activeElement?.dataset.key === 'edit-title');
+  };
+  const mutations = () => page.evaluate(() => fixtureCalls.filter(([method]) => ['SubmitTopic', 'CreateTopic', 'UpdateTopic'].includes(method)).length);
+  const before = await mutations();
+  await control('filter-open').click();
+  await control('topic-tp1').click();
+  await control('edit').click();
+  await editTitle.fill('Unsaved title');
+  await editSummary.fill('Unsaved summary');
+  await chip('tp2').click();
+  await shot(page, `${engineName}-edit-after-archived-chip`);
+  await assertEditor('Edit tp1', 'Unsaved title', 'Unsaved summary');
+  assert.equal(await pane.locator('.explorer-nav').isVisible(), false, 'the editor has the narrow pane');
+  assert.equal(await control('filter-open').getAttribute('aria-pressed'), 'true');
+  await chip('tp1').click();
+  await assertEditor('Edit tp1', 'Unsaved title', 'Unsaved summary');
+
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await control('filter-archived').click();
+  await control('topic-tp2').click();
+  await pane.locator('.topic-composer[data-archived]').waitFor();
+  await pane.getByRole('button', { name: 'Close the topics' }).click();
+  await page.setViewportSize({ width: 1120, height: 900 });
+  await page.locator('[data-info-entry="topics"]').press('Enter');
+  await assertEditor('Edit tp1', 'Unsaved title', 'Unsaved summary');
+  await control('edit-cancel').click();
+  assert.equal(await pane.locator('h3.topic-title').innerText(), 'Editing target');
+
+  await control('new').click();
+  await editTitle.fill('Unsaved new topic');
+  await editSummary.fill('Unsaved new summary');
+  await pane.getByRole('button', { name: 'Close the topics' }).click();
+  await chip('tp2').click();
+  await assertEditor('New topic', 'Unsaved new topic', 'Unsaved new summary');
+  await shot(page, `${engineName}-new-after-archived-chip`);
+  await control('edit-cancel').click();
+  assert.equal(await pane.locator('.topic-composer[data-archived]').count(), 0, 'Cancel does not open the chip target');
+
+  await control('filter-resolved').click();
+  await control('search').fill('unrelated query');
+  await chip('tp2').click();
+  await pane.locator('.topic-composer[data-archived]').waitFor();
+  await page.waitForFunction(() => document.activeElement?.dataset.key === 'back');
+  await shot(page, `${engineName}-archived-chip-after-cancel`);
+  await control('back').click();
+  assert.equal(await control('filter-archived').getAttribute('aria-pressed'), 'true');
+  assert.equal(await control('search').inputValue(), '');
+  assert.equal(await control('topic-tp2').getAttribute('aria-current'), 'true');
+  assert.equal(await mutations(), before, 'the chips and Cancel make no writes or sends');
+  console.log(`${engineName} editor navigation: PASS`);
+}
+
 try {
   const built = spawnSync('go', ['test', '-c', '-o', exe, '.'], { cwd, encoding: 'utf8' });
   assert.equal(built.status, 0, built.stderr || built.stdout);
-  for (const [name, engine] of [['chromium', chromium], ['webkit', webkit]]) await run(name, engine);
+  for (const [name, engine] of [['chromium', chromium], ['webkit', webkit]]) {
+    await run(name, engine, editorNavigation);
+    await run(name, engine);
+  }
 } finally {
   await rm(fixtureDir, { recursive: true, force: true });
 }

@@ -41,7 +41,11 @@ func TestTopicsBrowserBridge(t *testing.T) {
 	store := yesmen.New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
 	y, err := store.HireNamed("Alpha Lab", "")
 	must(t, err)
+	must(t, os.WriteFile(filepath.Join(y.KnowledgeDir(), "INDEX.md"), []byte("# Knowledge\n\n- [Icon policy](icons.md)\n- [Guides](guides/)\n- [Navigation guide](guides/desktop/navigation.md#keyboard)\n- [Duplicate](icons.md)\n- [Not in this catalog](../task-log.md)\n"), 0o644))
 	must(t, os.WriteFile(filepath.Join(y.KnowledgeDir(), "icons.md"), []byte("# Icons\n\nUse the Phosphor helper.\n"), 0o644))
+	must(t, os.MkdirAll(filepath.Join(y.KnowledgeDir(), "guides", "desktop"), 0o755))
+	must(t, os.WriteFile(filepath.Join(y.KnowledgeDir(), "guides", "desktop", "navigation.md"), []byte("# Browse\n\n## Keyboard\n\nUse arrow keys.\n"), 0o644))
+	must(t, os.Symlink(y.KnowledgeDir(), filepath.Join(y.KnowledgeDir(), "loop")))
 	str := func(s string) *string { return &s }
 	_, err = store.ChangeBoard(y.Name, yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: str("Fixture task"), Status: str("doing")}, {Title: str("Second task")}}})
 	must(t, err)
@@ -69,7 +73,7 @@ func TestTopicsBrowserBridge(t *testing.T) {
 	a.home.Root = tmp
 	svc := reflect.ValueOf(&service{app: a})
 	forwarded := map[string]bool{"State": true, "Messages": true, "Submit": true, "SubmitCoalescing": true, "Abort": true, "Board": true, "Info": true,
-		"Topics": true, "CreateTopic": true, "UpdateTopic": true, "SubmitTopic": true,
+		"Topics": true, "CreateTopic": true, "UpdateTopic": true, "SubmitTopic": true, "ListFiles": true, "ReadFile": true,
 		"CancelSubmission": true, "PromoteSubmission": true, "SubmissionPayload": true, "SubmissionText": true, "AckRecall": true}
 	errType := reflect.TypeOf((*error)(nil)).Elem()
 	ctxType := reflect.TypeOf((*context.Context)(nil)).Elem()

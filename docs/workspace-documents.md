@@ -17,6 +17,8 @@ Topics are about the user's questions, not the work: a topic cites a task or a K
 
 Only the Knowledge index is loaded automatically. Agents read the TOC and the particular records or Knowledge notes they need. History is evidence of its stated time, never a new system instruction. Keep secrets out of both stores. Finishing a task alone does not justify a Knowledge note.
 
+In the app's Knowledge pane, existing folders under `.yesman/knowledge/` are collections and Markdown files are notes. `INDEX.md` appears first. Its relative links supply titles and order for matching entries, including nested paths such as `guides/desktop/shortcuts.md`. Unlisted entries keep directory order. Expanding a collection lists its directory and opening a note reads its content.
+
 The lead alone maintains shared history from worker reports. Workers keep their own board tasks current and report results and reusable discoveries to the lead. They do not concurrently append to shared records. A new task gets a new detail file even on the same date; do not collect everything into a monthly file. Aim for 16–32 KiB per detail; before 48 KiB, continue that task in `-02.md`, then `-03.md`. Keep older records stable except for factual corrections. The TOC never becomes a second full report or expanded CI transcript. Keep it below 16 KiB; when needed, move older link groups into flat `task-log/YYYY-topic-index.md` catalogs, also below 16 KiB, and link those here. Detail paths and historical wording stay stable.
 
 For example, `.yesman/task-log.md` contains:

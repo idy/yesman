@@ -39,19 +39,18 @@
 .explorer-row[aria-selected="true"] > .explorer-line { background: var(--mds-selected); color: var(--mds-ink-strong); }
 .explorer-row[aria-current="true"]:not([aria-selected="true"]) > .explorer-line { color: var(--mds-ink-strong); }
 .explorer-row:focus-visible > .explorer-line { outline: 2px solid var(--mds-accent-ink); outline-offset: -2px; }
-.explorer-chevron { flex: 0 0 14px; display: inline-flex; justify-content: center; color: var(--mds-muted); }
-.explorer-chevron .mds-icon { width: 12px; height: 12px; font-size: 12px; transition: transform var(--mds-duration) var(--mds-ease); }
-.explorer-row[aria-expanded="true"] > .explorer-line .explorer-chevron .mds-icon { transform: rotate(90deg); }
+.explorer-marker { flex: 0 0 14px; display: inline-flex; justify-content: center; color: var(--mds-muted); }
+.explorer-marker .mds-icon { width: 12px; height: 12px; font-size: 12px; }
+.explorer-chevron { transition: transform var(--mds-duration) var(--mds-ease); }
+.explorer-row[aria-expanded="true"] > .explorer-line .explorer-chevron { transform: rotate(90deg); }
 .explorer-icon { flex: 0 0 14px; width: 14px; height: 14px; font-size: 14px; color: var(--mds-muted); }
 .explorer-label { flex: 1 1 auto; min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
 .explorer-meta { flex: 0 0 auto; max-width: 45%; overflow: hidden; color: var(--mds-faint); font-size: var(--mds-text-caption); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .explorer-row[data-kind="group"] > .explorer-line { color: var(--mds-muted); font-family: var(--mds-font-heading); }
-.explorer-row[data-kind="section"] > .explorer-line, .explorer-row[data-kind="heading"] > .explorer-line { font-size: var(--mds-text-caption); color: var(--mds-muted); }
-.explorer-row[data-kind="section"][aria-selected="true"] > .explorer-line, .explorer-row[data-kind="heading"][aria-selected="true"] > .explorer-line { color: var(--mds-ink-strong); }
 [data-status="resolved"] > .explorer-line .explorer-icon { color: var(--mds-good); }
 [data-status="open"] > .explorer-line .explorer-icon { color: var(--mds-accent); }
 @media (pointer: coarse) { .explorer-line { min-height: 44px; } }
-@media (prefers-reduced-motion: reduce) { .explorer-chevron .mds-icon { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .explorer-chevron { transition: none; } }
 
 /* An ordinary list (Needs You). */
 .explorer-list { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
@@ -80,11 +79,29 @@
 
 /* Topics in the explorer: the detail has room on the left. */
 .topics .topic-detail { padding: 12px 16px 24px; }
-.topics .explorer-nav .topics-search { width: 100%; }
+.topics-filters {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 3px;
+  border: 1px solid var(--mds-line); border-radius: var(--mds-radius-md); background: var(--mds-wash);
+}
+.topics-filters > button {
+  min-height: 26px; min-width: 0; padding: 3px 4px; border: 0; border-radius: var(--mds-radius-sm);
+  background: transparent; color: var(--mds-muted); font: 400 var(--mds-text-note)/1.4 var(--mds-font);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+}
+.topics-filters > button:hover { color: var(--mds-ink-strong); }
+.topics-filters > button[aria-pressed="true"] { background: var(--mds-selected); color: var(--mds-ink-strong); }
+.topics-list .explorer-line {
+  width: 100%; padding-inline: 8px; border: 0; background: transparent;
+  font-family: inherit; text-align: start; cursor: pointer;
+}
+.topics-list .explorer-line:hover { background: var(--mds-hover); }
+.topics-list .explorer-line:focus-visible, .topics-filters > button:focus-visible { outline-offset: -2px; }
+.topics-list .explorer-line[aria-current="true"] { background: var(--mds-selected); color: var(--mds-ink-strong); }
+.topics-list > li:has(> [aria-current="true"]) { background: transparent; }
+@media (pointer: coarse) { .topics-filters > button { min-height: 44px; } }
 
 /* Working log: records by day in the files pane's navigation column. */
 .files-records { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 2px 6px 16px; }
-.files-records-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px 2px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
 /* The content column scrolls; a pane body inside it does not scroll again. */
 .explorer-content > .board-body { overflow: visible; min-height: auto; }
 .explorer-content > .board-body > .explorer-back { margin: 0 0 4px; justify-self: start; align-self: flex-start; }

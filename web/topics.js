@@ -15,7 +15,7 @@ import { t, tn, formatNumber } from './i18n.js';
 import { IMAGE_ACCEPT, imageFileError, readImageFile, imageURL, imagePayload } from './images.js';
 import { DELIVERY_LABELS, deliveryLabel, newSubmissionID, sameSubmissionImages, topicMarker, isCommand, withoutLine } from './submission.js';
 import { originOf } from './conversation.js';
-import { explorerBody, narrowBack, resizer, scrollMemory, treeView } from './explorer.js';
+import { explorerBody, listView, narrowBack, resizer, scrollMemory } from './explorer.js';
 
 const STATUS = { open: 'Open', resolved: 'Resolved', archived: 'Archived' };
 const statusLabel = (s) => (STATUS[s] ? t(STATUS[s]) : s);
@@ -33,14 +33,6 @@ const when = (iso) => {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
 };
-
-function mark(status) {
-  switch (status) {
-    case 'resolved': return icon('check', 'mds-icon topic-mark');
-    case 'archived': return icon('archive', 'mds-icon topic-mark');
-    default: return icon('topics', 'mds-icon topic-mark');
-  }
-}
 
 const sameItems = (a, b) => a.length === b.length && a.every((x, i) => x.text === b[i].text);
 const itemsOf = (list) => (list ?? []).map(({ id, text }) => ({ id, text }));
@@ -66,14 +58,14 @@ const textOf = (content) => (typeof content === 'string' ? content
 //   changed(y)                       y's topics were read again
 export function createTopics(host) {
   const data = new Map(); // `${name}@${since}` -> { topics, error, loading, again }
-  const views = new Map(); // `${name}@${since}` -> { selected, query, filter, editing, notice }
+  const views = new Map(); // selection, filter and edit state per workspace hire
   const drafts = new Map(); // `${name}@${since}/${topic}` -> composer draft
 
   const keyOf = (y) => `${y.name}@${y.hiredAt ?? ''}`;
   const current = () => (host.isOpen() && host.yesman()) || null;
   function viewOf(y) {
     let v = views.get(keyOf(y));
-    if (!v) views.set(keyOf(y), (v = { selected: null, part: null, query: '', focus: 'nav', expanded: new Set(['g:open']), editing: null, notice: null }));
+    if (!v) views.set(keyOf(y), (v = { selected: null, query: '', filter: 'open', focus: 'nav', editing: null, notice: null }));
     return v;
   }
   const entry = (y) => data.get(keyOf(y));
@@ -88,7 +80,11 @@ export function createTopics(host) {
     try {
       const list = await host.call('Topics', y.name, y.hiredAt);
       if (list != null && !Array.isArray(list)) throw new Error(t('Topics cannot be read now.'));
+      const v = viewOf(y);
+      const before = topicOf(y, v.selected);
       e.topics = list ?? [];
+      const after = topicOf(y, v.selected);
+      if (after && before?.status !== after.status) reveal(v, after);
       e.error = null;
     } catch (err) {
       e.error = err?.message || String(err);
@@ -102,10 +98,7 @@ export function createTopics(host) {
 
   // ---------- Rendering ----------
 
-  // The pane is an explorer: the topic on the left, and on the right the
-  // tree of the topics as they are kept: by their status, then each topic,
-  // then the parts of that topic. Nothing is grouped by guesswork; a topic
-  // has no parent but its status.
+  // The detail reads on the left, with a filtered list of topics on the right.
   const sizes = resizer('topics', { min: 360 });
   const places = scrollMemory();
 
@@ -113,6 +106,7 @@ export function createTopics(host) {
     const aside = $('#topics');
     if (!aside) return;
     const y = current();
+    const reopening = aside.hidden;
     aside.hidden = !y;
     aside.setAttribute('aria-label', t('Topics'));
     document.documentElement.dataset.topics = y ? 'open' : 'closed';
@@ -120,12 +114,15 @@ export function createTopics(host) {
     const e = entry(y);
     if (!e) load(y);
     const v = viewOf(y);
+    if (reopening && v.editing) selectEditor(v);
     // Keep focus and caret across a redraw, by the element's data-key.
-    const active = aside.contains(document.activeElement) ? document.activeElement : null;
+    const sameWorkspace = aside.dataset.workspace === keyOf(y);
+    const active = sameWorkspace && aside.contains(document.activeElement) ? document.activeElement : null;
     const focusKey = active?.closest?.('[data-key]')?.dataset.key;
     const caret = active && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
     const scroll = $('.explorer-content', aside)?.scrollTop ?? 0;
     const navScroll = $('.explorer-nav-scroll', aside)?.scrollTop ?? 0;
+    const sameFilter = sameWorkspace && aside.dataset.filter === v.filter;
     const shownKey = aside.dataset.shown;
     if (shownKey) places.save(shownKey, scroll);
 
@@ -135,22 +132,29 @@ export function createTopics(host) {
     else if (v.selected && v.editing?.id === v.selected && topic) body = editor(y, v, topic);
     else if (v.selected) body = detail(y, v, topic, e);
     else body = placeholder(y, v, e);
-    // With nothing to list yet (loading, failed or no topics), the left says so.
-    const nothing = !e?.topics?.length;
-    const focus = !nothing && (v.focus === 'nav' || (!v.selected && v.editing?.id !== 'new')) ? 'nav' : 'content';
+    // Keep the filters reachable even with an empty list or a failed load.
+    const focus = v.focus === 'nav' ? 'nav' : 'content';
     const explorer = explorerBody({ name: 'topics', content: body, nav: navigation(y, v, e), focus, handle: sizes.nav(aside), label: topic ? topic.title : t('Topics') });
     aside.replaceChildren(head(y, v, e), explorer, sizes.pane(aside));
     sizes.apply(aside);
     const key = `${keyOf(y)}/${v.editing && (v.editing.id === 'new' ? !v.selected : v.editing.id === v.selected) ? 'edit:' : ''}${v.selected ?? ''}`;
     aside.dataset.shown = key;
+    aside.dataset.workspace = keyOf(y);
+    aside.dataset.filter = v.filter;
     const content = $('.explorer-content', aside);
     content.scrollTop = key === shownKey ? scroll : places.get(key);
-    $('.explorer-nav-scroll', aside).scrollTop = navScroll;
+    const nav = $('.explorer-nav-scroll', aside);
+    if (sameFilter) nav.scrollTop = navScroll;
+    else if (topic) nav.querySelector('[aria-current="true"]')?.scrollIntoView({ block: 'nearest' });
     if (focusKey) {
       const again = aside.querySelector(`[data-key="${CSS.escape(focusKey)}"]`);
-      if (again) {
+      if (again?.getClientRects().length) {
         again.focus({ preventScroll: true });
         if (caret && typeof again.setSelectionRange === 'function') try { again.setSelectionRange(...caret); } catch {}
+      } else if (focusKey.startsWith('topic-')) {
+        focusNavigation(aside);
+      } else if (['archive', 'restore', 'resolve', 'compose-' + v.selected].includes(focusKey)) {
+        aside.querySelector('[data-key="detail-title"]')?.focus({ preventScroll: true });
       }
     }
   }
@@ -169,11 +173,14 @@ export function createTopics(host) {
         h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', title: t('Close the topics'), 'aria-label': t('Close the topics'), onclick: () => host.setOpen(false) }, icon('x'))));
   }
 
+  function selectEditor(v) {
+    v.selected = v.editing.id === 'new' ? null : v.editing.id;
+    v.focus = 'content';
+  }
+
   // showNew goes back to the new topic being written.
   function showNew(y) {
-    const v = viewOf(y);
-    v.selected = null;
-    v.focus = 'content';
+    selectEditor(viewOf(y));
     render();
     $('#topics [data-key="edit-title"]')?.focus();
   }
@@ -183,27 +190,36 @@ export function createTopics(host) {
   const ORDER = ['open', 'resolved', 'archived'];
   const STATUS_ICON = { open: 'topics', resolved: 'check', archived: 'archive' };
 
-  // The parts of topic x, as its detail shows them.
-  function parts(x) {
-    const list = [
-      ['summary', t('Summary'), ''],
-      ['conclusions', t('Confirmed conclusions'), x.conclusions.length ? formatNumber(x.conclusions.length) : ''],
-      ['questions', t('Open questions'), x.questions.length ? formatNumber(x.questions.length) : ''],
-    ];
-    if (x.sources.length) list.push(['sources', t('Sources'), formatNumber(x.sources.length)]);
-    list.push(['conversation', t('In the conversation'), '']);
-    if (x.status !== 'archived') list.push(['continue', t('Continue the discussion'), '']);
-    return list;
+  function focusNavigation(aside) {
+    (aside.querySelector('#topics-list [tabindex="0"]') ?? aside.querySelector('[data-key="search"]'))?.focus({ preventScroll: true });
+  }
+
+  function reveal(v, topic) {
+    v.filter = topic.status;
+    v.active = topic.id;
+    if (!matches(topic, v.query.trim().toLowerCase())) v.query = '';
   }
 
   function navigation(y, v, e) {
     const search = h('input', { class: 'mds-input topics-search', type: 'search', 'data-key': 'search', value: v.query, placeholder: t('Search topics'), 'aria-label': t('Search topics'), spellcheck: 'false' });
     search.addEventListener('input', () => { v.query = search.value; render(); });
     search.addEventListener('keydown', (ev) => {
-      if (ev.key === 'ArrowDown') { ev.preventDefault(); $('#topics-tree .explorer-row[tabindex="0"]')?.focus(); }
+      const row = $('#topics-list [tabindex="0"]');
+      if (ev.key === 'ArrowDown' && row) { ev.preventDefault(); row.focus(); }
     });
+    const filters = h('div', { class: 'topics-filters', role: 'group', 'aria-label': t('Filter topics by status') }, ORDER.map((status) => {
+      const key = `filter-${status}`;
+      return h('button', { type: 'button', 'data-key': key, 'aria-pressed': String(v.filter === status), onclick: () => {
+        if (v.filter === status) return;
+        v.filter = status;
+        v.active = null;
+        if (!v.editing) { v.selected = null; v.notice = null; v.focus = 'nav'; }
+        render();
+        $(`#topics [data-key="${key}"]`)?.focus({ preventScroll: true });
+      } }, statusLabel(status));
+    }));
     const scroller = h('div', { class: 'explorer-nav-scroll' });
-    const tools = h('div', { class: 'explorer-nav-tools' }, search);
+    const tools = h('div', { class: 'explorer-nav-tools' }, search, filters);
     if (!e || (e.loading && !e.topics)) {
       scroller.append(h('p', { class: 'explorer-note' }, t('Loading…')));
       return [tools, scroller];
@@ -211,74 +227,40 @@ export function createTopics(host) {
     if (e.error) {
       scroller.append(h('div', { class: 'explorer-note', 'data-tone': 'error', role: 'alert' }, e.error, ' ',
         h('button', { class: 'mds-link-button', type: 'button', 'data-key': 'retry', onclick: () => load(y) }, t('Try again'))));
+      if (!e.topics) return [tools, scroller];
     }
-    if (!e.topics?.length) return [tools, scroller];
     const q = v.query.trim().toLowerCase();
-    // The topic shown stays in view when its status moves it to another
-    // group, once per move, so that the user can still close that group.
-    const chosen = v.selected ? topicOf(y, v.selected) : null;
-    if (chosen && v.revealed !== `${chosen.id}:${chosen.status}`) {
-      v.revealed = `${chosen.id}:${chosen.status}`;
-      v.expanded.add(`g:${chosen.status}`);
-    }
-    const statuses = [...ORDER, ...new Set(e.topics.map((x) => x.status).filter((s) => !ORDER.includes(s)))];
-    const nodes = [];
-    for (const status of statuses) {
-      const items = e.topics.filter((x) => x.status === status && matches(x, q)).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
-      if (!items.length) continue;
-      nodes.push({
-        id: `g:${status}`, kind: 'group', selectable: false, label: statusLabel(status), meta: formatNumber(items.length),
-        attrs: { 'data-key': `group-${status}` },
-        children: items.map((x) => ({
-          id: `t:${x.id}`, kind: 'topic', cls: 'topic-row', label: x.title, meta: x.id, icon: STATUS_ICON[x.status] ?? 'topics',
-          title: `${x.id} · ${statusLabel(x.status)}: ${x.title}`,
-          attrs: { 'data-key': `topic-${x.id}`, 'data-status': x.status, 'data-topic': x.id },
-          children: parts(x).map(([part, label, meta]) => ({
-            id: `s:${x.id}:${part}`, kind: 'section', label, meta, topic: x.id, part,
-            attrs: { 'data-key': `part-${x.id}-${part}` },
-          })),
-        })),
-      });
-    }
-    if (!nodes.length) {
-      scroller.append(h('p', { class: 'explorer-note' }, q ? t('No topics match.') : t('No topics here.')));
+    const topics = (e.topics ?? []).filter((x) => x.status === v.filter && matches(x, q))
+      .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '') || a.id.localeCompare(b.id, 'en', { numeric: true }));
+    if (!topics.length) {
+      const empty = q ? t('No topics match.') : e.topics?.length ? t('No topics here.') : t('No topics yet');
+      scroller.append(h('p', { class: 'explorer-note', role: 'status' }, empty));
       return [tools, scroller];
     }
-    // Searching shows every group with a match.
-    const open = q ? new Set([...v.expanded, ...nodes.map((n) => n.id)]) : v.expanded;
-    const selected = v.part && v.selected ? `s:${v.selected}:${v.part}` : v.selected ? `t:${v.selected}` : null;
-    scroller.append(treeView({
-      id: 'topics-tree', label: t('Topics'), nodes, expanded: open, selected,
-      active: v.active, onActive: (id) => { v.active = id; },
-      toggle: (node, on) => {
-        if (on) v.expanded.add(node.id); else v.expanded.delete(node.id);
-        render();
-        $(`#topics [data-key="${CSS.escape(node.attrs['data-key'])}"]`)?.focus({ preventScroll: true });
-      },
-      select: (node) => {
-        const id = node.kind === 'topic' ? node.id.slice(2) : node.topic;
-        choose(y, id, node.kind === 'section' ? node.part : null);
-        // In a narrow pane the tree makes way for the topic: focus its heading.
-        const row = $(`#topics [data-key="${CSS.escape(node.attrs['data-key'])}"]`);
+    const stop = topics.find((x) => x.id === v.active) ?? topics.find((x) => x.id === v.selected) ?? topics[0];
+    const items = topics.map((x) => h('li', { 'data-status': x.status }, h('button', {
+      type: 'button', class: 'explorer-line topic-row', tabindex: x === stop ? '0' : '-1', 'data-key': `topic-${x.id}`, 'data-topic': x.id,
+      'aria-current': x.id === v.selected ? 'true' : null, title: `${x.id} · ${statusLabel(x.status)}: ${x.title}`,
+      onclick: () => {
+        choose(y, x.id);
+        const row = $(`#topics [data-key="${CSS.escape(`topic-${x.id}`)}"]`);
         if (row?.getClientRects().length) row.focus({ preventScroll: true });
         else $('#topics [data-key="back"]')?.focus({ preventScroll: true });
       },
-    }));
+    }, icon(STATUS_ICON[x.status], 'mds-icon explorer-icon'), h('span', { class: 'explorer-label' }, x.title), h('span', { class: 'explorer-meta' }, x.id))));
+    const list = listView({ label: t('Topics'), items, cls: 'topics-list', onActive: (button) => { v.active = button.dataset.topic; } });
+    list.id = 'topics-list';
+    scroller.append(list);
     return [tools, scroller];
   }
 
-  // choose shows topic id, at one of its parts when part is given. Choosing
-  // a topic opens it in the tree, to show its parts.
-  function choose(y, id, part = null) {
+  function choose(y, id) {
     const v = viewOf(y);
-    const x = topicOf(y, id);
     if (v.selected !== id) v.notice = null;
     v.selected = id;
-    v.part = part;
+    v.active = id;
     v.focus = 'content';
-    if (x) { v.expanded.add(`g:${x.status}`); v.expanded.add(`t:${x.id}`); }
     render();
-    if (part) $(`#topics [data-section="${CSS.escape(part)}"]`)?.scrollIntoView({ block: 'start' });
   }
 
   // What the left shows before a topic is chosen.
@@ -290,26 +272,25 @@ export function createTopics(host) {
       body.append(h('div', { class: 'board-empty' }, h('strong', null, t('No topics yet')),
         h('p', null, t('Questions and discussions worth finding again: a summary, the conclusions you confirmed and the questions still open. {name} adds them as you talk, or add one yourself.', { name: y.displayName || y.name }))));
     } else {
-      body.append(h('div', { class: 'board-empty' }, h('strong', null, t('Choose a topic')),
-        h('p', null, t('Topics are listed on the right by status. Choose one to read its summary, conclusions and open questions, and to continue the discussion.'))));
+      body.append(h('div', { class: 'board-empty' }, h('strong', null, t('Choose a topic'))));
     }
     return body;
   }
 
-  // back shows the tree in a narrow pane; the topic stays chosen.
-  function back(y, v) {
+  // Back shows the list in a narrow pane and remembers the chosen topic.
+  function back(v) {
+    v.active = v.selected;
     v.focus = 'nav';
     v.notice = null;
     render();
-    const row = v.selected && $(`#topics [data-key="${CSS.escape(`topic-${v.selected}`)}"]`);
-    (row || $('#topics [data-key="search"]'))?.focus({ preventScroll: true });
+    focusNavigation($('#topics'));
   }
 
   function detail(y, v, x, e) {
     const body = h('div', { class: 'topics-body board-body topic-detail' });
-    body.append(narrowBack(t('All topics'), () => back(y, v)));
+    body.append(narrowBack(t('All topics'), () => back(v)));
     if (!x) {
-      body.append(h('p', { class: 'board-empty', role: 'status' }, e?.topics
+      body.append(h('p', { class: 'board-empty', role: 'status', 'data-key': 'detail-title', tabindex: '-1' }, e?.topics
         ? t('There is no topic {id} in {name}.', { id: v.selected, name: y.displayName || y.name })
         : (e?.error || t('Loading…'))));
       return body;
@@ -585,17 +566,20 @@ export function createTopics(host) {
     try {
       const r = await host.call('UpdateTopic', y.name, y.hiredAt, x.id, { revision: x.revision, ...patch });
       replace(y, r.topic);
-      v.notice = r.conflict ? { text: t('This topic changed meanwhile; nothing was changed. Here it is as it is now.'), tone: 'warn' } : null;
+      if (v.selected === x.id) v.notice = r.conflict ? { text: t('This topic changed meanwhile; nothing was changed. Here it is as it is now.'), tone: 'warn' } : null;
     } catch (err) {
-      v.notice = { text: err?.message || String(err), tone: 'error' };
+      if (v.selected === x.id) v.notice = { text: err?.message || String(err), tone: 'error' };
     }
-    render();
+    if (current() && keyOf(current()) === keyOf(y)) render();
   }
 
   function replace(y, topic) {
     const e = entry(y);
     if (!e?.topics || !topic) return;
     const i = e.topics.findIndex((x) => x.id === topic.id);
+    if (i >= 0 && e.topics[i].revision > topic.revision) return;
+    const v = viewOf(y);
+    if (v.selected === topic.id && e.topics[i]?.status !== topic.status) reveal(v, topic);
     if (i >= 0) e.topics[i] = topic;
     else e.topics.push(topic);
     e.indexed = null;
@@ -611,9 +595,7 @@ export function createTopics(host) {
         : { title: '', summary: '', conclusions: [], questions: [], addSources: [], removeSources: [] },
       conflict: null, saving: false, error: '', info: '',
     };
-    v.selected = id === 'new' ? null : id;
-    v.part = null;
-    v.focus = 'content';
+    selectEditor(v);
     render();
     $('#topics [data-key="edit-title"]')?.focus();
   }
@@ -739,8 +721,11 @@ export function createTopics(host) {
           questions: f.questions.map((c) => c.text).filter((s) => s.trim()),
           sources: wireSources(f.addSources),
         });
+        if (v.editing === ed && !v.selected) {
+          v.selected = r.topic.id;
+          reveal(v, r.topic);
+        }
         replace(y, r.topic);
-        if (v.editing === ed) v.selected = r.topic.id;
         settle(y, v, ed, f, r.topic, r.sources, []);
         return;
       }
@@ -911,22 +896,28 @@ export function createTopics(host) {
     return e.index.get(id) ?? null;
   }
 
-  // open shows the pane at a topic of yesman y, or its list.
+  // A chip returns to any edit already in progress. Once that form is
+  // closed, a new chip click can open its topic.
   function open(y, id = null) {
     const v = viewOf(y);
-    if (id && !v.editing) {
+    if (v.editing) selectEditor(v);
+    else if (id) {
       v.selected = id;
-      v.part = null;
       v.notice = null;
       v.focus = 'content';
       const x = topicOf(y, id);
-      if (x) { v.expanded.add(`g:${x.status}`); v.expanded.add(`t:${x.id}`); }
+      if (x) reveal(v, x);
+      else if (entry(y) && !entry(y).loading) load(y);
     }
     host.setOpen(true);
     render();
+    if (v.editing) {
+      $('#topics [data-key="edit-title"]')?.focus();
+      return;
+    }
     // In a narrow pane the back button, as before; else the topic's heading.
     const back = $('#topics [data-key="back"]');
-    const target = id && !v.editing ? (back?.getClientRects().length ? 'back' : 'detail-title') : 'search';
+    const target = id ? (back?.getClientRects().length ? 'back' : 'detail-title') : 'search';
     $(`#topics [data-key="${target}"]`)?.focus({ preventScroll: true });
   }
 

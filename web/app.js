@@ -3975,7 +3975,7 @@ function paneFocus(pane) {
   if (!aside) return null;
   const content = $('.explorer', aside)?.dataset.focus === 'content';
   const choices = pane === 'topics'
-    ? (content ? ['[data-key="back"]', '[data-key="detail-title"]', '[data-key="edit-title"]'] : ['.topics-search', '#topics-tree .explorer-row[tabindex="0"]'])
+    ? (content ? ['[data-key="back"]', '[data-key="detail-title"]', '[data-key="edit-title"]'] : ['.topics-search', '#topics-list [tabindex="0"]'])
     : (content ? ['[data-key="list"]', '.needs-you-detail-title'] : ['.needs-you-open[aria-current="true"]', '.needs-you-open', '.needs-you-heading']);
   const visible = (el) => el && !el.disabled && el.getClientRects().length > 0;
   for (const sel of [...choices, '.files-head-actions button:last-child']) {
@@ -4148,7 +4148,7 @@ function setPane(pane) {
   let target = null;
   if (pane) {
     target = pane === 'needs-you' ? $('#needs-you .needs-you-heading') : pane === 'board' ? $('#board .files-head-actions button')
-      : pane === 'topics' ? $('#topics .topics-search') ?? $('#topics .files-head-actions button')
+      : pane === 'topics' ? $('#topics [data-key="edit-title"]') ?? $('#topics .topics-search') ?? $('#topics .files-head-actions button')
       : pane === 'tasks' ? $('#schedules .files-head-actions button') : null;
     if (target && !inPane) paneFocusFrom = entry ? { entry } : had;
   } else {
