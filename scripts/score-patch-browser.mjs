@@ -2,7 +2,7 @@
 // YESMAN_PLAYWRIGHT=/path/to/playwright/index.mjs node scripts/score-patch-browser.mjs
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 const { chromium, webkit } = await import(process.env.YESMAN_PLAYWRIGHT || 'playwright');
@@ -279,7 +279,69 @@ try {
       await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
       await snapshot('chinese-narrow');
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+      // Actual newest embedded GPT-6.2 rows, with exact routed patch keys.
+      // Configure only the synthetic catalog/options; do not replace Embedded.
+      await page.evaluate(() => { localStorage.setItem('fixture.locale', 'en'); return fixtureCall('FixtureGPT62'); });
+      await page.setViewportSize({ width: 1180, height: 1000 });
+      await open();
+      const gptCSV = header + 'synthetic,codex-remote/codex/gpt-6.2-astra,high,0,,,0,\n'
+        + 'synthetic,codex-remote/codex/gpt-6.2-sol,high,,123.5,,,0\n'
+        + 'synthetic,local/patch-only,off,,37.125,,,0\n';
+      await page.evaluate((csv) => fixtureCall('FixtureCSV', csv), gptCSV);
+      await patch.getByRole('button', { name: 'Replace CSV…', exact: true }).click();
+      await patch.getByText('3 score rows · Enabled', { exact: true }).waitFor();
+      const metrics = () => rows.evaluateAll((elements) => elements.map((row) => ({
+        key: row.querySelector('strong').title,
+        text: row.innerText,
+        metrics: [...row.querySelectorAll('.crew-metrics dd')].map((el) => el.innerText),
+      })));
+      const checkGPT = async () => {
+        const shown = await metrics();
+        const view = await page.evaluate(() => fixtureCall('Crew'));
+        const context = await page.evaluate(() => fixtureCall('FixtureContext'));
+        assert.equal(view.date, '2026-11-18');
+        assert.equal(view.models.length, 5);
+        assert.equal(shown.length, 9);
+        assert.deepEqual(shown.map((r) => r.key), view.members.map((m) => m.key));
+        assert.deepEqual(shown[0].metrics, ['0 · Your CSV', '60.7 tok/s · Inherited from AA', '53.6 % · Inherited from AA', '0 USD · Your CSV', '4.9 min · Inherited from AA']);
+        assert.deepEqual(shown[2].metrics, ['54.9 · Inherited from AA', '123.5 tok/s · Your CSV', '49.4 % · Inherited from AA', '0.56 USD · Inherited from AA', '0 min · Your CSV']);
+        for (const [i, want] of [[1, ['61.6', '59.9 tok/s', '56.5 %', '2.52 USD', '6.2 min']], [3, ['55.7', '80.2 tok/s', '49.4 %', '0.65 USD', '5.1 min']], [4, ['60.1', '60.7 tok/s', '53.6 %', '2.07 USD', '4.9 min']], [5, ['60.1', '60.7 tok/s', '53.6 %', '2.07 USD', '4.9 min']], [6, ['12', '13 tok/s', '14 %', '15 USD', '16 min']]]) {
+          assert.deepEqual(shown[i].metrics, want);
+          assert.equal(view.members[i].source, i === 6 ? 'user' : 'aa');
+        }
+        assert.equal(view.members[7].score, undefined);
+        for (const i of [0, 2, 3]) assert.match(shown[8].metrics[i], /^—\s*Not available$/);
+        assert.equal(shown[8].metrics[1], '37.13 tok/s · Your CSV');
+        assert.equal(shown[8].metrics[4], '0 min · Your CSV');
+        assert.equal(view.members[8].score.intelligenceMissing, true);
+        assert.equal(view.members[8].score.speed, 37.125);
+        assert.match(context, /intelligence 0 \(user CSV\), speed 60\.7 tok\/s \(inherited AA\), coding 53\.6% \(inherited AA\), cost 0 USD per task \(user CSV\), time 4\.9 min per task \(inherited AA\)/);
+        assert.match(context, /intelligence 54\.9 \(inherited AA\), speed 123\.5 tok\/s \(user CSV\), coding 49\.4% \(inherited AA\), cost 0\.56 USD per task \(inherited AA\), time 0 min per task \(user CSV\)/);
+        assert.match(context, /AA source effort: xhigh/);
+        assert.equal(await page.evaluate(() => fixtureCall('FixturePatch')), gptCSV);
+        return { shown, view, context };
+      };
+      const gpt = await checkGPT();
+      await snapshot('gpt62-effective');
+      await patch.getByRole('combobox', { name: 'Use score patch' }).selectOption('off');
+      await patch.getByText('3 score rows · Disabled', { exact: true }).waitFor();
+      assert.match(await rows.first().innerText(), /60\.1/);
+      await page.evaluate(() => fixtureCall('FixtureRestart'));
+      await open();
+      await patch.getByText('3 score rows · Disabled', { exact: true }).waitFor();
+      await patch.getByRole('combobox', { name: 'Use score patch' }).selectOption('on');
+      await patch.getByText('3 score rows · Enabled', { exact: true }).waitFor();
+      await checkGPT();
+      await page.evaluate((csv) => fixtureCall('FixtureCSV', csv + 'synthetic,codex-remote/codex/gpt-6.2-astra,high,9,,,,\n'), gptCSV);
+      await patch.getByRole('button', { name: 'Replace CSV…', exact: true }).click();
+      await patch.getByRole('alert').filter({ hasText: 'duplicate' }).waitFor();
+      await checkGPT();
+      await page.evaluate(() => fixtureCall('FixtureRestart'));
+      await open();
+      await checkGPT();
+      await writeFile(`${output}/${name}-gpt62.json`, JSON.stringify(gpt, null, 2) + '\n');
       assert.deepEqual(errors, []);
+      console.log(`${name}: actual embedded GPT-6.2 overrides/blanks/exact route-provider-effort/Models-Lead/reload/rollback PASS`);
       console.log(`${name}: production Models/service/import/replacement/rollback/export/toggle/restart/estimate/default/remove/freshness PASS`);
     } finally { await browser?.close(); await backend.close(); }
   }

@@ -237,6 +237,13 @@ func TestScorePatchBrowserBridge(t *testing.T) {
 				value = s.Crew(r.Context())
 			case "RefreshCrew":
 				value = s.RefreshCrew(r.Context())
+			case "FixtureGPT62":
+				configureGPT62PatchCrew(t, a)
+				value = s.Crew(r.Context())
+			case "FixturePatch":
+				var data []byte
+				data, err = os.ReadFile(a.scorePatchPath())
+				value = string(data)
 			case "FixtureCSV":
 				var text string
 				arg(0, &text)
