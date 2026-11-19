@@ -1040,6 +1040,15 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 /* Keep the shadow close to the dialog: broad fades band against the dimmed canvas. */
 .mds-dialog { box-shadow: 0 8px 24px var(--mds-dialog-shadow); }
 .mds-dialog h2 { margin: 0; }
+.workspace-deletion { width: min(460px, calc(100vw - 32px)); overflow-wrap: anywhere; }
+.workspace-deletion .path { margin: 4px 0 16px; color: var(--mds-muted); }
+.workspace-deletion .delete-permanently { border-color: var(--mds-error-line); color: var(--mds-error); }
+.workspace-deletion .delete-permanently:hover:not(:disabled) { background: var(--mds-error-hover); }
+.deletion-status:empty { display: none; }
+.deletion-status[data-tone="error"] { color: var(--mds-error); }
+#stored-workspaces .mds-row { grid-template-columns: minmax(0, 1fr) auto; overflow-wrap: anywhere; }
+.stored-note { padding: 10px 16px; color: var(--mds-muted); }
+
 .mds-dialog .field { margin-top: 4px; }
 .mds-dialog .field + .field { margin-top: 12px; }
 .danger { color: var(--mds-error); }

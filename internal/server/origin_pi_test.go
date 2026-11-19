@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,8 +29,15 @@ import (
 //
 //	YESMAN_TEST_PI_FIXTURE=1 go test ./internal/server -run OriginWithPiFixture -v
 func TestOriginWithPiFixture(t *testing.T) {
-	f := startPiFixture(t, nil)
-	srv, m, store := f.srv, f.m, f.store
+	var sent atomic.Bool
+	f := startPiFixture(t, func(body string) []any {
+		if strings.Contains(body, "FIXTURE-SEND-WORKER") && sent.CompareAndSwap(false, true) {
+			call := map[string]any{"type": "toolCall", "id": "fixture-send", "name": "yesman_worker_send", "arguments": map[string]any{"name": "w1", "message": "once more"}}
+			return []any{map[string]any{"type": "toolcall_start", "contentIndex": 0, "id": "fixture-send", "toolName": "yesman_worker_send"}, map[string]any{"type": "toolcall_end", "contentIndex": 0, "toolCall": call}}
+		}
+		return []any{map[string]any{"type": "text_start", "contentIndex": 0}, map[string]any{"type": "text_end", "contentIndex": 0, "content": "fixture reply"}}
+	})
+	m, store := f.m, f.store
 	if _, err := store.Hire("alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -59,21 +67,35 @@ func TestOriginWithPiFixture(t *testing.T) {
 		!strings.Contains(string(got[1].Content), `[yesman] Worker \"w1\" finished a run`) {
 		t.Fatalf("the report records %+v: %s", got[1].Yesman, got[1].Content)
 	}
-	// The lead messages its worker through the API, as its tool does.
-	info, err := m.Get(lead)
-	if err != nil {
+	// The lead invokes its normal authenticated worker tool.
+	if err := m.Prompt(ctx, lead, "FIXTURE-SEND-WORKER"); err != nil {
 		t.Fatal(err)
 	}
-	y, err := store.Get("alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest("POST", "/v1/workers/send", strings.NewReader(`{"name":"w1","message":"once more"}`))
-	if _, err := srv.sendWorker(ctx, caller{agent: info, yesman: y}, req); err != nil {
-		t.Fatal(err)
-	}
-	wait("the worker's second message", func() bool { return len(users(worker)) >= 2 })
+	wait("worker-send tool completion", func() bool {
+		for _, data := range f.recorded(lead) {
+			var event struct {
+				Type, ToolCallID string
+				IsError          bool
+			}
+			if json.Unmarshal(data, &event) == nil && event.Type == "tool_execution_end" && event.ToolCallID == "fixture-send" {
+				if event.IsError {
+					t.Fatalf("worker-send failed: %s", data)
+				}
+				return true
+			}
+		}
+		return false
+	})
+	// Reading a finished conversation opens its process temporarily. Let the
+	// worker finish its second report and exit before opening that history.
+	wait("the worker to settle and stop after its second run", func() bool {
+		current, err := m.Get(worker)
+		return err == nil && f.settled(worker) >= 2 && current.Status == agent.Stopped && !current.FinishedAt.IsZero()
+	})
 	gotWorker := users(worker)
+	if len(gotWorker) < 2 {
+		t.Fatalf("expected the task and message in the worker's history: %+v", gotWorker)
+	}
 	if gotWorker[0].Yesman == nil || *gotWorker[0].Yesman != (agent.Origin{Source: agent.OriginLead, Kind: "task"}) {
 		t.Fatalf("the worker's task records %+v", gotWorker[0].Yesman)
 	}

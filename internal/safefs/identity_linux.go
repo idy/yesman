@@ -10,10 +10,10 @@ import (
 // keeps one (ext4, XFS, Btrfs and others).
 func identity(f *os.File) (Identity, error) {
 	var st unix.Statx_t
-	if err := unix.Statx(int(f.Fd()), "", unix.AT_EMPTY_PATH, unix.STATX_INO|unix.STATX_BTIME, &st); err != nil {
+	if err := unix.Statx(int(f.Fd()), "", unix.AT_EMPTY_PATH, unix.STATX_INO|unix.STATX_BTIME|unix.STATX_MNT_ID, &st); err != nil {
 		return Identity{}, err
 	}
-	id := Identity{Dev: uint64(unix.Mkdev(st.Dev_major, st.Dev_minor)), Ino: st.Ino}
+	id := Identity{Dev: uint64(unix.Mkdev(st.Dev_major, st.Dev_minor)), Ino: st.Ino, Mount: st.Mnt_id}
 	if st.Mask&unix.STATX_BTIME != 0 {
 		id.Birth, id.HasBirth = st.Btime.Sec*1e9+int64(st.Btime.Nsec), true
 	}

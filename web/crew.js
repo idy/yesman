@@ -82,13 +82,20 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
   const yesmanMember = () => view?.members.find((m) => m.key === view.yesman && !m.missing);
 
   // describe says, beside a form that hires, what the new yesman runs as.
+  const descriptions = new WeakMap();
   function describe(el) {
+    const m = yesmanMember();
+    const model = m ? optionName(m) : '';
+    const description = view ? `${locale()}/${model}` : '';
+    if (descriptions.get(el) === description) return;
+    descriptions.set(el, description);
+    const focused = el.contains(document.activeElement);
     if (!view) { el.replaceChildren(); return; }
     const settings = (label) => h('button', { class: 'mds-link-button inline-link', type: 'button', onclick: () => { el.closest('dialog')?.close('cancel'); openPage(); } }, label);
-    const m = yesmanMember();
     el.replaceChildren(...(m
-      ? tNodes('Its lead runs as {model}. {change}', { model: h('strong', null, optionName(m)), change: settings(t('Change')) })
+      ? tNodes('Its lead runs as {model}. {change}', { model: h('strong', null, model), change: settings(t('Change')) })
       : tNodes('Choose what new yesmen run as in {settings} first.', { settings: settings(t('Settings › yesman')) })));
+    if (focused) el.querySelector('button')?.focus({ preventScroll: true });
   }
 
   // ---------- Adding an option, and the user's own scores ----------

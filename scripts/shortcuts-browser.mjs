@@ -70,6 +70,7 @@ async function answer(m, args) {
   case 'Fetches': return {fetching:[],errors:{}};
   case 'Messages': return {messages:[]};
   case 'TakeFocus': return '';
+  case 'RestartStatus': return {};
   case 'Update': return {enabled:false};
   case 'Models': return {models:[{provider:'p',id:'m1',name:'Model One'},{provider:'p',id:'m2',name:'Model Two'}],agent:agents.find(a=>a.id===args[0])};
   case 'Info': return {knowledge:[],worktrees:[]};
@@ -80,7 +81,7 @@ async function answer(m, args) {
   case 'Schedules': return {yesman:args[0],owner:true,plans:[],limits:{title:120,instructions:4000,minEvery:15,maxEvery:10080,history:60}};
   case 'ListFiles': return args[1] === '.' || args[1] === '' ? [{name:'main.js',path:'main.js',size:13}] : [];
   case 'ReadFile': return {path:args[1],size:fileText.length,modTime:'2026-11-14T00:00:00Z',kind:'text',text:fileText,hash:'h1'};
-  case 'WriteFile': fileText = args[2]; return {path:args[1],size:args[2].length,modTime:'2026-11-14T00:00:01Z',kind:'text',text:args[2],hash:'h'+calls.length};
+  case 'SaveWorkspaceFile': fileText = args[2]; return {path:args[1],size:args[2].length,modTime:'2026-11-14T00:00:01Z',kind:'text',text:args[2],hash:'h'+calls.length};
   case 'FilesMenu': return '';
   case 'Submit': case 'SubmitCoalescing': return {id:args[1],revision:1,state:'accepted',agentSince:''};
   case 'Shortcuts': return saved();
@@ -105,7 +106,8 @@ async function answer(m, args) {
   }
   case 'Abort': case 'Stop': case 'WatchFiles': case 'Reveal': case 'FetchAll': return;
   // Called only if a guard were skipped; recorded in calls either way.
-  case 'Dismiss': case 'RemoveWorker': case 'Rename': case 'HireNamed': return null;
+  case 'PrepareWorkspaceDeletion': return {entry:args[0],label:'Alice',instance:'fixture'};
+  case 'DeleteWorkspace': case 'RemoveWorkerOf': case 'Rename': case 'HireNamed': return null;
   default: unmocked.push(m); return null;
   }
 }
@@ -224,7 +226,7 @@ async function palette(x, check) {
     reason: el.querySelector('.palette-option-reason')?.textContent ?? '', keys: [...el.querySelectorAll('.keycap')].map((k) => k.textContent),
   })));
   x.options = options;
-  assert.equal(options.length, 42); // 39 actions (Topics and Tasks among them), one per Settings page among them, and 3 conversations
+  assert.equal(options.length, 43); // 40 actions (including Restart and continue) and 3 conversations
   for (const o of options) {
     assert.ok(o.label, o.key);
     if (o.disabled) assert.ok(o.reason, o.key);
@@ -238,6 +240,9 @@ async function palette(x, check) {
   // Model usage too, from 0.1.33, with no key of its own.
   assert.deepEqual(option('action:settings.page.usage'), { ...option('action:settings.page.usage'), label: 'Settings: Model usage', disabled: false, keys: [] });
   assert.deepEqual(option('action:agent.stop'), { ...option('action:agent.stop'), disabled: true, reason: 'This agent is not running.' });
+  assert.deepEqual(option('action:app.restart').keys, []);
+  assert.deepEqual(option('action:yesman.delete').keys, []);
+  assert.equal(option('action:yesman.dismiss'), undefined);
   assert.equal(option('action:worker.remove').disabled, true);
   assert.equal(option('action:agent.needs-you').disabled, false);
   assert.equal(option('item:alice/lead').reason, 'This is the conversation shown.');
@@ -255,7 +260,7 @@ async function palette(x, check) {
   await x.palette.waitFor({ state: 'hidden' });
   assert.equal(await x.boardShown(), true);
   assert.equal(await x.active(), 'Message');
-  check('39 entries, each disabled one with its reason, and an entry for every Settings page; search ranks, shows the platform keycap, runs once and gives focus back');
+  check('Each disabled action has a reason, and an entry for every Settings page; search ranks, shows the platform keycap, runs once and gives focus back');
 
   // The scheduled tasks are found and opened there too; the board comes back.
   await page.keyboard.press(`${MOD}+KeyK`);
@@ -348,19 +353,20 @@ async function palette(x, check) {
   await page.locator('#confirm-dialog').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#confirm-title').innerText(), 'Remove worker-one?');
   await page.keyboard.press('Escape');
-  await run('dismiss this');
-  await page.locator('#confirm-dialog').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#confirm-title').innerText(), 'Dismiss Alice?');
-  await page.locator('#confirm-dialog button[value="cancel"]').click();
+  await run('delete yes man');
+  const deletion = page.locator('#delete-workspace-dialog');
+  await deletion.waitFor({ state: 'visible' });
+  assert.equal(await deletion.locator('h2').innerText(), 'Delete “Alice”?');
+  await deletion.getByRole('button', { name: 'Cancel' }).click();
   await run('rename this');
   await page.locator('#rename-dialog').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#rename-form input').inputValue(), 'Alice');
   await page.keyboard.press('Escape');
   await page.locator('#rename-dialog').waitFor({ state: 'hidden' });
-  assert.deepEqual([await x.count('RemoveWorker'), await x.count('Dismiss'), await x.count('Rename')], [0, 0, 0]);
+  assert.deepEqual([await x.count('RemoveWorkerOf'), await x.count('DeleteWorkspace'), await x.count('Rename')], [0, 0, 0]);
   await run('sleep');
   assert.deepEqual(await x.callsOf('Stop'), [['Stop', 'alice/worker-one']]);
-  check('remove worker, dismiss and rename ask first and do nothing on cancel; sleep acts on the worker shown');
+  check('remove worker, delete workspace and rename ask first and do nothing on cancel; sleep acts on the worker shown');
 
   // Settings from the palette: focus goes to its item in Settings.
   await run('open settings');
@@ -722,9 +728,9 @@ async function context(x, check) {
   assert.equal(await page.evaluate(() => document.querySelector('#app').dataset.view), 'agent');
   assert.match(await content.innerText(), /^\/\/ const a = 1;/);
   await page.keyboard.press(`${MOD}+KeyS`);
-  await page.waitForFunction(() => calls.some((c) => c[0] === 'WriteFile'));
+  await page.waitForFunction(() => calls.some((c) => c[0] === 'SaveWorkspaceFile'));
   await page.waitForTimeout(150);
-  assert.equal(await x.count('WriteFile'), 1);
+  assert.equal(await x.count('SaveWorkspaceFile'), 1);
   await page.keyboard.press(`${MOD}+KeyK`);
   await x.palette.waitFor({ state: 'visible' });
   await page.keyboard.press('Escape');
@@ -738,7 +744,7 @@ async function context(x, check) {
   await page.locator('#files-tree-list').waitFor();
   await page.getByRole('button', { name: 'More' }).first().click();
   await page.waitForFunction(() => calls.some((c) => c[0] === 'FilesMenu'));
-  assert.deepEqual((await x.callsOf('FilesMenu')).at(-1)[7], { 'files.find': 'Mod+P', 'files.tree': 'Mod+Shift+Y' });
+  assert.deepEqual((await x.callsOf('FilesMenu')).at(-1)[7], { 'files.find': 'Mod+P', 'files.tree': 'Mod+Shift+Y', 'yesman.delete': '' });
   await page.keyboard.press(`${MOD}+Shift+KeyE`);
   assert.equal(await x.filesShown(), false);
   check(`the editor keeps ${cap('⌘/', 'Ctrl+/')} (comment) and saves once with ${cap('⌘S', 'Ctrl+S')}; ${cap('⌘K', 'Ctrl+K')} works there and gives focus back; ${cap('⌘P', 'Ctrl+P')} finds, ${cap('⇧⌘Y', 'Ctrl+Shift+Y')} toggles the tree; the files menu gets their keys`);

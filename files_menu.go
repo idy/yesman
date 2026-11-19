@@ -74,7 +74,7 @@ func (s *service) FilesMenu(ctx context.Context, x, y int, tree, wrap, autoSave,
 			item("checkout", tr("Check Out a Repository…")),
 			item("reveal", revealLabel()),
 			mygo.Separator(),
-			item("dismiss", tr("Dismiss yesman…")),
+			item("delete-workspace", tr("Delete Yes Man…"), shortcut(keys, "yesman.delete")),
 		}
 	})
 }
