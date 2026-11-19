@@ -63,11 +63,22 @@ test('once pi takes the occurrence, its one canonical message binds every input 
   assert.equal(rows[0].delivery.id, A);
 });
 
-test('an unbound finished family folds as one earlier record', () => {
+test('an unbound finished family has no second history row', () => {
   const c = convo([receipt(A, { state: 'dispatched', merged: [B] }), receipt(B, { state: 'dispatched', mergedInto: A }), receipt(D, { state: 'dispatched' })]);
-  const rows = receiptRows(project(c, { status: 'idle' }));
-  assert.equal(rows.length, 1);
-  assert.deepEqual(rows[0].deliveries.map((d) => d.id), [A, D]);
+  assert.deepEqual(project(c, { status: 'idle' }), []);
+});
+
+test('an interrupted family stays actionable once, until hidden, while another pending input remains visible', () => {
+  const c = convo([
+    receipt(A, { state: 'interrupted', merged: [B], error: 'interrupted before intake' }),
+    receipt(B, { state: 'interrupted', mergedInto: A, error: 'interrupted before intake' }),
+    receipt(D, { nativePending: true, canCancel: true }),
+  ]);
+  assert.deepEqual(receiptRows(project(c)).map((r) => r.key), [`d:${A}`, `d:${D}`]);
+  c.handled = new Set([A, D]);
+  assert.deepEqual(receiptRows(project(c)).map((r) => r.key), [`d:${D}`], 'Hide never suppresses native pending');
+  c.deliveries.set(A, { ...c.deliveries.get(A), state: 'steering', error: '', nativePending: true });
+  assert.deepEqual(receiptRows(project(c)).map((r) => r.key), [`d:${A}`, `d:${D}`], 'a trusted new pending attempt remains visible');
 });
 
 test('an appended input whose occurrence receipt is gone shows honestly as itself', () => {

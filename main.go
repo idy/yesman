@@ -26,6 +26,7 @@ import (
 	"github.com/idy/yesman/internal/githubapp"
 	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/restart"
 	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/server"
@@ -115,6 +116,7 @@ func main() {
 	a.setTheme = mygo.Theme.SetSource
 	a.chosenLocale, a.setLocale = mygo.App.ChosenLocale, mygo.App.SetLocale
 	a.updates = newUpdates()
+	a.restarts = newRestarts(restart.Open(restart.Path(h.Root)))
 	if a.settings.Appearance != "" {
 		mygo.Theme.SetSource(a.settings.Appearance) // before Run, so the window opens in it
 	}
@@ -194,7 +196,8 @@ func main() {
 	})
 	schedules.Store(a.schedules)
 	srv.Schedules = a.schedules
-	a.schedules.Start()
+	a.restarts.hold = a.agents.HoldAfterRestart
+	finishRecovery := a.agents.HoldContinuations()
 	a.countHandoffs() // for the tray, before the first change of the agents
 	a.catalog = newCatalog(func(ctx context.Context) ([]agent.Model, error) {
 		if a.piErr != nil {
@@ -225,18 +228,31 @@ func main() {
 		if managedRuntime != nil {
 			managedRuntime.Close()
 		}
+		// A restart records the agents it cuts short right before they
+		// stop, closing the agents to new starts and reports; once they
+		// have stopped, it records where the workers' reports got
+		// meanwhile. A plain Quit does neither.
+		a.restarts.beforeStop(a.agents.CloseForRestart)
 		a.agents.StopAll()
+		a.restarts.afterStop(a.agents.ReconcileRestart)
 	})
+	mygo.App.OnQuitCanceled(a.restarts.canceled)
 	mygo.App.WhenReady(func() {
 		if err := mygo.App.Dock.SetIcon(appIcon); err != nil {
 			log.Print("dock icon: ", err)
 		}
 		a.setupTray()
 		a.updates.start()
-		// Tell each lead of work nobody carries since the app last ran: a
-		// trigger lost when it quit is not lost. Leads the user stopped,
-		// and tasks told about already, stay as they are.
-		a.agents.Resume()
+		if e2eReady != nil {
+			e2eReady(a) // builds tagged e2e only
+		}
+		go func() {
+			// Admit explicit recovery first. Events raised by those agents
+			// cannot send a competing task notice during the claim.
+			a.restarts.resume(a.agents.ResumeAfterRestart)
+			finishRecovery()
+			a.schedules.Start()
+		}()
 		if os.Getenv("YESMAN_HIDDEN") == "" {
 			a.showWindow()
 		}
@@ -245,6 +261,9 @@ func main() {
 		log.Fatal(err)
 	}
 }
+
+// e2eReady drives end-to-end checks in builds tagged e2e; nil otherwise.
+var e2eReady func(*app)
 
 // findPi locates the pi executable: $YESMAN_PI, else pi on the PATH.
 func findPi() (string, error) {

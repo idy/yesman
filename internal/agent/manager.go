@@ -4,7 +4,8 @@
 // works in its yesman's workspace and keeps its session log under
 // .yesman/sessions/<name>. An agent's ID is "<yesman>/<name>"; the lead is
 // named "lead". Agents start when someone talks to them and resume their
-// latest session, so restarting the app loses at most a turn in progress.
+// latest session, so restarting the app loses at most a turn in progress;
+// after a restart from the app, ResumeAfterRestart lets that turn's agent go on.
 package agent
 
 import (
@@ -24,6 +25,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/idy/yesman/internal/restart"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -162,8 +164,11 @@ type Config struct {
 type Manager struct {
 	cfg Config
 
-	mu              sync.Mutex
-	agents          map[string]*agent
+	mu     sync.Mutex
+	agents map[string]*agent
+	// restartRuns binds the checkpoint to each listed report generation.
+	restartRuns     map[string]uint64
+	recovering      bool                     // startup restart admission holds task evaluation
 	tokens          map[string]string        // credential -> agent ID, while its process runs
 	closed          bool                     // StopAll permanently prevents further starts; guarded by mu
 	worktreeCleanup map[string]bool          // reservations preventing owner startup/input during final removal
@@ -198,7 +203,11 @@ type agent struct {
 	prompts int
 	// reports counts worker handoffs being read or delivered to the lead,
 	// registered before the worker becomes idle; guarded by the manager's mu.
-	reports                        int
+	reports int
+	// reportRun numbers a worker's finished runs, and handoff is how far
+	// the report of the latest got; both guarded by the manager's mu.
+	reportRun                      uint64
+	handoff                        reportHandoff
 	info                           Info
 	proc                           *proc
 	token                          string
@@ -247,6 +256,10 @@ type agent struct {
 	// the inbox at the last settle, so accepted prompts awaiting agent_start
 	// still defer telling the lead about its tasks. Both are guarded by the manager's mu.
 	inbox, settledInbox uint64
+	// givenWork records actual incoming work in this Manager incarnation,
+	// before its startup can wait. Observation and restart dispatch do not
+	// set it. restartHandled prevents a second recovery of the same agent.
+	givenWork, restartHandled bool
 }
 
 // errStopped is returned when Stop interrupts a start or the manager has quit.
@@ -411,9 +424,13 @@ func (m *Manager) ensure(id string) (*agent, *proc, error) {
 	return m.ensureScoped(id, nil, "", nil, false)
 }
 
-// ensureScoped starts the agent if needed. auto: for yesman's own message to
-// a lead, which starts nothing while the user's pause holds it.
+// ensureScoped starts the agent if needed. Automatic lead messages obey its pause.
 func (m *Manager) ensureScoped(id string, owner *agent, messageID string, scope *time.Time, auto bool) (*agent, *proc, error) {
+	return m.ensureScopedCtx(context.Background(), id, owner, messageID, scope, auto, false)
+}
+
+// ensureScopedCtx bounds startup by the restart caller's context.
+func (m *Manager) ensureScopedCtx(ctx context.Context, id string, owner *agent, messageID string, scope *time.Time, auto, input bool) (*agent, *proc, error) {
 	ys, name, err := SplitID(id)
 	if err != nil {
 		return nil, nil, err
@@ -438,13 +455,15 @@ func (m *Manager) ensureScoped(id string, owner *agent, messageID string, scope 
 			}
 		}
 		var err error
-		a, p, err = m.ensureIn(y, id, name, auto)
+		a, p, err = m.ensureInCtx(ctx, y, id, name, auto, input, nil)
 		return err
 	})
 	return a, p, err
 }
 
-func (m *Manager) ensureIn(y yesmen.Yesman, id, name string, auto bool) (*agent, *proc, error) {
+// ensureInCtx stops waiting when ctx ends, including canceling its own start.
+// check, if present, rechecks recovery ownership under mu before every start.
+func (m *Manager) ensureInCtx(ctx context.Context, y yesmen.Yesman, id, name string, auto, input bool, check func() error) (*agent, *proc, error) {
 	ys := y.Name
 	role := RoleLead
 	since := y.HiredAt
@@ -482,6 +501,15 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string, auto bool) (*agent,
 			m.mu.Unlock()
 			return nil, nil, err
 		}
+		if check != nil {
+			if err := check(); err != nil {
+				m.mu.Unlock()
+				return nil, nil, err
+			}
+		}
+		if input {
+			a.givenWork = true
+		}
 		if a.deliveries == nil {
 			m.mu.Unlock()
 			if err := m.ensureDeliveries(a, filepath.Join(y.Path, ".yesman", "sessions", name, "delivery.json")); err != nil {
@@ -513,11 +541,20 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string, auto bool) (*agent,
 		if a.starting != nil {
 			wait := a.starting
 			m.mu.Unlock()
-			<-wait
+			select {
+			case <-wait:
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			m.mu.Unlock()
+			return nil, nil, err
 		}
 		a.starting = make(chan struct{})
 		startContext, cancelStart := context.WithCancel(context.Background())
+		stopCut := context.AfterFunc(ctx, cancelStart)
 		a.startCancel = cancelStart
 		a.stopping = false
 		a.info.Status, a.info.Detail, a.info.UpdatedAt = Starting, "", time.Now()
@@ -526,12 +563,23 @@ func (m *Manager) ensureIn(y yesmen.Yesman, id, name string, auto bool) (*agent,
 
 		started := time.Now()
 		p, state, err := m.spawn(startContext, a, y, name, role)
+		stopCut()
 		cancelStart()
 
 		m.mu.Lock()
 		a.startCancel = nil
 		if (a.stopping || m.closed) && err != nil {
 			err = errStopped
+		}
+		if err != nil && !errors.Is(err, errStopped) && ctx.Err() != nil {
+			// The caller's time ran out and cut its start off: the agent
+			// did not fail, it is not running.
+			close(a.starting)
+			a.starting = nil
+			a.info.Status, a.info.Detail, a.info.UpdatedAt = Stopped, "", time.Now()
+			m.mu.Unlock()
+			m.changed()
+			return nil, nil, fmt.Errorf("its start was cut off: %w", ctx.Err())
 		}
 		if err == nil && (a.stopping || m.closed) {
 			// Stop came during the start: end what it started before
@@ -585,6 +633,22 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	} else {
 		args = append(args, "--name", ID(y.Name, name))
 	}
+	// Each start gets its own temporary and evidence directories in the
+	// workspace (workspace_temp.go). Without them the agent does not start:
+	// programs would silently fall back to the system's temporary directory.
+	temp, err := reserveAgentTemp(y.Path, ID(y.Name, name), name, role)
+	if err != nil {
+		return nil, modelState{}, fmt.Errorf("prepare the agent's temporary directory: %w", err)
+	}
+	// Only a reservation no process ever ran with is released: from the
+	// moment the process exists, whatever it wrote there stays, even when
+	// its start then fails or is cancelled.
+	ran := false
+	defer func() {
+		if !ran {
+			temp.release()
+		}
+	}()
 	token := newToken()
 	env := append(os.Environ(), m.cfg.Env...)
 	env = append(env,
@@ -595,6 +659,7 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 		"YESMAN_ROLE="+role,
 		"YESMAN_WORKSPACE="+y.Path,
 	)
+	env = withEnv(env, temp.env())
 	path := m.cfg.Pi
 	if m.cfg.Command != nil {
 		ctx, cancel := context.WithTimeout(startContext, 10*time.Minute)
@@ -613,6 +678,8 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	if err != nil {
 		return nil, modelState{}, err
 	}
+	ran = true
+	p.temp = temp
 	m.mu.Lock()
 	a.token, a.tokenProc = token, p
 	m.tokens[token] = a.info.ID
@@ -678,13 +745,18 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			// The worker is still busy until its report reaches the lead.
 			// Reserve this before publishing Idle, without waiting on RPC.
 			a.reports++
+			if !e.Aborted {
+				// Its report, not yet sent, which a restart keeps track of.
+				a.reportRun++
+				a.handoff = reportHandoff{run: a.reportRun, state: restart.ReportNotSent}
+			}
 		}
 		a.info.Status, a.info.Detail, a.info.Dialog, a.info.UpdatedAt = Idle, "", nil, time.Now()
 		a.settledInbox = a.inbox
 		a.settled++
 		// The run that settled: its report may close the worker only while
 		// nothing was given to it since and no later run settled.
-		run := runMark{p: p, inbox: a.inbox, run: a.settled}
+		run := runMark{p: p, inbox: a.inbox, run: a.settled, report: a.reportRun}
 		m.mu.Unlock()
 		m.changed()
 		go func() {
@@ -702,6 +774,7 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			go func() {
 				defer m.handoffDone(a)
 				if !e.Aborted {
+					defer m.endHandoff(a, run.report)
 					m.reportToLead(a, run)
 					return
 				}
@@ -885,6 +958,15 @@ func (m *Manager) admitAuto(y yesmen.Yesman, more func() error) func() error {
 // promptAdmitted is promptDelivery where yesman's own message to a lead is
 // admitted only as it is written, by its pause and by more (see admitAuto).
 func (m *Manager) promptAdmitted(ctx context.Context, id, text, behavior, messageID string, owner *agent, scope *time.Time, origin Origin, more func() error, images ...Image) error {
+	return m.promptTrackedAdmitted(ctx, id, text, behavior, messageID, owner, scope, origin, nil, more, images...)
+}
+
+func (m *Manager) promptTracked(ctx context.Context, id, text, behavior, messageID string, owner *agent, scope *time.Time, origin Origin, track *sendTrack, images ...Image) error {
+	return m.promptTrackedAdmitted(ctx, id, text, behavior, messageID, owner, scope, origin, track, nil, images...)
+}
+
+// promptTrackedAdmitted combines restart delivery tracking and automatic admission.
+func (m *Manager) promptTrackedAdmitted(ctx context.Context, id, text, behavior, messageID string, owner *agent, scope *time.Time, origin Origin, track *sendTrack, more func() error, images ...Image) error {
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return errors.New("empty message")
 	}
@@ -893,6 +975,7 @@ func (m *Manager) promptAdmitted(ctx context.Context, id, text, behavior, messag
 		p *proc
 		y yesmen.Yesman
 	)
+	bounded := track != nil && track.bounded
 	auto := automatic(id, origin)
 	if auto {
 		ys, _, _ := SplitID(id)
@@ -906,14 +989,24 @@ func (m *Manager) promptAdmitted(ctx context.Context, id, text, behavior, messag
 	}
 	for {
 		var err error
-		if a, p, err = m.ensureScoped(id, owner, messageID, scope, auto); err != nil {
+		start := context.Background()
+		if bounded {
+			start = ctx
+		}
+		if a, p, err = m.ensureScopedCtx(start, id, owner, messageID, scope, auto, true); err != nil {
 			return err
 		}
 		// Register before dispatch, under the same lock as configuration's
 		// idle check and writes, SleepIfIdle, and closing a finished worker.
 		// Release it before waiting so other messages can steer a running
 		// turn. pi may await extensions before reporting isStreaming.
-		a.modelMu.Lock()
+		if bounded {
+			if err := lockWithin(ctx, &a.modelMu); err != nil {
+				return err
+			}
+		} else {
+			a.modelMu.Lock()
+		}
 		if err := ctx.Err(); err != nil {
 			a.modelMu.Unlock()
 			return err
@@ -949,6 +1042,11 @@ func (m *Manager) promptAdmitted(ctx context.Context, id, text, behavior, messag
 		a.modelMu.Unlock()
 		return errLeadPaused
 	}
+	if track != nil && track.admit != nil && !track.admit() {
+		m.mu.Unlock()
+		a.modelMu.Unlock()
+		return errStopped // no prompt registered; retain its previous handoff state
+	}
 	a.prompts++
 	var resume workerResume
 	if a.info.Role == RoleWorker {
@@ -977,14 +1075,16 @@ func (m *Manager) promptAdmitted(ctx context.Context, id, text, behavior, messag
 	if auto {
 		admit = m.admitAuto(y, more)
 	}
-	return m.sendPromptDelivery(ctx, a, p, text, behavior, messageID, origin, admit, images...)
+	return m.sendPromptTracked(ctx, a, p, text, behavior, messageID, origin, track, admit, images...)
 }
 
 // sendPromptDelivery dispatches a prompt already registered under modelMu
-// and mu; admit, unless nil, decides as it is written whether it is (see
-// proc.sendAdmitted). No manager lock is held while sending or waiting for
-// pi's answer.
+// and mu, checking automatic admission at the process write lock.
 func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, text, behavior, messageID string, origin Origin, admit func() error, images ...Image) error {
+	return m.sendPromptTracked(ctx, a, p, text, behavior, messageID, origin, nil, admit, images...)
+}
+
+func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text, behavior, messageID string, origin Origin, track *sendTrack, admit func() error, images ...Image) error {
 	if check := admit; check != nil {
 		// Admitted only to the process it was meant for, still the agent's.
 		admit = func() error {
@@ -1042,12 +1142,27 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 		} else {
 			err = m.bindDelivery(a, p, messageID)
 		}
+		state := restart.ReportNotSent
 		if err == nil {
 			// pi's answer, read in order with its records, says what became
 			// of the prompt; see originTracker.
 			p.origins.sent()
 			answered := false
-			_, err = p.callAdmitted(context.Background(), cmd, admit, func(r response) {
+			admitted := false
+			_, err = p.callAdmitted(context.Background(), cmd, func() error {
+				if admit != nil {
+					if err := admit(); err != nil {
+						return err
+					}
+				}
+				if track != nil && track.current != nil {
+					if err := track.current(); err != nil {
+						return err
+					}
+				}
+				admitted = true
+				return nil
+			}, func(r response) {
 				answered = true
 				p.origins.answered(origin, behavior, &r)
 				m.deliveryResponse(a, p, messageID, behavior, r)
@@ -1055,6 +1170,15 @@ func (m *Manager) sendPromptDelivery(ctx context.Context, a *agent, p *proc, tex
 			if !answered {
 				p.origins.answered(origin, behavior, nil)
 			}
+			switch {
+			case answered && err == nil:
+				state = restart.ReportAccepted
+			case !answered && admitted:
+				state = restart.ReportUncertain // admitted to the pipe, perhaps taken
+			}
+		}
+		if track != nil {
+			track.result(state)
 		}
 		if m.beforePromptDone != nil {
 			m.beforePromptDone(a) // tests: the answered prompt is slow to end
@@ -1197,6 +1321,7 @@ func (m *Manager) Answer(id, requestID string, answer map[string]any) error {
 	// Reserve the question before sending. A second answer cannot consume
 	// it, and events after the response (including a new question) stay put.
 	handedOver := a.handedOver
+	a.givenWork = true // an explicit answer owns the run, unlike a history read
 	a.info.Status, a.info.Dialog, a.info.UpdatedAt = Working, nil, time.Now()
 	m.mu.Unlock()
 	msg := map[string]any{}
@@ -1537,21 +1662,49 @@ func (m *Manager) handoffDone(a *agent) {
 func (m *Manager) reportToLead(a *agent, run runMark) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	report := "(no final message)"
-	if r, err := run.p.call(ctx, map[string]any{"type": "get_last_assistant_text"}); err != nil {
+	report, err := m.readFinal(ctx, run.p)
+	if err != nil {
 		report = "(its final message could not be read: " + err.Error() + ")"
 	} else {
-		var data struct {
-			Text *string `json:"text"`
+		// Which report this is, should a restart have to hand it on.
+		m.mu.Lock()
+		if a.handoff.run == run.report {
+			a.handoff.digest = digest(report)
 		}
-		_ = json.Unmarshal(r.Data, &data)
-		if data.Text != nil && strings.TrimSpace(*data.Text) != "" {
-			report = *data.Text
-		}
+		m.mu.Unlock()
 	}
-	if m.tellLeadRun(ctx, a, run, "report", fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", a.info.Name, report)) == nil {
+	if m.tellLeadRun(ctx, a, run, "report", reportText(a.info.Name, report, false)) == nil {
 		m.closeIfFinished(a, run, time.Now().UTC())
 	}
+}
+
+// readFinal reads the last thing a worker said, for its report. It is a
+// read of its session: it starts no run.
+func (m *Manager) readFinal(ctx context.Context, p *proc) (string, error) {
+	r, err := p.call(ctx, map[string]any{"type": "get_last_assistant_text"})
+	if err != nil {
+		return "", err
+	}
+	var data struct {
+		Text *string `json:"text"`
+	}
+	_ = json.Unmarshal(r.Data, &data)
+	if data.Text == nil {
+		return "", nil
+	}
+	return *data.Text, nil
+}
+
+// reportText is a worker's report to its lead; afterRestart marks one
+// handed on after a restart, which had not reached the lead before it.
+func reportText(name, report string, afterRestart bool) string {
+	if strings.TrimSpace(report) == "" {
+		report = "(no final message)"
+	}
+	if afterRestart {
+		report = "(Handed on after a restart: Yes Man restarted before this report reached you.)\n\n" + report
+	}
+	return fmt.Sprintf("[yesman] Worker %q finished a run. Its final message:\n\n%s", name, report)
 }
 
 // runMark identifies a worker's run: the process it ran in, the count of
@@ -1560,16 +1713,17 @@ func (m *Manager) reportToLead(a *agent, run runMark) {
 // the same and pi runs nothing: a message given before it settled but sent
 // after starts a run of its own, which pi reports running, then settled.
 type runMark struct {
-	p     *proc
-	inbox uint64
-	run   uint64
+	p      *proc
+	inbox  uint64
+	run    uint64
+	report uint64 // latest restart handoff generation at this run's settlement
 }
 
 // runOf marks the run of a that last settled, in p.
 func (m *Manager) runOf(a *agent, p *proc) runMark {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return runMark{p: p, inbox: a.settledInbox, run: a.settled}
+	return runMark{p: p, inbox: a.settledInbox, run: a.settled, report: a.reportRun}
 }
 
 // lastRunLocked reports whether run is still a's last, in its process, with
@@ -1690,6 +1844,14 @@ func (m *Manager) tellLeadWithin(ctx context.Context, a *agent, kind, msg string
 // tellLeadRun is tellLeadWithin about the run marked run: a report kept for
 // a paused lead closes only that run's worker once delivered.
 func (m *Manager) tellLeadRun(ctx context.Context, a *agent, run runMark, kind, msg string) error {
+	var track *sendTrack
+	if kind == "report" && run.report != 0 {
+		track = m.reportTrack(ctx, a, run.report, false)
+	}
+	return m.tellLeadTracked(ctx, a, run, kind, msg, track)
+}
+
+func (m *Manager) tellLeadTracked(ctx context.Context, a *agent, run runMark, kind, msg string, track *sendTrack) error {
 	scope, active := m.reportScope(a)
 	if !active {
 		return errStopped
@@ -1711,10 +1873,13 @@ func (m *Manager) tellLeadRun(ctx context.Context, a *agent, run runMark, kind, 
 		if _, active := m.reportScope(a); !active {
 			return errStopped
 		}
-		if err = m.promptDelivery(ctx, lead, msg, "followUp", "", nil, &scope, origin); err == nil {
+		if err = m.promptTracked(ctx, lead, msg, "followUp", "", nil, &scope, origin, track); err == nil {
 			return nil
 		}
 		if errors.Is(err, errLeadPaused) {
+			if track != nil && track.bounded {
+				return err // restart recovery never schedules a later unbounded send
+			}
 			// The user stopped the lead: keep this for when they write to it.
 			if m.deferForLead(a.info.Yesman, scope, func() { m.redeliver(a, run, kind, msg) }) {
 				m.mu.Lock()
@@ -1754,6 +1919,7 @@ func (m *Manager) tellLeadRun(ctx context.Context, a *agent, run runMark, kind, 
 func (m *Manager) redeliver(a *agent, run runMark, kind, msg string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+	defer m.endHandoff(a, run.report)
 	if m.tellLeadRun(ctx, a, run, kind, msg) != nil {
 		return
 	}

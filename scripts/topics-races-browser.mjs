@@ -9,6 +9,7 @@
 // TOPICS_WEB serves another copy of web/ (to show an older version failing);
 // TOPICS_REPORT=1 prints each case's result instead of stopping at the first.
 import assert from 'node:assert/strict';
+import { retryHiddenTopic } from './topics-retry-browser.mjs';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -126,7 +127,8 @@ async function open(browser) {
 }
 const frame = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 async function pick(page, id) {
-  if (await page.locator('#topics [data-key="back"]').count()) await page.click('#topics [data-key="back"]');
+  // A narrow pane shows the tree after Back; a wide one shows it beside the topic.
+  if (await page.locator('#topics [data-key="back"]').isVisible()) await page.click('#topics [data-key="back"]');
   await page.click(`#topics [data-key="topic-${id}"]`);
 }
 const settle = (page) => page.waitForTimeout(80);
@@ -326,6 +328,16 @@ async function run(engine, launcher) {
       });
       assert.deepEqual(errors, []);
       await page.close();
+    }
+    for (const options of [
+      { state: 'unconfirmed', mode: 'same' },
+      { state: 'interrupted', mode: 'same', image: true },
+      { state: 'unconfirmed', mode: 'bridge' },
+      { state: 'interrupted', mode: 'registration' },
+      { state: 'unconfirmed', mode: 'same', hide: false },
+      { state: 'unconfirmed', mode: 'same', main: true },
+    ]) {
+      await check(engine, `hidden retry ${JSON.stringify(options)}`, () => retryHiddenTopic(browser, engine, options, `http://127.0.0.1:${server.address().port}/`));
     }
   } finally {
     await browser.close();

@@ -53,7 +53,10 @@ type leadPause struct {
 	epoch uint64
 	// set by the user here, and not yet written (persisted false).
 	local, persisted bool
-	deferred         []func()
+	// givenWork remembers explicit user input even before an agent exists
+	// or its startup begins; it belongs to this exact workspace hire.
+	givenWork bool
+	deferred  []func()
 }
 
 // pauseOf returns the pause kept here of hire y, or nil; under mu. One is
@@ -253,6 +256,9 @@ func (m *Manager) setPauseLocked(y yesmen.Yesman, paused bool) ([]func(), func()
 	lp := m.pauseOf(y)
 	if lp == nil {
 		return nil, func() error { return nil } // owned by another hire meanwhile
+	}
+	if !paused {
+		lp.givenWork = true // user's input precedes startup and persistence
 	}
 	if lp.known && !lp.paused && !paused && (!lp.local || lp.persisted) {
 		epoch := lp.epoch

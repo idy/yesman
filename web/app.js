@@ -5,11 +5,12 @@
 //   mygo.on("agents" | "agent-event" | "changed" | "clones" | "fetches" | "pi-packages" | "focus-agent" | "update" | "files", fn)
 
 import { orderWorkers } from './sidebar.js';
+import { CONVERSATION_MIN, TWO_COLUMNS, explorerBody, listView, narrowBack, resizer, scrollMemory } from './explorer.js';
 import { needsYouItems, requestsOf, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
 import { messageActions, messageText, receiptText } from './message-actions.js';
 import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
 import { renderMarkdown } from './markdown.js';
-import { project, originOf, FINISHED, familyOf, joinInputs } from './conversation.js';
+import { project, originOf, FINISHED, dismissible, familyOf, joinInputs } from './conversation.js';
 import { $, h, icon, openModal } from './dom.js';
 import { createFiles } from './files.js';
 import { logRoute } from './task-log.js';
@@ -71,6 +72,12 @@ const runErrorText = (text) => (text?.trim() ? text : t('The model returned an e
 const statusLabel = (a) => (asking(a) ? t('Asking {name}', { name: yesmanLabel(a.yesman) }) : runFailed(a) ? t('Last run ended with an error') : statusText(a.status));
 const statusTone = (a) => (asking(a) ? 'asking' : runFailed(a) ? 'error' : a.status);
 
+// Whether the user kept the info panel beside the pane open now, and whether
+// it makes way for it (infoYields, below).
+let infoKept = false;
+let infoYielded = false;
+let infoFocus = null; // see the resize listener
+
 const state = {
   snap: { yesmen: [], agents: [] },
   view: { kind: 'none' },
@@ -118,16 +125,15 @@ class Convo {
     this.live = null; // { message }: the reply being written
     this.workOpen = new Set(); // keys of the work rows the user opened
     this.failuresOpen = new Set(); // keys of the folded failed runs the user opened
-    this.receiptsOpen = false; // the earlier submissions' row is open
     this.tools = new Map(); // toolCallId -> { args, status, result }
     this.recalled = new Set();
-    this.submitted = new Set(); // bounded receipt IDs, never original payloads or queue authority
     this.actions = new Set(); // in-flight exact-item actions
     this.deliveries = new Map(); // message ID -> server receipt (or local Sending only)
     // message ID -> { text, images } this window submitted, shown as sent until
     // a message is tied to it. Only in memory; see holdSent.
     this.sent = new Map();
     this.lastSent = null; // the message ID this window submitted last
+    this.handled = handledOf(this.key); // IDs the person dismissed or resent unchanged; see saveHandled
     this.seq = 0;
     this.eventSeqs = new Set();
     this.piQueue = { known: false };
@@ -135,6 +141,47 @@ class Convo {
     this.receiptSetSeq = 0;
     this.retainedDeliveryIDs = null;
   }
+}
+
+// A submission the person dismissed, or resent unchanged from the draft it
+// left, is only a matter of what this page shows: its ID is kept in this
+// browser by conversation, never sent anywhere, and its receipt does not
+// change. Hiding covers what the person saw: when they send that ID again,
+// or the server takes it up again (sending, queued, ready to return), the
+// Hide is dropped, so the outcome of that new attempt shows (see
+// reopenHandled). Only IDs the server still keeps are kept, for the
+// conversations last used.
+const HANDLED_STORE = 'yesman.handledSubmissions';
+const readHandled = () => {
+  try {
+    const all = JSON.parse(localStorage.getItem(HANDLED_STORE) ?? '{}');
+    return all && typeof all === 'object' && !Array.isArray(all) ? all : {};
+  } catch { return {}; }
+};
+const handledOf = (key) => {
+  const ids = readHandled()[key];
+  return new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === 'string' && /^[a-f0-9]{48}$/.test(id)));
+};
+function saveHandled(c) {
+  const all = readHandled();
+  delete all[c.key];
+  if (c.handled.size) all[c.key] = [...c.handled].slice(-256);
+  const keys = Object.keys(all);
+  for (const key of keys.slice(0, Math.max(0, keys.length - 64))) delete all[key];
+  try { localStorage.setItem(HANDLED_STORE, JSON.stringify(all)); } catch {
+    // Unwritable: this page still hides what it hid until it reloads. Try to
+    // remove the whole stored key (every conversation's Hides); if that works,
+    // a reload shows rather than hides. If removal is refused too, only this
+    // page's memory is reliable: a reload after storage recovers may read the
+    // old Hides again.
+    try { localStorage.removeItem(HANDLED_STORE); } catch { /* Best effort, see above. */ }
+  }
+}
+// reopenHandled drops the Hide of a submission tried again; true if it had one.
+function reopenHandled(c, id) {
+  if (!c.handled.delete(id)) return false;
+  saveHandled(c);
+  return true;
 }
 
 // An agent's name can be reused: a dismissed yesman's name can be hired
@@ -165,17 +212,16 @@ function pruneCaches() {
 const messageKey = (m) => originOf(m)?.submission ? `submission:${originOf(m).submission}` : `${m?.role}:${m?.timestamp}`;
 
 
-// Only an explicit recorded submission identity can bind a receipt.
-const BOUND_DELIVERY = 'Taken by pi';
 
 function pruneDeliveryRows(c, ids) {
-  let changed = false;
+  let changed = false, handled = false;
   for (const id of ids ?? []) {
     c.recalled.delete(id);
-    c.submitted.delete(id);
     c.sent.delete(id);
+    handled = c.handled.delete(id) || handled;
     changed = c.deliveries.delete(id) || changed;
   }
+  if (handled) saveHandled(c);
   if (changed) schedulePatch(c, { frame: true });
 }
 
@@ -196,6 +242,9 @@ function updateDelivery(c, d) {
   if (d?.agentSince && `${c.id}@${d.agentSince}` !== c.key) return;
   if (!d?.id || (c.deliveries.get(d.id)?.revision ?? -1) >= d.revision) return;
   c.deliveries.set(d.id, d);
+  // Only an update that passed the checks above (this generation, a newer
+  // revision) can say the server took a hidden submission up again.
+  if (!dismissible(d)) reopenHandled(c, d.id);
   letGo(c);
   if (c.deliveries.size > 256) {
     const excess = [...c.deliveries.keys()].filter(id => id !== d.id).slice(0,c.deliveries.size-256);
@@ -210,14 +259,32 @@ function copyActions(text, c = null, d = null) {
     copy: (value) => call('CopyValue', value), done: () => toast(t('Copied.')), fail,
     recall: eligible ? () => recallMessage(c, d.id) : null, restoring: d?.canRestore,
     promote: d?.canPromote && d.nativePending && d.state === 'queued' ? () => promoteMessage(c, d.id) : null,
-    busy: c?.actions.has(d?.id) });
+    busy: c?.actions.has(d?.id), dismiss: c && d && dismissible(d) ? () => dismissReceipt(c, d.id) : null });
   actions._copyText = text;
   actions._recall = `${!!d?.canCancel}:${!!d?.canRestore}:${!!d?.originalText}`;
-  actions._state = `${eligible}:${!!(d?.canPromote && d.nativePending && d.state === 'queued')}:${!!c?.actions.has(d?.id)}`;
+  actions._state = `${eligible}:${!!(d?.canPromote && d.nativePending && d.state === 'queued')}:${!!c?.actions.has(d?.id)}:${!!(c && d && dismissible(d))}`;
   return actions;
 }
 
 function refreshDelivery(c, d) { if (d) schedulePatch(c, { frame: true }); }
+
+// The person is done with a submission nothing waits on: its row leaves this
+// page (and focus moves on to the next such row, or the input).
+function dismissReceipt(c, id) {
+  const d = c.deliveries.get(id);
+  if (!d || !dismissible(d)) return;
+  const el = document.querySelector(`#thread > [data-delivery="${CSS.escape(id)}"]`);
+  const focused = !!el?.contains(document.activeElement);
+  const after = focused ? [...document.querySelectorAll('#thread > .msg-delivery .message-dismiss')]
+    .map((b) => b.closest('.msg-delivery')?.dataset.delivery).filter((other) => other && other !== id &&
+      (el.compareDocumentPosition(document.querySelector(`#thread > [data-delivery="${CSS.escape(other)}"]`)) & Node.DOCUMENT_POSITION_FOLLOWING)) : [];
+  c.handled.add(id);
+  saveHandled(c);
+  schedulePatch(c);
+  if (!focused) return;
+  const next = after.length ? document.querySelector(`#thread > [data-delivery="${CSS.escape(after[0])}"] .message-dismiss`) : null;
+  (next ?? document.querySelector('.composer textarea'))?.focus({ preventScroll: true });
+}
 
 async function promoteMessage(c, id) {
   const a = selectedAgent();
@@ -269,6 +336,7 @@ async function recallMessage(c, id) {
     attachments.items = images;
     attachments.submissionID = null;
     attachments.submission = null;
+    attachments.retryOf = null;
     const d = c.deliveries.get(id);
     if (d) { d.canCancel = false; d.canRestore = false; d.originalText = false; refreshDelivery(c, d); }
     call('AckRecall', a.id, id, a.since).catch(() => {});
@@ -283,15 +351,13 @@ async function recallMessage(c, id) {
   }
 }
 
-// deliveryStatus is a receipt's state, lightly, under the message it is for.
-function deliveryStatus(d, bound) {
-  const label = bound ? BOUND_DELIVERY : deliveryLabel(d);
-  const title = bound ? t('pi took this message into the conversation.')
-    : d.state === 'dispatched' ? t('pi took this input for processing.')
-      : d.nativePending ? (d.preparing ? t('pi has claimed this input for its next turn and is preparing it. It has not been taken yet and can still be recalled.') : d.state === 'queued' ? t('This input is still in pi’s follow-up queue.') : t('Steering is read at the next eligible input checkpoint, after the current response and tool batch.'))
-      : d.state === 'cancelled' ? t('This input was removed from the queue.')
-        : d.error || (d.state === 'sending' ? null : t('pi has not reported whether this particular message was taken for processing.'));
-  return h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite', 'data-state': bound ? 'dispatched' : d.state, 'data-preparing': !bound && d.preparing ? 'true' : null,
+// deliveryStatus is the state of a submission still open, lightly, under it.
+function deliveryStatus(d) {
+  const label = deliveryLabel(d);
+  const title = d.nativePending ? (d.preparing ? t('pi has claimed this input for its next turn and is preparing it. It has not been taken yet and can still be recalled.') : d.state === 'queued' ? t('This input is still in pi’s follow-up queue.') : t('Steering is read at the next eligible input checkpoint, after the current response and tool batch.'))
+    : d.state === 'cancelled' ? t('This input was removed from the queue.')
+      : d.error || (d.state === 'sending' ? null : t('pi has not reported whether this particular message was taken for processing.'));
+  return h('div', { class: 'delivery-status', role: 'status', 'aria-live': 'polite', 'data-state': d.state, 'data-preparing': d.preparing ? 'true' : null,
     hidden: !label, title },
   label ? t(label) : '');
 }
@@ -299,35 +365,25 @@ function deliveryStatus(d, bound) {
 // receiptEl shows a submission the conversation does not show yet as the
 // person's message, with its state under it: exactly as this window sent it
 // when it has that, or else what the receipt keeps (a preview and the number
-// of images), never a guess at the original. Folded with earlier submissions,
-// it is one light line. Inputs pi appended into one pending occurrence are
-// one message: the occurrence's row shows them all, in the same element.
-const receiptForm = (d, sent, line) => (line ? `line:${d.text ?? ''}:${d.imageCount ?? 0}` : 'bubble');
-
-// A receipt the app recorded as sent from a topic names the topic, as its
-// message will once pi takes it; its form changes when that becomes known.
-const receiptVariant = (c, d, sent, line) => `${!line && d.origin?.source === 'schedule' ? 'scheduled:' : ''}${receiptForm(d, sent, line)}:${line ? '' : topicKey(topicOfSubmission(c, d.id))}`;
+// of images), never a guess at the original. Inputs pi appended into one
+// pending occurrence are one message: its row shows them in the same element.
+const receiptVariant = (c, d) => `${d.origin?.source === 'schedule' ? 'scheduled:' : 'bubble:'}${topicKey(topicOfSubmission(c, d.id))}`;
 
 // What copying a topic's message copies: the person's text, without the line
 // the app sent before it.
 const ownText = (text, topic) => (topic && typeof text === 'string' ? withoutLine(text, topic.context) : text);
 
-function receiptEl(c, d, { sent, line = false, members } = {}) {
+function receiptEl(c, d, { sent, members } = {}) {
   // A scheduled run is never shown as something a person typed.
-  if (!line && d.origin?.source === 'schedule') {
-    const el = scheduledEl({ plan: d.origin.plan, preview: d.text ? (d.preview ? `${d.text}…` : d.text) : '', delivery: d, bound: false });
-    el._variant = receiptVariant(c, d, sent, line);
-    return el;
-  }
-  if (line) {
-    const el = receiptLine(d);
-    el._variant = receiptVariant(c, d, sent, line);
+  if (d.origin?.source === 'schedule') {
+    const el = scheduledEl({ plan: d.origin.plan, preview: d.text ? (d.preview ? `${d.text}…` : d.text) : '', delivery: d });
+    el._variant = receiptVariant(c, d);
     return el;
   }
   const el = h('div', { class: 'msg-delivery', 'data-delivery': d.id, 'data-sending': String(d.state === 'sending') },
     h('div', { class: 'msg-user' }),
-    h('div', { class: 'message-footer' }, deliveryStatus(d, false), h('div', { class: 'message-actions' })));
-  el._variant = receiptVariant(c, d, sent, line);
+    h('div', { class: 'message-footer' }, deliveryStatus(d), h('div', { class: 'message-actions' })));
+  el._variant = receiptVariant(c, d);
   return updateBubble(c, el, d, { sent, members });
 }
 
@@ -388,7 +444,7 @@ function updateBubble(c, el, d, { sent, members = [d.id] }) {
       el._shown = { sig, full: content.full, members: content.members, text: content.text, images: content.images };
     }
   }
-  el.querySelector('.message-footer > .delivery-status').replaceWith(deliveryStatus(d, false));
+  el.querySelector('.message-footer > .delivery-status').replaceWith(deliveryStatus(d));
   const full = el._shown?.full && startsWithIDs(el._shown.members, members) ? el._shown.text : null;
   // A receipt whose occurrence has not caught up with its appended inputs
   // keeps an older preview: only the Manager's whole message is copied then.
@@ -435,86 +491,20 @@ async function hydrateReceipt(c, el, d, members) {
 
 const imageNote = (n) => h('div', { class: 'delivery-image-count' }, tn(n, '{n} image submitted', '{n} images submitted'));
 
-// Historical receipts keep their recorded state without announcing it as a
-// current delivery status. Missing confirmation never establishes consumption.
-const HISTORICAL_DELIVERY_LABELS = {
-  unconfirmed: 'No confirmation recorded at the time', failed: 'Recorded as not sent',
-  interrupted: 'Recorded as interrupted', handled: 'Recorded as handled by an extension',
-  dispatched: 'Recorded as taken by pi', cancelled: 'Recorded as recalled',
-};
-function historicalDeliveryStatus(d) {
-  return h('div', { class: 'delivery-status delivery-status--historical', 'data-state': d.state, title: d.error || null },
-    t(HISTORICAL_DELIVERY_LABELS[d.state] ?? 'Status not recorded'));
-}
-
-function receiptLine(d) {
-  const imageCount = d.imageCount ?? d.images?.length ?? 0;
-  const preview = d.text ? (d.preview ? `${d.text}…` : d.text) : '';
-  const short = d.text?.trim().replace(/\s+/g, ' ').slice(0, 60) || t('Attached images');
-  return h('div', { class: 'msg-delivery msg-delivery--compact', 'data-delivery': d.id, 'data-sending': 'false' },
-    h('div', { class: 'delivery-compact', title: preview || null }, t('Submission: {text}', { text: short }),
-      imageCount ? ` · ${tn(imageCount, '{n} image submitted', '{n} images submitted')}` : ''),
-    historicalDeliveryStatus(d));
-}
 
 // receiptEl brought up to date: a receipt changing state keeps its element
 // (and what is selected in it) unless it changes form.
 function updateReceipt(c, el, d, options = {}) {
-  if (el._variant === receiptVariant(c, d, options.sent, options.line)) {
-    if (options.line) {
-      el.querySelector('.delivery-status').replaceWith(historicalDeliveryStatus(d));
-      return el;
-    }
+  if (el._variant === receiptVariant(c, d)) {
     if (d.origin?.source !== 'schedule') return updateBubble(c, el, d, options);
-  }
-  if (el._variant === receiptVariant(c, d, options.sent, options.line) && !d.images?.length) {
     // A scheduled run's receipt: its plan's request, never recalled or joined.
-    el.dataset.sending = String(d.state === 'sending');
-    el.querySelector('.delivery-status').replaceWith(deliveryStatus(d, false));
-    el.querySelector('.message-actions')?.replaceWith(copyActions(options.sent?.text ?? receiptText(d), c, d));
+    el.querySelector('.delivery-status').replaceWith(deliveryStatus(d));
     return el;
   }
   return receiptEl(c, d, options);
 }
 
 const receiptSig = (d, sent, members = []) => `${d.state}:${d.revision}:${d.error ?? ''}:${d.images?.length ?? 0}:${sent ? 1 : 0}:${!!d.originalPayload}:${!!d.canPromote}:${!!d.canCancel}:${!!d.canRestore}:${!!d.preparing}:${members.join(',')}`;
-
-// The earlier submissions no message is tied to, folded into one neutral
-// record count. Recorded outcomes belong in the historical details.
-function receiptsEl(c, row) {
-  const el = h('details', { class: 'receipts' });
-  el.append(
-    h('summary', null, h('span', { class: 'receipts-label' }), icon('chevron', 'mds-icon receipts-caret')),
-    h('div', { class: 'receipts-note' }, t('These statuses reflect what was recorded at the time. Missing confirmation does not establish whether pi processed the input.')),
-    h('div', { class: 'receipts-body' }));
-  el.open = c.receiptsOpen;
-  el.addEventListener('toggle', () => {
-    c.receiptsOpen = el.open;
-    if (el.open) patchReceipts(c, el.lastElementChild, el._deliveries ?? []);
-  });
-  return updateReceipts(c, el, row);
-}
-
-function updateReceipts(c, el, row) {
-  const label = t('Earlier submission records · {n}', { n: row.deliveries.length });
-  if (el._summary !== label) {
-    el._summary = label;
-    const s = el.firstElementChild;
-    s.children[0].textContent = label;
-    s.title = t('Earlier submission receipts that yesman cannot tie to a message above. Open to see the retained previews and recorded statuses.');
-  }
-  el._deliveries = row.deliveries;
-  if (el.open) patchReceipts(c, el.lastElementChild, row.deliveries);
-  return el;
-}
-
-function patchReceipts(c, body, deliveries) {
-  patchChildren(body, 'data-item', deliveries.map((d) => ({ type: 'receipt', key: `d:${d.id}`, delivery: d })), {
-    make: (entry) => receiptEl(c, entry.delivery, { line: true }),
-    sig: (entry) => receiptSig(entry.delivery),
-    update: (el, entry) => updateReceipt(c, el, entry.delivery, { line: true }),
-  });
-}
 
 function renderQueue(c) {
   const thread = $('#thread');
@@ -554,6 +544,9 @@ async function loadConvo(c) {
     c.tools.clear();
     for (const message of c.messages) indexMessage(c, message);
     for (const id of c.sent.keys()) if (!c.deliveries.has(id)) c.sent.delete(id);
+    const kept = c.handled.size;
+    for (const id of c.handled) if (!c.deliveries.has(id)) c.handled.delete(id);
+    if (c.handled.size !== kept) saveHandled(c);
     c.live = null;
     c.loaded = true;
     c.error = null;
@@ -740,20 +733,16 @@ function userRowEl(row, c) {
   const images = Array.isArray(row.message.content) && row.message.content.some((b) => b?.type === 'image');
   const legacy = !row.origin && !images && legacyNoteEl(textOf(row.message.content));
   if (legacy) return legacy;
-  // A message the app recorded as sent from a topic (its native origin
-  // names one of the topic's submissions) shows the topic's chip.
+  // A message the app recorded as sent from a topic keeps its topic's chip.
   const topic = row.origin?.source === 'user' ? topicOfSubmission(c, row.origin.submission) : null;
   const bubble = userBubble(row.message, topic);
-  const text = ownText(textOf(row.message.content), topic);
-  if (!row.delivery) { bubble.append(copyActions(text)); return bubble; }
-  return h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble,
-    h('div', { class: 'message-footer' }, deliveryStatus(row.delivery, true), copyActions(text)));
+  bubble.append(copyActions(ownText(textOf(row.message.content), topic)));
+  // Tied to its submission: pi has it, so it reads as any message, without a status.
+  return row.delivery ? h('div', { class: 'msg-delivery', 'data-delivery': row.delivery.id, 'data-bound': 'true' }, bubble) : bubble;
 }
 
-// scheduledEl shows a scheduled task's run: the request the user saved in
-// Tasks, sent for them. Its origin, recorded beside the message, says so;
-// the text is never read to decide it.
-function scheduledEl({ plan, text, preview, delivery, bound }) {
+// A scheduled task stays separate from a person's input, with its saved request.
+function scheduledEl({ plan, text, preview, delivery, bound = false }) {
   const yesman = selectedAgent()?.yesman;
   const label = plan ? t('Scheduled task {id}', { id: plan }) : t('Scheduled task');
   let body = null;
@@ -767,7 +756,7 @@ function scheduledEl({ plan, text, preview, delivery, bound }) {
     h('div', { class: 'scheduled-head' }, icon('clock', 'mds-icon scheduled-mark'), h('strong', null, label),
       plan && yesman ? h('button', { class: 'mds-link-button scheduled-open', type: 'button', onclick: () => schedules.open(yesman, plan) }, t('Open in Tasks')) : null),
     body,
-    delivery ? deliveryStatus(delivery, bound) : null);
+    delivery && !bound ? deliveryStatus(delivery) : null);
 }
 
 function scheduledRowEl(row) {
@@ -849,7 +838,7 @@ function patchChildren(parent, attr, entries, { make, sig, update }) {
     const s = sig(entry);
     if (el && el._kind === entry.type) {
       old.delete(entry.key);
-      if (el._sig !== s || entry.type === 'work' || entry.type === 'receipts' || entry.type === 'failures' || entry.type === 'failure') {
+      if (el._sig !== s || entry.type === 'work' || entry.type === 'failures' || entry.type === 'failure') {
         const fresh = update(el, entry);
         if (fresh && fresh !== el) {
           el.replaceWith(fresh);
@@ -1019,15 +1008,14 @@ function rowEl(c, row) {
     case 'work': return workEl(c, row);
     case 'failures': return failuresEl(c, row);
     case 'receipt': return receiptEl(c, row.delivery, { sent: row.sent, members: row.members });
-    case 'receipts': return receiptsEl(c, row);
     default: return h('div');
   }
 }
 
 function rowSig(c, row) {
   switch (row.type) {
-    case 'user': return `${row.delivery ? `bound:${row.delivery.id}:${row.delivery.revision}` : ''}|${row.origin?.source === 'user' ? topicKey(topicOfSubmission(c, row.origin.submission)) : ''}`;
-    case 'scheduled': return `${row.origin.plan}:${row.delivery ? `${row.delivery.id}:${row.delivery.revision}` : ''}`;
+    case 'user': return `${row.delivery ? `bound:${row.delivery.id}` : ''}|${row.origin?.source === 'user' ? topicKey(topicOfSubmission(c, row.origin.submission)) : ''}`;
+    case 'scheduled': return row.origin.plan;
     case 'text': return row.live ? `l:${row.text}` : 'f';
     case 'receipt': return `${receiptSig(row.delivery, row.sent, row.members)}|${topicKey(topicOfSubmission(c, row.delivery.id))}`;
     default: return 'f';
@@ -1059,7 +1047,6 @@ function patchThread(c) {
     update: (el, row) => {
       if (row.type === 'work') return updateWork(c, el, row);
       if (row.type === 'failures') return updateFailures(c, el, row);
-      if (row.type === 'receipts') return updateReceipts(c, el, row);
       if (row.type === 'text') {
         el.firstElementChild.innerHTML = renderMarkdown(row.text);
         return el;
@@ -1123,7 +1110,7 @@ function renderWorking(rows) {
   const thread = $('#thread');
   if (!thread) return;
   const a = selectedAgent();
-  const last = rows?.findLast((r) => r.type !== 'receipt' && r.type !== 'receipts');
+  const last = rows?.findLast((r) => r.type !== 'receipt');
   const show = a?.status === 'working' && last?.state !== 'running';
   let el = thread.querySelector('.working-live');
   if (!show) {
@@ -1516,15 +1503,74 @@ function needsYouScope() {
 
 let needsYouHistoryOpen = false;
 
-// showNeedsYou opens the pane for the yesman shown, and puts focus on the
-// request named or on the pane's heading. Outside a conversation there is no
-// yesman to show it for.
+// The pane is an explorer: the request chosen, in full, on the left, and the
+// list of what waits on the right. What is chosen is kept per yesman and
+// hire; when it is answered, the request in its place in the list follows.
+// In a narrow pane one column shows: the list ('nav') until a request is
+// chosen, then its detail ('content'), per yesman and hire.
+const needsYouChosen = new Map(); // needsYouScope() -> { key, at, focus }
+const needsYouSizes = resizer('needs-you', { min: 360 });
+const needsYouPlaces = scrollMemory();
+// What is typed into a dialog's text answer in the pane, by request key,
+// with the yesman and hire it was typed for, so that a redraw, or showing
+// another yesman and coming back, keeps it. It goes once the request is
+// known to be closed (pruneNeedsYouDrafts); a bounded number are kept.
+const needsYouDrafts = new Map(); // key -> { yesman, hiredAt, text }
+const NEEDS_YOU_DRAFTS = 64;
+// Past that bound, the one answer being typed for the request shown, kept
+// apart and only while that very request, of that hire, stays shown: a
+// redraw keeps it, choosing another request or yesman lets it go.
+let needsYouOverflow = null; // { key, yesman, hiredAt, text }
+
+// pruneNeedsYouDrafts drops the answers typed for requests the whole state
+// shows closed: answered, cancelled, timed out, of an agent stopped or
+// started again, or of a yesman hired again since. A yesman the state does
+// not list (its workspace cannot be read) is unknown, not closed: its
+// answers are kept.
+function pruneNeedsYouDrafts() {
+  const yesmen = new Map(state.snap.yesmen.map((y) => [y.name, y]));
+  const open = new Map();
+  for (const [k, d] of needsYouDrafts) {
+    const y = yesmen.get(d.yesman);
+    if (!y) continue;
+    if ((y.hiredAt ?? '') !== d.hiredAt) { needsYouDrafts.delete(k); continue; }
+    if (!open.has(y.name)) open.set(y.name, new Set(needsYouOf(y).map((item) => item.key)));
+    if (!open.get(y.name).has(k)) needsYouDrafts.delete(k);
+  }
+}
+
+const needsYouRow = (aside, key) => key && aside.querySelector(`.needs-you-open[data-request="${CSS.escape(key)}"]`);
+
+// showNeedsYou opens the pane for the yesman shown, with the request named
+// chosen and focused in its list, or focus on the pane's heading. Outside a
+// conversation there is no yesman to show it for.
 function showNeedsYou(focusKey = null) {
   if (!selectedAgent()) return false;
   if (state.pane !== 'needs-you') setPane('needs-you');
   const aside = $('#needs-you');
-  ((focusKey && aside.querySelector(`[data-request="${CSS.escape(focusKey)}"]`)) || aside.querySelector('.needs-you-heading'))?.focus({ preventScroll: true });
+  const scope = needsYouScope();
+  // Coming back to the pane shows the list, with the request named chosen.
+  if (scope) {
+    const was = needsYouChosen.get(scope);
+    needsYouChosen.set(scope, { key: focusKey ?? was?.key ?? null, at: was?.at ?? 0, focus: 'nav' });
+    renderNeedsYouPane();
+  }
+  (needsYouRow(aside, focusKey) || aside.querySelector('.needs-you-heading'))?.focus({ preventScroll: true });
   return true;
+}
+
+// chooseRequest shows a request's detail beside the list.
+function chooseRequest(item, at) {
+  const scope = needsYouScope();
+  if (!scope) return;
+  needsYouChosen.set(scope, { key: item.key, at, focus: 'content' });
+  renderNeedsYouPane();
+  const aside = $('#needs-you');
+  // In a narrow pane the list makes way: focus goes to the way back to it,
+  // as in Topics.
+  const row = needsYouRow(aside, item.key);
+  if (row?.getClientRects().length) row.focus({ preventScroll: true });
+  else aside.querySelector('.needs-you-detail [data-key="list"]')?.focus({ preventScroll: true });
 }
 
 // closeNeedsYou closes the pane and gives focus back to what opens it: the
@@ -1554,43 +1600,66 @@ function renderNeedsYouPane() {
   aside.setAttribute('aria-label', t('Needs You'));
   document.documentElement.dataset.needsYou = shown ? 'open' : 'closed';
   if (!shown) {
+    needsYouOverflow = null;
     aside.replaceChildren();
     delete aside.dataset.scope;
+    delete aside.dataset.shown;
     return;
   }
   const { name, y } = shown;
   const scope = needsYouScope();
   const same = aside.dataset.scope === scope;
   // What had focus, to give back after the redraw: the request (or the one
-  // now in its place), the request memory, the history, the close button or
-  // the heading. A control gone with another yesman or hire leaves focus on
-  // the heading; focus outside the pane stays where it is.
+  // now in its place), a control of the detail, the request memory, the
+  // history, the close button or the heading. A control gone with another
+  // yesman or hire leaves focus on the heading; focus outside the pane stays
+  // where it is.
   const active = aside.contains(document.activeElement) ? document.activeElement : null;
-  const rows = [...aside.querySelectorAll('[data-request]')];
-  const at = rows.indexOf(active?.closest('[data-request]'));
-  const key = active?.closest('[data-request]')?.dataset.request;
+  const rows = [...aside.querySelectorAll('.needs-you-open[data-request]')];
+  const at = rows.indexOf(active?.closest('.needs-you-open[data-request]'));
+  const key = active?.closest('.needs-you-open[data-request]')?.dataset.request;
   const memory = active?.closest('[data-memory]') ? 'memory' : null;
   const control = memory ?? active?.closest('[data-pane-control]')?.dataset.paneControl;
-  const scroll = same ? $('.board-body', aside)?.scrollTop ?? 0 : 0;
+  const detailControl = active?.closest('[data-detail-control]')?.dataset.detailControl;
+  const caret = active && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
+  const navScroll = same ? $('.explorer-nav-scroll', aside)?.scrollTop ?? 0 : 0;
+  const contentScroll = same ? $('.explorer-content', aside)?.scrollTop ?? 0 : 0;
+  if (aside.dataset.shown) needsYouPlaces.save(aside.dataset.shown, $('.explorer-content', aside)?.scrollTop ?? 0);
 
   const label = yesmanLabel(name);
   const items = y ? needsYouOf(y) : [];
-  const body = h('div', { class: 'board-body needs-you-body' });
+  // The request chosen, or, once it is gone, the one in its place.
+  const was = needsYouChosen.get(scope);
+  let chosen = items.find((item) => item.key === was?.key) ?? null;
+  // A request answered meanwhile gives its place to the next; a narrow pane
+  // goes back to the list rather than show another request unasked.
+  const gone = Boolean(was?.key) && !chosen;
+  if (!chosen && items.length) chosen = items[Math.min(was?.at ?? 0, items.length - 1)];
+  const narrowFocus = gone ? 'nav' : was?.focus ?? 'nav';
+  if (chosen) needsYouChosen.set(scope, { key: chosen.key, at: items.indexOf(chosen), focus: narrowFocus });
+  else needsYouChosen.delete(scope);
+  pruneNeedsYouDrafts();
+  if (needsYouOverflow && (needsYouOverflow.key !== chosen?.key || needsYouOverflow.yesman !== name || needsYouOverflow.hiredAt !== (y?.hiredAt ?? ''))) needsYouOverflow = null;
+
+  const nav = h('div', { class: 'explorer-nav-scroll needs-you-body' });
+  let content;
   if (!y) {
-    body.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
-      h('strong', null, t('What {name} needs from you cannot be read', { name: label })),
-      h('p', null, t('Its workspace is unavailable; the sidebar says why.')))));
+    content = h('div', { class: 'needs-you-detail' },
+      narrowBack(t('Show the conversation again'), closeNeedsYou),
+      h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+        h('strong', null, t('What {name} needs from you cannot be read', { name: label })),
+        h('p', null, t('Its workspace is unavailable; the sidebar says why.')))));
   } else {
     if (y.handoffsError) {
-      body.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
+      nav.append(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null,
         h('strong', null, t('What {name} handed to you cannot be read', { name: label })), h('p', null, y.handoffsError))));
     }
     const notice = callMemoryNotice(y);
-    if (notice) body.append(notice);
+    if (notice) nav.append(notice);
     if (items.length) {
-      body.append(h('ol', { class: 'board-list needs-you-list', 'aria-label': t('Waiting for you') }, items.map(needsYouPaneRow)));
+      nav.append(listView({ label: t('Waiting for you'), cls: 'board-list needs-you-list', items: items.map((item, i) => needsYouPaneRow(item, item === chosen, i)) }));
     } else if (!y.handoffsError) {
-      body.append(h('div', { class: 'board-empty needs-you-empty', role: 'status' },
+      nav.append(h('div', { class: 'board-empty needs-you-empty', role: 'status' },
         h('strong', null, t('Nothing from {name} needs you right now.', { name: label })),
         h('p', null, t('When a yesman needs your answer, a decision or a step only you can take, it shows here.'))));
     }
@@ -1603,40 +1672,55 @@ function renderNeedsYouPane() {
           h('span', { class: 'needs-you-history-meta' },
             `${t(RESOLUTIONS[handoff.resolution] ?? 'Closed')} · ${t('{time} ago', { time: elapsed(handoff.closedAt) })}`)))));
       history.addEventListener('toggle', () => { needsYouHistoryOpen = history.open; });
-      body.append(history);
+      nav.append(history);
     }
+    content = chosen ? needsYouDetail(y, chosen)
+      : h('div', { class: 'needs-you-detail' }, h('div', { class: 'board-empty', role: 'status' },
+        h('strong', null, t('Nothing to answer')),
+        h('p', null, t('What {name} hands you shows here in full, with what you can do about it.', { name: label }))));
   }
   const count = items.length ? tn(items.length, '{n} waiting', '{n} waiting') : '';
+  // An unavailable workspace has no navigation; its error lives in content.
+  const focus = !y ? 'content' : !chosen || narrowFocus === 'nav' ? 'nav' : 'content';
   aside.replaceChildren(
     h('div', { class: 'files-head drag' },
       h('h2', { class: 'files-title needs-you-heading', tabindex: '-1' }, t('Needs You')),
       count ? h('span', { class: 'board-count', 'data-tone': 'waiting' }, count) : null,
       h('div', { class: 'files-head-actions' },
+        h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-pane-control': 'refresh', title: t('Check again'), 'aria-label': t('Check again'), onclick: () => refreshState().catch(fail) }, icon('reload')),
         h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-pane-control': 'close', title: t('Close Needs You'), 'aria-label': t('Close Needs You'), onclick: closeNeedsYou }, icon('x')))),
-    body);
+    explorerBody({ name: 'needs-you', content, nav, focus, handle: needsYouSizes.nav(aside), label: chosen ? requestWhat(chosen) : t('Needs You') }),
+    needsYouSizes.pane(aside));
+  needsYouSizes.apply(aside);
   aside.dataset.scope = scope;
-  body.scrollTop = scroll;
+  const shownKey = `${scope}\u0001${chosen?.key ?? ''}`;
+  const kept = aside.dataset.shown === shownKey;
+  aside.dataset.shown = shownKey;
+  $('.explorer-nav-scroll', aside).scrollTop = navScroll;
+  $('.explorer-content', aside).scrollTop = kept ? contentScroll : needsYouPlaces.get(shownKey);
   if (!active) return;
   let target = null;
   if (same && key) {
-    const now = [...aside.querySelectorAll('[data-request]')];
+    const now = [...aside.querySelectorAll('.needs-you-open[data-request]')];
     target = now.find((el) => el.dataset.request === key) ?? (now.length ? now[Math.min(at, now.length - 1)] : null);
-  } else if (same && control === 'memory') target = aside.querySelector('[data-memory] button');
+  } else if (same && detailControl && kept) target = aside.querySelector(`[data-detail-control="${CSS.escape(detailControl)}"]`);
+  else if (same && detailControl) target = needsYouRow(aside, chosen?.key);
+  else if (same && control === 'memory') target = aside.querySelector('[data-memory] button');
   else if (same && control === 'history') target = aside.querySelector('[data-pane-control="history"] > summary');
-  else if (control === 'close') target = aside.querySelector('[data-pane-control="close"]');
+  else if (control === 'close' || control === 'refresh') target = aside.querySelector(`[data-pane-control="${control}"]`);
   (target ?? aside.querySelector('.needs-you-heading'))?.focus({ preventScroll: true });
+  if (target && caret && typeof target.setSelectionRange === 'function') try { target.setSelectionRange(...caret); } catch {}
 }
 
-// A request in the pane, as a task on the board: what it asks, a line of its
-// text, its kind and how long it has waited, and who asks.
-function needsYouPaneRow(item) {
+// A request in the list: what it asks, a line of its text, its kind and how
+// long it has waited, and who asks. Choosing it shows it in full.
+function needsYouPaneRow(item, chosen, at) {
   const text = requestSummary(item.summary);
-  const opened = state.request?.key === item.key && state.view.kind === 'agent' && state.view.id === item.agent;
-  return h('li', { class: 'board-task needs-you-item', 'data-type': item.type, 'data-kind': item.kind },
+  return h('li', { class: 'board-task needs-you-item', 'data-type': item.type, 'data-kind': item.kind, 'aria-current': chosen ? 'true' : null },
     h('button', {
-      class: 'board-toggle needs-you-open', type: 'button', 'data-request': item.key, 'aria-current': opened ? 'true' : null,
+      class: 'board-toggle needs-you-open', type: 'button', 'data-request': item.key, 'aria-current': chosen ? 'true' : null,
       title: `${requestFrom(item)}: ${requestWhat(item)} (${t(typeLabel(item))})`,
-      onclick: () => openRequest(item),
+      onclick: () => chooseRequest(item, at),
     }, requestIcon(item, 'mds-icon board-mark'),
     h('span', { class: 'needs-you-item-text' },
       h('span', { class: 'board-title' }, requestWhat(item)),
@@ -1646,6 +1730,131 @@ function needsYouPaneRow(item) {
         item.since ? h('span', null, t('Waiting'), ' ', h('span', { 'data-elapsed': item.since }, elapsed(item.since))) : null,
         item.timeout ? h('span', null, t('Goes on without you after {time}', { time: span(Math.round(item.timeout / 1000)) })) : null))),
     h('span', { class: 'board-owner needs-you-source', title: requestFrom(item) }, requestSource(item)));
+}
+
+// needsYouDetail is a request in full, with what the user can do about it
+// there: a handoff's Mark done and Not needed, or the dialog's own answer,
+// through the same calls as where it was asked.
+function needsYouDetail(y, item) {
+  const box = h('div', { class: 'needs-you-detail', 'data-detail': item.key });
+  const scope = JSON.stringify([y.name, y.hiredAt ?? '']);
+  // The default detail is editable beside the list even before its row is
+  // chosen. Focusing its controls keeps that detail visible when narrowing,
+  // without redrawing the input or disturbing its caret. Back still chooses
+  // navigation explicitly; a detached or different request cannot claim it.
+  box.addEventListener('focusin', (e) => {
+    if (!e.target.closest('[data-detail-control]') || needsYouScope() !== scope) return;
+    const aside = box.closest('#needs-you');
+    const chosen = needsYouChosen.get(scope);
+    if (!aside || aside.dataset.scope !== scope || chosen?.key !== item.key) return;
+    chosen.focus = 'content';
+    $('.explorer', aside).dataset.focus = 'content';
+  });
+  box.append(
+    narrowBack(t('All requests'), () => {
+      const scope = needsYouScope();
+      if (scope && needsYouChosen.has(scope)) needsYouChosen.get(scope).focus = 'nav';
+      renderNeedsYouPane();
+      needsYouRow($('#needs-you'), item.key)?.focus({ preventScroll: true });
+    }, 'list'),
+    h('span', { class: 'needs-you-type' }, requestIcon(item), t(typeLabel(item))),
+    h('h3', { class: 'needs-you-detail-title', tabindex: '-1' }, requestWhat(item)),
+    h('p', { class: 'needs-you-detail-meta' },
+      h('span', null, requestFrom(item)),
+      item.since ? h('span', null, t('Waiting'), ' ', h('span', { 'data-elapsed': item.since }, elapsed(item.since))) : null,
+      item.timeout ? h('span', null, t('Goes on without you after {time}', { time: span(Math.round(item.timeout / 1000)) })) : null));
+  const where = h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-detail-control': 'open', onclick: () => openRequest(item) },
+    icon('topics'), t('Open in the conversation'));
+  if (item.kind === 'handoff') {
+    const ho = item.handoff;
+    const busy = state.resolving.has(item.key);
+    const facts = [ho.task && t('Task {id}', { id: ho.task }), ho.worker && t('Worker {name}', { name: ho.worker })].filter(Boolean).join(' · ');
+    const confirmedByUser = ['login', 'install', 'manual'].includes(ho.type);
+    box.append(
+      ho.detail ? h('div', { class: 'md', html: renderMarkdown(ho.detail) }) : null,
+      facts ? h('p', { class: 'needs-you-detail-meta' }, facts) : null,
+      h('p', { class: 'ask-hint' }, confirmedByUser
+        ? t('Mark it done once you have done it yourself; {name} checks it before relying on it.', { name: yesmanLabel(y.name) })
+        : t('Answer in the conversation if it needs words, then mark it done.')),
+      h('div', { class: 'needs-you-detail-actions' },
+        h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', 'data-detail-control': 'done', disabled: busy, onclick: () => resolveHandoff(y, item, 'done') }, t('Mark done')),
+        h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-detail-control': 'not-needed', disabled: busy, onclick: () => resolveHandoff(y, item, 'not-needed') }, t('Not needed')),
+        ho.toolCall ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-detail-control': 'asked', onclick: () => {
+          const lead = agentById(item.agent);
+          if (!lead) { openRequest(item); return; }
+          selectAgent(lead.id);
+          showToolCall(lead, ho.toolCall);
+        } }, t('Show where it was asked')) : null,
+        where));
+    return box;
+  }
+  // A dialog is answered here only while its agent, of the same start,
+  // still asks this very dialog.
+  const a = agentById(item.agent);
+  const id = item.key.slice(item.key.lastIndexOf(':') + 1);
+  if (a && a.status === 'waiting' && (a.since ?? '') === item.agentSince && a.dialog?.id === id) {
+    const ask = askEl(a);
+    ask.removeAttribute('role');
+    ask.removeAttribute('data-request');
+    // The dock's question stays the one .ask on the page; this copy is
+    // styled as the pane's own (explorer.css).
+    ask.className = 'needs-you-ask';
+    ask.querySelector(':scope > strong')?.remove(); // the title is the heading above
+    for (const [i, b] of [...ask.querySelectorAll('.ask-actions button')].entries()) b.dataset.detailControl = `answer-${i}`;
+    const input = ask.querySelector('input, textarea');
+    if (input) {
+      input.dataset.detailControl = 'answer-text';
+      input.setAttribute('aria-label', requestWhat(item));
+      // Past the bound, no other answer is dropped to make room: this one
+      // is kept apart while its request shows, and the pane says so. Once
+      // room frees, it is remembered like the others.
+      const draft = { yesman: y.name, hiredAt: y.hiredAt ?? '' };
+      const over = needsYouOverflow?.key === item.key ? needsYouOverflow : null;
+      if (over && needsYouDrafts.size < NEEDS_YOU_DRAFTS) { needsYouDrafts.set(item.key, { ...draft, text: over.text }); needsYouOverflow = null; }
+      if (needsYouDrafts.has(item.key)) input.value = needsYouDrafts.get(item.key).text;
+      else if (needsYouOverflow) input.value = needsYouOverflow.text;
+      const full = h('p', { class: 'ask-hint', role: 'status', hidden: !needsYouOverflow },
+        t('Kept only while this request is shown: {n} other unsent answers are already kept.', { n: formatNumber(NEEDS_YOU_DRAFTS) }));
+      input.addEventListener('input', () => {
+        const keep = needsYouDrafts.has(item.key) || needsYouDrafts.size < NEEDS_YOU_DRAFTS;
+        if (keep) {
+          needsYouDrafts.set(item.key, { ...draft, text: input.value });
+          if (needsYouOverflow?.key === item.key) needsYouOverflow = null;
+        } else needsYouOverflow = { key: item.key, ...draft, text: input.value };
+        full.hidden = keep;
+      });
+      ask.append(full);
+    }
+    box.append(ask);
+  } else {
+    box.append(h('p', { class: 'ask-hint', role: 'status' }, t('This request is no longer open: it was answered, cancelled or timed out.')));
+  }
+  box.append(h('div', { class: 'needs-you-detail-actions' }, where));
+  return box;
+}
+
+// resolveHandoff closes a handoff of yesman y, for the hire it was read in,
+// as the user chose: done or not needed. A handoff closed meanwhile, or of a
+// yesman hired again, is refused by the app.
+async function resolveHandoff(y, item, resolution, after) {
+  if (state.resolving.has(item.key)) return false;
+  state.resolving.add(item.key);
+  renderDock();
+  renderNeedsYouPane();
+  let closed = false;
+  try {
+    await call('ResolveHandoff', y.name, y.hiredAt, item.handoff.id, resolution);
+    closed = true;
+    await refreshState();
+  } catch (err) {
+    fail(err);
+  } finally {
+    state.resolving.delete(item.key);
+    renderDock();
+    renderNeedsYouPane();
+    after?.(closed);
+  }
+  return closed;
 }
 
 // What a yesman's memory of its lead's tool calls means for the user, when
@@ -1735,25 +1944,9 @@ function handoffEls(a) {
 function handoffEl(a, y, item) {
   const ho = item.handoff;
   const busy = state.resolving.has(item.key);
-  const resolve = async (resolution) => {
-    if (state.resolving.has(item.key)) return;
-    state.resolving.add(item.key);
-    renderDock();
-    let closed = false;
-    try {
-      await call('ResolveHandoff', y.name, y.hiredAt, ho.id, resolution);
-      closed = true;
-      await refreshState();
-    } catch (err) {
-      fail(err);
-    } finally {
-      state.resolving.delete(item.key);
-      if (selectedAgent()?.id === a.id) {
-        renderDock();
-        if (closed) $('#dock textarea')?.focus();
-      }
-    }
-  };
+  const resolve = (resolution) => resolveHandoff(y, item, resolution, (closed) => {
+    if (closed && selectedAgent()?.id === a.id) $('#dock textarea')?.focus();
+  });
   const confirmedByUser = ['login', 'install', 'manual'].includes(ho.type);
   const facts = [ho.task && t('Task {id}', { id: ho.task }), ho.worker && t('Worker {name}', { name: ho.worker })].filter(Boolean).join(' · ');
   return h('div', { class: 'ask handoff', role: 'group', 'aria-label': `${t(typeLabel(item))}: ${ho.title}`, 'data-request': item.key, 'data-type': ho.type },
@@ -1887,7 +2080,7 @@ function renderBarActions() {
       ? button('power', t('Put this agent to sleep: end its pi process. It resumes its session when you next talk to it.'), () => call('Stop', a.id).catch(fail))
       : null,
     a?.role === 'worker' ? button('x', t('Remove worker'), () => removeWorker(a)) : null,
-    a ? button('listDashes', state.panelOpen ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(state.panelOpen) }, 'pane.info') : null,
+    a ? button('listDashes', infoShown() ? t('Hide the info') : t('Show the info'), togglePanel, { 'aria-pressed': String(infoShown()) }, 'pane.info') : null,
     a ? button('listChecks', state.pane === 'board' ? t('Hide the board') : t('Show the board'), () => togglePane('board'), { 'aria-pressed': String(state.pane === 'board') }, 'pane.board') : null,
     a ? button('topics', state.pane === 'topics' ? t('Hide the topics') : t('Show the topics'), () => togglePane('topics'), { 'aria-pressed': String(state.pane === 'topics') }, 'pane.topics') : null,
     a ? button('panel', state.pane === 'files' ? t('Hide the files') : t('Show the files'), () => togglePane('files'), { 'aria-pressed': String(state.pane === 'files') }, 'pane.files') : null,
@@ -1913,13 +2106,92 @@ function installUpdate() {
   call('InstallUpdate').catch(fail);
 }
 
-async function restartToUpdate() {
+function restartToUpdate() {
+  return restartApp('RestartToUpdate');
+}
+
+// Restart and continue, Restart to update and the tray's Restart all go
+// one way: agents that were working continue afterwards. Ask only when one
+// works, once.
+async function restartApp(method = 'Restart') {
+  if (state.restart?.pending) return;
   const busy = state.snap.agents.filter((a) => a.status === 'working' || a.status === 'waiting').length;
-  if (busy && !(await confirmAction(t('Restart yesman?'),
-    tn(busy, 'An agent is working. Restarting stops it; it picks up its session when you next talk to it.',
-      '{n} agents are working. Restarting stops them; they pick up their sessions when you next talk to them.'),
+  if (busy && !(await confirmAction(t('Restart Yes Man?'),
+    tn(busy, 'An agent is working. Restarting interrupts its current step; it continues afterwards from its session.',
+      '{n} agents are working. Restarting interrupts their current steps; they continue afterwards from their sessions.'),
     t('Restart')))) return;
-  call('RestartToUpdate').catch(fail);
+  if (state.restart?.pending) return; // another click went first while this one asked
+  // Pending at once, so that a second click sends nothing; yesman says so too.
+  onRestart({ ...state.restart, pending: true });
+  call(method).catch((err) => {
+    onRestart({ ...state.restart, pending: false });
+    fail(err);
+  });
+}
+
+// What the last restart came to, said in one line: every agent it had
+// recorded is counted under what became of it, skipped ones included.
+const RESTART_OUTCOMES = [
+  ['resumed', '{n} continued'],
+  ['reported', '{n} report handed on', '{n} reports handed on'],
+  ['accepted', '{n} report already with its lead', '{n} reports already with their leads'],
+  ['uncertain', '{n} uncertain, not sent again'],
+  ['waiting', '{n} waits for you', '{n} wait for you'],
+  ['active', '{n} already busy'],
+  ['stopped', '{n} kept stopped'],
+  ['finished', '{n} already finished'],
+  ['gone', '{n} no longer there'],
+  ['failed', '{n} could not continue'],
+];
+
+const OUTCOME_LABELS = {
+  resumed: 'Continued', reported: 'Report handed on', accepted: 'Report was already with the lead; not sent again',
+  uncertain: 'Uncertain whether it arrived; nothing sent again', waiting: 'Waits for you', active: 'Already busy',
+  finished: 'Already finished', gone: 'No longer there', stopped: 'Kept stopped', failed: 'Could not continue; nothing sent',
+  'not-continued': 'Not continued; waits for a message',
+};
+
+function restartSummary(last) {
+  if (last.rejected) return t('The record of the last restart could not be used; no agent was woken.');
+  // The old instance quit before it finished its record: nobody went on.
+  if (last.unfinished) {
+    return tn(last.agents.length, 'Its record was not finished, so no agent was continued: {n} interrupted agent waits for a message.',
+      'Its record was not finished, so no agent was continued: {n} interrupted agents wait for a message.');
+  }
+  if (!last.agents.length) return t('No agent was working.');
+  const count = (o) => last.agents.filter((a) => a.outcome === o).length;
+  const parts = RESTART_OUTCOMES.map(([o, one, many]) => (count(o) ? tn(count(o), one, many ?? one) : null)).filter(Boolean);
+  const other = last.agents.filter((a) => !OUTCOME_LABELS[a.outcome]).length;
+  if (other) parts.push(tn(other, '{n} other'));
+  return parts.join(t(', '));
+}
+
+function onRestart(v) {
+  const before = state.restart?.last?.resumedAt;
+  state.restart = v;
+  // Said once: as it arrives, or when the window opens just after it.
+  const fresh = state.restartSeen ? v.last?.resumedAt !== before : Date.now() - new Date(v.last?.resumedAt ?? 0).getTime() < 2 * 60e3;
+  if (v.last && fresh && (v.last.agents.length || v.last.rejected)) {
+    toast(t('Yes Man restarted: {summary}', { summary: restartSummary(v.last) }), { duration: 6000 });
+  }
+  state.restartSeen = true;
+  if (state.view.kind === 'settings' && state.view.page === 'about') renderBody();
+}
+
+function restartStatus() {
+  const r = state.restart;
+  const faint = (text) => h('span', { class: 'about-faint' }, text);
+  const ready = state.update?.state === 'ready';
+  const note = r?.pending ? faint(t('Restarting…'))
+    : r?.last ? h('span', { title: r.last.agents.map((a) => `${yesmanLabel(a.yesman)} · ${a.name}: ${t(OUTCOME_LABELS[a.outcome] ?? a.outcome)}`).join('\n') || null },
+      t('Last restart, {when}: {summary}', {
+        when: new Date(r.last.resumedAt).toLocaleString(locale(), { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }),
+        summary: restartSummary(r.last),
+      }))
+    : faint(ready ? t('Starts the installed update. Working agents continue afterwards.') : t('Working agents continue afterwards from their sessions.'));
+  return h('span', { class: 'about-update' }, note,
+    h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: !!r?.pending, onclick: () => restartApp() },
+      icon('reload'), h('span', null, t('Restart and continue'))));
 }
 
 function onUpdate(u) {
@@ -2277,10 +2549,10 @@ function renderDock({ focusComposer = false, held = null } = {}) {
 }
 
 // holdSent keeps what this window submitted, exactly as it was sent, to show
-// as the person's message until pi's own message is tied to it. A new
-// submission lets go of earlier ones nothing more will be known about: they
-// fold with the other earlier submissions, from what the receipt keeps. It is
-// never stored or sent anywhere, and at most a few are kept.
+// while its row is open until pi's own message is tied to it. A new
+// submission lets go of earlier ones nothing more will be known about: a row
+// still open for them shows what the receipt keeps. It is never stored or
+// sent anywhere, and at most a few are kept.
 const SENT_KEPT = 8;
 function holdSent(c, id, submission) {
   if (!c.sent.has(id)) {
@@ -2314,8 +2586,17 @@ async function sendMessage(a, textarea, submitter = null) {
       attachments.submission = null;
     }
   }
+  // The draft a refusal left, sent again unchanged, is that submission's
+  // retry: once the server has the new one, the refused one has been dealt
+  // with. An edited draft is a new intent and leaves it in view.
+  const retry = attachments.retryOf;
+  if (retry && (retry.text !== text || !sameSubmissionImages(retry.images, images))) attachments.retryOf = null;
+  const retried = attachments.retryOf?.id ?? null;
   const messageID = attachments.submissionID ?? newSubmissionID();
   {
+    // Sending a hidden submission's draft again is a new attempt the person
+    // asked for: what comes of it shows, even if it fails again.
+    reopenHandled(c, messageID);
     attachments.submissionID = messageID;
     attachments.submission ??= { text, images };
     if (!c.deliveries.has(messageID)) {
@@ -2324,7 +2605,6 @@ async function sendMessage(a, textarea, submitter = null) {
       const excess = [...c.deliveries.keys()].slice(0,Math.max(0,c.deliveries.size-256));
       pruneDeliveryRows(c,excess);
     }
-    c.submitted.add(messageID);
     holdSent(c, messageID, attachments.submission);
     c.lastSent = messageID;
     schedulePatch(c);
@@ -2342,6 +2622,11 @@ async function sendMessage(a, textarea, submitter = null) {
     // decides at its own enqueue point and the receipt says which it did.
     const receipt = await call('SubmitCoalescing', a.id, messageID, text, images, a.since);
     updateDelivery(c, receipt);
+    if (retried && receipt?.id === messageID && receipt.revision > 0) {
+      if (attachments.retryOf?.id === retried) attachments.retryOf = null;
+      c.handled.add(retried);
+      saveHandled(c);
+    }
     schedulePatch(c);
     // A duplicate may find registration durable while pi's response is still
     // pending. Keep the only full draft/attachments until acceptance is known.
@@ -2349,7 +2634,11 @@ async function sendMessage(a, textarea, submitter = null) {
     if (receipt.state === 'failed' || receipt.state === 'interrupted' || receipt.state === 'unconfirmed' && receipt.error) {
       // Only a definite rejection permits a fresh ID on unchanged retry. An
       // interrupted process may already have admitted this input before exit.
-      if (receipt.state === 'failed') { attachments.submissionID = null; attachments.submission = null; }
+      if (receipt.state === 'failed') {
+        attachments.retryOf = { id: messageID, text, images };
+        attachments.submissionID = null;
+        attachments.submission = null;
+      }
       throw new Error(receipt.error || t(DELIVERY_LABELS[receipt.state]));
     }
     attachments.submissionID = null;
@@ -2825,6 +3114,7 @@ function renderAbout(inner) {
     settingsSection('Yes Man', t('Hires yesmen: pi agents that each take on one project in a workspace of their own.'),
       row(t('Build'), build),
       row(t('Updates'), updateStatus()),
+      row(t('Restart'), restartStatus()),
       row(!v ? 'pi' : v.piManaged ? t('Managed pi') : t('External pi'), v ? (v.pi || (v.piState && v.piState !== 'failed' ? t({ preparing: 'Preparing…', unprepared: 'Not prepared', closed: 'Stopped.' }[v.piState] || 'Version unknown') : h('span', { class: 'danger' }, v.piError || t('Version unknown')))) : checking()),
       row('MyGo', v ? v.mygo || faint(t('unknown')) : checking()),
       row('Magpie', v ? v.magpie || faint(t('unknown')) : checking()),
@@ -3502,7 +3792,7 @@ const info = createInfo({
     const a = selectedAgent();
     return a ? yesmanOf(a.id) : null;
   },
-  isOpen: () => state.panelOpen,
+  isOpen: () => infoShown(),
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
@@ -3528,11 +3818,81 @@ const info = createInfo({
   openURL: (url) => call('OpenURL', url).catch(fail),
 });
 
+// The info panel makes way for Topics and Needs You while, beside it, they
+// could not show their content and navigation side by side and still leave
+// the conversation its room; it shows again once the pane closes. This
+// never changes whether the user keeps the panel shown (yesman.info).
+// Showing it while it makes way keeps it beside that pane, until the pane
+// closes or another opens; the pane then shows one column at a time.
+function infoYields() {
+  if (!state.panelOpen || (state.pane !== 'topics' && state.pane !== 'needs-you')) return false;
+  // Below 1072px app.css hides the panel beside these panes, kept or not.
+  if (window.matchMedia('(max-width: 1071px)').matches) return true;
+  if (infoKept) return false;
+  const css = getComputedStyle(document.documentElement);
+  const side = $('#side')?.getBoundingClientRect().width || parseFloat(css.getPropertyValue('--side-width')) || 0;
+  const panel = parseFloat(css.getPropertyValue('--info-width')) || 0;
+  return window.innerWidth < side + panel + TWO_COLUMNS + CONVERSATION_MIN;
+}
+const infoShown = () => state.panelOpen && !infoYields();
+
 function togglePanel() {
-  state.panelOpen = !state.panelOpen;
-  localStorage.setItem('yesman.info', state.panelOpen ? 'shown' : 'hidden');
+  if (infoShown()) {
+    state.panelOpen = false;
+    infoKept = false;
+    localStorage.setItem('yesman.info', 'hidden');
+  } else {
+    if (!state.panelOpen) localStorage.setItem('yesman.info', 'shown');
+    state.panelOpen = true;
+    infoKept = true;
+  }
+  infoYielded = infoYields();
   info.render();
   renderBarActions();
+}
+
+// As the window changes, the info panel makes way, or shows again; focus it
+// hid goes into the pane, to a control of the column it shows (paneFocus).
+// A browser may drop that focus to the page as the panel hides, before this
+// runs, so the panel having focus is remembered for the pane and yesman it
+// was beside (infoFocus): focus moved elsewhere, or let go of while the
+// panel still shows, forgets it, as does any change of pane, yesman, or
+// whether the panel makes way.
+const infoScope = () => `${state.pane}\n${yesmanOf(selectedAgent()?.id)?.name ?? ''}`;
+document.addEventListener('focusin', (e) => {
+  infoFocus = $('#yesman-info')?.contains(e.target) ? infoScope() : null;
+});
+document.addEventListener('focusout', (e) => {
+  if (!e.relatedTarget && e.target.isConnected && e.target.getClientRects().length > 0) infoFocus = null;
+});
+window.addEventListener('resize', () => {
+  const now = infoYields();
+  if (now === infoYielded) return;
+  infoYielded = now;
+  const active = document.activeElement;
+  const dropped = (!active || active === document.body) && infoFocus === infoScope();
+  const lost = now && ($('#yesman-info')?.contains(active) || dropped);
+  infoFocus = null;
+  info.render();
+  renderBarActions();
+  if (lost) paneFocus(state.pane)?.focus({ preventScroll: true });
+});
+
+// paneFocus is the first visible control of the explorer pane shown, in the
+// column it shows (content or navigation), else its close button.
+function paneFocus(pane) {
+  const aside = pane === 'topics' ? $('#topics') : pane === 'needs-you' ? $('#needs-you') : null;
+  if (!aside) return null;
+  const content = $('.explorer', aside)?.dataset.focus === 'content';
+  const choices = pane === 'topics'
+    ? (content ? ['[data-key="back"]', '[data-key="detail-title"]', '[data-key="edit-title"]'] : ['.topics-search', '#topics-tree .explorer-row[tabindex="0"]'])
+    : (content ? ['[data-key="list"]', '.needs-you-detail-title'] : ['.needs-you-open[aria-current="true"]', '.needs-you-open', '.needs-you-heading']);
+  const visible = (el) => el && !el.disabled && el.getClientRects().length > 0;
+  for (const sel of [...choices, '.files-head-actions button:last-child']) {
+    const el = $(sel, aside);
+    if (visible(el)) return el;
+  }
+  return null;
 }
 
 // ---------- Board pane ----------
@@ -3620,6 +3980,7 @@ const topics = createTopics({
       if (topicSends.size > 256) topicSends.delete(topicSends.keys().next().value);
     }
     const c = convo(lead);
+    reopenHandled(c, id);
     if (!c.deliveries.has(id)) {
       // Keep the whole topic line, so the receipt shows its chip, and clip
       // only the user's text after it, as the composer's receipts do.
@@ -3681,7 +4042,9 @@ function setPane(pane) {
   const visible = had && had !== document.body && shown(had);
   const inPane = !!had?.closest?.('#board, #schedules, #needs-you, #topics, #files');
   const entry = had?.closest?.('#yesman-info [data-info-entry]')?.dataset.infoEntry;
+  if (state.pane !== pane) { infoKept = false; infoFocus = null; }
   state.pane = pane;
+  infoYielded = infoYields();
   renderInfo();
   renderBarActions();
   // Only focus this change hid moves: to the pane opened, or, once it
@@ -3895,6 +4258,7 @@ const actionHost = {
   },
   abort: (a) => call('Abort', a.id),
   sleep: (a) => call('Stop', a.id),
+  restart: () => restartApp(),
   // Another dialog than the palette, which closes before an action runs.
   dialogOpen: () => !!document.querySelector('dialog[open]:not(.palette-dialog)'),
   showSettings(page) {
@@ -4065,6 +4429,7 @@ async function start() {
   mygo.on('fetches', onFetches);
   mygo.on('pi-packages', (jobs) => piPage.onJobs(jobs));
   mygo.on('update', onUpdate);
+  mygo.on('restart', onRestart);
   mygo.on('files', (change) => { files.onChange(change); info.onFiles(change); });
   mygo.on('board', (yesman) => { board.onChange(yesman); schedules.onBoard(yesman); });
   mygo.on('schedules', (yesman) => schedules.onChange(yesman));
@@ -4074,6 +4439,7 @@ async function start() {
   shortcuts.listen();
   shortcuts.load().catch(fail);
   call('Update').then(onUpdate, () => {});
+  call('RestartStatus').then(onRestart, () => {});
   mygo.on('focus-agent', (id) => {
     call('TakeFocus').catch(() => {});
     selectAgent(id);

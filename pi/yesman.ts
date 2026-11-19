@@ -15,10 +15,10 @@
 // writes only Knowledge notes and the working log. Its tools are narrowed when
 // its session starts, and any call outside them is refused.
 import { createHash } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createBashToolDefinition, createPowerShellToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, createEditToolDefinition, createPowerShellToolDefinition, createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const API = process.env.YESMAN_API;
@@ -181,6 +181,16 @@ async function commandEnv(signal?: AbortSignal): Promise<{ env: Record<string, s
 // env endpoint is unavailable, so PR creation cannot silently become personal.
 function shellEnvironment(base: Record<string, string>, injected: Record<string, string>): Record<string, string> {
 	const env = { ...base, ...injected };
+	// The workspace temporary directories and caches the app set for this
+	// process (internal/agent/workspace_temp.go ManagedEnvKeys) win over a
+	// user variable of the same name in any case, so configuration cannot move
+	// TMP, TEMP or a cache back out. A command can still set its own values.
+	for (const key of ["TMPDIR", "TMP", "TEMP", "GOTMPDIR", "GOCACHE", "GOMODCACHE", "npm_config_cache", "YESMAN_TMP", "YESMAN_EVIDENCE", "YESMAN_TMP_ROOT", "YESMAN_EVIDENCE_ROOT", "YESMAN_CACHE"]) {
+		const value = process.env[key];
+		if (value === undefined) continue; // started by an app that sets none
+		for (const name of Object.keys(env)) if (name.toUpperCase() === key.toUpperCase()) delete env[name];
+		env[key] = value;
+	}
 	const shim = process.env.YESMAN_GH_SHIM;
 	if (!shim) return env;
 	const pathOf = (source: Record<string, string>) => Object.entries(source).find(([name]) => name.toUpperCase() === "PATH")?.[1];
@@ -209,6 +219,69 @@ async function requireGitHubRouting(signal?: AbortSignal): Promise<void> {
 		throw new Error("GitHub App routing is unavailable and its mode could not be verified. No command ran with fallback credentials; repair the runtime wrapper or disable App identity in Settings.");
 	}
 	if (mode?.mode !== "personal") throw new Error("GitHub App routing is unavailable for this workspace. Repair the runtime wrapper and restart, or explicitly disable App identity in Settings; no command ran with fallback credentials.");
+}
+
+// The process's own scratch directory, made by the app for this process
+// only. Its identity is taken when the extension loads; if it is later
+// removed or replaced, commands are refused rather than recreating it or
+// letting programs fall back to the system temporary directory.
+const TEMP = process.env.YESMAN_TMP;
+let tempIdentity: { dev: bigint; ino: bigint } | undefined;
+let tempProblem: string | undefined;
+
+function captureTemp(): void {
+	if (!TEMP) return;
+	try {
+		const st = lstatSync(TEMP, { bigint: true });
+		const owner = JSON.parse(readFileSync(join(TEMP, "owner.json"), "utf8"));
+		if (!st.isDirectory() || st.isSymbolicLink() || owner?.incarnation !== basename(TEMP)) throw new Error("not this process's directory");
+		tempIdentity = { dev: st.dev, ino: st.ino };
+	} catch (err) {
+		tempProblem = (err as Error).message;
+	}
+}
+
+function checkTemp(): void {
+	if (!TEMP) return;
+	let ok = false;
+	try {
+		const st = lstatSync(TEMP, { bigint: true });
+		ok = !!tempIdentity && st.isDirectory() && !st.isSymbolicLink() && st.dev === tempIdentity.dev && st.ino === tempIdentity.ino;
+	} catch {}
+	if (!ok) {
+		throw new Error(`This agent's temporary directory ${TEMP} is missing or was replaced${tempProblem ? ` (${tempProblem})` : ""}, so the command did not run. yesman does not recreate it in place; ask the lead to start this agent again, which gives it a new one.`);
+	}
+}
+
+// managedFiles routes a worker's write and edit through the app, which
+// decides from trusted state where this process may write (its own author
+// or release worktrees and its own scratch and evidence directories) and
+// does the I/O there itself, under this process's credential. pi still
+// resolves the path and computes the edit; an edit's write carries the hash
+// of what it read, so a file changed in between is not overwritten.
+function managedFiles(signal?: AbortSignal) {
+	const read = new Map<string, string>();
+	const send = (op: string, path: string, extra: Record<string, unknown> = {}) => call("POST", "/v1/files", { op, path, ...extra }, signal);
+	return {
+		mkdir: async (dir: string) => {
+			await send("mkdir", dir);
+		},
+		access: async (path: string) => {
+			await send("access", path);
+		},
+		readFile: async (path: string) => {
+			const r = await send("read", path);
+			read.set(path, r.sha256);
+			return Buffer.from(r.data, "base64");
+		},
+		// A write after this tool read the file is an edit of that existing
+		// file at the version read; the app neither creates it nor its
+		// directory. A write without a read creates what it needs.
+		writeFile: async (path: string, content: string) => {
+			const expect = read.get(path);
+			await send("write", path, expect === undefined ? { content } : { content, expect });
+		},
+	};
 }
 
 // refreshHidden asks the app for the secrets' values to hide, keeping
@@ -426,6 +499,7 @@ export default function yesman(pi: ExtensionAPI) {
 			...base,
 			defaultActive: false,
 			async execute(id, params, signal, onUpdate, ctx) {
+				checkTemp();
 				await requireGitHubRouting(signal);
 				const { env, note } = await commandEnv(signal);
 				const tool = make(ctx.cwd, { spawnHook: (c) => ({ ...c, env: shellEnvironment(c.env, env) }) });
@@ -443,6 +517,28 @@ export default function yesman(pi: ExtensionAPI) {
 	};
 	shell(createBashToolDefinition);
 	if (process.platform === "win32") shell(createPowerShellToolDefinition);
+	captureTemp();
+
+	// A worker's write and edit: pi's own tools with their file operations
+	// done by the app (managedFiles). The lead keeps pi's tools and its own
+	// narrower rule above. Only these two tools are governed: shell commands,
+	// other tools, MCP tools and extensions write with the process's own
+	// permissions.
+	if (ROLE !== "lead") {
+		const managed = (make: typeof createWriteToolDefinition | typeof createEditToolDefinition) => {
+			const base = (make as any)(process.cwd());
+			pi.registerTool({
+				...base,
+				defaultActive: false,
+				async execute(id: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) {
+					const tool = (make as any)(ctx.cwd, { operations: managedFiles(signal) });
+					return tool.execute(id, params, signal, onUpdate, ctx);
+				},
+			});
+		};
+		managed(createWriteToolDefinition);
+		managed(createEditToolDefinition);
+	}
 
 	// Whatever a tool returns, a secret's value does not reach the model.
 	// The values are asked for again first: the secrets may have been

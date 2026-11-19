@@ -293,6 +293,9 @@ func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string
 	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, Origin: origin, fingerprint: fingerprint, created: deliveryTimestamp(messageID),
 		coalesce: sub.coalesce && origin == nil && sub.context == "", hostContext: sub.context}
 	a.deliveries[messageID] = d
+	// A new immutable input already owns this generation, even while its
+	// first durable write/start is pending. A duplicate above owns no new work.
+	a.givenWork = true
 	// Only what a person typed can be recalled, edited or shown again in
 	// full: a scheduled run's request is the plan's, never the user's draft.
 	if origin == nil {

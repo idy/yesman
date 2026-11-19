@@ -322,14 +322,38 @@ restored drafts have the same in-memory lifetime as other composer drafts.
 
 Reliable pending human receipt rows show **Cancel and edit**. Their footer uses
 **Waiting · follow-up** or **Steering · waiting for input checkpoint**, never
-Sending after native acceptance. Pending/failure visibility does not depend on
-the eight-entry `Convo.sent` display cache or a later submitted ID. Current
-failures stay visible for their agent generation. Earlier nonactionable unbound
-receipts fold into one default-collapsed group from PR67; they never grant queue
-actions. Receipt binding uses only an explicit recorded submission identity,
-including identical text/images, so late events and reloading do not add a second
-bubble. A recorded message shows **Taken by pi**, which does not promise provider
-execution has finished.
+Sending after native acceptance. The conversation is pi's messages; a receipt
+draws a row only while it is open: sending/accepted/queued/steering or native
+pending, cancelled with a restorable original, `failed`, `interrupted` or
+`unconfirmed` with an error until the person hides it (**Hide**) or this window
+resends its kept draft unchanged and the server registers that resend, or an
+`unconfirmed` answer without an error while it is the latest submission. Other
+later sends, replies and empty queues never retire a problem: its status can
+arrive after them, to a reloaded page. Hiding is page-only: IDs in localStorage
+per conversation, pruned to the receipts Go still keeps; receipts are unchanged
+and nothing is resent. The person sending that ID again, or an accepted update
+(this generation, newer revision, still retained) that is not finished, drops
+the ID from the hidden set and persists that, so the new attempt's outcome shows
+live and after reload; lower revisions and earlier generations cannot. If the
+set cannot be written, the page tries to remove the whole stored key (every
+conversation's Hides); when that works, a reload shows rather than hides. If
+removal is refused too, only the page's memory is reliable, and a reload after
+storage recovers may read the old Hides again.
+Taken (`dispatched`), `handled` and other finished receipts draw
+nothing, including after compaction removes their messages from context; their
+receipts stay in Go for idempotence and audit. Visibility does not depend on the
+eight-entry `Convo.sent` display cache, which only supplies a visible row's exact
+text and images, so live and reloaded windows agree. Receipt binding uses only an
+explicit recorded submission identity, including identical text/images, so late
+events and reloading do not add a second bubble. A recorded message reads as an
+ordinary message without a delivery label; being taken does not promise provider
+execution has finished. A pending occurrence with appended inputs keeps one
+bubble with all member text and images, copied or recalled as a whole. Preparing
+still means pending and recallable, not taken. Topics keep their recorded chip
+and copy only the person's text; scheduled runs retain their Tasks origin rather
+than appearing as a person's typed input. Their canonical request has no
+permanent receipt status either. Topic-pane submission history retains its own
+recorded state labels.
 
 `SubmissionPayload` reads complete text/images from the existing bounded volatile
 Go cache, without changing native membership. A visible unbound row may hydrate

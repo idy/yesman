@@ -2,6 +2,38 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.50
+
+- Add embedded Artificial Analysis scores for GPT-6.2 Astra and GPT-6.2 Sol at low, medium, high, xhigh and max reasoning effort. The crew settings and the lead's model context use the same scores.
+
+## 0.1.49
+
+- Add Restart and continue in Settings › About, the command palette and the tray. Restart to update uses the same recovery path.
+- Continue eligible interrupted agents from their existing sessions and Board goals after an explicit restart, while keeping stopped, sleeping and human-waiting agents paused and checking workspace and worker identities before recovery.
+- Reconcile workers' reports across the restart: hand on a report known not sent, preserve reports already accepted, and show uncertain delivery without sending it again. Original user messages and images are never automatically resent.
+- Show the last restart's outcomes in About, including unfinished or failed recovery that needs an explicit message. Preserve those holds on later ordinary opens.
+- Keep ordinary Quit separate from explicit restart recovery. Updating from an earlier version without this feature has no restart checkpoint to restore; existing bounded task-continuation checks still apply. Recovery does not guarantee exactly-once effects outside the app.
+
+## 0.1.48
+
+- Browse Files, Knowledge, Working log, Topics and Needs You with content on the left and navigation on the right. Narrow panes switch between navigation and the selected detail with a Back control.
+- Navigate Knowledge notes and their headings in a tree. Topics are grouped by Open, Resolved and Archived, with branches for each topic's summary, conclusions, questions, sources and conversation.
+- Browse Working log records by day, newest day first, keeping the TOC's order within each day. Dates come from the TOC or file names; undated records have their own group, and records open individually as needed.
+- Answer a Needs You question or mark a handoff done or not needed directly in its detail pane. Open in the conversation takes you to where the request was raised.
+- Keep an active Needs You answer and its text selection visible when narrowing the window. Show unavailable-workspace errors in narrow panes and provide a keyboard-accessible way back to the conversation.
+
+## 0.1.47
+
+- Default agents' temporary files, command-output files and Go/npm caches to the current workspace's `.yesman/tmp`, with retained verification evidence under `.yesman/evidence`.
+- Route workers' built-in Write and Edit tools through Yes Man, limited to their own scratch and evidence folders and eligible managed author or release worktrees. Check the current process, workspace and checkout identity, and serialize managed file checks and updates.
+- Keep existing temporary files and caches, home directories, credentials and configuration in place. Shell commands, other tools and extensions retain their operating-system permissions; this update does not enable an operating-system sandbox.
+
+## 0.1.46
+
+- Keep your original messages and images in the conversation without a second Earlier submission records list, its counters or permanent success labels.
+- Show useful pending and error states with their available actions, and let pending items leave as pi takes them.
+- Bring a hidden message back when you explicitly retry its unchanged draft, including from Topics. Keep the available complete original and Copy accessible after a page reload, and show a new failed attempt again.
+
 ## 0.1.45
 
 - Keep an unfinished Board goal distinct from a worker finishing its run. Check tasks individually after reports, failures, Board changes, startup and the lead settling, and notify the lead when no running worker carries the work, even while other workers are active.

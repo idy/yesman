@@ -44,6 +44,10 @@ type TaskNotice struct {
 	At       time.Time `json:"at"`
 	// Delivered is set once pi accepted the notice, never before.
 	Delivered bool `json:"delivered,omitempty"`
+	// RestartReserved covers a task state before a restart note is sent.
+	// It prevents replay after a crash or ambiguous send, without claiming
+	// pi accepted anything. A definite refusal withdraws the reservation.
+	RestartReserved bool `json:"restartReserved,omitempty"`
 	// extra keeps the fields of the notice this version does not know, as
 	// they were. A notice recorded anew for its task is a new notice: they
 	// described the old one and go with it.
@@ -76,7 +80,7 @@ func (n TaskNotice) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON reads a notice, which must be an object, and keeps the
 // fields this version does not know.
 func (n *TaskNotice) UnmarshalJSON(data []byte) error {
-	obj, err := recordObject(data, "sig", "progress", "count", "at", "delivered")
+	obj, err := recordObject(data, "sig", "progress", "count", "at", "delivered", "restartReserved")
 	if err != nil {
 		return fmt.Errorf("a task notice: %w", err)
 	}

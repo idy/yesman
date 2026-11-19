@@ -120,41 +120,25 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .message-footer .delivery-status { flex: 0 1 auto; min-width: 0; }
 .message-footer .message-actions { flex: none; }
 .msg-user > .message-actions { margin-top: 4px; }
-.message-copy {
+.message-copy, .message-dismiss {
   display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
   width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--mds-radius-sm);
   background: transparent; color: var(--mds-muted); cursor: pointer;
 }
-.message-promote { width: auto; gap: 4px; padding-inline: 6px; font-size: var(--mds-text-caption); }
-.message-copy .mds-icon { width: 16px; height: 16px; font-size: 16px; }
-.message-copy:hover:not(:disabled) { background: var(--mds-hover); color: var(--mds-ink); }
-.message-copy:focus-visible { outline: 2px solid var(--mds-accent); outline-offset: 2px; }
+.message-promote, .message-dismiss { width: auto; gap: 4px; padding-inline: 6px; font-size: var(--mds-text-caption); }
+.message-copy .mds-icon, .message-dismiss .mds-icon { width: 16px; height: 16px; font-size: 16px; }
+.message-copy:hover:not(:disabled), .message-dismiss:hover { background: var(--mds-hover); color: var(--mds-ink); }
+.message-copy:focus-visible, .message-dismiss:focus-visible { outline: 2px solid var(--mds-accent); outline-offset: 2px; }
 .message-copy:disabled { opacity: .5; cursor: default; }
 .message-copy[aria-busy="true"] { opacity: .6; cursor: progress; }
-@media (pointer: coarse) { .message-copy { min-width: 40px; height: 40px; } }
+@media (pointer: coarse) { .message-copy, .message-dismiss { min-width: 40px; height: 40px; } }
 .msg-delivery { align-self: flex-end; max-width: 82%; min-width: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .msg-delivery > .msg-user { max-width: 100%; }
 .delivery-image-count { color: var(--mds-muted); font-size: var(--mds-text-caption); margin-top: 4px; }
 .delivery-status { color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; padding-inline: 4px; overflow-wrap: anywhere; }
 .delivery-status[data-state="failed"], .delivery-status[data-state="interrupted"] { color: var(--mds-error); }
-.delivery-status.delivery-status--historical { color: var(--mds-muted); }
-.msg-delivery--compact { gap: 2px; }
+/* Scheduled requests still use the bounded preview when their text is not loaded. */
 .delivery-compact { max-width: 100%; color: var(--mds-muted); font-size: var(--mds-text-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-inline: 4px; }
-/* Earlier submissions no message is tied to: one light line, opened to read them. */
-.receipts { align-self: flex-end; max-width: 82%; min-width: 0; }
-.receipts > summary {
-  display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; padding: 3px 6px; border-radius: var(--mds-radius-sm);
-  list-style: none; cursor: default; font-size: var(--mds-text-caption); color: var(--mds-muted);
-}
-.receipts > summary::-webkit-details-marker { display: none; }
-.receipts > summary:hover { background: var(--mds-hover); }
-.receipts > summary:focus-visible { outline: 2px solid var(--mds-accent-ink); outline-offset: -2px; }
-.receipts-label { flex: none; color: var(--mds-ink-secondary); white-space: nowrap; }
-.receipts-note { margin: 6px 0; padding-inline: 4px; color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; overflow-wrap: anywhere; }
-.receipts-caret { flex: none; display: inline-flex; width: 12px; height: 12px; font-size: 12px; color: var(--mds-muted); transition: transform .15s ease; }
-.receipts[open] > summary .receipts-caret { transform: rotate(90deg); }
-.receipts-body { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; min-width: 0; margin: 4px 0 2px; padding-right: 12px; border-right: 2px solid var(--mds-line); }
-.receipts-body > .msg-delivery { max-width: 100%; }
 .note--lead > .md { margin-top: 6px; }
 .note--scheduled { display: grid; gap: 4px; }
 .scheduled-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
@@ -243,7 +227,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .failure-run > time { padding-top: 5px; color: var(--mds-muted); font-size: var(--mds-text-caption); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .failure-run-empty { padding: 5px 8px; color: var(--mds-muted); font-size: var(--mds-text-caption); }
 .dot-wrap .status-error-mark { width: 14px; height: 14px; font-size: 14px; color: var(--mds-error); }
-@media (prefers-reduced-motion: reduce) { .work[data-state="running"] .work-mark { animation: none; } .work-caret, .receipts-caret, .failures-caret { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .work[data-state="running"] .work-mark { animation: none; } .work-caret, .failures-caret { transition: none; } }
 
 .tool { border-radius: var(--mds-radius-sm); }
 .tool > summary {

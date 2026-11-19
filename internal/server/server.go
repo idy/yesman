@@ -61,7 +61,7 @@ type Server struct {
 
 	url           string
 	worktreeMu    sync.Mutex
-	worktreeLocks map[string]*sync.Mutex // serialize lifecycle operations per workspace
+	worktreeLocks map[string]*sync.Mutex // serialize checkout lifecycle and managed file I/O per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
 	// beginChange replaces Agents.BeginChange in tests that run no agent.
@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/repos", s.handle(s.addRepo))
 	mux.HandleFunc("POST /v1/checkout", s.handle(s.checkout))
 	mux.HandleFunc("POST /v1/worktrees/remove", s.handle(s.removeWorktree))
+	mux.HandleFunc("POST /v1/files", s.handle(s.files))
 	mux.HandleFunc("GET /v1/agents", s.handle(s.agents))
 	mux.HandleFunc("POST /v1/workers", s.handle(s.startWorker))
 	mux.HandleFunc("POST /v1/workers/send", s.handle(s.sendWorker))
@@ -352,18 +353,15 @@ func sanitize(s string) string {
 	return strings.Trim(b.String(), "-.")
 }
 
-func (s *Server) checkout(_ context.Context, c caller, r *http.Request) (any, error) {
+func (s *Server) checkout(ctx context.Context, c caller, r *http.Request) (any, error) {
 	var req CheckoutRequest
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
-	l := s.worktreeLock(c.yesman.Name)
-	l.Lock()
-	defer l.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	var wt pool.Worktree
-	err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+	err := s.worktreeOperation(ctx, c, func(ctx context.Context, y yesmen.Yesman) error {
 		var err error
 		wt, err = s.checkoutOwned(ctx, c, y, req)
 		return err
@@ -382,11 +380,8 @@ func (s *Server) removeWorktree(ctx context.Context, c caller, r *http.Request) 
 	if !dirRE.MatchString(req.Dir) {
 		return nil, fmt.Errorf("%q is not a worktree directory of this workspace", req.Dir)
 	}
-	l := s.worktreeLock(c.yesman.Name)
-	l.Lock()
-	defer l.Unlock()
 	var out cleanupResult
-	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+	if err := s.worktreeOperation(ctx, c, func(ctx context.Context, y yesmen.Yesman) error {
 		var err error
 		out, err = s.cleanupWorktree(ctx, c, y, req)
 		return err
@@ -864,6 +859,7 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	}
 
 	writeWorktreeCleanupContext(&b, y, me)
+	writeTemporaryFilesContext(&b, y, me)
 
 	rel := ".yesman/knowledge"
 	w("\n## Knowledge\n\n")
