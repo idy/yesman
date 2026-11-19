@@ -2,6 +2,11 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.57
+
+- Respond directly in a **Needs You** card. Write a reply, choose one of the offered options with an optional note, or confirm that you completed a requested action.
+- Saved replies to handoffs remain available to the lead after a restart. Retrying the same reply avoids duplicate notifications.
+
 ## 0.1.56
 
 - Keep Markdown table columns readable in Knowledge, Working Logs, and Files previews. Wide tables scroll horizontally in place.
