@@ -435,7 +435,9 @@ func (s *service) Answer(id string, scope agent.DialogScope, answer agent.Dialog
 	if err != nil {
 		return err
 	}
-	if scope.HiredAt.IsZero() || !y.HiredAt.Equal(scope.HiredAt) {
+	// Legacy workspaces can have a zero HiredAt. This is an exact match,
+	// and the live dialog still has to match the active process and request.
+	if !y.HiredAt.Equal(scope.HiredAt) {
 		return errors.New("this yesman was replaced: refresh the window")
 	}
 	// The manager rechecks this hire against the exact live process at

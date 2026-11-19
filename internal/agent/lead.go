@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/idy/yesman/internal/yesmen"
 )
 
 // The lead answers for its yesman: what its workers ask, how their runs end,
@@ -114,8 +112,9 @@ func (d dialog) windowReply(r DialogReply) (map[string]any, error) {
 		if d.Method == "select" && slices.Contains(d.Options, *r.Value) {
 			return map[string]any{"value": *r.Value}, nil
 		}
-		if (d.Method == "input" || d.Method == "editor") && yesmen.ValidResponseText(*r.Value) &&
-			(d.Method == "editor" || !strings.ContainsAny(*r.Value, "\r\n")) {
+		// Native Pi dialogs can return entire documents. The durable
+		// handoff's short-answer budget does not apply to this RPC.
+		if d.Method == "input" || d.Method == "editor" {
 			return map[string]any{"value": *r.Value}, nil
 		}
 	}

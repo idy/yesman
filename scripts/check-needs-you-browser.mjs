@@ -360,7 +360,12 @@ async function scenario(engineName, page) {
   await rowsAre(1);
   await rows.first().click();
   await page.locator('.ask.handoff').getByRole('button', { name: 'Mark done' }).click();
-  await page.getByRole('dialog', { name: 'Mark this request done?' }).getByRole('button', { name: 'Mark done' }).click();
+  const dockConfirm = page.getByRole('dialog', { name: 'Mark this request done?' });
+  await dockConfirm.waitFor();
+  await page.evaluate(() => { window.openingCard = document.querySelector('#dock .handoff'); });
+  await refresh();
+  assert.equal(await page.evaluate(() => openingCard.isConnected), false, 'State rebuilt the dock');
+  await dockConfirm.getByRole('button', { name: 'Mark done' }).click();
   await settle(0);
   await prompted('alice/lead', '[yesman] The user marked n1 (login) "Log in to the npm registry", for task t1 as done. That is their own confirmation');
   assert.equal(await composer.inputValue(), 'unsent alice draft');
@@ -447,6 +452,17 @@ async function scenario(engineName, page) {
   await send.click();
   assert.match(await pane.locator('.needs-you-response-error').innerText(), /Enter a reply/);
   assert.equal(await called('RespondHandoff'), responseCount);
+  const dockReply = page.locator('#dock .handoff textarea');
+  await dockReply.fill('editing 中文');
+  await dockReply.evaluate((el) => {
+    el.focus();
+    el.setSelectionRange(1, 3);
+    window.composingReply = el;
+    el.dispatchEvent(new CompositionEvent('compositionstart', { data: '中' }));
+  });
+  await refresh();
+  assert.deepEqual(await dockReply.evaluate(el => [el === composingReply, el === document.activeElement, el.selectionStart, el.selectionEnd]), [true, true, 1, 3]);
+  await dockReply.evaluate(el => el.dispatchEvent(new CompositionEvent('compositionend', { data: '中' })));
   await reply.fill('已检查\nSecond line');
   await reply.evaluate((el) => {
     el.dataset.imeTest = 'same';

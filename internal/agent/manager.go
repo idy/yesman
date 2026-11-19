@@ -1388,11 +1388,11 @@ func (m *Manager) answerDialog(id string, scope *DialogScope, r DialogReply) err
 	err = p.sendAdmitted(answer, func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if a.proc != p || a.stopping || a.retiring || a.removing || a.info.Status != Waiting ||
+		if m.closed || m.agents[id] != a || a.proc != p || a.stopping || a.retiring || a.removing || a.info.Status != Waiting ||
 			!a.info.DialogAt.Equal(askedAt) || dialogID(a.info.Dialog) != d.ID || dialogTimedOut(d.Timeout, askedAt) {
 			return stale
 		}
-		if scope != nil && (!a.workspaceSince.Equal(scope.HiredAt) || !a.info.Since.Equal(scope.Since) ||
+		if scope != nil && (scope.AskedAt.IsZero() || !a.workspaceSince.Equal(scope.HiredAt) || !a.info.Since.Equal(scope.Since) ||
 			!askedAt.Equal(scope.AskedAt) || (scope.HandedOverOnly && a.info.Role == RoleWorker && a.handedOver != d.ID)) {
 			return stale
 		}

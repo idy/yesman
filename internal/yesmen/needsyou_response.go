@@ -13,7 +13,7 @@ const (
 	ResponseText       = "text"
 	ResponseChoice     = "choice"
 	ResponseAction     = "action"
-	MaxResponseText    = 2000 // Unicode code points, shared with Pi text replies
+	MaxResponseText    = 2000 // Unicode code points in a durable handoff reply or note
 	maxResponseOptions = 8
 	maxOptionLength    = 120
 )
@@ -68,8 +68,7 @@ func validResponseText(s string, maxRunes int) bool {
 	}) == -1
 }
 
-// ValidResponseText checks the common bound and encoding. A dialogue's own
-// semantics decide whether an empty value is acceptable.
+// ValidResponseText checks the bound and encoding of a durable reply or note.
 func ValidResponseText(s string) bool { return validResponseText(s, MaxResponseText) }
 
 func (h Handoff) checkAnswer(resolution string, answer *HandoffAnswer) error {

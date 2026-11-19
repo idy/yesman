@@ -1410,6 +1410,8 @@ export default {
   "Mark done": "标记完成",
   "Mark this request done?": "将此请求标记为完成？",
   "Confirm that you completed “{title}” yourself.": "请确认你已亲自完成“{title}”。",
+  "Confirm that you already answered “{title}” in the conversation.": "请确认你已在对话中回复“{title}”。",
+  "Already replied in the conversation? Mark this request done.": "如果已经在对话中回复，可以标记为完成。",
   "Respond to {title}": "回复：{title}",
   "Send reply": "发送回复",
   "Your reply": "你的回复",
