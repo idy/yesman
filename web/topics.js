@@ -468,7 +468,7 @@ export function createTopics(host) {
     const sync = () => {
       send.disabled = (!textarea.value.trim() && !d.items.length) || busy || !lead;
       textarea.style.height = 'auto';
-      textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
+      textarea.style.height = `${textarea.scrollHeight}px`;
       const command = isCommand(textarea.value);
       context.hidden = command;
       commandNote.hidden = !command;
@@ -495,7 +495,7 @@ export function createTopics(host) {
         h('button', { class: 'round', type: 'button', disabled: busy, title: t('Remove image'), 'aria-label': t('Remove image'), onclick: () => { d.items = d.items.filter((i) => i !== image); refresh(); } }, icon('trash')))));
     const attach = h('button', { class: 'round', type: 'button', disabled: busy, 'aria-label': t('Attach images'),
       title: t('Attach images (PNG, JPEG, GIF, WebP; 4 images, 5 MB each, 10 MB total)'), onclick: () => fileInput.click() }, icon('plus'));
-    const textarea = h('textarea', { rows: 2, 'data-key': `compose-${x.id}`, 'aria-label': t('Message {name} about this topic', { name }), readonly: d.sending,
+    const textarea = h('textarea', { rows: 1, 'data-key': `compose-${x.id}`, 'aria-label': t('Message {name} about this topic', { name }), readonly: d.sending,
       placeholder: t('Message {name} about this topic…', { name }), 'aria-describedby': `topic-context-${x.id}` });
     textarea.value = d.text;
     const send = h('button', { class: 'round composer-action', type: 'submit', 'data-key': `send-${x.id}`, 'aria-label': t('Send'), title: t('Send to {name}', { name }) }, icon('enter'));

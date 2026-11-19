@@ -62,6 +62,7 @@ const bridge = () => {
         case 'Fetches': return { fetching: [], errors: {} };
         case 'TakeFocus': return '';
         case 'Update': return { enabled: false };
+        case 'RestartStatus': return { pending: false };
         case 'Models': return { models: [], agent: (window.fixtureAgents ?? []).find((a) => a.id === args[0]) };
         default: return null;
       }
@@ -91,6 +92,36 @@ async function post(url, path, body) {
 
 async function shot(page, name) {
   if (shots) await page.screenshot({ path: `${shots}/${name}.png`, fullPage: false });
+}
+
+async function checkComposerLayout(page, state, singleLine) {
+  const [chat, topic] = await page.locator('#dock .composer-input, #topics .composer-input').evaluateAll((rows) => rows.map((row) => {
+    const [attach, textarea, send] = row.children;
+    const frame = row.getBoundingClientRect();
+    const plus = attach.getBoundingClientRect();
+    const text = textarea.getBoundingClientRect();
+    const arrow = send.getBoundingClientRect();
+    const style = getComputedStyle(textarea);
+    return {
+      height: frame.height,
+      attachInset: plus.left - frame.left,
+      sendInset: frame.right - arrow.right,
+      textStartGap: text.left - plus.right,
+      textEndGap: arrow.left - text.right,
+      attachBottom: frame.bottom - plus.bottom,
+      sendBottom: frame.bottom - arrow.bottom,
+      firstLineCenter: text.top + parseFloat(style.paddingTop) + parseFloat(style.lineHeight) / 2 - frame.top,
+      attachCenter: plus.top + plus.height / 2 - frame.top,
+      sendCenter: arrow.top + arrow.height / 2 - frame.top,
+    };
+  }));
+  for (const key of Object.keys(chat)) {
+    assert.ok(Math.abs(topic[key] - chat[key]) <= 1, `${state} ${key}: Topics ${topic[key]} vs Chat ${chat[key]}`);
+  }
+  if (singleLine) {
+    assert.ok(Math.abs(topic.firstLineCenter - topic.attachCenter) <= 1, `${state}: first line is centered with Attach`);
+    assert.ok(Math.abs(topic.firstLineCenter - topic.sendCenter) <= 1, `${state}: first line is centered with Send`);
+  }
 }
 
 async function run(engineName, engine) {
@@ -213,11 +244,26 @@ async function run(engineName, engine) {
     assert.match(await page.locator('#topics .topic-section').first().innerText(), /Mine again/);
     assert.equal(await page.locator('#topics [data-kind="question"] li').count(), 2, 'the lead\'s question survives');
 
+    const main = page.locator('#dock textarea');
+    const composeA = page.locator('#topics [data-key="compose-tp1"]');
+    await page.evaluate(() => document.fonts.ready);
+    await checkComposerLayout(page, 'empty', true);
+    await main.fill('First line');
+    await composeA.fill('First line');
+    assert.equal(await composeA.evaluate((el) => el === document.activeElement), true);
+    await checkComposerLayout(page, 'focused single line', true);
+    await main.press('Shift+Enter');
+    await composeA.press('Shift+Enter');
+    assert.equal(await composeA.inputValue(), 'First line\n');
+    await checkComposerLayout(page, 'multiline', false);
+    const longDraft = 'Long draft line\n'.repeat(30);
+    await main.fill(longDraft);
+    await composeA.fill(longDraft);
+    await checkComposerLayout(page, 'long multiline', false);
+
     // Send from topics while the lead's run is held: the main draft stays,
     // A then B (with an image) reach the lead's one conversation.
-    const main = page.locator('#dock textarea');
     await main.fill('my unsent main draft');
-    const composeA = page.locator('#topics [data-key="compose-tp1"]');
     await composeA.fill('What belongs on the board?');
     assert.match(await page.locator('#topics .topic-context').first().innerText(), /\[Topic tp1: Topics and tasks\]/);
     await composeA.press('Enter');
@@ -325,6 +371,12 @@ async function run(engineName, engine) {
     await page.locator('#topics .files-title', { hasText: '话题' }).waitFor();
     await page.click('#topics [data-key="topic-tp1"]');
     await page.locator('#topics .topic-heading', { hasText: '已确认的结论' }).waitFor();
+    const narrowCompose = page.locator('#topics [data-key="compose-tp1"]');
+    await main.fill('Short draft');
+    await narrowCompose.fill('Short draft');
+    await checkComposerLayout(page, 'narrow single line', true);
+    await main.fill('');
+    await narrowCompose.fill('');
     // As narrow as the board: the same windows fit either beside the conversation.
     const box = await page.locator('#topics').boundingBox();
     const mainBox = await page.locator('main.main').boundingBox();
