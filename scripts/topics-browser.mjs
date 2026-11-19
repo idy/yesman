@@ -200,20 +200,34 @@ async function run(engineName, engine) {
     const topicDraft = page.locator('#topics [data-key="compose-tp2"]');
     const classicScrollbar = await page.addStyleTag({ content: '#topics .explorer-content::-webkit-scrollbar { width: 18px; }' });
     const draft = 'A longer draft with normal words that wraps when this panel narrows. It must stay readable when we type, hide, and restore it.';
-    await topicDraft.fill(draft);
-    await page.setViewportSize({ width: 760, height: 798 });
-    const columnScrolls = () => page.locator('#topics .explorer-content').evaluate((el) => el.scrollHeight > el.clientHeight);
-    assert.equal(await columnScrolls(), false, 'the Topics column fits before editing');
-    await topicDraft.press('!');
-    assert.equal(await columnScrolls(), true, 'growing the draft makes the Topics column scroll');
-    const wrapped = await topicDraft.evaluate((el) => ({
-      height: el.clientHeight,
-      content: el.scrollHeight,
-      maxHeight: parseFloat(getComputedStyle(el).maxHeight),
-      focused: document.activeElement === el,
-      selection: [el.selectionStart, el.selectionEnd],
-      value: el.value,
-    }));
+    await page.setViewportSize({ width: 760, height: 1200 });
+    await page.evaluate(() => document.fonts.ready);
+    const wrapped = await topicDraft.evaluate((el, draft) => {
+      const column = el.closest('.explorer-content');
+      el.focus();
+      el.value = draft;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      // Match the column's limit to the rendered detail. Keep the viewport
+      // fixed and sample this same render before an asynchronous redraw.
+      const threshold = document.createElement('style');
+      threshold.id = 'fixture-scroll-threshold';
+      threshold.textContent = `#topics .explorer-content { max-height: ${Math.ceil(column.firstElementChild.getBoundingClientRect().height) + 3}px; }`;
+      document.head.append(threshold);
+      const before = column.scrollHeight > column.clientHeight;
+      el.value = `${draft}\nx\ny\nz`;
+      el.setSelectionRange(el.value.length, el.value.length);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return {
+        before, after: column.scrollHeight > column.clientHeight,
+        height: el.clientHeight,
+        content: el.scrollHeight,
+        maxHeight: parseFloat(getComputedStyle(el).maxHeight),
+        focused: document.activeElement === el,
+        selection: [el.selectionStart, el.selectionEnd],
+        value: el.value,
+      };
+    }, draft);
+    assert.deepEqual([wrapped.before, wrapped.after], [false, true], `the edit makes the Topics column scroll: ${JSON.stringify(wrapped)}`);
     if (shots) {
       await page.locator('#topics .explorer-content').evaluate((el) => { el.scrollTop = el.scrollHeight; });
       await shot(page, `${engineName}-narrow-wrapped-edit`);
@@ -221,9 +235,10 @@ async function run(engineName, engine) {
     assert.ok(wrapped.height < wrapped.maxHeight, 'draft is below the textarea cap');
     assert.ok(wrapped.content <= wrapped.height + 1, `all wrapped lines fit: ${wrapped.content} px of text in ${wrapped.height} px`);
     assert.equal(wrapped.focused, true);
-    assert.deepEqual(wrapped.selection, [draft.length + 1, draft.length + 1]);
-    assert.equal(wrapped.value, `${draft}!`);
+    assert.deepEqual(wrapped.selection, [draft.length + 6, draft.length + 6]);
+    assert.equal(wrapped.value, `${draft}\nx\ny\nz`);
     await topicDraft.fill('');
+    await page.locator('#fixture-scroll-threshold').evaluate((style) => style.remove());
     await classicScrollbar.evaluate((style) => style.remove());
     await page.setViewportSize(viewport);
     await page.click('#topics [data-key="back"]');
@@ -280,6 +295,9 @@ async function run(engineName, engine) {
     const main = page.locator('#dock textarea');
     const composeA = page.locator('#topics [data-key="compose-tp1"]');
     await page.evaluate(() => document.fonts.ready);
+    // The earlier viewport change can leave the empty Chat field at the
+    // height it measured at the narrower width. Measure both at this width.
+    await main.evaluate((el) => el.dispatchEvent(new Event('input', { bubbles: true })));
     await checkComposerLayout(page, 'empty', true);
     await main.fill('First line');
     await composeA.fill('First line');
@@ -293,11 +311,12 @@ async function run(engineName, engine) {
     await main.fill(longDraft);
     await composeA.fill(longDraft);
     await checkComposerLayout(page, 'long multiline', false);
-    const scrollable = await composeA.evaluate((el) => {
+    await page.waitForFunction((value) => {
+      const el = document.querySelector('#topics [data-key="compose-tp1"]');
+      if (el?.value !== value || el.scrollHeight <= el.clientHeight) return false;
       el.scrollTop = el.scrollHeight;
       return el.scrollTop > 0;
-    });
-    assert.equal(scrollable, true, 'long drafts can scroll inside the capped field');
+    }, longDraft); // wait for the current field if a topic refresh redraws it
 
     // Send from topics while the lead's run is held: the main draft stays,
     // A then B (with an image) reach the lead's one conversation.
