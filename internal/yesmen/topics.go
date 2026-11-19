@@ -414,7 +414,7 @@ func (s *Store) openTopicsDir(y Yesman, create bool) (*os.Root, error) {
 		return nil, fail(err)
 	}
 	defer store.Close()
-	ws, err := openPlainDir(store, y.Name)
+	ws, err := openPlainDir(store, filepath.Base(y.Path))
 	if err != nil {
 		return nil, fail(err)
 	}

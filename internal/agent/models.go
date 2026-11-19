@@ -71,12 +71,17 @@ func ParseChoice(key string) (Choice, bool) {
 // yesman's extension, to read its authenticated catalog of models. It
 // loads the user's own extensions, which may add providers.
 func (m *Manager) Catalog(ctx context.Context, dir string) ([]Model, error) {
-	env := append(os.Environ(), m.cfg.Env...)
-	path, args := m.cfg.Pi, []string{"--mode", "rpc", "--no-session"}
-	if m.cfg.Command != nil {
+	return m.cfg.Catalog(ctx, dir)
+}
+
+// Catalog also permits validating a run configuration before hiring a workspace.
+func (cfg Config) Catalog(ctx context.Context, dir string) ([]Model, error) {
+	env := append(os.Environ(), cfg.Env...)
+	path, args := cfg.Pi, []string{"--mode", "rpc", "--no-session"}
+	if cfg.Command != nil {
 		var prefix []string
 		var err error
-		path, prefix, err = m.cfg.Command(ctx)
+		path, prefix, err = cfg.Command(ctx)
 		if err != nil {
 			return nil, err
 		}

@@ -70,7 +70,7 @@ func openSchedules(y yesmen.Yesman, create bool) (*os.Root, error) {
 func openWorkspace(y yesmen.Yesman) (*os.Root, error) {
 	path := filepath.Clean(y.Path)
 	name := filepath.Base(path)
-	if name != y.Name || yesmen.ValidName(name) != nil {
+	if !y.TaskRoot && (name != y.Name || yesmen.ValidName(name) != nil) {
 		return nil, errUnsafePath{y.Path}
 	}
 	store, err := os.OpenRoot(filepath.Dir(path))

@@ -63,6 +63,7 @@ type Server struct {
 	GitHubApp *githubapp.Manager
 
 	url           string
+	http          *http.Server
 	worktreeMu    sync.Mutex
 	worktreeLocks map[string]*sync.Mutex // serialize checkout lifecycle and managed file I/O per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
@@ -81,16 +82,27 @@ type Server struct {
 }
 
 // Start listens on a loopback port and serves in the background.
-func (s *Server) Start() error {
+func (s *Server) Start() error { return s.StartWith(nil) }
+
+// StartWith allows the agent manager to use the assigned port and attach its
+// authenticator before the listener serves its first request.
+func (s *Server) StartWith(attach func(string)) error {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
 	}
 	s.url = "http://" + ln.Addr().String()
+	if attach != nil {
+		attach(s.url)
+	}
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	s.http = srv
 	go func() { _ = srv.Serve(ln) }()
 	return nil
 }
+
+// Shutdown closes the listener and waits for requests already serving.
+func (s *Server) Shutdown(ctx context.Context) error { return s.http.Shutdown(ctx) }
 
 // URL is the address the API serves at, after Start.
 func (s *Server) URL() string { return s.url }
@@ -862,7 +874,11 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	}
 
 	w("\n## Workspace\n\n")
-	w("Your working directory %s is this yesman's workspace. It is not a git repository: each repository is a worktree in a subdirectory, checked out of yesman's shared repo pool. Run git inside a worktree or with `git -C <dir>`.\n", y.Path)
+	if y.TaskRoot {
+		w("Your working directory %s is the project directory supplied by the user. The lead and workers share its files. Workers can edit the supplied project directly. Coordinate changes to shared files.\n", y.Path)
+	} else {
+		w("Your working directory %s is this yesman's workspace. It is not a git repository: each repository is a worktree in a subdirectory, checked out of yesman's shared repo pool. Run git inside a worktree or with `git -C <dir>`.\n", y.Path)
+	}
 	w("- Get a worktree with yesman_checkout, never with git clone or git worktree add. Each worktree is on its own branch; ")
 	w("give every piece of parallel work (each PR) its own worktree, and never edit a worktree another agent is using.\n")
 	w("- Never write to the pool (%s). Commits, pushes and pull requests happen in worktrees as usual.\n", p.Root())

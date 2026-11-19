@@ -24,7 +24,6 @@ import (
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/githubapp"
-	"github.com/idy/yesman/internal/piruntime"
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/restart"
 	"github.com/idy/yesman/internal/schedule"
@@ -44,6 +43,12 @@ var extensionSource []byte
 var appName = "yesman"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "run" && !githubapp.IsShim(os.Args) {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		code := runCLI(ctx, os.Args[2:], os.Stdin, os.Stdout, os.Stderr)
+		cancel()
+		os.Exit(code)
+	}
 	// MyGo's binding generator only needs method types. Do not initialize
 	// a user's storage, vault, agents, or profile while inspecting that API.
 	if os.Getenv("MYGO_GENERATE") != "" {
@@ -77,14 +82,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	lock, err := h.Lock()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer lock.Close()
 	if err := h.Ensure(); err != nil {
-		log.Fatal(err)
-	}
-	extension := filepath.Join(h.Runtime(), "pi", "yesman.ts")
-	if err := os.MkdirAll(filepath.Dir(extension), 0o755); err != nil {
-		log.Fatal(err)
-	}
-	if err := os.WriteFile(extension, extensionSource, 0o644); err != nil {
 		log.Fatal(err)
 	}
 
@@ -92,23 +95,13 @@ func main() {
 	if err := a.yesmen.EnsureTaskLogs(); err != nil {
 		log.Print("workspace working logs: ", err)
 	}
-	a.pi, a.piErr = findPi()
-	var piCommand func(context.Context) (string, []string, error)
-	var managedRuntime *piruntime.Runtime
-	if os.Getenv("YESMAN_PI") == "" && (a.piErr != nil || piruntime.OfficialNPM(a.pi)) {
-		a.managedPi = true
-		managed, err := piruntime.New(h.Runtime())
-		a.piErr = err
-		if err == nil {
-			a.pi = managed.Description()
-			piCommand = managed.Command
-			managedRuntime = managed
-			a.piRuntime = managed
-		}
+	cfg, err := a.agentConfig()
+	if err != nil {
+		log.Fatal(err)
 	}
 	a.runPi = runPi(a.pi, h.Runtime())
-	if piCommand != nil {
-		a.runPi = runPiCommand(piCommand, h.Runtime())
+	if cfg.Command != nil {
+		a.runPi = runPiCommand(cfg.Command, h.Runtime())
 	}
 	a.piJobs = newPiJobs(a.runPi, func(j PiJobs) { _ = piJobsEvent.Broadcast(j) })
 	a.settings = loadSettings(h.Settings())
@@ -138,27 +131,7 @@ func main() {
 	a.variables = secrets.NewVariables(h.Variables())
 	a.keychain = appKeychain()
 	go a.unlockFromKeychain() // the system may ask the user first
-	gh, ghErr := exec.LookPath("gh")
-	if ghErr != nil {
-		gh = ""
-	} else if absolute, err := filepath.Abs(gh); err == nil {
-		gh = absolute
-	} else {
-		gh = ""
-	}
-	executable, _ := os.Executable()
-	shim, routingErr := a.prepareGitHubAppRouting(gh, executable)
-	if routingErr != nil {
-		log.Print("GitHub App command routing is unavailable: ", routingErr)
-	}
-	routingRequired := ""
-	if shim == "" && a.githubApp.RequiresRouting() {
-		routingRequired = "1"
-	}
-	if a.githubApp.Configured() {
-		go func() { _ = a.githubApp.Prepare("") }()
-	}
-	srv := &server.Server{Pool: a.pool, Yesmen: a.yesmen, Changed: a.notifyChanged, AddRepo: a.clones.Add,
+	srv := &server.Server{Changed: a.notifyChanged, AddRepo: a.clones.Add,
 		BoardChanged: func(yesman string) {
 			_ = boardEvent.Broadcast(yesman)
 			if a.agents != nil {
@@ -168,26 +141,21 @@ func main() {
 		DeliveryConfirmed: a.chimes.Notify,
 		NeedsYouChanged:   func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
 		TopicsChanged:     a.topicsChanged,
-		Secrets:           a.vault, Variables: a.variables, Crew: a.leadCrew, GitHubApp: a.githubApp}
-	if err := srv.Start(); err != nil {
+		Crew:              a.leadCrew}
+	var schedules atomic.Pointer[schedule.Service]
+	cfg.OnEvent = func(e agent.Event) {
+		_ = agentEvent.Broadcast(e)
+		if s := schedules.Load(); s != nil {
+			s.OnAgentEvent(e) // a scheduled run's receipt
+		}
+	}
+	cfg.OnChange = a.agentsChanged
+	if err := a.serveAgents(srv, cfg); err != nil {
 		log.Fatal(err)
 	}
-	var schedules atomic.Pointer[schedule.Service]
-	a.agents = agent.New(agent.Config{
-		Pi:        a.pi,
-		Command:   piCommand,
-		Extension: extension,
-		Env:       []string{"YESMAN_API=" + srv.URL(), "YESMAN_HOME=" + h.Root, "YESMAN_GH_SHIM=" + shim, "YESMAN_GH_REAL=" + gh, "YESMAN_GH_REQUIRED=" + routingRequired},
-		Yesmen:    a.yesmen,
-		OnEvent: func(e agent.Event) {
-			_ = agentEvent.Broadcast(e)
-			if s := schedules.Load(); s != nil {
-				s.OnAgentEvent(e) // a scheduled run's receipt
-			}
-		},
-		OnChange: a.agentsChanged,
-	})
-	srv.Agents = a.agents
+	if a.githubApp.Configured() {
+		go func() { _ = a.githubApp.Prepare("") }()
+	}
 	// Scheduled tasks run while the app runs, in the tray too; one app per
 	// data directory runs them.
 	a.schedules = schedule.New(schedule.Config{
@@ -229,8 +197,8 @@ func main() {
 		a.schedules.Close() // no new run starts while the agents stop
 		a.stopGitHubAppSetup()
 		a.githubApp.Close()
-		if managedRuntime != nil {
-			managedRuntime.Close()
+		if a.piRuntime != nil {
+			a.piRuntime.Close()
 		}
 		// A restart records the agents it cuts short right before they
 		// stop, closing the agents to new starts and reports; once they

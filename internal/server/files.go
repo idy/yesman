@@ -157,14 +157,20 @@ func (s *Server) fileGrant(c caller, y yesmen.Yesman, target string, dir bool) (
 			}
 		}
 	}
+	var recordedDir bool
 	if len(rest) > 0 && s.Pool != nil {
-		if records, err := s.Yesmen.WorktreeRecords(y.Name); err == nil {
+		records, err := s.Yesmen.WorktreeRecords(y.Name)
+		if err != nil && y.TaskRoot {
+			return fileGrant{}, nil, fmt.Errorf("check task root worktrees: %w", err)
+		}
+		if err == nil {
 			// The latest record of the directory is the checkout there now.
 			for i := len(records) - 1; i >= 0; i-- {
 				rec := records[i]
 				if !sameName(rec.Dir, rest[0]) {
 					continue
 				}
+				recordedDir = true
 				if rec.Removed || rec.Owner != c.agent.Name || !rec.OwnerSince.Equal(c.agent.Since) || (rec.Purpose != "author" && rec.Purpose != "release") || !plainComponent(rec.Dir) || rec.ID == "" {
 					break
 				}
@@ -181,6 +187,17 @@ func (s *Server) fileGrant(c caller, y yesmen.Yesman, target string, dir bool) (
 			}
 		}
 	}
+	// An explicitly attached task directory grants ordinary project files to
+	// the crew. Recorded checkout names and all management paths retain their
+	// existing rules. workspaceRelative has already rejected .git components.
+	if y.TaskRoot && !recordedDir && s.Yesmen.TaskRootInfo() != nil {
+		for _, part := range rest {
+			if strings.EqualFold(part, ".yesman") || strings.EqualFold(part, ".git") {
+				return fileGrant{}, nil, fmt.Errorf("%s is a protected project path", target)
+			}
+		}
+		return fileGrant{created: s.Yesmen.TaskRootInfo()}, rest, nil
+	}
 	where := "your own worktrees (author or release checkouts yesman_checkout made for you)"
 	if haveTemp {
 		where += fmt.Sprintf(", %s and %s", filepath.Join(y.Path, filepath.FromSlash(scratch.Rel)), filepath.Join(y.Path, filepath.FromSlash(evidence.Rel)))
@@ -195,7 +212,11 @@ func (s *Server) commitFile(y yesmen.Yesman, g fileGrant, sub []string, req file
 		return nil, err
 	}
 	defer ws.Close()
-	root, err := safefs.OpenPath(ws, strings.Split(g.rel, "/"), nil)
+	var parts []string
+	if g.rel != "" {
+		parts = strings.Split(g.rel, "/")
+	}
+	root, err := safefs.OpenPath(ws, parts, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", g.rel, err)
 	}

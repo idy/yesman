@@ -344,6 +344,37 @@ func (d *Dir) Cancel(id string) error {
 	return r.Remove(intentName)
 }
 
+// PendingFor reports whether a desktop restart still owns work for this exact
+// hire. A single-workspace client only inspects the record. The desktop claims
+// it once for all workspaces, including provisional records that hold a pause.
+func (d *Dir) PendingFor(name string, since time.Time) (bool, error) {
+	r, err := d.root(false)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer r.Close()
+	data, err := readRegular(r, intentName, maxIntentBytes)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var in Intent
+	if decodeStrict(data, &in) != nil || in.Validate(d.now()) != nil {
+		return false, nil // Claim cannot dispatch this record
+	}
+	for _, a := range in.Agents {
+		if a.Yesman == name && a.WorkspaceHiredAt.Equal(since) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // Claim takes the intent a restart left, once: the file is moved aside
 // before it is read, so that no later start sees it again. found is false
 // when there was none. An intent that cannot be used is kept as

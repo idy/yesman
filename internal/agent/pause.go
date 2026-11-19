@@ -590,7 +590,7 @@ func (m *Manager) resumeByUser(id string) func() {
 			go send()
 		}
 		if len(deferred) > 0 {
-			go m.continueTasks(yesman)
+			m.TasksChanged(yesman)
 		}
 	}
 }

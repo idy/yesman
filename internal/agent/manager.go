@@ -140,6 +140,9 @@ type Config struct {
 	// Command resolves a managed runtime outside Manager locks. Nil preserves
 	// the executable supplied by callers and tests.
 	Command func(context.Context) (string, []string, error)
+	// ExactModel pins each process, resumed sessions included. A nonzero
+	// choice must match Pi's effective startup state before it receives work.
+	ExactModel Choice
 	// Extension is the path of yesman's pi extension, loaded with -e.
 	Extension string
 	// Env is added to every agent's environment, after the app's own.
@@ -162,8 +165,8 @@ type Config struct {
 
 // Manager runs agents.
 type Manager struct {
-	cfg Config
-
+	cfg    Config
+	run    *singleRun // non-nil only for a dedicated single-message client, guarded by mu
 	mu     sync.Mutex
 	agents map[string]*agent
 	// restartRuns binds the checkpoint to each listed report generation.
@@ -274,16 +277,21 @@ func New(cfg Config) *Manager {
 	if cfg.OnEvent == nil {
 		cfg.OnEvent = func(Event) {}
 	}
-	if cfg.OnChange == nil {
-		cfg.OnChange = func([]Info) {}
-	}
-	m := &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}, shutdown: make(chan struct{}), notify: make(chan struct{}, 1)}
+	m := &Manager{cfg: cfg, agents: map[string]*agent{}, tokens: map[string]string{}, shutdown: make(chan struct{})}
 	m.callsDone = sync.NewCond(&m.mu)
-	go func() {
-		for range m.notify {
-			m.cfg.OnChange(m.List())
-		}
-	}()
+	if cfg.OnChange != nil {
+		m.notify = make(chan struct{}, 1)
+		go func() {
+			for {
+				select {
+				case <-m.notify:
+					cfg.OnChange(m.List())
+				case <-m.shutdown:
+					return
+				}
+			}
+		}()
+	}
 	return m
 }
 
@@ -631,6 +639,9 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 		return nil, modelState{}, err
 	}
 	args := []string{"--mode", "rpc", "--session-dir", sessions, "-e", m.cfg.Extension}
+	if pin := m.cfg.ExactModel; !pin.IsZero() {
+		args = append(args, "--provider", pin.Provider, "--model", pin.Model, "--thinking", pin.Effort)
+	}
 	resumed := hasSession(sessions)
 	if resumed {
 		args = append(args, "--continue")
@@ -692,6 +703,16 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	ctx, cancel := context.WithTimeout(startContext, 60*time.Second)
 	defer cancel()
 	state, err := p.startupState(ctx)
+	if pin := m.cfg.ExactModel; err == nil && !pin.IsZero() {
+		err = checkExactModel(state, pin)
+		if err != nil {
+			m.mu.Lock()
+			if m.run != nil {
+				m.run.err = fmt.Errorf("%s: %w", a.info.ID, err)
+			}
+			m.mu.Unlock()
+		}
+	}
 	if err != nil {
 		p.stop(2 * time.Second)
 		m.retireCredential(a, p)
@@ -706,7 +727,7 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 	// A lead's new session starts as the model chosen when its yesman was
 	// hired; a resumed one keeps the model it was using. Workers are given
 	// theirs by StartWorkerAs.
-	if c, ok := ParseChoice(y.Model); ok && role == RoleLead && !resumed {
+	if c, ok := ParseChoice(y.Model); m.cfg.ExactModel.IsZero() && ok && role == RoleLead && !resumed {
 		// A model pi no longer has must not keep the lead from starting:
 		// it runs as pi's own default instead.
 		if err := applyChoice(ctx, p, c); err != nil {
@@ -723,6 +744,7 @@ func (m *Manager) spawn(startContext context.Context, a *agent, y yesmen.Yesman,
 // process's reader, so it must not wait for that process's answers.
 func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 	raw = p.origins.observe(kind, raw)
+	m.observeRun(a, p, kind, raw)
 	m.observeNativeInput(a, p, kind, raw)
 	m.observeDelivery(a, p, kind, raw)
 	m.follow(a, p, kind, raw)
@@ -761,6 +783,9 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 		// The run that settled: its report may close the worker only while
 		// nothing was given to it since and no later run settled.
 		run := runMark{p: p, inbox: a.inbox, run: a.settled, report: a.reportRun}
+		if !worker && !e.Aborted && !retiring {
+			m.scheduleTasksLocked(a.info.Yesman)
+		}
 		m.mu.Unlock()
 		m.changed()
 		go func() {
@@ -770,11 +795,7 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			defer a.modelMu.Unlock()
 			_, _ = m.syncModel(ctx, a, p)
 		}()
-		if !worker && !e.Aborted && !retiring {
-			// A lead run the user stopped is theirs: it was recorded as a
-			// pause by AbortByUser, and nothing is evaluated for it.
-			go m.continueTasks(a.info.Yesman)
-		} else if handoff {
+		if handoff {
 			go func() {
 				defer m.handoffDone(a)
 				if !e.Aborted {
@@ -888,20 +909,23 @@ func (m *Manager) watch(a *agent, p *proc) {
 	}
 	a.info.Dialog, a.info.UpdatedAt = nil, time.Now()
 	worker, detail, since := a.info.Role == RoleWorker, a.info.Detail, a.info.Since
+	if failed && worker {
+		a.reports++ // its failure notice can wake the lead, just like a final report
+	} else if failed {
+		m.scheduleTasksLocked(a.info.Yesman)
+	}
 	m.mu.Unlock()
 	m.changed()
 	if failed && worker {
 		go func() {
+			defer m.handoffDone(a)
 			// Recorded for its generation, so that the failure outlives a
 			// restart and is told about once.
 			if err := m.cfg.Yesmen.FailWorker(a.info.Yesman, a.info.Name, since, time.Now().UTC()); err != nil {
 				log.Printf("yesman: record that %s failed: %v", a.info.ID, err)
 			}
 			m.tellLead(a, "failed", fmt.Sprintf("[yesman] Worker %q stopped unexpectedly (%s). It keeps its session; message it to start it again.", a.info.Name, clip(strings.Join(strings.Fields(detail), " "))))
-			m.continueTasks(a.info.Yesman)
 		}()
-	} else if failed {
-		go m.continueTasks(a.info.Yesman)
 	}
 }
 
@@ -1182,9 +1206,15 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 						return err
 					}
 				}
+				m.runPrompt(a, origin, 1)
 				admitted = true
 				return nil
 			}, func(r response) {
+				if !r.Success {
+					m.runPrompt(a, origin, -1)
+				} else {
+					m.runHandled(a, r)
+				}
 				answered = true
 				p.origins.answered(origin, behavior, &r)
 				m.deliveryResponse(a, p, messageID, behavior, r)
@@ -1221,11 +1251,11 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 		// A lead that settled while this prompt was still unanswered was
 		// not yet free to hear about its tasks: it is now.
 		settled := a.prompts == 0 && a.info.Role == RoleLead && a.info.Status == Idle && a.inbox == a.settledInbox && !a.retiring
+		if settled {
+			m.scheduleTasksLocked(a.info.Yesman)
+		}
 		m.mu.Unlock()
 		a.modelMu.Unlock()
-		if settled {
-			go m.continueTasks(a.info.Yesman)
-		}
 		if !closeAt.IsZero() {
 			go m.closeWhenIdle(a, closeMark, closeAt)
 		}
@@ -1501,11 +1531,22 @@ func newToken() string {
 
 // StopAll permanently closes the manager and stops every agent, for quitting.
 func (m *Manager) StopAll() {
-	m.mu.Lock()
+	if err := m.Shutdown(); err != nil {
+		log.Print(err)
+	}
+}
+
+func (m *Manager) closeLocked() {
 	if !m.closed {
 		m.closed = true
 		close(m.shutdown)
 	}
+}
+
+// Shutdown closes admission, joins child processes and drains receipt writers.
+func (m *Manager) Shutdown() error {
+	m.mu.Lock()
+	m.closeLocked()
 	for _, c := range m.continuations {
 		if c.timer != nil {
 			c.timer.Stop()
@@ -1556,14 +1597,21 @@ func (m *Manager) StopAll() {
 		}
 	}
 	m.mu.Unlock()
+	results := make(chan error, len(writers))
 	for _, writer := range writers {
 		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			writer.close(ctx)
+			results <- writer.close(ctx)
 		})
 	}
 	wg.Wait()
+	close(results)
+	var errs []error
+	for err := range results {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func (m *Manager) running(id string) *proc {
@@ -1586,6 +1634,12 @@ func (m *Manager) StartWorker(ctx context.Context, yesman, name, title, task str
 func (m *Manager) StartWorkerAs(ctx context.Context, yesman, name, title, task string, as Choice) (Info, error) {
 	if strings.TrimSpace(task) == "" {
 		return Info{}, errors.New("a worker needs a task")
+	}
+	if pin := m.cfg.ExactModel; !pin.IsZero() {
+		if !as.IsZero() && as != pin {
+			return Info{}, fmt.Errorf("this run requires %s", pin)
+		}
+		as = Choice{} // spawn pins and verifies every process before input
 	}
 	title = strings.Join(strings.Fields(title), " ")
 	if n := utf8.RuneCountInString(title); n > titleLimit {
@@ -1687,10 +1741,10 @@ func (m *Manager) handoffDone(a *agent) {
 	a.reports--
 	lead := m.agents[ID(a.info.Yesman, yesmen.LeadName)]
 	current := !a.retiring && (lead == nil || lead.workspaceSince.IsZero() || lead.workspaceSince.Equal(a.workspaceSince))
-	m.mu.Unlock()
 	if current {
-		go m.continueTasks(a.info.Yesman)
+		m.scheduleTasksLocked(a.info.Yesman)
 	}
+	m.mu.Unlock()
 }
 
 // reportToLead hands a worker's final message to its lead, which starts a

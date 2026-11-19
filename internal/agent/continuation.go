@@ -65,7 +65,20 @@ type continuation struct {
 }
 
 // TasksChanged tells the manager that a yesman's board changed.
-func (m *Manager) TasksChanged(yesman string) { go m.continueTasks(yesman) }
+func (m *Manager) TasksChanged(yesman string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scheduleTasksLocked(yesman)
+}
+
+// Reserve before publishing the state that triggered this evaluation. An
+// observer of the whole workspace can then see pending notices even while
+// their goroutine has yet to start.
+func (m *Manager) scheduleTasksLocked(yesman string) {
+	if c := m.reserveEvaluationLocked(yesman); c != nil {
+		go m.evaluateUntilCurrent(yesman, c)
+	}
+}
 
 // HoldContinuations reserves startup for explicit restart recovery. Call before
 // starting schedulers or agents. Releasing it evaluates all work once; events
@@ -93,7 +106,7 @@ func (m *Manager) Resume() {
 		return
 	}
 	for _, y := range ys {
-		go m.continueTasks(y.Name)
+		m.TasksChanged(y.Name)
 	}
 }
 
@@ -101,9 +114,16 @@ func (m *Manager) Resume() {
 // runs makes it run again when it ends.
 func (m *Manager) continueTasks(yesman string) {
 	m.mu.Lock()
+	c := m.reserveEvaluationLocked(yesman)
+	m.mu.Unlock()
+	if c != nil {
+		m.evaluateUntilCurrent(yesman, c)
+	}
+}
+
+func (m *Manager) reserveEvaluationLocked(yesman string) *continuation {
 	if m.closed || m.recovering {
-		m.mu.Unlock()
-		return
+		return nil
 	}
 	if m.continuations == nil {
 		m.continuations = map[string]*continuation{}
@@ -115,12 +135,14 @@ func (m *Manager) continueTasks(yesman string) {
 	}
 	if c.running {
 		c.again = true
-		m.mu.Unlock()
-		return
+		return nil
 	}
 	c.running = true
 	m.evaluations.Add(1)
-	m.mu.Unlock()
+	return c
+}
+
+func (m *Manager) evaluateUntilCurrent(yesman string, c *continuation) {
 	defer m.evaluations.Done()
 	for {
 		m.evaluate(yesman, c)
@@ -160,8 +182,8 @@ func (m *Manager) later(yesman string, c *continuation, d time.Duration) {
 	c.timer = time.AfterFunc(d, func() {
 		m.mu.Lock()
 		c.timer = nil
+		m.scheduleTasksLocked(yesman)
 		m.mu.Unlock()
-		m.continueTasks(yesman)
 	})
 }
 

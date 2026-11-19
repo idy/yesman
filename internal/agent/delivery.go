@@ -130,9 +130,7 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 // SendHuman gives older desktop Send callers the same native slot policy as
 // the composer. Callers needing retry safety provide their own ID via Submit.
 func (m *Manager) SendHuman(ctx context.Context, id, text string, images []Image) error {
-	var nonce [18]byte
-	rand.Read(nonce[:])
-	d, err := m.Submit(ctx, id, fmt.Sprintf("%012x%x", time.Now().UnixMilli(), nonce), text, images)
+	d, err := m.Submit(ctx, id, NewSubmissionID(), text, images)
 	if err != nil {
 		return err
 	}
@@ -143,6 +141,13 @@ func (m *Manager) SendHuman(ctx context.Context, id, text string, images []Image
 		return errors.New("Delivery could not be confirmed. Check the conversation before sending again.")
 	}
 	return nil
+}
+
+// NewSubmissionID returns a fresh timestamped ID for one user message.
+func NewSubmissionID() string {
+	var nonce [18]byte
+	rand.Read(nonce[:])
+	return fmt.Sprintf("%012x%x", time.Now().UnixMilli(), nonce)
 }
 
 // Submit registers a stable client ID before dispatch. Repeating an uncertain

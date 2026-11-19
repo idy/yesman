@@ -59,6 +59,27 @@ func TestClaimOnce(t *testing.T) {
 	}
 }
 
+func TestPendingForInspectsOnlyThisHire(t *testing.T) {
+	d := dirAt(t, t0)
+	in := intent(NewID())
+	if err := d.Write(in); err != nil {
+		t.Fatal(err)
+	}
+	since := in.Agents[0].WorkspaceHiredAt
+	for _, tc := range []struct {
+		name  string
+		since time.Time
+		want  bool
+	}{{"demo", since, true}, {"demo", t0, false}, {"another", since, false}} {
+		if found, err := d.PendingFor(tc.name, tc.since); err != nil || found != tc.want {
+			t.Fatalf("PendingFor(%s, %s) = %v, %v", tc.name, tc.since, found, err)
+		}
+	}
+	if got, _, found, _, err := d.Claim(); err != nil || !found || got.ID != in.ID {
+		t.Fatalf("desktop could not claim its original intent: %v %v", found, err)
+	}
+}
+
 func TestNoIntent(t *testing.T) {
 	d := dirAt(t, t0)
 	if _, _, found, _, err := d.Claim(); found || err != nil {

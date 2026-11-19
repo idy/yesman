@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/idy/yesman/internal/filelock"
 )
 
 // Home is the root of yesman's data.
@@ -58,6 +60,15 @@ func (h Home) Variables() string { return filepath.Join(h.Root, "variables.yaml"
 
 // Settings is the file of the user's choices in Settings.
 func (h Home) Settings() string { return filepath.Join(h.Root, "settings.json") }
+
+// Lock reserves the data directory before either frontend begins writing.
+func (h Home) Lock() (*os.File, error) {
+	f, err := filelock.Try(filepath.Join(h.Runtime(), "profile.lock"))
+	if err != nil {
+		return nil, fmt.Errorf("lock Yes Man data folder %s: %w", h.Root, err)
+	}
+	return f, nil
+}
 
 // Ensure creates the directories.
 func (h Home) Ensure() error {

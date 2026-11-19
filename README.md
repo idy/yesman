@@ -256,6 +256,37 @@ go run .
 | `YESMAN_WEB_DIR` | Serve the page from this directory instead of the embedded copy, to edit it without rebuilding |
 | `YESMAN_HIDDEN` | Start in the tray without opening the window |
 
+## Run one message from the shell
+
+`yesman run` sends one UTF-8 message to a named workspace's Lead. The Lead has its usual tools, board, crew and worker reporting. The command runs headlessly and prints one JSON object to stdout. Diagnostics and `--help` go to stderr.
+
+```sh
+# Create a named workspace in a private profile, using an existing project directory.
+YESMAN_HOME="$profile" PI_CODING_AGENT_DIR="$pi_config" yesman run \
+  --workspace example --new --root "$project" --prompt-file instruction.md \
+  --provider "$provider" --model "$full_model_id" --effort max --timeout 45m >result.json
+
+# Resume its Lead conversation, workers and board. Stdin is the default.
+printf 'Summarize the result.\n' | YESMAN_HOME="$profile" PI_CODING_AGENT_DIR="$pi_config" \
+  yesman run --workspace example
+```
+
+`--workspace` takes the stable workspace ID. `--new` requires a free name. Without `--root`, a fresh hire uses the usual `yesmen/<name>` location. With `--root`, supply an existing directory, separate from the data folder, with no `.yesman` entry. All agents use that directory as their cwd. Workers can edit the supplied project files directly. The profile reserves the name in `yesmen/<name>/run-root.json` and keeps the external project outside desktop dismissal. Use the same profile and name to resume. Keep both the registration and the project's `.yesman` directory. `--prompt-file -` reads stdin. File and stdin input preserve whitespace and line endings.
+
+Specify `--provider`, `--model` and `--effort` together to give the whole team one crew option for this invocation. Yes Man checks the exact authenticated Pi catalog entry and each process's effective selection before sending work, including on resume. Supply provider configuration and authentication in the chosen Pi profile. The flags apply to this process. Omitting these flags uses the saved crew. In a profile without a configured crew, resuming a pinned hire reuses its recorded choice.
+
+| JSON `status` | Exit | Meaning |
+| --- | ---: | --- |
+| `completed` | 0 | Pi recorded the submission and the Lead, its workers, queued messages, reports and automatic board notices settled. Read `reply` and the board for the outcome of the work. |
+| `needs_input` | 2 | A Lead dialog, a worker question handed to the user, or an open Needs You handoff requires attention. The result includes `dialogs` or `handoffs`. |
+| `timed_out` | 124 | The whole-run deadline expired (default `30m`). |
+| `cancelled` | 130 | The process received an interrupt/termination signal or Pi aborted the Lead's run. |
+| `failure` | 1 | Configuration, submission, agent execution or shutdown failed. Inspect `error`. |
+
+The result includes `workspace`, `root`, `submissionId` and the last visible Lead `reply` when available. The native session JSONL, submission receipts and board are under `root/.yesman`. Each exit closes the run's Pi processes and drains receipts. An interrupted live dialog is described in the output. A later invocation resumes by sending a new message. Free-text questions appear in `reply`. Machine-readable human waits use the structured dialog and handoff tools.
+
+Close the desktop before using the same data folder. Each frontend takes a profile lock. Use a separate `YESMAN_HOME` when an older desktop or another workspace needs to run alongside the CLI. The desktop owns scheduled jobs and explicit restart checkpoints. Complete a pending desktop restart before resuming a workspace named in its checkpoint. The Yes Man secrets vault stays locked in a headless run. Workers have ordinary OS permissions, so use an appropriate container or operating-system account for untrusted projects.
+
 ## Test
 
 ```bash

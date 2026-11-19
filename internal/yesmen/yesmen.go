@@ -61,6 +61,8 @@ type Yesman struct {
 	// was hired: provider/model:effort, or provider/model at pi's default
 	// effort. Empty for yesmen hired before there was a choice.
 	Model string `json:"model,omitempty"`
+	// TaskRoot is set only by the Store explicitly bound to user-provided files.
+	TaskRoot bool `json:"-"`
 }
 
 // Label is the user-visible name, including for workspaces hired before renaming.
@@ -133,6 +135,7 @@ func (w Worker) Subject(b Board) string {
 // Store keeps the workspaces under a directory.
 type Store struct {
 	root, archive string
+	attached      *rootBinding // immutable, set only on a single-workspace CLI Store
 	mu            sync.Mutex
 	metaMu        sync.Mutex // serialize metadata reads with atomic replacement on Windows
 
@@ -272,6 +275,12 @@ func (s *Store) get(name string) (Yesman, error) {
 		return Yesman{}, err
 	}
 	y := Yesman{Name: name, Path: filepath.Join(s.root, name)}
+	if s.attached != nil {
+		if name != s.attached.Name {
+			return Yesman{}, fmt.Errorf("no yesman named %s", name)
+		}
+		y.Path, y.TaskRoot = s.attached.Path, true
+	}
 	if _, err := os.Stat(y.MetaDir()); err != nil {
 		return Yesman{}, fmt.Errorf("no yesman named %s", name)
 	}
@@ -280,7 +289,11 @@ func (s *Store) get(name string) (Yesman, error) {
 		DisplayName string    `json:"displayName"`
 		Model       string    `json:"model"`
 	}
-	if err := readYesmanMetadata(filepath.Join(y.MetaDir(), "yesman.json"), &meta); err != nil {
+	if s.attached != nil {
+		if err := s.attached.readMeta(&meta); err != nil {
+			return Yesman{}, err
+		}
+	} else if err := readYesmanMetadata(filepath.Join(y.MetaDir(), "yesman.json"), &meta); err != nil {
 		var issue *MetadataError
 		if errors.As(err, &issue) {
 			issue.Name = name
@@ -289,6 +302,9 @@ func (s *Store) get(name string) (Yesman, error) {
 	}
 	y.HiredAt, y.Model = meta.HiredAt, meta.Model
 	y.DisplayName = meta.DisplayName
+	if s.attached != nil && !y.HiredAt.Equal(s.attached.HiredAt) {
+		return Yesman{}, errors.New("the attached workspace was replaced")
+	}
 	return y, nil
 }
 
@@ -340,6 +356,13 @@ func (s *Store) Rename(name, label string) (Yesman, error) {
 // reported separately as MetadataErrors alongside these results; an affected
 // workspace is never returned with a fabricated zero-metadata identity.
 func (s *Store) List() ([]Yesman, error) {
+	if s.attached != nil {
+		y, err := s.Get(s.attached.Name)
+		if err != nil {
+			return nil, err
+		}
+		return []Yesman{y}, nil
+	}
 	entries, err := os.ReadDir(s.root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -378,6 +401,9 @@ func (s *Store) List() ([]Yesman, error) {
 // went. It waits for work inside Use to finish, and runs before, when not
 // nil, while none can start, just before the move.
 func (s *Store) Archive(name string, before func(Yesman) error) (string, error) {
+	if s.attached != nil {
+		return "", errors.New("an attached task root cannot be archived")
+	}
 	if err := ValidName(name); err != nil {
 		return "", err
 	}

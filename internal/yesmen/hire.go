@@ -110,16 +110,27 @@ func initializeHire(y Yesman) (_ Yesman, err error) {
 	defer os.RemoveAll(stage)
 	staged := y
 	staged.Path = stage
-	for _, dir := range []string{staged.KnowledgeDir(), filepath.Join(staged.MetaDir(), "sessions")} {
+	if err := writeHireFiles(staged); err != nil {
+		return Yesman{}, err
+	}
+	if err := os.Rename(staged.MetaDir(), y.MetaDir()); err != nil {
+		return Yesman{}, err
+	}
+	return y, nil
+}
+
+// writeHireFiles initializes only the newly reserved metadata directory.
+func writeHireFiles(y Yesman) error {
+	for _, dir := range []string{y.KnowledgeDir(), filepath.Join(y.MetaDir(), "sessions")} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return Yesman{}, err
+			return err
 		}
 	}
-	if err := os.WriteFile(filepath.Join(staged.KnowledgeDir(), "INDEX.md"), []byte(indexTemplate), 0o644); err != nil {
-		return Yesman{}, err
+	if err := os.WriteFile(filepath.Join(y.KnowledgeDir(), "INDEX.md"), []byte(indexTemplate), 0o644); err != nil {
+		return err
 	}
-	if err := ensureTaskLog(staged); err != nil {
-		return Yesman{}, err
+	if err := ensureTaskLog(y); err != nil {
+		return err
 	}
 	meta := map[string]any{"hiredAt": y.HiredAt}
 	if y.Model != "" {
@@ -128,11 +139,5 @@ func initializeHire(y Yesman) (_ Yesman, err error) {
 	if y.DisplayName != "" {
 		meta["displayName"] = y.DisplayName
 	}
-	if err := writeYesmanMetadata(filepath.Join(staged.MetaDir(), "yesman.json"), meta); err != nil {
-		return Yesman{}, err
-	}
-	if err := os.Rename(staged.MetaDir(), y.MetaDir()); err != nil {
-		return Yesman{}, err
-	}
-	return y, nil
+	return writeYesmanMetadata(filepath.Join(y.MetaDir(), "yesman.json"), meta)
 }

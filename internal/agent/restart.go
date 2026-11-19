@@ -122,10 +122,7 @@ func digest(text string) string {
 func (m *Manager) CloseForRestart() []restart.Agent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.closed {
-		m.closed = true
-		close(m.shutdown)
-	}
+	m.closeLocked()
 	m.restartRuns = map[string]uint64{}
 	var out []restart.Agent
 	for id, a := range m.agents {
