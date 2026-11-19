@@ -45,6 +45,7 @@ type pendingQueue struct {
 	PromoteAllowed    bool          `json:"promoteAllowed"`
 	PromotionBlocked  string        `json:"promotionBlocked,omitempty"`
 	IdleResume        bool          `json:"idleResume"`
+	HumanSteer        bool          `json:"humanSteer"`    // strict single-slot human steering protocol
 	AppendAllowed     bool          `json:"appendAllowed"` // a hint; pi decides each append atomically
 }
 

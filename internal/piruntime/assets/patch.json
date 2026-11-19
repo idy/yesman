@@ -1,6 +1,6 @@
 {
   "upstream": "1.5.2",
-  "revision": 5,
+  "revision": 6,
   "patches": [
     {
       "path": "@earendil-works/pi-coding-agent/dist/bundle/cli.js",
@@ -16,7 +16,7 @@
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.js",
       "before": "f45ae001e2b14fced8ae151f0a00303b5fbdb5fc4b25418d45de6a5546f48a8c",
-      "after": "dcc5c03908242daef9f8d389186fd182e157718443dee494abfc447a75dd5ef7",
+      "after": "51121ad03744650480f831de3c708386a7979cf391136753246b9278789dc623",
       "edits": [
         {
           "before": "class PendingMessageQueue {\n    messages = [];\n    mode;\n    constructor(mode) {\n        this.mode = mode;\n    }\n    enqueue(message) {\n        this.messages.push(message);\n    }\n    hasItems() {\n        return this.messages.length > 0;\n    }\n    peek() {\n        if (this.mode === \"all\")\n            return this.messages.slice();\n        const first = this.messages[0];\n        return first ? [first] : [];\n    }\n    drain() {\n        const drained = this.peek();\n        this.messages = this.messages.slice(drained.length);\n        return drained;\n    }\n    clear() {\n        this.messages = [];\n    }\n}\n",
@@ -85,13 +85,17 @@
         {
           "before": "                preparationError = error;\n                return;\n            }\n            // All asynchronous preparation is over. No await between validation,\n            // consuming Session nextTurn context and exact native intake.\n            if (!this.steeringQueue.commitDrain(plan)) return;",
           "after": "                preparationError = error;\n                return;\n            } finally {\n                if (!ready) this.pendingQueue.release(claim);\n            }\n            // All asynchronous preparation is over. No await between validation,\n            // consuming Session nextTurn context and exact native intake.\n            const intake = this.steeringQueue.commitDrain(plan);\n            // A claimed target behind the one-at-a-time prefix becomes extendable again.\n            this.pendingQueue.release(claim);\n            if (!intake) return;"
+        },
+        {
+          "before": "    getPendingQueue() { return this.pendingQueue.snapshot(); }",
+          "after": "    getPendingQueue() { return this.pendingQueue.snapshot(); }\n    steerHuman(message, metadata, original, registerImages) {\n        return this.pendingQueue.steerHuman(message, metadata, original, registerImages);\n    }"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-agent-core/dist/agent.d.ts",
       "before": "05968f90cf20eec86cfd352c6a87dff94f7e177d8579c3864697e8a7bb773ace",
-      "after": "8835720618427297f04d453bd282d373ded91ee07d6dc9ed74c2463059c765bd",
+      "after": "984f33d36c74d294b8dcc68f5a77537a674c4ff39800377d9ef85043134c4578",
       "edits": [
         {
           "before": "export declare class Agent {",
@@ -152,13 +156,17 @@
         {
           "before": "    notifyPendingQueue(): void;",
           "after": "    notifyPendingQueue(): void;\n    /** Synchronously append into one unclaimed pending human occurrence; otherwise enqueue as a new occurrence (enqueued: true). */\n    appendQueuedMessage(target: PendingAppendTarget & { fence?: string }, kind: \"steer\" | \"followUp\", message: AgentMessage, metadata: { submissionId: string; hostOrigin?: HostInputIdentity[\"origin\"] }): PendingAppendResult;"
+        },
+        {
+          "before": "appendAllowed?: boolean; }",
+          "after": "appendAllowed?: boolean; humanSteer?: true; }"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.js",
       "before": "ee756f6f74afe9f8930ebf216c95334605d913a275a0eec2c9702f101baef3c3",
-      "after": "c87fe036b81668c8a2e7e44d801e9cd14ba15e1e4d4fcd22b38a27b878968d9e",
+      "after": "56acb2064cf318ec2aaa337994314463425bcec4acfe7845aa2386a5b065ec4f",
       "edits": [
         {
           "before": "            followUp: [...this._followUpMessages],",
@@ -415,6 +423,42 @@
         {
           "before": "        return { ...snapshot, controlGeneration: this._queueControlGeneration, promoteAllowed, idleResume: true,",
           "after": "        return { ...snapshot, controlGeneration: this._queueControlGeneration, promoteAllowed, idleResume: true,\n            appendAllowed: this.isStreaming && !this._agentRunAbortRequested && !this._isEmittingAgentSettled,"
+        },
+        {
+          "before": "        if (this._isEmittingAgentSettled) {\n            this._deferredSettledActions.push(async () => await this.prompt(text, options));",
+          "after": "        if (this._isEmittingAgentSettled) {\n            if (options?.humanSteer) {\n                // Preserve the real preflight result even when settlement defers it.\n                return await new Promise((resolve, reject) => {\n                    this._deferredSettledActions.push(() => this.prompt(text, options).then(resolve, reject));\n                });\n            }\n            this._deferredSettledActions.push(async () => await this.prompt(text, options));"
+        },
+        {
+          "before": "        // Handle extension commands first (execute immediately, even during streaming)",
+          "after": "        this._checkHumanSteer(options?.humanSteer);\n        // Handle extension commands first (execute immediately, even during streaming)"
+        },
+        {
+          "before": "        if (trigger)\n            await this._startRun(trigger, () => preflightResult?.(\"started\"));",
+          "after": "        if (trigger) {\n            this._checkHumanSteer(options?.humanSteer);\n            this._checkIdleHumanSteer(options?.humanSteer);\n            await this._startRun(trigger, () => preflightResult?.(\"started\"));\n        }"
+        },
+        {
+          "before": "    async _preparePrompt(text, options) {",
+          "after": "    _checkHumanSteer(human) {\n        if (human && (human.controlGeneration !== this._queueControlGeneration ||\n            human.epoch !== this.agent.pendingQueue.epoch || this.isStreaming && this._agentRunAbortRequested))\n            throw new Error(\"The run was stopped. Send the draft again to continue.\");\n    }\n    _checkIdleHumanSteer(human) {\n        if (human && !this.isStreaming && this.agent.pendingQueue.steeringHuman())\n            throw new Error(\"Recall the waiting message before sending this draft.\");\n    }\n    async _preparePrompt(text, options) {"
+        },
+        {
+          "before": "        // Emit input event for extension interception (before skill/template expansion)",
+          "after": "        const human = options?.humanSteer;\n        this._checkHumanSteer(human);\n        // Emit input event for extension interception (before skill/template expansion)"
+        },
+        {
+          "before": "        // If streaming, queue via steer() or followUp() based on option",
+          "after": "        this._checkHumanSteer(human);\n        this._checkIdleHumanSteer(human);\n        // If streaming, queue via steer() or followUp() based on option"
+        },
+        {
+          "before": "                : await this._queueSteer(expandedText, currentImages, options?.submissionId, options?.hostOrigin, options?.appendTo);\n            preflightResult?.(\"queued\", options?.appendTo ? queued : undefined);",
+          "after": "                : await this._queueSteer(expandedText, currentImages, options?.submissionId, options?.hostOrigin, options?.appendTo,\n                    human && { imageSizes: human.imageSizes, joinable: human.joinable && !currentText.trimStart().startsWith(\"/\") });\n            preflightResult?.(\"queued\", (options?.appendTo || human) && typeof queued === \"object\" ? queued : undefined);"
+        },
+        {
+          "before": "    async _queueSteer(text, images, submissionId, hostOrigin, appendTo) {",
+          "after": "    async _queueSteer(text, images, submissionId, hostOrigin, appendTo, human) {"
+        },
+        {
+          "before": "        if (appendTo) return this._appendQueued(\"steer\", message, { submissionId, hostOrigin }, appendTo);",
+          "after": "        if (human) return this.agent.steerHuman(message, { submissionId, hostOrigin }, human, queued => {\n            if (queued.content.length > 1) this._queuedMessagesWithImages.add(queued);\n        });\n        if (appendTo) return this._appendQueued(\"steer\", message, { submissionId, hostOrigin }, appendTo);"
         }
       ]
     },
@@ -484,7 +528,7 @@
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-mode.js",
       "before": "505297dba2df1de3003c0399b3312fd581359a4e27a5e9262b274b6cb5cb4ef3",
-      "after": "f38368df13d2563cc1c48b748a20f882a9f734d3cfe31a125ce57a1dd2e53f98",
+      "after": "74f08f0d4eb19d447f6563f3c01a5b1910488cf2061c28f255ca43ba9ecc17eb",
       "edits": [
         {
           "before": "                    streamingBehavior: command.streamingBehavior,",
@@ -545,13 +589,33 @@
         {
           "before": "runtime: \"yesman-pi/1.5.2-4\"",
           "after": "runtime: \"yesman-pi/1.5.2-5\""
+        },
+        {
+          "before": "    let activeCommands = 0;",
+          "after": "    let activeCommands = 0;\n    let humanPreflight = Promise.resolve();"
+        },
+        {
+          "before": "                void session\n                    .prompt(command.message, {",
+          "after": "                const promptSession = session;\n                const human = command.humanSteer;\n                let prior = Promise.resolve(), release = () => {};\n                if (human !== undefined) {\n                    if (!human || typeof human.joinable !== \"boolean\" || typeof human.epoch !== \"string\" ||\n                        !Number.isSafeInteger(human.controlGeneration) || !/^[a-f0-9]{48}$/.test(command.submissionId ?? \"\") ||\n                        command.streamingBehavior !== \"steer\" || command.hostOrigin?.source !== \"user\" || target !== undefined) {\n                        activeCommands--;\n                        return error(id, \"prompt\", \"Invalid human steering input\");\n                    }\n                    prior = humanPreflight;\n                    humanPreflight = new Promise(resolve => { release = resolve; });\n                }\n                void (async () => {\n                    if (human) {\n                        await prior;\n                        if (session !== promptSession) throw new Error(\"The session changed. Reopen the conversation before sending.\");\n                    }\n                    return promptSession.prompt(command.message, {"
+        },
+        {
+          "before": "                    source: \"rpc\",\n                    preflightResult:",
+          "after": "                    source: \"rpc\",\n                    humanSteer: human && { ...human, imageSizes: (command.images ?? []).map(image => {\n                        const data = image.data;\n                        return Math.floor(data.length * 3 / 4) - (data.endsWith(\"==\") ? 2 : data.endsWith(\"=\") ? 1 : 0);\n                    }) },\n                    preflightResult:"
+        },
+        {
+          "before": "                        preflightSucceeded = true;\n                        output(success(id, \"prompt\", append ? { disposition, append } : { disposition }));\n                    },\n                })",
+          "after": "                        preflightSucceeded = true;\n                        release();\n                        output(success(id, \"prompt\", append ? { disposition, append } : { disposition }));\n                    },\n                    });\n                })()"
+        },
+        {
+          "before": "                    .finally(() => {\n                    activeCommands--;",
+          "after": "                    .finally(() => {\n                    release();\n                    activeCommands--;"
         }
       ]
     },
     {
       "path": "@earendil-works/pi-coding-agent/dist/modes/rpc/rpc-types.d.ts",
       "before": "68b6dc2e47a3969c09c961a40d0462473407b6786f3bd02715fa035e816e2af1",
-      "after": "bc92dfa41a091524f58fcce7bb0aa16139eae5157526094512d43a6589caf413",
+      "after": "bc72e99cc553422ec9975c9fe1bfd73043ce4f53aab05e812641b15ec4b229c3",
       "edits": [
         {
           "before": "    type: \"prompt\";\n    message: string;",
@@ -600,6 +664,10 @@
         {
           "before": "    command: \"prompt\";\n    success: true;\n    data: {\n        disposition: PromptDisposition;\n    };",
           "after": "    command: \"prompt\";\n    success: true;\n    data: {\n        disposition: PromptDisposition;\n        append?: import(\"@earendil-works/pi-agent-core\").PendingAppendResult;\n    };"
+        },
+        {
+          "before": "    type: \"prompt\";\n    appendTo?:",
+          "after": "    type: \"prompt\";\n    humanSteer?: { joinable: boolean; epoch: string; controlGeneration: number };\n    appendTo?:"
         }
       ]
     },

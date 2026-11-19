@@ -46,7 +46,8 @@ type Delivery struct {
 	// task's run; nil for what a person typed.
 	Origin         *Origin `json:"origin,omitempty"`
 	queuePreparing bool
-	coalesce       bool   // a composer submission that may join a pending occurrence
+	coalesce       bool   // legacy capability 4 may append this composer input
+	humanSteer     bool   // the app's human submission, eligible for the single steer slot
 	appendRoot     string // the occurrence an in-flight append targeted
 	// hostContext is the trusted conversation context the app sent this
 	// submission in (a topic's), host-only: pi keeps inputs of different
@@ -122,20 +123,15 @@ func (m *Manager) deliveryLocked(a *agent, d Delivery) Event {
 // Submit registers a stable client ID before dispatch. Repeating an uncertain
 // bridge call returns its existing receipt and never sends the prompt twice.
 func (m *Manager) Submit(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
-	d, err := m.submit(ctx, id, messageID, text, images, "steer", nil, expectedSince...)
+	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{humanSteer: true}, expectedSince...)
 	return m.submitView(id, d), err
 }
 
-// SubmitCoalescing is Submit for the composer: while pi still holds this
-// agent's newest composer input pending and unclaimed, in the same lane,
-// session and generation, pi appends this input to that same occurrence
-// instead of queueing another one. pi decides atomically at its own enqueue
-// point; when the occurrence was taken, claimed or changed first, or the
-// runtime predates capability 4, the input is queued exactly once as its own
-// message. Only another composer input can be joined: never a scheduled run,
-// a topic's message, a worker's report or any other submission.
+// SubmitCoalescing opts into legacy append on managed runtimes predating the
+// single-slot human steering protocol. On current runtimes all human sends
+// use the same policy and the native queue decides atomically at admission.
 func (m *Manager) SubmitCoalescing(ctx context.Context, id, messageID, text string, images []Image, expectedSince ...time.Time) (Delivery, error) {
-	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{coalesce: true}, expectedSince...)
+	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{coalesce: true, humanSteer: true}, expectedSince...)
 	return m.submitView(id, d), err
 }
 
@@ -147,7 +143,7 @@ func (m *Manager) SubmitInContext(ctx context.Context, id, messageID, text strin
 	if !hostContextRE.MatchString(hostContext) {
 		return Delivery{}, errors.New("invalid conversation context")
 	}
-	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{context: hostContext}, expectedSince...)
+	d, err := m.submitDelivery(ctx, id, messageID, text, images, "steer", submission{context: hostContext, humanSteer: true}, expectedSince...)
 	return m.submitView(id, d), err
 }
 
@@ -168,9 +164,10 @@ func (m *Manager) submit(ctx context.Context, id, messageID, text string, images
 
 // submission is what a caller states about a submission beyond its content.
 type submission struct {
-	origin   *Origin // a scheduled run's; nil for what a person typed
-	coalesce bool    // the composer's: may join its newest pending occurrence
-	context  string  // a trusted host-only conversation context, such as a topic's
+	origin     *Origin // a scheduled run's; nil for what a person typed
+	coalesce   bool    // legacy capability 4 append
+	humanSteer bool    // single-slot human admission when advertised by Pi
+	context    string  // a trusted host-only conversation context, such as a topic's
 }
 
 // hostContextRE bounds a host-only conversation context, as pi's
@@ -291,7 +288,7 @@ func (m *Manager) submitDelivery(ctx context.Context, id, messageID, text string
 	preview, truncated := deliveryClip(text, maxDeliveryPreview)
 	a.deliveryOrder++
 	d := Delivery{ID: messageID, State: "sending", Text: preview, ImageCount: len(images), Preview: truncated, Order: a.deliveryOrder, AgentSince: info.Since, Origin: origin, fingerprint: fingerprint, created: deliveryTimestamp(messageID),
-		coalesce: sub.coalesce && origin == nil && sub.context == "", hostContext: sub.context}
+		coalesce: sub.coalesce && origin == nil && sub.context == "", humanSteer: sub.humanSteer && origin == nil, hostContext: sub.context}
 	a.deliveries[messageID] = d
 	// A new immutable input already owns this generation, even while its
 	// first durable write/start is pending. A duplicate above owns no new work.

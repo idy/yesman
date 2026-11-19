@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { identityPatch } from './identity-patch.mjs';
 import { idlePatch } from './idle-patch.mjs';
 import { appendPatch } from './append-patch.mjs';
+import { humanSteerPatch } from './human-steer-patch.mjs';
 const root = resolve(process.argv[2]);
 const dest = resolve(process.argv[3]);
 const sha = (s) => createHash('sha256').update(s).digest('hex');
@@ -193,5 +194,6 @@ await patch('@earendil-works/pi-coding-agent/package.json', (change) => {
 await identityPatch(patch, core, app);
 await idlePatch(patch, core, app);
 await appendPatch(patch, core, app);
-await writeFile(dest, JSON.stringify({ upstream: '1.5.2', revision: 5, patches }, null, 2)+'\n');
+await humanSteerPatch(patch, core, app);
+await writeFile(dest, JSON.stringify({ upstream: '1.5.2', revision: 6, patches }, null, 2)+'\n');
 console.log(`${patches.length} source files recorded in ${dest}`);

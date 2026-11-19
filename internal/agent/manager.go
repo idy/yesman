@@ -1107,7 +1107,8 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 			cmd["images"] = images
 		}
 		m.mu.Lock()
-		joining := messageID != "" && origin.Source == OriginUser && a.deliveries[messageID].coalesce && a.nativeQueue.supportsAppend()
+		joining := messageID != "" && origin.Source == OriginUser && a.deliveries[messageID].coalesce &&
+			a.nativeQueue.supportsAppend() && !a.nativeQueue.HumanSteer
 		m.mu.Unlock()
 		if joining {
 			// Held across this RPC: its ordered reply/events update the occurrence
@@ -1122,6 +1123,13 @@ func (m *Manager) sendPromptTracked(ctx context.Context, a *agent, p *proc, text
 		}
 		if messageID != "" && a.nativeQueue.supported() {
 			cmd["submissionId"] = messageID
+		}
+		if d := a.deliveries[messageID]; d.humanSteer && a.nativeQueue.supportsAppend() && a.nativeQueue.HumanSteer && !retiring {
+			_, retained := a.recallPayloads[messageID]
+			cmd["humanSteer"] = map[string]any{
+				"epoch": a.nativeQueue.Epoch, "controlGeneration": a.nativeQueue.ControlGeneration,
+				"joinable": retained && joinableText(text),
+			}
 		}
 		if joining && !retiring {
 			if d, ok := a.deliveries[messageID]; ok && d.State == "sending" {
