@@ -18,7 +18,7 @@ import (
 	"unicode/utf8"
 )
 
-// Only bounded metadata is retained, never original image/text payloads. New
+// Receipt metadata is bounded separately from managed original drafts. New
 // IDs start with a 12-hex millisecond timestamp. A persisted eviction watermark
 // makes an unknown old ID fail closed after compaction instead of resending it.
 const (
@@ -256,6 +256,9 @@ func (m *Manager) ensureDeliveries(a *agent, path string) error {
 			// Orphaned originals cannot create a receipt or authorize replay.
 			drafts = nil
 		}
+		if err == nil {
+			err = retireHumanDraftStage(path)
+		}
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		a.deliveryErr = err
@@ -472,7 +475,7 @@ func (m *Manager) persistDeliveriesLocked(a *agent) uint64 {
 	}
 	for _, d := range a.deliveries {
 		state.Records = append(state.Records, storedDelivery{d, d.fingerprint, d.created, d.expires})
-		if d.recoverDraft && retainsHumanDraft(d) {
+		if d.recoverDraft && retainsHumanDraft(d) && !a.recallReleasing[d.ID] {
 			if payload, ok := a.recallPayloads[d.ID]; ok {
 				drafts[d.ID] = payload.RecallPayload
 			}

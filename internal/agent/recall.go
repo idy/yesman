@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const maxRecallBytes = 128 << 20 // across all agents; full payloads never go to disk
+const maxRecallBytes = 128 << 20 // in-memory budget across all agents
 const maxAgentRecallBytes = 32 << 20
 const maxRecallRecords = 64
 
@@ -284,7 +284,7 @@ func (m *Manager) syncPending(a *agent, p *proc, q pendingQueue) {
 
 // CancelSubmission atomically removes one native occurrence and returns the
 // full original payload. Repeating it after a lost response returns the same
-// cancelled intent until AckRecall releases its bounded in-memory payload.
+// cancelled intent until AckRecall releases its retained originals.
 // It never starts a stopped agent and never clears or rebuilds either queue.
 // For inputs appended into one occurrence it cancels that whole occurrence at
 // its current revision and returns the complete combined message.
@@ -415,7 +415,7 @@ func (m *Manager) recallOwnerLocked(a *agent, since, hiredAt time.Time) bool {
 		a.info.Since.Equal(since) && a.workspaceSince.Equal(hiredAt) && !m.worktreeCleanup[a.info.ID]
 }
 
-// SubmissionPayload reads the existing bounded volatile original for display.
+// SubmissionPayload reads the bounded original for display or recovery.
 // It grants no queue authority and cannot restore a missing/retired payload.
 func (m *Manager) SubmissionPayload(agentID, id string, since time.Time) (RecallPayload, error) {
 	m.mu.Lock()
@@ -458,15 +458,68 @@ func (m *Manager) AckRecall(agentID, id string, since time.Time) error {
 		return errStopped
 	}
 	d, ok := a.rootDeliveryLocked(id)
-	if !ok || d.State != "cancelled" && !a.deliveryView(d).CanRecover {
+	if !ok || d.State != "cancelled" && !recoverableDelivery(d.State) {
 		m.mu.Unlock()
 		return errors.New("no retained draft to acknowledge")
 	}
-	for _, member := range d.members() {
+	members := d.members()
+	var durable bool
+	for _, member := range members {
+		if a.recallReleasing[member] {
+			m.mu.Unlock()
+			return errors.New("this draft is already being cleared")
+		}
+		_, held := a.recallPayloads[member]
+		durable = durable || held && a.deliveries[member].recoverDraft
+	}
+	if durable {
+		// Exclude these originals from snapshots while the acknowledgement is
+		// pending. The recovery action remains available on a write failure.
+		if a.recallReleasing == nil {
+			a.recallReleasing = make(map[string]bool)
+		}
+		for _, member := range members {
+			a.recallReleasing[member] = true
+		}
+		writer, revision := a.deliveryWriter, m.persistDeliveriesLocked(a)
+		m.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		err := writer.wait(ctx, revision, m.shutdown)
+		cancel()
+		m.mu.Lock()
+		for _, member := range members {
+			delete(a.recallReleasing, member)
+		}
+		current := m.agents[agentID] == a && !a.retiring && !a.removing && !a.deliverySealed && a.info.Since.Equal(since)
+		if err != nil {
+			if current {
+				// Restore these originals to later snapshots, including if a
+				// timed-out write finishes after the acknowledgement returns.
+				m.persistDeliveriesLocked(a)
+			}
+			m.mu.Unlock()
+			return err
+		}
+		if !current {
+			// The durable write belonged to the old generation only. Release
+			// its memory so a retried seal cannot publish it again.
+			for _, member := range members {
+				m.forgetRecallLocked(a, member)
+			}
+			m.mu.Unlock()
+			return errStopped
+		}
+	}
+	for _, member := range members {
 		m.forgetRecallLocked(a, member)
 	}
-	event := m.deliveryLocked(a, d)
-	m.mu.Unlock()
-	m.cfg.OnEvent(event)
+	// Use the newest receipt in case its revision advanced while waiting.
+	if latest, exists := a.deliveries[d.ID]; exists {
+		event := m.deliveryLocked(a, latest)
+		m.mu.Unlock()
+		m.cfg.OnEvent(event)
+	} else {
+		m.mu.Unlock()
+	}
 	return nil
 }

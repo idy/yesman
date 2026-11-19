@@ -275,6 +275,7 @@ export default {
   "Copy message text": "复制消息文字",
   "Recover draft": "恢复草稿",
   "Recover this draft?": "恢复这份草稿？",
+  "Message sent, but the earlier draft could not be cleared. Use Hide on the earlier message to try again.": "消息已发送，但之前的草稿未能清除。请在之前的消息上点击「隐藏」重试。",
   "Pi may already have received this message. Check the conversation before sending it again.": "Pi 可能已经收到这条消息。再次发送前请先查看对话。",
   "Clear the current draft before returning this message to the input.": "请先清空当前草稿，再把这条消息恢复到输入框。",
   "A message is already waiting. Wait for Pi to take it, or recall it before sending this draft.": "已有一条待发消息。请等 Pi 取走，或先撤回它，再发送这份草稿。",

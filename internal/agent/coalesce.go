@@ -13,7 +13,8 @@ import (
 // same RPC; Go only proposes the target and never resubmits. Receipts keep each
 // input's own immutable ID and fingerprint: the first input owns the occurrence
 // and lists the appended IDs in Merged, each appended input names it in
-// MergedInto. Complete payloads stay in the bounded volatile recall cache.
+// MergedInto. Originals use the bounded recall cache and, for managed inputs,
+// the separate draft snapshot.
 const (
 	// pi bounds one occurrence to its primary input plus this many appended ones.
 	maxMergedInputs = 15

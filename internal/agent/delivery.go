@@ -33,7 +33,7 @@ type Delivery struct {
 	CanRecover      bool      `json:"canRecover,omitempty"`     // original draft retained after uncertain delivery
 	AwaitingRecord  bool      `json:"awaitingRecord,omitempty"` // native take precedes the session entry
 	OriginalText    bool      `json:"originalText,omitempty"`
-	OriginalPayload bool      `json:"originalPayload,omitempty"` // bounded volatile display access only
+	OriginalPayload bool      `json:"originalPayload,omitempty"` // bounded original payload available for display
 	NativePending   bool      `json:"nativePending,omitempty"`
 	CanPromote      bool      `json:"canPromote,omitempty"` // live native membership/admission only
 	// MergedInto names the still-pending submission this input was appended to;

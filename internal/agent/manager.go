@@ -235,6 +235,7 @@ type agent struct {
 	queue                          QueueStatus
 	nativeQueue                    pendingQueue
 	recallPayloads                 map[string]recallPayload
+	recallReleasing                map[string]bool // originals excluded from the writer's next snapshot while AckRecall waits
 	recallBytes, recalls           int
 	appendGate                     chan struct{} // legacy managed append serialization
 	humanTail                      chan struct{} // stable submissions in registration order

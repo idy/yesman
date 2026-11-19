@@ -87,15 +87,19 @@ func TestCoalesceFamilyEndsWithArchiveAndSameNameHireWithManagedPi(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.store.Archive("alice", func(yesmen.Yesman) error { return f.m.StopYesman("alice") }); err != nil {
+	archive, err := f.store.Archive("alice", func(yesmen.Yesman) error { return f.m.StopYesman("alice") })
+	if err != nil {
 		t.Fatal(err)
 	}
-	f.m.ForgetYesman("alice", old.HiredAt)
+	archivedReceipt := filepath.Join(archive, ".yesman", "sessions", "lead", "delivery.json")
+	archivedDrafts, err := readHumanDrafts(archivedReceipt)
+	if err != nil || archivedDrafts[idA].Text != "family alpha" || !slices.Equal(archivedDrafts[idA].Images, []Image{image}) || archivedDrafts[idB].Text != "family beta" {
+		t.Fatalf("archive did not retain originals: %v", err)
+	}
 	if _, err = f.store.Hire("alice"); err != nil {
 		t.Fatal(err)
 	}
-	// The archived generation keeps the family honestly: both inputs
-	// interrupted with their link, and no original payload on disk.
+	// The archived receipts keep the interrupted family links and no payload bytes.
 	var archived []byte
 	_ = filepath.WalkDir(filepath.Join(filepath.Dir(f.gate), "archive"), func(path string, d fs.DirEntry, err error) error {
 		if err == nil && d.Name() == "delivery.json" && strings.Contains(path, filepath.Join("sessions", "lead")) {
@@ -142,6 +146,20 @@ func TestCoalesceFamilyEndsWithArchiveAndSameNameHireWithManagedPi(t *testing.T)
 	idC := deliveryTestID(91003)
 	if c, err := f.m.SubmitCoalescing(ctx, fresh.ID, idC, "new generation", nil, fresh.Since); err != nil || c.MergedInto != "" {
 		t.Fatalf("new generation submit %+v %v", c, err)
+	}
+	// Service post-Archive cleanup can arrive after the new hire initializes.
+	f.m.ForgetYesman("alice", old.HiredAt)
+	f.m.mu.Lock()
+	used, accounted := f.m.recallBytes, f.m.agents[fresh.ID].recallBytes
+	f.m.mu.Unlock()
+	if used != accounted {
+		t.Fatalf("retired originals still charged: global %d, current agent %d", used, accounted)
+	}
+	if err := f.m.AckRecall(fresh.ID, idA, f.info.Since); err == nil {
+		t.Fatal("stale acknowledgement accepted")
+	}
+	if got, err := readHumanDrafts(archivedReceipt); err != nil || !slices.Equal(got[idA].Images, []Image{image}) {
+		t.Fatalf("replacement changed the sealed archive: %v", err)
 	}
 	waitFor(t, "new generation input taken", func() bool {
 		f.m.mu.Lock()

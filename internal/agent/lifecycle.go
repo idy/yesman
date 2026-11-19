@@ -20,6 +20,9 @@ func (m *Manager) workspaceAgentLocked(y yesmen.Yesman, info Info) (*agent, erro
 		if a.proc != nil || a.starting != nil || a.deliveryWriter != nil && !a.deliveryWriter.finished() {
 			return nil, errStopped
 		}
+		// The drained writer already sealed this generation's archive snapshot.
+		// A delayed ForgetYesman can only see the replacement after this point.
+		m.clearRecallLocked(a)
 		a = nil
 	}
 	if a != nil && a.removing {

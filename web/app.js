@@ -269,17 +269,26 @@ function refreshDelivery(c, d) { if (d) schedulePatch(c, { frame: true }); }
 
 // The person is done with a submission nothing waits on: its row leaves this
 // page (and focus moves on to the next such row, or the input).
-function dismissReceipt(c, id) {
+async function dismissReceipt(c, id) {
   const d = c.deliveries.get(id);
-  if (!d || !dismissible(d)) return;
-  const el = document.querySelector(`#thread > [data-delivery="${CSS.escape(id)}"]`);
+  if (!d || !dismissible(d) || c.actions.has(id)) return;
+  if (d.canRecover) {
+    c.actions.add(id);
+    try {
+      await call('AckRecall', c.id, id, d.agentSince);
+    } catch (error) {
+      if (keyOf(selectedAgent() ?? {}) === c.key) fail(t(errorText(error)));
+      return;
+    } finally {
+      c.actions.delete(id);
+    }
+    if (keyOf(agentById(c.id) ?? {}) !== c.key) return;
+  }
+  const el = keyOf(selectedAgent() ?? {}) === c.key ? document.querySelector(`#thread > [data-delivery="${CSS.escape(id)}"]`) : null;
   const focused = !!el?.contains(document.activeElement);
   const after = focused ? [...document.querySelectorAll('#thread > .msg-delivery .message-dismiss')]
     .map((b) => b.closest('.msg-delivery')?.dataset.delivery).filter((other) => other && other !== id &&
       (el.compareDocumentPosition(document.querySelector(`#thread > [data-delivery="${CSS.escape(other)}"]`)) & Node.DOCUMENT_POSITION_FOLLOWING)) : [];
-  if (d.canRecover) {
-    call('AckRecall', c.id, id, d.agentSince).catch(fail);
-  }
   c.handled.add(id);
   saveHandled(c);
   schedulePatch(c);
@@ -325,14 +334,25 @@ async function recallMessage(c, id) {
     const images = restoredImages(payload.images ?? []);
     if ((state.drafts.get(key) ?? '') !== '' || attachments.items.length || attachments.composing) throw new Error(t('Clear the current draft before returning this message to the input.'));
     state.drafts.set(key, payload.text);
-    c.recalled.add(id);
     attachments.items = images;
     attachments.submissionID = null;
     attachments.submission = null;
-    attachments.retryOf = null;
-    const d = c.deliveries.get(id);
-    if (d) { d.canCancel = false; d.canRestore = false; d.canRecover = false; d.originalText = false; refreshDelivery(c, d); }
-    if (!receipt.canRecover) call('AckRecall', a.id, id, a.since).catch(() => {});
+    attachments.retryOf = receipt.state === 'failed' ? { ids: [id], text: payload.text, images: imagePayload(images) } : null;
+    if (!receipt.canRecover) {
+      c.recalled.add(id);
+      const wasRestorable = c.deliveries.get(id);
+      if (wasRestorable) {
+        c.deliveries.set(id, { ...wasRestorable, canCancel: false, canRestore: false, originalText: false });
+        refreshDelivery(c, c.deliveries.get(id));
+      }
+      call('AckRecall', a.id, id, a.since).catch(error => {
+        if (!current()) return;
+        c.recalled.delete(id);
+        if (wasRestorable && c.deliveries.get(id)?.revision === wasRestorable.revision) c.deliveries.set(id, wasRestorable);
+        refreshDelivery(c, c.deliveries.get(id));
+        if (keyOf(selectedAgent() ?? {}) === key) fail(t(errorText(error)));
+      });
+    }
   } catch (error) {
     if (current() && keyOf(selectedAgent() ?? {}) === key) fail(t(errorText(error)));
   } finally {
@@ -1972,7 +1992,7 @@ function locateRequest(dock, a) {
     return;
   }
   target.classList.add('needs-you-target');
-  target.append(backToNeedsYou(r.key));
+  if (!target.querySelector('.needs-you-back')) target.append(backToNeedsYou(r.key));
   if (!r.pending) return;
   r.pending = false;
   target.scrollIntoView({ block: 'nearest' });
@@ -2352,6 +2372,13 @@ function renderBody() {
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
   const held = requestFocus($('#dock'));
+  const composing = $('#dock .composer textarea');
+  if (state.view.kind === 'agent' && composing?._composing && composing._agentKey === keyOf(selectedAgent() ?? {})) {
+    renderDock({ held });
+    renderThread();
+    return;
+  }
+  releaseComposerComposition(composing);
   contextViewer.close();
   for (const select of composerSelects) select.destroy();
   composerSelects = [];
@@ -2390,37 +2417,16 @@ function requestFocus(dock) {
   };
 }
 
-function renderDock({ focusComposer = false, held = null } = {}) {
-  const dock = $('#dock');
-  const a = selectedAgent();
-  const keep = dock?.querySelector('textarea');
-  if (keep?._composing && keep._agentKey === keyOf(a ?? {})) {
-    keep._redrawAfterComposition = true;
-    return;
-  }
-  const focused = keep && document.activeElement === keep;
-  // Focus on the Needs you pane beside stays there when the conversation is
-  // drawn again; opening a request from it moves focus to the request.
-  const beside = !!document.activeElement?.closest?.('#needs-you');
-  const actionFocused = dock?.querySelector('.composer-action') === document.activeElement;
-  const caret = focused ? [keep.selectionStart, keep.selectionEnd, keep.selectionDirection] : null;
-  const control = dock?.contains(document.activeElement) && document.activeElement.getAttribute('role') === 'combobox'
-    ? document.activeElement.getAttribute('aria-label') : null;
-  // A request being handled keeps its focus and typed answer across redraws,
-  // also when the whole body was drawn again (held).
-  const heldAt = held ?? requestFocus(dock);
-  for (const select of composerSelects) select.destroy();
-  composerSelects = [];
-  if (!dock || !a) return;
-  const previousComposer = dock.querySelector('.composer textarea');
-  if (previousComposer?._composing) {
-    const previousAttachments = state.attachments.get(previousComposer._agentKey);
-    if (previousAttachments) previousAttachments.composing = false;
-  }
-  dock.replaceChildren();
+function releaseComposerComposition(textarea) {
+  if (!textarea?._composing) return;
+  const attachments = state.attachments.get(textarea._agentKey);
+  if (attachments) attachments.composing = false;
+}
 
-  // What waits above the composer takes at most part of the window, and
-  // scrolls, so that the conversation and the composer stay in view.
+function renderDockRequests(dock, a, form = null) {
+  // Keep the same request node when its controls and copy are unchanged.
+  // Its editor's current value and selection are live properties of that node.
+  const previous = dock.querySelector(':scope > .dock-requests');
   const requests = [];
   if (a.status === 'failed' && a.detail) {
     requests.push(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('This agent stopped')), h('p', null, a.detail))));
@@ -2429,9 +2435,70 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   }
   if (a.status === 'waiting' && a.dialog) requests.push(askEl(a));
   requests.push(...handoffEls(a));
-  if (requests.length) dock.append(h('div', { class: 'dock-requests' }, ...requests));
+  if (!requests.length) {
+    previous?.remove();
+    return;
+  }
+  if (!previous) {
+    dock.insertBefore(h('div', { class: 'dock-requests' }, ...requests), form);
+    return;
+  }
+  const old = [...previous.children];
+  const next = requests.map(node => old.find(other => {
+    if (node._dialogState !== undefined) return node._dialogState === other._dialogState;
+    return node.isEqualNode(other);
+  }) ?? node);
+  for (const node of old) if (!next.includes(node)) node.remove();
+  next.forEach((node, index) => {
+    if (previous.children[index] !== node) previous.insertBefore(node, previous.children[index] ?? null);
+  });
+}
 
+function composerAction(a, working) {
+  return working
+    ? h('button', { class: 'round round--stop composer-action', type: 'button', 'aria-label': t('Stop'), title: shortcuts.hint(t('Stop the current run'), 'agent.stop'),
+      'aria-keyshortcuts': shortcuts.aria('agent.stop'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop'))
+    : h('button', { class: 'round composer-action', type: 'submit', 'aria-label': t('Send'), title: t('Send') }, icon('enter'));
+}
+
+function renderDock({ focusComposer = false, held = null } = {}) {
+  const dock = $('#dock');
+  const a = selectedAgent();
+  if (!dock || !a) return;
+  const keep = dock.querySelector('.composer textarea');
   const working = a.status === 'working' || a.status === 'waiting';
+  const heldAt = held ?? requestFocus(dock);
+  if (keep?._composing && keep._agentKey === keyOf(a)) {
+    keep._redrawAfterComposition = true;
+    renderDockRequests(dock, a, keep.form);
+    const action = keep.form.querySelector('.composer-action');
+    if (working !== action.classList.contains('round--stop')) {
+      const next = composerAction(a, working);
+      next.disabled = !working;
+      const hadFocus = document.activeElement === action;
+      action.replaceWith(next);
+      if (hadFocus) (next.disabled ? keep : next).focus({ preventScroll: true });
+    }
+    finishDockRequests(dock, a, heldAt, keep);
+    return;
+  }
+  const focused = keep && document.activeElement === keep;
+  // Focus on the Needs you pane beside stays there when the conversation is
+  // drawn again; opening a request from it moves focus to the request.
+  const beside = !!document.activeElement?.closest?.('#needs-you');
+  const actionFocused = dock.querySelector('.composer-action') === document.activeElement;
+  const caret = focused ? [keep.selectionStart, keep.selectionEnd, keep.selectionDirection] : null;
+  const control = dock.contains(document.activeElement) && document.activeElement.getAttribute('role') === 'combobox'
+    ? document.activeElement.getAttribute('aria-label') : null;
+  for (const select of composerSelects) select.destroy();
+  composerSelects = [];
+  releaseComposerComposition(keep);
+  // The request area and composer update independently. Keep the request
+  // in place while swapping the composer controls after composition ends.
+  if (keep?._agentKey !== keyOf(a)) dock.replaceChildren();
+  else keep.form.remove();
+  renderDockRequests(dock, a);
+
   const key = keyOf(a);
   let attachments = state.attachments.get(key);
   if (!attachments) state.attachments.set(key, (attachments = { items: [], reading: false, sending: false }));
@@ -2474,10 +2541,7 @@ function renderDock({ focusComposer = false, held = null } = {}) {
     placeholder: a.role === 'lead' ? t('Message {name}…', { name: yesmanLabel(a.yesman) }) : t('Message worker {name}…', { name: a.name }),
   });
   textarea.value = state.drafts.get(keyOf(a)) ?? '';
-  const action = working
-    ? h('button', { class: 'round round--stop composer-action', type: 'button', 'aria-label': t('Stop'), title: shortcuts.hint(t('Stop the current run'), 'agent.stop'),
-      'aria-keyshortcuts': shortcuts.aria('agent.stop'), onclick: () => call('Abort', a.id).catch(fail) }, icon('stop'))
-    : h('button', { class: 'round composer-action', type: 'submit', 'aria-label': t('Send'), title: t('Send') }, icon('enter'));
+  const action = composerAction(a, working);
   const sync = () => {
     // A run can be interrupted even with an empty draft or a pending image/send.
     if (!working) action.disabled = (!textarea.value.trim() && !attachments.items.length) || busy || !!state.modelOptions.get(keyOf(a))?.busy;
@@ -2530,6 +2594,10 @@ function renderDock({ focusComposer = false, held = null } = {}) {
     textarea.focus();
     if (caret) textarea.setSelectionRange(...caret);
   }
+  finishDockRequests(dock, a, heldAt, textarea);
+}
+
+function finishDockRequests(dock, a, heldAt, textarea) {
   // A long detail scrolls in its request; then it can be reached and
   // scrolled with the keyboard too.
   for (const detail of dock.querySelectorAll('.handoff-detail')) {
@@ -2541,7 +2609,7 @@ function renderDock({ focusComposer = false, held = null } = {}) {
   if (heldAt) {
     const again = dock.querySelector(`[data-request="${CSS.escape(heldAt.key)}"]`);
     const field = again?.querySelector('input, textarea');
-    if (field && heldAt.value !== undefined) field.value = heldAt.value;
+    if (field && heldAt.value !== undefined && field.value !== heldAt.value) field.value = heldAt.value;
     const control = again?.querySelectorAll('button, input, textarea')[heldAt.index];
     if (control && !control.disabled) control.focus({ preventScroll: true });
     else if (!again) {
@@ -2593,12 +2661,12 @@ async function sendMessage(a, textarea, submitter = null) {
       attachments.submission = null;
     }
   }
-  // The draft a refusal left, sent again unchanged, is that submission's
-  // retry: once the server has the new one, the refused one has been dealt
-  // with. An edited draft is a new intent and leaves it in view.
+  // An unchanged resend can retire earlier refusals after confirmed admission.
+  // An edit leaves those originals available for explicit recovery or discard.
   const retry = attachments.retryOf;
   if (retry && (retry.text !== text || !sameSubmissionImages(retry.images, images))) attachments.retryOf = null;
-  const retried = attachments.retryOf?.id ?? null;
+  const retried = attachments.retryOf?.ids ?? [];
+  const stillCurrent = () => state.attachments.get(key) === attachments && keyOf(agentById(a.id) ?? {}) === key;
   const messageID = attachments.submissionID ?? newSubmissionID();
   {
     // Sending a hidden submission's draft again is a new attempt the person
@@ -2628,30 +2696,44 @@ async function sendMessage(a, textarea, submitter = null) {
     // A composer input may join the newest still-pending human message; pi
     // decides at its own enqueue point and the receipt says which it did.
     const receipt = await call('SubmitCoalescing', a.id, messageID, text, images, a.since);
+    if (!stillCurrent()) return;
     updateDelivery(c, receipt);
-    if (retried && receipt?.id === messageID && receipt.revision > 0) {
-      if (attachments.retryOf?.id === retried) attachments.retryOf = null;
-      c.handled.add(retried);
-      saveHandled(c);
-    }
     schedulePatch(c);
-    // A duplicate may find registration durable while pi's response is still
-    // pending. Keep the only full draft/attachments until acceptance is known.
-    if (receipt.state === 'sending') return;
-    if (receipt.state === 'failed' || receipt.state === 'interrupted' || receipt.state === 'unconfirmed' && receipt.error) {
-      // Only a definite rejection permits a fresh ID on unchanged retry. An
-      // interrupted process may already have admitted this input before exit.
-      if (receipt.state === 'failed') {
-        attachments.retryOf = { id: messageID, text, images };
+    // The ordered events can have a newer disposition than this RPC reply.
+    const current = c.deliveries.get(messageID);
+    if (!current?.revision || current.state === 'sending') return;
+    if (['failed', 'interrupted', 'unconfirmed'].includes(current.state)) {
+      if (current.state === 'failed') {
+        attachments.retryOf = { ids: [...new Set([...retried, messageID])], text, images };
         attachments.submissionID = null;
         attachments.submission = null;
       }
-      throw new Error(receipt.error || t(DELIVERY_LABELS[receipt.state]));
+      throw new Error(current.error || t(DELIVERY_LABELS[current.state]));
     }
+    if (!['accepted', 'steering', 'queued', 'dispatched', 'handled'].includes(current.state)) return;
     attachments.submissionID = null;
     attachments.submission = null;
+    attachments.retryOf = null;
     state.drafts.delete(key);
     attachments.items = [];
+    for (const id of retried) {
+      if (!stillCurrent()) break;
+      const old = c.deliveries.get(id);
+      if (old?.state !== 'failed' || c.actions.has(id)) continue;
+      c.actions.add(id);
+      try {
+        if (old.canRecover) await call('AckRecall', a.id, id, a.since);
+        if (stillCurrent() && c.deliveries.get(id)?.state === 'failed') {
+          c.handled.add(id);
+          saveHandled(c);
+        }
+      } catch (error) {
+        if (keyOf(selectedAgent() ?? {}) === key) fail(t('Message sent, but the earlier draft could not be cleared. Use Hide on the earlier message to try again.'));
+      } finally {
+        c.actions.delete(id);
+        if (stillCurrent()) schedulePatch(c);
+      }
+    }
   } catch (err) {
     // Keep both text and images for retry if pi rejects the prompt. An
     // uncertain bridge failure keeps the same ID, so retry cannot duplicate it.
@@ -2673,6 +2755,7 @@ function askEl(a) {
     a.role === 'worker' ? h('p', { class: 'ask-hint' }, a.handedOver
       ? t('{name} handed this question to you.', { name: yesmanLabel(a.yesman) })
       : t('{name} has this question and answers it. You can answer here instead.', { name: yesmanLabel(a.yesman) })) : null);
+  box._dialogState = JSON.stringify([box.dataset.request, d, a.handedOver, t('Submit')]);
   const actions = h('div', { class: 'ask-actions' });
   if (d.method === 'confirm') {
     actions.append(
