@@ -267,14 +267,17 @@ export function createInfo(host) {
       const req = { workspace: y.name, since: y.hiredAt, dir, id, action };
       const p = await host.call('MoveWorktree', req);
       if (!current()) return;
+      const cancel = action === 'cancel';
       const archive = action === 'archive';
-      const title = archive ? t('Archive {name}?', { name: dir }) : t('Restore {name}?', { name: dir });
-      const body = [archive ? t('The entire worktree stays on disk, including ignored files. You can restore it here.') : t('The entire worktree will return to its original directory.'),
-        t('Current path: {path}', { path: p.physical }), t('Destination: {path}', { path: p.to }),
-        t('Branch: {branch}', { branch: p.branch }), `HEAD: ${p.head}`, t('Confirm that no other agent, task, editor or process is using this worktree.')].join('\n\n');
-      if (await host.confirm(title, body, archive ? t('Archive worktree') : t('Restore worktree')) && current()) {
+      const title = cancel ? t('Cancel the pending move of {name}?', { name: dir }) : archive ? t('Archive {name}?', { name: dir }) : t('Restore {name}?', { name: dir });
+      const label = cancel ? t('Cancel pending move') : archive ? t('Archive worktree') : t('Restore worktree');
+      const body = [cancel ? t('The worktree is still at its original location. Canceling releases it there.') : archive ? t('The entire worktree stays on disk, including ignored files. You can restore it here.') : t('The entire worktree will return to its original directory.'),
+        t('Current path: {path}', { path: p.physical }), cancel ? '' : t('Destination: {path}', { path: p.to }),
+        t('Branch: {branch}', { branch: p.branch }), `HEAD: ${p.head}`, t('Confirm that no other agent, task, editor or process is using this worktree.')].filter(Boolean).join('\n\n');
+      if (await host.confirm(title, body, label) && current()) {
         checkEditor();
-        await host.call('MoveWorktree', { ...req, confirm: p.stamp });
+        const result = await host.call('MoveWorktree', { ...req, confirm: p.stamp });
+        if (result?.warning) host.fail(result.warning);
       }
     } catch (err) { host.fail(err); }
     finally { moving.delete(id); load(y.name, 'info'); render(); }
@@ -320,7 +323,11 @@ export function createInfo(host) {
         'data-info-entry': `move-${m.id}`, disabled: !label || moving.has(m.id),
         onclick: () => moveTree(y, m.dir, m.id, m.phase === 'archiving' ? 'archive' : 'restore') },
         h('span', { class: 'info-row-icon' }, icon('archive')), h('span', { class: 'info-row-title' }, m.dir),
-        h('span', { class: 'info-row-meta' }, label || t('Cannot be read'))));
+        h('span', { class: 'info-row-meta' }, label || t('Cannot be read'))),
+        m.phase === 'archiving' || m.phase === 'restoring' ? h('div', { class: 'info-row-actions' },
+          h('button', { type: 'button', class: 'mds-icon-button mds-icon-button--compact info-row-action', 'data-info-entry': `cancel-move-${m.id}`,
+            title: t('Cancel pending move'), 'aria-label': t('Cancel the pending move of {name}', { name: m.dir }), disabled: moving.has(m.id),
+            onclick: () => moveTree(y, m.dir, m.id, 'cancel') }, icon('undo'))) : null);
     }
     return h('div', { class: 'info-merged' }, toggle, d.archivedOpen ? h('ul', { class: 'info-list' }, moves.map(row)) : null);
   }

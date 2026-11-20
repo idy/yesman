@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/idy/yesman/internal/safefs"
 )
@@ -32,6 +34,7 @@ type MoveRequest struct {
 	Ino                                      uint64
 	Birth                                    int64
 	Restore                                  bool
+	Cancel                                   bool // only end a pending intent that is still at its source
 	// Pending and LockReason come only from the persisted move intent.
 	Pending    bool
 	LockReason string
@@ -93,6 +96,16 @@ func (p *Pool) WithLinkedMove(ctx context.Context, req MoveRequest, fn func(*Lin
 	if err := m.checkOperations(ctx); err != nil {
 		return err
 	}
+	source, _ := m.endpoints()
+	if req.Cancel {
+		if !req.Pending || m.Physical != source || m.Registered != source {
+			return errors.New("the directory has already moved. Choose Finish to complete its registration")
+		}
+	} else if m.Physical == source {
+		if err := m.checkDefaultBranch(ctx); err != nil {
+			return err
+		}
+	}
 	if err := p.checkMoveRegistrations(ctx, m); err != nil {
 		return err
 	}
@@ -143,6 +156,42 @@ func exists(path string) (bool, error) {
 	return err == nil, err
 }
 
+// Git may have recorded an absolute path through an alias of the configured
+// storage root (for example /var on macOS). Compare the root by identity and
+// require the literal managed components below it. This also works for the
+// missing source of a split registration, without following links in a tree.
+func managedPathMatches(raw, canonical string, depth int) bool {
+	path := filepath.FromSlash(raw)
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return false
+	}
+	if path == canonical {
+		return true
+	}
+	for range depth {
+		a, b := filepath.Base(path), filepath.Base(canonical)
+		if a != b && !(runtime.GOOS == "windows" && strings.EqualFold(a, b)) {
+			return false
+		}
+		path, canonical = filepath.Dir(path), filepath.Dir(canonical)
+	}
+	a, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	b, err := os.Stat(canonical)
+	return err == nil && os.SameFile(a, b)
+}
+
+// The active tree is <workspace-root>/<hire>/<dir>. The archived tree is a
+// direct child of the archive root.
+func (m *LinkedMove) locationDepth(path string) int {
+	if path == m.Active {
+		return 2
+	}
+	return 1
+}
+
 func (m *LinkedMove) inspect(ctx context.Context) error {
 	source, dest := m.endpoints()
 	hasSrc, err := exists(source)
@@ -191,8 +240,10 @@ func (m *LinkedMove) inspect(ctx context.Context) error {
 		return err
 	}
 	name, ok := strings.CutPrefix(strings.TrimSuffix(string(data), "\n"), "gitdir: ")
-	m.Private = filepath.FromSlash(strings.TrimSuffix(name, "\r"))
-	if !ok || !filepath.IsAbs(m.Private) || realPath(m.Private) != m.Private || filepath.Dir(m.Private) != filepath.Join(m.Common, "worktrees") {
+	rawPrivate := filepath.FromSlash(strings.TrimSuffix(name, "\r"))
+	commonDepth := 1 + strings.Count(m.req.Repo, "/")
+	m.Private = filepath.Join(m.Common, "worktrees", filepath.Base(rawPrivate))
+	if !ok || !managedPathMatches(rawPrivate, m.Private, commonDepth+2) || realPath(m.Private) != m.Private {
 		return errors.New("unsupported or foreign private Git directory")
 	}
 	pd, err := openWorktree(m.Private)
@@ -208,12 +259,13 @@ func (m *LinkedMove) inspect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	backPath := filepath.FromSlash(strings.TrimRight(string(back), "\r\n"))
-	if filepath.Base(backPath) != ".git" {
-		return errors.New("invalid private Git backpointer")
-	}
-	m.Registered = filepath.Dir(backPath)
-	if backPath != filepath.Join(m.Registered, ".git") || m.Registered != m.Physical && !(m.req.Pending && m.Physical == dest && m.Registered == source) {
+	backPath := strings.TrimRight(string(back), "\r\n")
+	switch {
+	case managedPathMatches(backPath, filepath.Join(m.Physical, ".git"), m.locationDepth(m.Physical)+1):
+		m.Registered = m.Physical
+	case m.req.Pending && m.Physical == dest && managedPathMatches(backPath, filepath.Join(source, ".git"), m.locationDepth(source)+1):
+		m.Registered = source
+	default:
 		return errors.New("private Git backpointer points to another worktree")
 	}
 	commondir, err := safefs.ReadSmall(pd, "commondir", maxGitFile)
@@ -231,7 +283,7 @@ func (m *LinkedMove) inspect(ctx context.Context) error {
 		return err
 	}
 	v := strings.Split(fields, "\n")
-	if len(v) != 4 || filepath.FromSlash(v[0]) != m.Common || filepath.FromSlash(v[1]) != m.Private || filepath.FromSlash(v[2]) != m.Physical || !commitID.MatchString(v[3]) {
+	if len(v) != 4 || !managedPathMatches(v[0], m.Common, commonDepth) || !managedPathMatches(v[1], m.Private, commonDepth+2) || !managedPathMatches(v[2], m.Physical, m.locationDepth(m.Physical)) || !commitID.MatchString(v[3]) {
 		return errors.New("Git reports a different common directory, worktree or commit")
 	}
 	m.Head = v[3]
@@ -240,12 +292,25 @@ func (m *LinkedMove) inspect(ctx context.Context) error {
 		return errors.New("worktree archive requires a local branch")
 	}
 	m.Branch = strings.TrimPrefix(ref, "refs/heads/")
-	def, err := git(ctx, m.Common, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
-	if err != nil || !strings.HasPrefix(def, "refs/remotes/origin/") {
-		return errors.New("cannot verify the protected default branch")
+	return nil
+}
+
+// Origin's cached HEAD can stay on the old default after fetch --prune. Ask
+// the remote on preview and confirmation, and immediately before a rename.
+// Finishing a rename that has already landed only repairs local metadata.
+func (m *LinkedMove) checkDefaultBranch(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	remote, err := git(ctx, m.Common, "ls-remote", "--exit-code", "--symref", "origin", "HEAD")
+	first, second, _ := strings.Cut(remote, "\n")
+	ref, name, _ := strings.Cut(strings.TrimSuffix(first, "\r"), "\t")
+	def, ok := strings.CutPrefix(ref, "ref: refs/heads/")
+	head, target, _ := strings.Cut(second, "\t")
+	if err != nil || !ok || def == "" || name != "HEAD" || !commitID.MatchString(head) || target != "HEAD" {
+		return errors.New("cannot verify the current default branch on origin. Check the remote connection and try again")
 	}
 	for _, b := range []string{m.Branch, m.req.OriginalBranch} {
-		if b == "main" || b == "master" || b == strings.TrimPrefix(def, "refs/remotes/origin/") {
+		if b == "main" || b == "master" || b == def {
 			return errors.New("primary/default branch is protected")
 		}
 	}
@@ -295,6 +360,9 @@ func (m *LinkedMove) checkOperations(ctx context.Context) error {
 // use the OS no-replace operation, and update only this absolute backpointer.
 // Every cut is resumable by inspecting observable state, even after unlock.
 func (m *LinkedMove) Finish(ctx context.Context, reason string) error {
+	if m.req.Cancel {
+		return errors.New("canceling a pending move cannot rename a directory")
+	}
 	want := m.LinkedLocation
 	m.req.Pending, m.req.LockReason = true, reason
 	if err := m.inspect(ctx); err != nil {
@@ -308,11 +376,14 @@ func (m *LinkedMove) Finish(ctx context.Context, reason string) error {
 		if _, err := git(ctx, m.Common, "worktree", "lock", "--reason", reason, "--", m.Registered); err != nil {
 			return err
 		}
-		if err := syncDirectory(m.Private); err != nil {
-			return err
-		}
 	}
 	if m.Physical == src {
+		if err := m.syncOwnedLock(reason); err != nil {
+			return err
+		}
+		if err := m.checkDefaultBranch(ctx); err != nil {
+			return err
+		}
 		if err := m.inspect(ctx); err != nil {
 			return err
 		}
@@ -360,6 +431,55 @@ func (m *LinkedMove) Finish(ctx context.Context, reason string) error {
 	return nil
 }
 
+// Flush the contents of Git's lock as well as its directory before moving. A
+// retry can observe a lock created just before a crash or a failed sync.
+func (m *LinkedMove) syncOwnedLock(reason string) error {
+	pd, err := openWorktree(m.Private)
+	if err != nil {
+		return err
+	}
+	defer pd.Close()
+	f, err := pd.OpenFile("locked", os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() > 1024 {
+		return errors.New("invalid worktree move lock")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 1025))
+	if err != nil || strings.TrimRight(string(data), "\r\n") != reason {
+		return errors.New("the worktree move lock changed")
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return syncDirectory(m.Private)
+}
+
+// Cancel releases only this intent's lock. The same original directory must
+// still be physically present and registered at the source on both checks.
+func (m *LinkedMove) Cancel(ctx context.Context) error {
+	want := m.LinkedLocation
+	if !m.req.Cancel || !m.req.Pending {
+		return errors.New("only a pending move can be canceled")
+	}
+	if err := m.inspect(ctx); err != nil {
+		return err
+	}
+	src, _ := m.endpoints()
+	if m.LinkedLocation != want || m.Physical != src || m.Registered != src {
+		return errors.New("checkout changed before cancellation")
+	}
+	if m.locked {
+		if _, err := git(ctx, m.Common, "worktree", "unlock", "--", src); err != nil {
+			return err
+		}
+	}
+	return syncDirectory(m.Private)
+}
+
 func (m *LinkedMove) publishBackpointer(dst string) error {
 	r, err := os.OpenRoot(m.Private)
 	if err != nil {
@@ -379,7 +499,7 @@ func (m *LinkedMove) publishBackpointer(dst string) error {
 	if err = errors.Join(err, f.Close()); err != nil {
 		return err
 	}
-	return r.Rename(tmp, "gitdir")
+	return safefs.ReplaceSynced(r, tmp, "gitdir")
 }
 
 func syncDirectory(path string) error {

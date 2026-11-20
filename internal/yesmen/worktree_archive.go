@@ -5,9 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"github.com/idy/yesman/internal/safefs"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 // UseWorktreeMove fences workspace dismissal, UI checkout, board changes and
@@ -125,22 +125,17 @@ func (s *Store) WorktreeMoveFile(y Yesman, fn func([]WorktreeRecord, func(int, W
 		if !bytes.Equal(data, current) {
 			return errors.New("worktree records changed during confirmation")
 		}
+		replace := s.ReplaceWorktreeJournal
+		if replace == nil {
+			replace = safefs.ReplaceSynced
+		}
 		s.metaMu.Lock()
-		err = meta.Rename(tmp, name)
+		err = replace(meta, tmp, name)
 		s.metaMu.Unlock()
-		if err != nil {
-			return err
+		if err == nil {
+			data = next
 		}
-		data = next
-		if runtime.GOOS == "windows" {
-			return nil
-		}
-		dir, err := meta.Open(".")
-		if err != nil {
-			return err
-		}
-		defer dir.Close()
-		return dir.Sync()
+		return err
 	}
 	return fn(records, publish)
 }

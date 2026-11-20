@@ -30,7 +30,8 @@ try {
         const lead = {id: 'alice/lead', yesman:'alice', name:'lead', role:'lead', status:'stopped'};
         const y = {name:'alice', displayName:'Demo', hiredAt:'2026-02-01T12:00:00Z', path:'/data/yesmen/alice'};
         const handlers = {}, moves = []; window.moves = moves;
-        let archived = false;
+        let archived = false, pending = false;
+        window.pendingArchive = () => { pending = true; handlers.changed?.(true); };
         window.mygo = {locale: 'en', on: (key, fn) => { handlers[key] = fn; }, call: async (method, ...args) => {
           switch (method.replace('Yesman.', '')) {
             case 'State': return {yesmen: [{...y, worktrees: archived ? [] : [w]}], agents:[lead]};
@@ -39,13 +40,14 @@ try {
             case 'Models': return {models:[], agent:lead};
             case 'Board': return {tasks:[]};
             case 'Shortcuts': return {};
-            case 'Info': return {knowledge:{}, topics:{}, worktrees:archived ? [] : [w], archiveMoves:archived ? [{dir, id, phase:'archived'}] : []};
+            case 'Info': return {knowledge:{}, topics:{}, worktrees:archived ? [] : [{...w,canArchive:!pending}], archiveMoves:pending ? [{dir,id,phase:'archiving'}] : archived ? [{dir, id, phase:'archived'}] : []};
             case 'MoveWorktree': {
               const r = args[0];
-              if (r.id !== id || r.since !== y.hiredAt || r.dir !== dir || r.workspace !== y.name || r.action !== (archived ? 'restore' : 'archive')) throw Error('wrong move');
+              if (r.id !== id || r.since !== y.hiredAt || r.dir !== dir || r.workspace !== y.name || r.action !== (pending ? 'cancel' : archived ? 'restore' : 'archive')) throw Error('wrong move');
               moves.push(r);
               if (r.confirm) {
                 if (r.confirm !== r.action + '-stamp') throw Error('wrong confirmation');
+                if (pending) { pending = false; return {physical:active, warning:'The worktree is at its source. Check the final record.'}; }
                 archived = !archived;
                 queueMicrotask(() => handlers.changed?.(true));
               }
@@ -82,8 +84,16 @@ try {
       await dlg.getByRole('button', {name:'Restore worktree'}).click();
       await archive.waitFor();
       assert.deepEqual(await page.evaluate(()=>moves.filter(r=>r.confirm).map(r=>r.action)), ['archive','restore']);
+      await page.evaluate(() => window.pendingArchive());
+      const cancel = page.getByRole('button', {name:'Cancel the pending move of room-finish'});
+      await cancel.click(); await dlg.waitFor();
+      assert.match(await dlg.innerText(), /still at its original location/);
+      await dlg.getByRole('button', {name:'Cancel pending move',exact:true}).click();
+      await page.getByText('The worktree is at its source. Check the final record.').waitFor();
+      await archive.waitFor();
+      assert.deepEqual(await page.evaluate(()=>moves.filter(r=>r.confirm).map(r=>r.action)), ['archive','restore','cancel']);
       assert.deepEqual(errors, []);
-      console.log(name + ': preview, cancel, archive list, restore and exact confirmations passed');
+      console.log(name + ': preview, cancel, archive list, restore, pending cancellation and final journal warning passed');
     } finally { await browser.close(); }
   }
 } finally { await new Promise(resolve => server.close(resolve)); }

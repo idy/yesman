@@ -43,10 +43,19 @@ type WorktreeRecord struct {
 // Its paths are evidence, never accepted as destinations from the client.
 type WorktreeArchive struct {
 	pool.LinkedLocation
-	Phase       string    `json:"phase"` // archiving, archived, restoring, restored
-	Transaction string    `json:"transaction"`
-	ConfirmedAt time.Time `json:"confirmedAt"`
-	TaskOwner   string    `json:"taskOwner"`
+	Phase       string             `json:"phase"` // archiving, archived, restoring, restored
+	Transaction string             `json:"transaction"`
+	ConfirmedAt time.Time          `json:"confirmedAt"`
+	TaskOwner   string             `json:"taskOwner"`
+	Users       []WorktreeMoveUser `json:"users,omitempty"`
+	CanceledAt  time.Time          `json:"canceledAt,omitzero"`
+}
+
+// WorktreeMoveUser retains a worker generation verified at move admission.
+// Its name continues to be reserved against live activity during recovery.
+type WorktreeMoveUser struct {
+	Name  string    `json:"name"`
+	Since time.Time `json:"since"`
 }
 
 func (r WorktreeRecord) ReservedForArchive() bool {

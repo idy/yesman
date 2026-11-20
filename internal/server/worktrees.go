@@ -146,6 +146,9 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 // registration, and never treats a missing unfinished task as completed.
 func (s *Server) retireMissingWorktree(ctx context.Context, c caller, y yesmen.Yesman, records []yesmen.WorktreeRecord, i int) error {
 	rec := &records[i]
+	if rec.ReservedForArchive() {
+		return errors.New("worktree directory reserved for archive or restoration")
+	}
 	if rec.Owner != c.agent.Name || !rec.OwnerSince.Equal(c.agent.Since) {
 		return errors.New("recorded checkout belongs to another owner; retain it")
 	}

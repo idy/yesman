@@ -82,7 +82,11 @@ func TestHumanWorktreeArchiveRestore(t *testing.T) {
 	before, _ := f.s.Yesmen.WorktreeRecords(f.y.Name)
 	refs := cleanupGit(t, f.repo.Path, "show-ref")
 	preview := moveTest(t, f, r)
-	if preview.Branch != "superseded" || preview.Head != current || filepath.FromSlash(w.Path) != preview.Physical || preview.Stamp == "" {
+	canonical, err := filepath.EvalSymlinks(filepath.FromSlash(w.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Branch != "superseded" || preview.Head != current || canonical != preview.Physical || preview.Stamp == "" {
 		t.Fatal(preview)
 	}
 	if _, err := os.Stat(preview.To); !errors.Is(err, os.ErrNotExist) {
@@ -266,7 +270,8 @@ func TestHumanWorktreeMoveCrashRecovery(t *testing.T) {
 				if direction == "restore" {
 					phase = "restoring"
 				}
-				j := yesmen.WorktreeArchive{LinkedLocation: pool.LinkedLocation{Active: active, Stored: stored, Common: f.repo.Path, Private: private, Head: p.Head, Branch: p.Branch}, Transaction: tx, ConfirmedAt: time.Now().UTC(), TaskOwner: "owner", Phase: phase}
+				common := filepath.FromSlash(cleanupGit(t, p.From, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+				j := yesmen.WorktreeArchive{LinkedLocation: pool.LinkedLocation{Active: active, Stored: stored, Common: common, Private: private, Head: p.Head, Branch: p.Branch}, Transaction: tx, ConfirmedAt: time.Now().UTC(), TaskOwner: "owner", Phase: phase}
 				err := f.s.Yesmen.WorktreeMoveFile(f.y, func(_ []yesmen.WorktreeRecord, publish func(int, yesmen.WorktreeArchive) error) error {
 					return publish(0, j)
 				})

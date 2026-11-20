@@ -35,6 +35,7 @@ type MovePreview struct {
 	Branch   string `json:"branch"`
 	Head     string `json:"head"`
 	Stamp    string `json:"stamp"`
+	Warning  string `json:"warning,omitempty"` // the physical move finished but its final record needs attention
 }
 
 // The desktop has one confirmation dialog. A new preview supersedes the old
@@ -65,7 +66,7 @@ func (s *Server) consumeMove(token string) (moveConfirmation, error) {
 
 func (s *Server) WorktreeMove(ctx context.Context, req WorktreeMove) (MovePreview, error) {
 	var out MovePreview
-	if !dirRE.MatchString(req.Dir) || req.ID == "" || req.Since.IsZero() || req.Action != "archive" && req.Action != "restore" {
+	if !dirRE.MatchString(req.Dir) || req.ID == "" || req.Since.IsZero() || req.Action != "archive" && req.Action != "restore" && req.Action != "cancel" {
 		return out, errors.New("select one registered worktree to archive or restore")
 	}
 	var approval moveConfirmation
@@ -97,12 +98,12 @@ func (s *Server) WorktreeMove(ctx context.Context, req WorktreeMove) (MovePrevie
 					return errors.New("ambiguous original checkout record")
 				}
 			}
-			return s.withArchiveUsers(y, r, func(task yesmen.Task) error {
+			return s.withArchiveUsers(y, r, func(task yesmen.Task, users []yesmen.WorktreeMoveUser) error {
 				active, stored, err := s.Yesmen.WorktreePaths(y, r.Dir, r.ID)
 				if err != nil {
 					return err
 				}
-				move := pool.MoveRequest{Repo: r.Repo, ID: r.ID, Active: active, Stored: stored, Ino: r.Root.Ino, Birth: r.Root.Birth, OriginalBranch: r.Branch, Restore: req.Action == "restore"}
+				move := pool.MoveRequest{Repo: r.Repo, ID: r.ID, Active: active, Stored: stored, Ino: r.Root.Ino, Birth: r.Root.Birth, OriginalBranch: r.Branch, Restore: req.Action == "restore", Cancel: req.Action == "cancel"}
 				if err := selectMove(r.Archive, &move); err != nil {
 					return err
 				}
@@ -114,9 +115,12 @@ func (s *Server) WorktreeMove(ctx context.Context, req WorktreeMove) (MovePrevie
 					if move.Restore {
 						out.From, out.To = stored, active
 					}
+					if move.Cancel {
+						out.To = out.Physical
+					}
 					// Include the previous transaction in the digest: returning to
 					// identical files after restore never revives an old confirmation.
-					data, err := json.Marshal([]any{y.Name, y.HiredAt, req.Action, r, task, actual.LinkedLocation, actual.Physical, actual.Registered})
+					data, err := json.Marshal([]any{y.Name, y.HiredAt, req.Action, r, task, users, actual.LinkedLocation, actual.Physical, actual.Registered})
 					if err != nil {
 						return err
 					}
@@ -136,18 +140,36 @@ func (s *Server) WorktreeMove(ctx context.Context, req WorktreeMove) (MovePrevie
 						if move.Restore {
 							journal.Phase = "restoring"
 						}
-						if err := publish(i, journal); err != nil {
+					}
+					journal.Users = users
+					// A pending record may be visible after its previous directory
+					// sync failed. Durably republish the authenticated intent on
+					// every retry before touching the worktree or its registration.
+					if err := publish(i, journal); err != nil {
+						return fmt.Errorf("could not sync the pending move at %s: %w", actual.Physical, err)
+					}
+					if move.Cancel {
+						if err := actual.Cancel(ctx); err != nil {
 							return err
 						}
-					}
-					if err := actual.Finish(ctx, "yesman move "+journal.Transaction); err != nil {
+						journal.CanceledAt = time.Now().UTC()
+					} else if err := actual.Finish(ctx, "yesman move "+journal.Transaction); err != nil {
 						return fmt.Errorf("move pending in Worktrees: %w", err)
 					}
-					journal.Phase = "archived"
-					if move.Restore {
-						journal.Phase = "restored"
+					out.Physical = actual.Physical
+					journal.Phase = "restored"
+					if out.Physical == stored {
+						journal.Phase = "archived"
 					}
-					return publish(i, journal)
+					if err := publish(i, journal); err != nil {
+						// The durable intent or the final state will be readable on restart.
+						retry := "Finish"
+						if move.Cancel {
+							retry = "Cancel pending move"
+						}
+						out.Warning = fmt.Sprintf("The worktree is at %s and Git points there. Could not verify the final move record (%v). Refresh Worktrees. If the move is pending, choose %s.", out.Physical, err, retry)
+					}
+					return nil
 				})
 			})
 		})
@@ -163,6 +185,12 @@ func selectMove(j *yesmen.WorktreeArchive, m *pool.MoveRequest) error {
 			return errors.New("unrecognized move record")
 		}
 	}
+	if m.Cancel {
+		if phase != "archiving" && phase != "restoring" {
+			return errors.New("there is no pending move to cancel")
+		}
+		m.Restore = phase == "restoring"
+	}
 	switch {
 	case !m.Restore && phase == "restored", m.Restore && phase == "archived":
 		return nil
@@ -177,7 +205,7 @@ func selectMove(j *yesmen.WorktreeArchive, m *pool.MoveRequest) error {
 // A terminal board task can legitimately have changed hands. Verify both
 // worker generations and reserve both, including any recorded delegate.
 // Other workers/tasks using this tree are covered by the user's confirmation.
-func (s *Server) withArchiveUsers(y yesmen.Yesman, r yesmen.WorktreeRecord, fn func(yesmen.Task) error) error {
+func (s *Server) withArchiveUsers(y yesmen.Yesman, r yesmen.WorktreeRecord, fn func(yesmen.Task, []yesmen.WorktreeMoveUser) error) error {
 	b, workers, err := s.Yesmen.WorktreeMoveActors(y)
 	if err != nil {
 		return err
@@ -192,35 +220,60 @@ func (s *Server) withArchiveUsers(y yesmen.Yesman, r yesmen.WorktreeRecord, fn f
 	if task.ID == "" || task.Open() || yesmen.ValidName(task.Owner) != nil {
 		return errors.New("the associated board task must have a known owner and be finished")
 	}
-	users := []string{}
+	var users []yesmen.WorktreeMoveUser
+	var names []string
 	taskSince := task.OwnerSince
 	if taskSince.IsZero() && task.Owner == r.Owner {
 		// A task handed over before its worker started can lack OwnerSince.
 		// The original recorded owner and the live generation must still match.
 		taskSince = r.OwnerSince
 	}
-	for _, u := range []struct {
-		name  string
-		since time.Time
-	}{{r.Owner, r.OwnerSince}, {task.Owner, taskSince}, {r.CleanupOwner, r.CleanupSince}} {
-		if u.name == "" {
+	current := []yesmen.WorktreeMoveUser{{Name: r.Owner, Since: r.OwnerSince}, {Name: task.Owner, Since: taskSince}, {Name: r.CleanupOwner, Since: r.CleanupSince}}
+	if r.ReservedForArchive() {
+		users = slices.Clone(r.Archive.Users)
+		// Early moves saved the verified task owner's name beside the
+		// original lifecycle generations. Removal binds the task's generation.
+		if len(users) == 0 {
+			users = append(users, current[0]) // original owner
+			if r.CleanupOwner != "" {
+				users = append(users, current[2])
+			}
+			if task.Owner == r.Archive.TaskOwner {
+				users = append(users, current[1])
+			}
+		}
+		if r.Archive.TaskOwner != "" {
+			names = append(names, r.Archive.TaskOwner)
+		}
+	}
+	for _, u := range current {
+		if u.Name == "" {
 			continue
 		}
-		known := u.name == yesmen.LeadName && y.HiredAt.Equal(u.since) || slices.ContainsFunc(workers, func(w yesmen.Worker) bool { return w.Name == u.name && w.StartedAt.Equal(u.since) })
-		if !known || u.since.IsZero() {
-			return fmt.Errorf("cannot verify recorded owner %s", u.name)
+		if slices.Contains(users, u) {
+			continue
 		}
-		if !slices.Contains(users, u.name) {
-			users = append(users, u.name)
+		known := u.Name == yesmen.LeadName && y.HiredAt.Equal(u.Since) || slices.ContainsFunc(workers, func(w yesmen.Worker) bool { return w.Name == u.Name && w.StartedAt.Equal(u.Since) })
+		if !known || u.Since.IsZero() {
+			return fmt.Errorf("cannot verify recorded owner %s", u.Name)
+		}
+		users = append(users, u)
+	}
+	for _, u := range users {
+		if yesmen.ValidName(u.Name) != nil || u.Since.IsZero() {
+			return errors.New("invalid archive owner generation")
+		}
+		if !slices.Contains(names, u.Name) {
+			names = append(names, u.Name)
 		}
 	}
 	for _, t := range b.Tasks {
-		if t.Open() && slices.Contains(users, t.Owner) {
+		if t.Open() && slices.Contains(names, t.Owner) {
 			return fmt.Errorf("%s still owns open task %s", t.Owner, t.ID)
 		}
 	}
-	run := func() error { return fn(task) }
-	for _, user := range users {
+	run := func() error { return fn(task, users) }
+	for _, user := range names {
 		inner := run
 		run = func() error { return s.Agents.WithWorktreeOwner(agent.ID(y.Name, user), "", inner) }
 	}
