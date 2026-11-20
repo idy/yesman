@@ -266,7 +266,7 @@ YESMAN_HOME="$profile" PI_CODING_AGENT_DIR="$pi_config" yesman run \
   --workspace example --new --root "$project" --prompt-file instruction.md \
   --provider "$provider" --model "$full_model_id" --effort max --timeout 45m >result.json
 
-# Resume its Lead conversation, workers and board. Stdin is the default.
+# Send a new message to the existing Lead conversation. Stdin is the default.
 printf 'Summarize the result.\n' | YESMAN_HOME="$profile" PI_CODING_AGENT_DIR="$pi_config" \
   yesman run --workspace example
 ```
@@ -285,7 +285,11 @@ Specify `--provider`, `--model` and `--effort` together to give the whole team o
 
 A worker’s model error reaches the Lead in its report. `yesman_agents` exposes the worker’s latest `runError`, and its session JSONL keeps the original error. The Lead decides whether to retry, reassign or finish with the available evidence. After those turns settle, the CLI uses the Lead’s final state.
 
-The result includes `workspace`, `root`, `submissionId` and the last visible Lead `reply` when available. The native session JSONL, submission receipts and board are under `root/.yesman`. Each exit closes the run's Pi processes and drains receipts. An interrupted live dialog is described in the output. A later invocation resumes by sending a new message. Free-text questions appear in `reply`. Machine-readable human waits use the structured dialog and handoff tools.
+The result includes `workspace`, `root` and `submissionId` when available. `reply` is the latest Lead text observed after Pi recorded the submission, or an empty string if no text was observed. It can be an intermediate reply, for example the Lead's acknowledgement that it delegated work. Use `status` to tell how execution ended and check the actual deliverables for the outcome. Free-text questions appear in `reply`. For `needs_input`, use `dialogs` and `handoffs` for structured requests.
+
+On `timed_out`, `interruptedAgents` can list agents the run's Manager still saw starting, working, waiting, handling pending input or reporting when it closed admission. It is omitted if no such agent was observed, including a deadline during preparation before agents start. Entries are sorted by `id` and include `role`, the hire time `since` when known, and `phase` (`starting`, `working`, `waiting`, `input_pending` or `reporting`). `waitingOn` is `user` or `lead` when the dialog's route is known. A worker has phase `reporting` while the Manager is still handling a report or notice. `reportStatus: "accepted"` means the Manager can match Pi's successful prompt response to the sole outstanding report. `unknown` covers missing or ambiguous receipts, including overlapping reports. Whether the report entered the Lead's conversation or the Lead read it remains unknown. The snapshot describes that instant of the run and may differ from the state after shutdown. Use it to decide which agents' saved state to inspect.
+
+Each exit closes the run's Pi processes and drains receipts. The native session JSONL, submission receipts and board are under `root/.yesman`. To follow up after a timeout, use the same `YESMAN_HOME`, Pi configuration and workspace name, and send a new message without `--new` or `--root`. The Lead reopens its conversation and can inspect saved files and the board, then decide whether to message a worker or delegate again. This is a new submission with its own deadline. Review any external effects before repeating work.
 
 Close the desktop before using the same data folder. Each frontend takes a profile lock. Use a separate `YESMAN_HOME` when an older desktop or another workspace needs to run alongside the CLI. The desktop owns scheduled jobs and explicit restart checkpoints. Complete a pending desktop restart before resuming a workspace named in its checkpoint. The Yes Man secrets vault stays locked in a headless run. Workers have ordinary OS permissions, so use an appropriate container or operating-system account for untrusted projects.
 

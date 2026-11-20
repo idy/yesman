@@ -9,20 +9,33 @@ import (
 	"strings"
 	"time"
 
+	"github.com/idy/yesman/internal/restart"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
 // RunResult describes one human submission and all work its team ran.
 // Completed describes the execution. The reply and board explain its outcome.
 type RunResult struct {
-	Status       string           `json:"status"`
-	Workspace    string           `json:"workspace"`
-	Root         string           `json:"root,omitempty"`
-	SubmissionID string           `json:"submissionId,omitempty"`
-	Reply        string           `json:"reply"`
-	Handoffs     []yesmen.Handoff `json:"handoffs,omitempty"`
-	Dialogs      []RunDialog      `json:"dialogs,omitempty"`
-	Error        string           `json:"error,omitempty"`
+	Status            string                `json:"status"`
+	Workspace         string                `json:"workspace"`
+	Root              string                `json:"root,omitempty"`
+	SubmissionID      string                `json:"submissionId,omitempty"`
+	Reply             string                `json:"reply"`
+	Handoffs          []yesmen.Handoff      `json:"handoffs,omitempty"`
+	Dialogs           []RunDialog           `json:"dialogs,omitempty"`
+	InterruptedAgents []RunInterruptedAgent `json:"interruptedAgents,omitempty"`
+	Error             string                `json:"error,omitempty"`
+}
+
+// RunInterruptedAgent is the Manager's observation at the timeout boundary.
+// It names the hire and phase without retaining any message or tool data.
+type RunInterruptedAgent struct {
+	ID           string    `json:"id"`
+	Role         string    `json:"role"`
+	Since        time.Time `json:"since,omitzero"`
+	Phase        string    `json:"phase"`
+	WaitingOn    string    `json:"waitingOn,omitempty"`
+	ReportStatus string    `json:"reportStatus,omitempty"`
 }
 
 type RunDialog struct {
@@ -205,6 +218,9 @@ func (m *Manager) RunOnce(ctx context.Context, y yesmen.Yesman, prompt string) (
 		}
 		if out.Status != "" {
 			m.closeLocked()
+			if out.Status == "timed_out" {
+				out.InterruptedAgents = m.interruptedRunAgentsLocked(y)
+			}
 		}
 		m.mu.Unlock()
 		if out.Status != "" {
@@ -246,6 +262,64 @@ func ContextStatus(err error) string {
 	return "failure"
 }
 
+// runInputQueuedLocked also sees a worker's admitted input before Pi reports
+// its next turn. The Lead's intake and settlement are checked separately.
+func runInputQueuedLocked(a *agent, worker bool) bool {
+	return a.proc != nil && (a.queue.Steering+a.queue.FollowUp > 0 || worker && a.inbox != a.settledInbox)
+}
+
+func (m *Manager) interruptedRunAgentsLocked(y yesmen.Yesman) []RunInterruptedAgent {
+	var out []RunInterruptedAgent
+	for _, a := range m.agents {
+		if a.info.Yesman != y.Name || !a.workspaceSince.Equal(y.HiredAt) || a.retiring || a.removing {
+			continue
+		}
+		e := RunInterruptedAgent{ID: a.info.ID, Role: a.info.Role, Since: a.info.Since.UTC()}
+		worker := e.Role == RoleWorker
+		live := a.proc != nil && !a.stopping
+		if live {
+			select {
+			case <-a.proc.done:
+				live = false
+			default:
+			}
+		}
+		switch {
+		case !a.stopping && (a.starting != nil || a.info.Status == Starting):
+			e.Phase = "starting"
+		case live && a.info.Status == Working:
+			e.Phase = "working"
+		case live && a.info.Status == Waiting:
+			e.Phase = "waiting"
+			if id := dialogID(a.info.Dialog); id != "" {
+				if !worker || id == a.handedOver {
+					e.WaitingOn = "user"
+				} else {
+					e.WaitingOn = "lead"
+				}
+			}
+		case live && (a.prompts > 0 || runInputQueuedLocked(a, worker)):
+			e.Phase = "input_pending"
+		case worker && a.reports > 0:
+			// The latest receipt can outlive its reservation while an older
+			// report or a notice is still pending. Require a unique match.
+			accepted := a.reports == 1 && a.handoff.active && a.handoff.state == restart.ReportAccepted
+			if accepted && !live {
+				continue // its accepted report is only finishing cleanup
+			}
+			e.Phase, e.ReportStatus = "reporting", "unknown"
+			if accepted {
+				e.ReportStatus = "accepted"
+			}
+		default:
+			continue
+		}
+		out = append(out, e)
+	}
+	slices.SortFunc(out, func(a, b RunInterruptedAgent) int { return strings.Compare(a.ID, b.ID) })
+	return out
+}
+
 func (m *Manager) checkRunLocked(y yesmen.Yesman, submitted bool, out *RunResult) {
 	r := m.run
 	lead := m.agents[r.lead]
@@ -271,7 +345,7 @@ func (m *Manager) checkRunLocked(y yesmen.Yesman, submitted bool, out *RunResult
 		if busyLocked(a) || a.calls > 0 || len(a.operations) > 0 || a.removing || a.proc != nil && a.stopping {
 			return
 		}
-		if a.proc != nil && (a.queue.Steering+a.queue.FollowUp > 0 || a != lead && a.inbox != a.settledInbox) {
+		if runInputQueuedLocked(a, a != lead) {
 			return // includes a worker given new work after an earlier error
 		}
 		if a.handoff.state != "" {

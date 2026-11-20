@@ -197,7 +197,7 @@ func TestRunCLIWithManagedPi(t *testing.T) {
 	}
 	close(gate)
 	out := <-done
-	if out.Status != "completed" || out.Reply != "Final Lead reply after checking worker report" || out.SubmissionID == "" {
+	if out.Status != "completed" || out.Reply != "Final Lead reply after checking worker report" || out.SubmissionID == "" || out.InterruptedAgents != nil {
 		t.Errorf("first result: %+v", out)
 	}
 	if b, err := os.ReadFile(filepath.Join(root, "worker.txt")); err != nil || string(b) != candidate {
@@ -252,7 +252,7 @@ func TestRunCLIWithManagedPi(t *testing.T) {
 	if out, code := run([]string{"--workspace", "team", "--timeout", "30s"}, second); code != 0 || out.Reply != "Resumed reply" {
 		t.Fatalf("resume: %+v (exit %d)", out, code)
 	}
-	if out, code := run(args, ask); code != 2 || out.Status != "needs_input" || len(out.Handoffs) != 1 || out.Handoffs[0].Title != "Choose a color" {
+	if out, code := run(args, ask); code != 2 || out.Status != "needs_input" || len(out.Handoffs) != 1 || out.Handoffs[0].Title != "Choose a color" || out.InterruptedAgents != nil {
 		t.Fatalf("handoff: %+v (exit %d)", out, code)
 	}
 	if out, code := run(args, failLead); code != 1 || out.Status != "failure" || !strings.Contains(out.Error, "synthetic Lead request refused") {

@@ -67,8 +67,12 @@ func TestRunCLIInterruptedInput(t *testing.T) {
 		var out bytes.Buffer
 		got := runCLI(ctx, []string{"--workspace", "x", "--timeout", "20ms"}, read, &out, io.Discard)
 		cancel()
-		if got != want {
-			t.Fatalf("got %d, want %d: %s", got, want, out.String())
+		var result map[string]json.RawMessage
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if got != want || result["interruptedAgents"] != nil || result["submissionId"] != nil || string(result["reply"]) != `""` {
+			t.Fatalf("got exit %d, want %d and no agent or submission yet: %s", got, want, out.String())
 		}
 	}
 }
