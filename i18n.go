@@ -138,6 +138,8 @@ var zhHans = map[string]string{
 	"Open Working Logs":       "打开工作日志",
 	"Check Out a Repository…": "检出仓库…",
 	"Dismiss yesman…":         "解雇 yesman…",
+	"Clean up worktrees…":     "清理工作树…",
+	"Remove Worktree…":        "移除工作树…",
 	"Reveal in Finder":        "在访达中显示",
 	"Show in Explorer":        "在资源管理器中显示",
 	"Show in Files":           "在文件管理器中显示",

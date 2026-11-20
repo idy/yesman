@@ -16,6 +16,7 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/safefs"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -179,25 +180,11 @@ type cleanupResult struct {
 	Record  *yesmen.WorktreeRecord `json:"record,omitempty"`
 }
 
-func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman, req removeWorktreeRequest) (cleanupResult, error) {
+func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, req removeWorktreeRequest, proof removalVerification, records []yesmen.WorktreeRecord, i int, board yesmen.Board, workers []yesmen.Worker) (cleanupResult, error) {
 	if err := ctx.Err(); err != nil {
 		return cleanupResult{}, err
 	}
-	if req.Force {
-		return cleanupResult{}, errors.New("agent cleanup never uses force")
-	}
-	records, err := s.Yesmen.WorktreeRecords(y.Name)
-	if err != nil {
-		return cleanupResult{}, err
-	}
-	i := latestWorktree(records, req.Dir)
-	if i < 0 {
-		return cleanupResult{Reason: "retain: unknown ownership; no agent lifecycle record"}, nil
-	}
 	rec := &records[i]
-	if req.Checkout == "" || req.Checkout != rec.ID {
-		return cleanupResult{Reason: "retain: checkout ID changed or missing; old cleanup cannot affect a new round"}, nil
-	}
 	out := cleanupResult{Record: rec}
 	retain := func(reason string) (cleanupResult, error) { out.Reason = "retain: " + reason; return out, nil }
 	owner := rec.Owner == c.agent.Name && rec.OwnerSince.Equal(c.agent.Since)
@@ -209,31 +196,52 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	if rec.Purpose != "review" && rec.Purpose != "author" && rec.Purpose != "release" {
 		return retain("primary or unknown purpose")
 	}
+	recoveryOnly := proof.missing && rec.Completion != nil && req.Handoff == ""
+	if !rec.Removed && !recoveryOnly {
+		if err := CheckSavedWorktreeReturn(y, *rec, board, workers); err != nil {
+			return retain(err.Error())
+		}
+		// A first manual proposal has no saved certificate yet. The task can
+		// be reopened, closed again or explicitly kept during a remote check.
+		if proof.decision != WorktreeDecisionFor(board, *rec) {
+			return retain("the associated task changed during verification. Check its current disposition before trying again")
+		}
+		if !rec.BoardRound.IsZero() && heldByUsers(*rec, board, workers) {
+			return retain("recorded user has open or paused work")
+		}
+	}
+	reservationCaller := c.agent.ID
+	if !rec.BoardRound.IsZero() {
+		reservationCaller = ""
+	}
 	branchVerified := false
 	if req.Completion != nil {
 		if !owner && !lead {
 			return retain("only the owner or lead may certify completion")
 		}
 		v := *req.Completion
-		if !exactHeadRE.MatchString(v.Head) || strings.TrimSpace(v.Ref) == "" || strings.TrimSpace(v.Evidence) == "" || len(v.Ref) > 2048 || len(v.Evidence) > 16000 || !v.Unused {
-			return retain("completion needs exact HEAD, PR/ref, durable evidence and unused=true")
+		if reason := completionProblem(*rec, v); reason != "" {
+			return retain(reason)
 		}
-		valid := v.Outcome == "done" && rec.Purpose != "review"
-		if rec.Purpose == "review" {
-			valid = v.Outcome == "pass" || v.Outcome == "findings-handed-off" || v.Outcome == "waiting-release" || v.Outcome == "audit-complete"
-		}
-		if !valid || rec.Purpose == "review" && v.Head != rec.Head {
-			return retain("outcome or reviewed HEAD does not match this checkout")
-		}
-		if rec.Completion != nil && !sameWorktreeCompletion(*rec.Completion, v) {
+		if !matchesSavedProposal(*rec, v) {
 			return retain("completion already saved; reconstruct a new checkout for another round")
 		}
 		if rec.Completion == nil {
 			v.SavedAt = time.Now().UTC()
+			v.ReturnID = ""
+			v.CertifiedBy, v.CertifiedSince = c.agent.Name, c.agent.Since
+			candidate, err := proof.decision.bind(*rec, v)
+			if err != nil {
+				return retain(err.Error())
+			}
+			if err := CheckSavedWorktreeReturn(y, candidate, board, workers); err != nil {
+				return retain(err.Error())
+			}
+			if !candidate.BoardRound.IsZero() && heldByUsers(candidate, board, workers) {
+				return retain("recorded user has open or paused work")
+			}
 			if rec.Purpose != "review" {
-				candidate := *rec
-				candidate.Completion = &v
-				err := s.verifyBranchCompletion(ctx, y, candidate)
+				err := proof.branchProof(board, candidate)
 				if err == nil {
 					err = s.Pool.CheckTemporaryWorktree(ctx, y.Path, expectedWorktree(candidate))
 				}
@@ -254,7 +262,10 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 			if err := ctx.Err(); err != nil {
 				return out, err
 			}
-			rec.Completion = &v
+			rec.Completion, rec.BoardRound = candidate.Completion, candidate.BoardRound
+			if !rec.BoardRound.IsZero() {
+				reservationCaller = ""
+			}
 			if err := s.Yesmen.SaveWorktreeRecords(y.Name, records); err != nil {
 				return out, err
 			}
@@ -262,6 +273,11 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	}
 	if rec.Completion == nil {
 		return retain("no saved completion evidence; stopped/restarted is not completed")
+	}
+	if !rec.Removed && rec.Purpose != "review" && !branchVerified && !recoveryOnly {
+		if err := proof.branchProof(board, *rec); err != nil {
+			return retain(err.Error())
+		}
 	}
 	if req.Handoff != "" {
 		if !lead {
@@ -271,7 +287,7 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 		if err != nil || target.Role != agent.RoleWorker {
 			return retain("handoff needs a worker in this workspace")
 		}
-		err = s.withWorktreeUsers(y.Name, *rec, c.agent.ID, func() error {
+		err = s.withWorktreeUsers(y.Name, *rec, reservationCaller, func() error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -292,13 +308,6 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 		out.Removed = true
 		return out, nil
 	}
-	// Fresh merge evidence is required for branches, including squash merges.
-	// Release tasks stay open through publication/verification, after PR merge.
-	if rec.Purpose != "review" && !branchVerified {
-		if err := s.verifyBranchCompletion(ctx, y, *rec); err != nil {
-			return retain(err.Error())
-		}
-	}
 	// Refuse a reused worker name. A removed worker's durable records still
 	// exist, but only the lead can take responsibility for that evidence.
 	if info, err := s.Agents.Get(agent.ID(y.Name, rec.Owner)); err == nil {
@@ -308,29 +317,24 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	} else if !lead && !delegate {
 		return retain("owner cannot be verified")
 	}
-	err = s.withWorktreeUsers(y.Name, *rec, c.agent.ID, func() error {
+	err := s.withWorktreeUsers(y.Name, *rec, reservationCaller, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Idempotent recovery after git removed the tree but the app exited
-		// before the final metadata save. A replacement path is never touched.
-		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-			registered, err := s.Pool.HasWorktreeRegistration(ctx, "", path)
-			if err != nil {
+		if recoveryOnly {
+			if err := s.checkMissingInstance(ctx, *rec, path); err != nil {
 				return err
 			}
-			if registered {
-				return errors.New("missing path is still registered; retain for recovery")
-			}
-		} else {
-			if err := s.Pool.RemoveTemporaryWorktree(ctx, y.Path, expectedWorktree(*rec)); err != nil {
-				return err
-			}
+		} else if err := s.removeCompletedInstance(ctx, y, *rec); err != nil {
+			return err
 		}
 		// Successful removal must be recorded even if cancellation just arrived.
 		// The process gate still keeps Stop/Archive from finishing before save.
-		rec.Removed = true
-		return s.Yesmen.SaveWorktreeRecords(y.Name, records)
+		err := s.recordWorktreeRemoval(y, *rec, rec.RetiredReason)
+		if err == nil {
+			rec.Removed = true
+		}
+		return err
 	})
 	if err != nil {
 		return retain(err.Error())
@@ -339,31 +343,48 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	return out, nil
 }
 
+// recordWorktreeRemoval is the single post-Git write under TryWorktreeCommit.
+// It reloads and compares the original record, preserving unrelated checkouts.
+func (s *Server) recordWorktreeRemoval(y yesmen.Yesman, before yesmen.WorktreeRecord, reason string) error {
+	after := before
+	after.Removed, after.RetiredReason = true, reason
+	return s.Yesmen.CommitWorktreeRecord(y, before, after)
+}
+
+// A Board certification keeps the task's evidence. Retrying the owner's
+// original request can therefore supply a different external evidence note.
+func matchesSavedProposal(rec yesmen.WorktreeRecord, v yesmen.WorktreeCompletion) bool {
+	if rec.Completion == nil || sameWorktreeCompletion(*rec.Completion, v) {
+		return true
+	}
+	return !rec.BoardRound.IsZero() && sameReturnedSource(*rec.Completion, v) && rec.Completion.Outcome == v.Outcome && rec.Completion.Unused == v.Unused
+}
+
 func sameWorktreeCompletion(a, b yesmen.WorktreeCompletion) bool {
-	return a.Head == b.Head && a.Outcome == b.Outcome && a.Ref == b.Ref && a.Evidence == b.Evidence && a.Unused == b.Unused
+	return a.Head == b.Head && a.Outcome == b.Outcome && a.Ref == b.Ref && a.Evidence == b.Evidence && a.Unused == b.Unused && a.SourceBranch == b.SourceBranch && a.Publication == b.Publication
 }
 
 func expectedWorktree(rec yesmen.WorktreeRecord) pool.Worktree {
-	return pool.Worktree{Repo: rec.Repo, Dir: rec.Dir, Head: rec.Completion.Head, Branch: rec.Branch, Detached: rec.Purpose == "review", CleanupID: rec.ID}
+	wt := pool.Worktree{Repo: rec.Repo, Dir: rec.Dir, Head: rec.Completion.Head, Branch: rec.Branch, Detached: rec.Purpose == "review", CleanupID: rec.ID}
+	if rec.Root != nil {
+		wt.Root = &safefs.Identity{Ino: rec.Root.Ino, Birth: rec.Root.Birth, HasBirth: true}
+	}
+	return wt
 }
 
-func (s *Server) verifyBranchCompletion(ctx context.Context, y yesmen.Yesman, rec yesmen.WorktreeRecord) error {
-	b, err := s.Yesmen.Board(y.Name)
-	if err != nil {
-		return err
-	}
+func branchTaskFinished(b yesmen.Board, rec yesmen.WorktreeRecord) error {
 	finished := false
 	for _, t := range b.Tasks {
 		terminal := !t.Open()
 		if rec.Purpose == "release" {
 			terminal = t.Status == yesmen.TaskDone
 		}
-		finished = finished || t.ID == rec.Task && t.Owner == rec.Owner && terminal
+		finished = finished || t.ID == rec.Task && t.Owner == rec.Owner && (t.OwnerSince.IsZero() || rec.OwnerSince.Equal(t.OwnerSince)) && terminal
 	}
 	if !finished {
 		return errors.New("associated author/release task is unfinished")
 	}
-	return s.verifyMerged(ctx, rec)
+	return nil
 }
 
 // Reserve every recorded user, including a prior cleanup delegate, so a lead
@@ -379,7 +400,7 @@ func (s *Server) withWorktreeUsers(workspace string, rec yesmen.WorktreeRecord, 
 
 func (s *Server) verifyMerged(ctx context.Context, rec yesmen.WorktreeRecord) error {
 	u, err := url.Parse(rec.Completion.Ref)
-	if err != nil || u.Scheme != "https" || u.Host != "github.com" {
+	if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("branch completion needs a GitHub PR URL")
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
@@ -391,7 +412,7 @@ func (s *Server) verifyMerged(ctx context.Context, rec yesmen.WorktreeRecord) er
 		return errors.New("invalid PR number")
 	}
 	target := parts[0] + "/" + parts[1]
-	r, err := s.Pool.Get(rec.Repo)
+	r, err := s.Pool.RecordedRepo(ctx, rec.Repo)
 	if err != nil {
 		return err
 	}
@@ -407,8 +428,23 @@ func (s *Server) verifyMerged(ctx context.Context, rec yesmen.WorktreeRecord) er
 	if err != nil {
 		return fmt.Errorf("cannot verify merged PR: %w", err)
 	}
-	if !pr.Merged || pr.State != "closed" || pr.MergedAt.IsZero() || !exactHeadRE.MatchString(pr.MergeCommit) || pr.Head.SHA != rec.Completion.Head || pr.Head.Ref != rec.Branch || !strings.EqualFold("github.com/"+pr.Head.Repo.FullName, rec.Repo) {
+	if !pr.Merged || pr.State != "closed" || pr.MergedAt.IsZero() || !exactHeadRE.MatchString(pr.MergeCommit) || pr.Head.SHA != rec.Completion.Head || pr.Head.Ref != publishedBranch(rec) || !strings.EqualFold("github.com/"+pr.Head.Repo.FullName, rec.Repo) {
 		return errors.New("PR is not merged at this exact source repository/branch/HEAD")
+	}
+	if rec.Purpose == "release" && rec.Completion.Publication != "" {
+		base := "https://github.com/" + target + "/releases/tag/"
+		tag, ok := strings.CutPrefix(rec.Completion.Publication, base)
+		if !ok || tag == "" || strings.ContainsAny(tag, "?#%") {
+			return errors.New("publication needs the published GitHub release URL in the PR's repository")
+		}
+		readTag := s.ReadPublishedTag
+		if readTag == nil {
+			readTag = github.ReadPublishedTag
+		}
+		head, err := readTag(ctx, target, tag)
+		if err != nil || head != pr.MergeCommit && head != pr.Head.SHA {
+			return errors.New("cannot verify publication of this release PR at its tag")
+		}
 	}
 	return nil
 }

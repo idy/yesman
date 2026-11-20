@@ -4180,6 +4180,10 @@ const info = createInfo({
     return a ? yesmanOf(a.id) : null;
   },
   isOpen: () => infoShown(),
+  toast,
+  unsaved: y => files.unsavedWorktrees(y),
+  removed: (y, rows) => files.removedWorktrees(y, rows),
+  reconcile: (y, rows, complete) => files.reconcileWorktrees(y, rows, complete),
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
@@ -4200,7 +4204,7 @@ const info = createInfo({
   openNeedsYou: () => showNeedsYou(),
   pane: () => state.pane,
   openTopics: () => setPane('topics'),
-  openWorktree: (dir, show) => files.openWorktree(dir, show),
+  openWorktree: (w, show) => files.openWorktree(w, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
 });
@@ -4722,6 +4726,7 @@ async function refreshState() {
     fail(err);
     return;
   }
+  for (const y of state.snap.yesmen) files.reconcileWorktrees(y, y.worktrees ?? [], false);
   pruneNeedsYouDrafts();
   pruneCaches();
   if (state.view.kind === 'agent' && !agentById(state.view.id)) state.view = { kind: 'none' };
@@ -4733,7 +4738,9 @@ async function refreshState() {
     return;
   }
   const sidebarFocus = $('#yesmen').contains(document.activeElement) ? document.activeElement : null;
+  const worktreeFocus = document.activeElement?.closest('#yesman-info [data-info-entry^="worktree"]')?.dataset.infoEntry;
   render();
+  if (worktreeFocus) ($(`#yesman-info [data-info-entry="${CSS.escape(worktreeFocus)}"]`) || $('#yesman-info .worktree-heading'))?.focus({ preventScroll: true });
   palette.refresh();
   // The rebuilt composer can take initial focus during a full state refresh.
   // Preserve the sidebar's stable agent + semantic entry after that rebuild.

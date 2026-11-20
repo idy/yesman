@@ -21,6 +21,7 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/idy/yesman/internal/tasklog"
+	"github.com/idy/yesman/internal/yesmen"
 )
 
 // filesEvent says which files of a yesman's workspace changed, while the
@@ -165,9 +166,14 @@ func (s *service) ReadFile(yesman, file string) (FileView, error) {
 	}
 	defer root.Close()
 	file = cleanRel(file)
+	return readFileAt(root, file, tasklog.IsPath(file))
+}
+
+func readFileAt(root *os.Root, file string, workingLog bool) (FileView, error) {
+	var err error
 	var f *os.File
 	var history *tasklog.File
-	if tasklog.IsPath(file) {
+	if workingLog {
 		history, err = tasklog.Open(root, file)
 		if err == nil {
 			f = history.File
@@ -243,7 +249,14 @@ var errChanged = errors.New("the file changed on disk since it was opened")
 // something else, it is left alone and the error says it changed. An empty
 // base writes regardless, also to a file that is gone.
 func (s *service) WriteFile(yesman, file, text, base string) (FileView, error) {
-	root, err := s.workspaceRoot(yesman)
+	// An editor save already in progress finishes before service-owned
+	// worktree reclamation can take its exclusive workspace lease.
+	y, release, err := s.app.yesmen.BeginUse(yesman)
+	if err != nil {
+		return FileView{}, err
+	}
+	defer release()
+	root, err := os.OpenRoot(y.Path)
 	if err != nil {
 		return FileView{}, err
 	}
@@ -252,6 +265,11 @@ func (s *service) WriteFile(yesman, file, text, base string) (FileView, error) {
 	if tasklog.IsPath(file) {
 		return FileView{}, errors.New("working history is read-only; the lead maintains its Markdown records")
 	}
+	return writeFileAt(root, file, text, base)
+}
+
+func writeFileAt(root *os.Root, file, text, base string) (FileView, error) {
+	var err error
 	if file == "." {
 		return FileView{}, errors.New("no file named")
 	}
@@ -299,6 +317,44 @@ func (s *service) WriteFile(yesman, file, text, base string) (FileView, error) {
 		v.ModTime = st.ModTime()
 	}
 	return v, nil
+}
+
+// FileCheckout is the instance the Files pane showed when its tab opened.
+// A delayed bridge call still carries that same checkout and workspace hire.
+type FileCheckout struct {
+	Repo string    `json:"repo"`
+	Dir  string    `json:"dir"`
+	ID   string    `json:"cleanupId"`
+	Hire time.Time `json:"hiredAt"`
+}
+
+func (s *service) withCheckoutFile(name, file string, checkout FileCheckout, op func(*os.Root, string) (FileView, error)) (FileView, error) {
+	file = cleanRel(file)
+	rel, ok := strings.CutPrefix(file, checkout.Dir+"/")
+	if !ok || rel == "" {
+		return FileView{}, errors.New("file is outside this checkout")
+	}
+	var v FileView
+	err := s.app.yesmen.Use(name, func(y yesmen.Yesman) error {
+		if checkout.Hire.IsZero() || !y.HiredAt.Equal(checkout.Hire) {
+			return yesmen.ErrRehired
+		}
+		return s.app.pool.WithCheckoutFiles(y.Path, checkout.Repo, checkout.Dir, checkout.ID, func(root *os.Root) error {
+			var err error
+			v, err = op(root, rel)
+			v.Path = file
+			return err
+		})
+	})
+	return v, err
+}
+
+func (s *service) ReadWorktreeFile(name, file string, checkout FileCheckout) (FileView, error) {
+	return s.withCheckoutFile(name, file, checkout, func(root *os.Root, rel string) (FileView, error) { return readFileAt(root, rel, false) })
+}
+
+func (s *service) WriteWorktreeFile(name, file, text, base string, checkout FileCheckout) (FileView, error) {
+	return s.withCheckoutFile(name, file, checkout, func(root *os.Root, rel string) (FileView, error) { return writeFileAt(root, rel, text, base) })
 }
 
 // isText reports whether data reads as UTF-8 text without NUL bytes. A

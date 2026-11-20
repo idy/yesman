@@ -27,6 +27,8 @@ func TestWorktreeOwnerGuard(t *testing.T) {
 		{"pending report", &agent{reports: 1}, "alice/cleanup", false},
 		{"initial receipt load", &agent{dir: "fixture"}, "alice/cleanup", false},
 		{"failed receipt load is stopped", &agent{dir: "fixture", deliveryErr: errors.New("read failed")}, "alice/cleanup", true},
+		{"desktop retains unreadable receipts", &agent{deliveryErr: errors.New("read failed")}, "", false},
+		{"desktop retains an outstanding call", &agent{calls: 1}, "", false},
 		{"unbound submission", &agent{deliveries: map[string]Delivery{"intent": {State: "sending"}}}, "alice/cleanup", false},
 		{"interrupted receipt", &agent{deliveries: map[string]Delivery{"intent": {State: "interrupted"}}}, "alice/cleanup", true},
 		{"own native queue", &agent{queue: QueueStatus{Known: true, Steering: 1}}, "alice/owner", false},

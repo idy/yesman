@@ -169,6 +169,7 @@ func main() {
 		NeedsYouChanged:   func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
 		TopicsChanged:     a.topicsChanged,
 		Secrets:           a.vault, Variables: a.variables, Routing: a.workerRouting, GitHubApp: a.githubApp}
+	srv.Reclaimer = server.NewWorktreeReclaimer(srv)
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}
@@ -185,9 +186,11 @@ func main() {
 				s.OnAgentEvent(e) // a scheduled run's receipt
 			}
 		},
-		OnChange: a.agentsChanged,
+		OnChange:     a.agentsChanged,
+		WorktreeIdle: srv.Reclaimer.OwnerRetired,
 	})
 	srv.Agents = a.agents
+	a.desktopWorktrees.Server = srv
 	// Scheduled tasks run while the app runs, in the tray too; one app per
 	// data directory runs them.
 	a.schedules = schedule.New(schedule.Config{
@@ -225,6 +228,7 @@ func main() {
 	mygo.App.OnSecondInstance(func([]string, string) { a.showWindow() })
 	mygo.App.OnActivate(func(bool) { a.showWindow() })
 	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		srv.Reclaimer.Close()
 		a.chimes.Close()
 		a.schedules.Close() // no new run starts while the agents stop
 		a.stopGitHubAppSetup()
@@ -255,6 +259,7 @@ func main() {
 			// cannot send a competing task notice during the claim.
 			a.restarts.resume(a.agents.ResumeAfterRestart)
 			finishRecovery()
+			srv.Reclaimer.Start()
 			a.schedules.Start()
 		}()
 		if os.Getenv("YESMAN_HIDDEN") == "" {

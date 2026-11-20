@@ -90,7 +90,7 @@ func TestBoardResponsesCarryWaits(t *testing.T) {
 		if string(b.Tasks[0].Schedule) != `{"plan":"s1"}` {
 			t.Errorf("%s %s: the plan of t1: %s", who, how, b.Tasks[0].Schedule)
 		}
-		for _, private := range []string{run, "ownerSince", "doneAt", "doneOwner", "submission"} {
+		for _, private := range []string{run, "ownerSince", "doneAt", "doneOwner", "worktreeGeneration", "submission"} {
 			if bytes.Contains(body, []byte(private)) {
 				t.Errorf("%s %s: %q reached the agent: %s", who, how, private, body)
 			}

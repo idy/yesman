@@ -155,6 +155,9 @@ type Config struct {
 	// wait for the UI thread while that thread waits for Stop; bursts of
 	// changes are coalesced into one call with the latest agents.
 	OnChange func([]Info)
+	// WorktreeIdle schedules local housekeeping after a process or its last
+	// report drains. It must return without waiting for I/O.
+	WorktreeIdle func(workspace, owner string)
 	// deliveryWrite is a controllable atomic writer for persistence tests.
 	deliveryWrite func(string, []byte) error
 	deliveryRead  func(string, time.Time) (map[string]Delivery, int64, error)
@@ -1472,6 +1475,9 @@ func (m *Manager) stopAgentLocked(a *agent, only *proc) {
 	}
 	m.mu.Unlock()
 	m.changed()
+	if idle := m.cfg.WorktreeIdle; idle != nil {
+		idle(a.info.Yesman, a.info.Name)
+	}
 }
 
 // SleepIfIdle stops the agent's process, as Stop does, only if it is idle
@@ -1766,6 +1772,9 @@ func (m *Manager) handoffDone(a *agent) {
 	current := !a.retiring && (lead == nil || lead.workspaceSince.IsZero() || lead.workspaceSince.Equal(a.workspaceSince))
 	m.mu.Unlock()
 	if current {
+		if idle := m.cfg.WorktreeIdle; idle != nil {
+			idle(a.info.Yesman, a.info.Name)
+		}
 		go m.continueTasks(a.info.Yesman)
 	}
 }
