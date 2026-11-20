@@ -4,6 +4,24 @@ Agent runs finish independently of PRs and releases. A completed review round ca
 
 `BuildContext` supplies this policy to both roles before every run. Workers save their conclusion and reclaim their own temporary resources before reporting. The lead checks missed completion evidence and delegates one batch cleanup task. Stopped/failed processes, `FinishedAt`, restart, detached status and directory names do not establish review completion. Unfinished reviews resume first.
 
+## Archive or restore one author worktree
+
+From **Info → Worktrees**, hover over or tab into an author checkout's row and choose **Archive worktree**. Read the current path, destination, branch and full HEAD. Close any editor or preview using the tree, check that other tasks and processes have finished using it, and confirm. Open **Worktree archives → Restore worktree** in the same panel to preview and confirm the inverse. Both actions are available in the desktop window only.
+
+Archive moves the complete directory to `archive/worktree-<checkout-id>` under the data folder. It keeps the index, tracked edits, untracked and ignored files, private Git metadata, branch, commits and disk usage. The checkout then appears only in the archive group. Its original name is reserved for restoration. A dismissed workspace takes the record of its archives with it, and their registered paths stay in the data folder's archive.
+
+Admission requires the original author record, private nonce, directory inode and creation time, matching Git common directory and bidirectional registration. The associated task must be finished. Yes Man checks the recorded worker, the current task owner and any cleanup delegate for active work. A task can have changed hands and the branch or HEAD can have changed since checkout. The current values are verified and stored under `archive` in `.yesman/worktrees.json`. Historical branch, HEAD, ownership and PR completion retain their original meanings. The user confirms non-use by other tasks and external processes. The desktop issues a one-use confirmation for the displayed checkout and task state. A new preview supersedes it, and it expires after ten minutes.
+
+This version supports ordinary absolute Git links on the same volume, with a local branch and an identifiable filesystem root. Primary/default branches, submodules, custom per-worktree configuration, unfinished Git operations, foreign Git locks, nested pool worktrees, path collisions, missing identities and ambiguous registrations are refused. Resolve an occupied restore path separately and request a new preview. An existing file, directory or link is never replaced by the worktree.
+
+### Recovering an interrupted move
+
+The app saves an `archiving` or `restoring` record before modifying Git or moving files. It locks the linked worktree through Git with the transaction's unique reason. It then uses the operating system's same-volume no-replace rename and atomically updates the one verified private `gitdir` backpointer. The absolute `.git` link in the worktree already points at the correct private directory. Git's lock protects the registration from pruning if the process exits between the rename and the backpointer update. Git's ordinary `worktree move` uses an overwriting rename and updates the registration after it, so those two steps require separate protection here.
+
+After restarting, open **Worktree archives** and choose **Finish archive** or **Finish restore** for that checkout. Verify the displayed physical path, branch and HEAD and confirm. The app checks both paths, resumes from the saved intent and actual registration, releases only its own lock and records the final state. Repeated clicks cannot move a replacement or reuse a confirmation from an earlier round trip. Finish pending moves before dismissing the workspace.
+
+If the identity, contents of a registration file, or location no longer matches, preserve the tree, its bare pool repository and the workspace metadata. Inspect `git -C <pool-repo> worktree list --porcelain`, the checkout's `.git` file and its private directory's `gitdir`, `yesman-instance` and `locked` files alongside the saved `archive` record. Clear an unrelated path conflict or correct storage access, then retry in the panel. Leave a mismatched or missing marker for manual investigation. Avoid Git prune, force, manual unlocking or recertifying an unrelated PR during recovery.
+
 ## Management tools
 
 Create temporary work with an explicit `dir`, `purpose` (`review`, `author`, `release`) and an open board `task` owned by the caller. A review also needs `ref` and must be read-only/detached. `purpose: primary`, omitted/unknown lifecycle purposes, UI/user checkouts and legacy trees without lifecycle records stay protected.

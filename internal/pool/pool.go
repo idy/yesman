@@ -170,7 +170,18 @@ func (p *Pool) lock(name string) *sync.Mutex {
 // List returns the pool's repositories, sorted by name.
 func (p *Pool) List() ([]Repo, error) {
 	var repos []Repo
-	err := filepath.WalkDir(p.root, func(path string, d fs.DirEntry, err error) error {
+	err := p.visitRepos(func(name, path string) error {
+		repos = append(repos, p.info(name, path))
+		return nil
+	})
+	sort.Slice(repos, func(i, j int) bool { return repos[i].Name < repos[j].Name })
+	return repos, err
+}
+
+// visitRepos visits only complete bare repositories. Callers that need only
+// registrations can avoid reading each remote's metadata.
+func (p *Pool) visitRepos(visit func(name, path string) error) error {
+	return filepath.WalkDir(p.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil
@@ -188,13 +199,13 @@ func (p *Pool) List() ([]Repo, error) {
 			if err != nil {
 				return err
 			}
-			repos = append(repos, p.info(filepath.ToSlash(rel), path))
+			if err := visit(filepath.ToSlash(rel), path); err != nil {
+				return err
+			}
 			return filepath.SkipDir
 		}
 		return nil
 	})
-	sort.Slice(repos, func(i, j int) bool { return repos[i].Name < repos[j].Name })
-	return repos, err
 }
 
 // Get finds a repository by its full name or by a unique trailing part of
@@ -696,7 +707,16 @@ func (p *Pool) Repair(ctx context.Context, paths []string) error {
 			errs = append(errs, err)
 			continue
 		}
-		if _, err := git(ctx, repoDir, "worktree", "repair", path); err != nil {
+		rel, err := filepath.Rel(realPath(p.root), realPath(repoDir))
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		l := p.lock(filepath.ToSlash(strings.TrimSuffix(rel, ".git")))
+		l.Lock()
+		_, err = git(ctx, repoDir, "worktree", "repair", path)
+		l.Unlock()
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -711,7 +731,11 @@ func (p *Pool) Prune(ctx context.Context) error {
 	}
 	var errs []error
 	for _, r := range repos {
-		if _, err := git(ctx, r.Path, "worktree", "prune"); err != nil {
+		l := p.lock(r.Name)
+		l.Lock()
+		_, err := git(ctx, r.Path, "worktree", "prune")
+		l.Unlock()
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}

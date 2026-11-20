@@ -1473,5 +1473,9 @@ export function createFiles(host) {
     return t('The workspace is empty. Agents check repositories out into it.');
   }
 
-  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, shown, onChange, onKey, focusFind, toggleTree, current: () => !!current() };
+  function hasUnsavedWorktree(y, dir) {
+    return [...panes.values()].some((p) => p.name === y.name && p.hiredAt === y.hiredAt && p.tabs.some((tab) => tab.dirty && within(tab.path, dir)));
+  }
+
+  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, hasUnsavedWorktree, shown, onChange, onKey, focusFind, toggleTree, current: () => !!current() };
 }

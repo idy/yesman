@@ -165,7 +165,7 @@ func (s *Server) fileGrant(c caller, y yesmen.Yesman, target string, dir bool) (
 				if !sameName(rec.Dir, rest[0]) {
 					continue
 				}
-				if rec.Removed || rec.Owner != c.agent.Name || !rec.OwnerSince.Equal(c.agent.Since) || (rec.Purpose != "author" && rec.Purpose != "release") || !plainComponent(rec.Dir) || rec.ID == "" {
+				if rec.Removed || rec.ReservedForArchive() || rec.Owner != c.agent.Name || !rec.OwnerSince.Equal(c.agent.Since) || (rec.Purpose != "author" && rec.Purpose != "release") || !plainComponent(rec.Dir) || rec.ID == "" {
 					break
 				}
 				sub, ok := below(fileGrant{rel: rec.Dir})

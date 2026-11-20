@@ -63,6 +63,7 @@ type Server struct {
 
 	url           string
 	worktreeMu    sync.Mutex
+	movePreview   moveConfirmation       // one outstanding human desktop confirmation, guarded by worktreeMu
 	worktreeLocks map[string]*sync.Mutex // serialize checkout lifecycle and managed file I/O per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
 	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
@@ -308,6 +309,29 @@ type CheckoutRequest struct {
 	Task    string `json:"task,omitempty"`
 }
 
+// CheckoutForUser keeps the old directory available for the user's inverse.
+// The bridge holds Store.Use, which serializes it with WorktreeMove.
+func CheckoutForUser(ctx context.Context, p *pool.Pool, store *yesmen.Store, y yesmen.Yesman, req CheckoutRequest) (pool.Worktree, error) {
+	r, err := p.Get(req.Repo)
+	if err != nil {
+		return pool.Worktree{}, err
+	}
+	dir, err := checkoutDir(r, req)
+	if err != nil {
+		return pool.Worktree{}, err
+	}
+	records, err := store.WorktreeRecords(y.Name)
+	if err != nil {
+		return pool.Worktree{}, err
+	}
+	for _, r := range records {
+		if strings.EqualFold(r.Dir, dir) && r.ReservedForArchive() {
+			return pool.Worktree{}, errors.New("directory reserved for worktree restoration")
+		}
+	}
+	return checkoutRepo(ctx, p, y, req, r, dir)
+}
+
 // Checkout resolves a request's defaults and checks the worktree out.
 func Checkout(ctx context.Context, p *pool.Pool, y yesmen.Yesman, req CheckoutRequest) (pool.Worktree, error) {
 	repo, err := p.Get(req.Repo)
@@ -318,6 +342,10 @@ func Checkout(ctx context.Context, p *pool.Pool, y yesmen.Yesman, req CheckoutRe
 	if err != nil {
 		return pool.Worktree{}, err
 	}
+	return checkoutRepo(ctx, p, y, req, repo, dir)
+}
+
+func checkoutRepo(ctx context.Context, p *pool.Pool, y yesmen.Yesman, req CheckoutRequest, repo pool.Repo, dir string) (pool.Worktree, error) {
 	branch := req.Branch
 	if branch == "" && req.Ref == "" {
 		branch = "yesman/" + y.Name + "/" + dir

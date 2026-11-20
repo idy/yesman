@@ -22,6 +22,7 @@ import (
 	"github.com/idy/yesman/internal/restart"
 	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
+	"github.com/idy/yesman/internal/server"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -52,12 +53,13 @@ var (
 )
 
 type app struct {
-	home    home.Home
-	pool    *pool.Pool
-	clones  *clones
-	fetcher *fetcher
-	yesmen  *yesmen.Store
-	agents  *agent.Manager
+	home           home.Home
+	pool           *pool.Pool
+	clones         *clones
+	fetcher        *fetcher
+	yesmen         *yesmen.Store
+	agents         *agent.Manager
+	worktreeServer *server.Server // shares worktree admission with the agent API
 	// schedules runs the scheduled tasks (Tasks) while the app runs.
 	schedules *schedule.Service
 	pi        string
