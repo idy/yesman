@@ -14,7 +14,7 @@ export function workerPools({ view, busy, save, reloadPool, poolViewForEdit, fai
       summary = listed.map(optionName).join(', ');
       if (view.catalogUnknown) summary += ` · ${t('Availability unknown')}`;
     }
-    const edit = h('button', { type: 'button', class: 'mds-button mds-button--small', disabled: busy,
+    const edit = h('button', { id: `worker-pool-edit-${pool.id}`, type: 'button', class: 'mds-button mds-button--small', disabled: busy,
       'data-pool': pool.id, 'aria-label': t('Edit {label}', { label: t(pool.name) }), onclick: () => editPool(pool) }, t('Edit'));
     return preferenceRow(t(pool.name), h('p', null, summary), edit);
   });

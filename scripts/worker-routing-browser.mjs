@@ -34,25 +34,57 @@ export async function checkWorkerRouting({ page, open, name, output, errors }) {
     throw Error(`Pool focus after Save: ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 250))}`, { cause: err });
   });
   const cfg = () => go('Crew');
-  let pool = (await cfg()).pools.find((p) => p.id === 'backend');
+  const pool = (await cfg()).pools.find((p) => p.id === 'backend');
   assert.deepEqual(pool.members, [max, low]); assert.equal(pool.instructions, saved);
   assert.equal((await cfg()).yesman, max);
+  const waitForPoolFocus = (id) => page.waitForFunction((id) => document.activeElement?.dataset.pool === id, id);
+  const afterPaint = () => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  async function reopenDuringConflict(winner, members) {
+    await openPool('backend'); await instructions.fill('local draft');
+    const { revision } = (await cfg()).pools.find((p) => p.id === 'backend');
+    await go('SetWorkerPool', 'backend', revision, { instructions: winner, members });
+    await page.evaluate(() => { scoreControls.Crew = {}; });
+    await dialog.getByRole('button', { name: 'Save', exact: true }).press('Enter');
+    await dialog.getByRole('alert').filter({ hasText: 'pool changed' }).waitFor();
+    assert.equal(await instructions.inputValue(), 'local draft');
+    await page.waitForFunction(() => !!scorePending.Crew);
+    await page.keyboard.press('Escape');
+    await waitForPoolFocus('backend');
+    await page.keyboard.press('Enter');
+    await dialog.getByRole('status').filter({ hasText: 'Reading pool settings' }).waitFor();
+    assert.equal(await instructions.count(), 0);
+  }
+
+  // Cancel the waiting editor and let its close handler finish before the read.
+  // The page must preserve whichever Edit is focused when the new summary arrives.
+  for (const [target, effort, member] of [['backend', 'Low', low], ['frontend', 'Max', max]]) {
+    const winner = `Use the ${effort} effort for API work.`;
+    await reopenDuringConflict(winner, [member]);
+    await page.keyboard.press('Escape');
+    await waitForPoolFocus('backend');
+    await afterPaint();
+    if (target === 'frontend') await button(target).focus();
+    const summary = pools.getByText(`Claude Opus 5.5 · ${effort}`, { exact: true });
+    assert.equal(await summary.count(), 0);
+    await page.evaluate(() => scorePending.Crew());
+    await summary.waitFor();
+    await afterPaint();
+    assert.equal(await active(button(target)), true, `${target} Edit lost focus when the recovery read arrived`);
+    await page.keyboard.press('Enter');
+    await instructions.waitFor();
+    assert.equal(await active(instructions), true);
+    if (target === 'backend') assert.equal(await instructions.inputValue(), winner);
+    else await dialog.getByRole('heading', { name: 'Frontend & Design', exact: true }).waitFor();
+    await page.keyboard.press('Escape');
+    await waitForPoolFocus(target);
+  }
+
   // Hold the older catalog response and the post-conflict settings read.
   // A new opening can wait for the winner without adopting either old draft.
   await page.evaluate(() => { scoreControls.RefreshCrew = {}; });
   await page.getByRole('button', { name: 'Read pi’s models again' }).click();
   await page.waitForFunction(() => !!scorePending.RefreshCrew);
-  await openPool('backend'); await instructions.fill('local draft');
-  await go('SetWorkerPool', 'backend', pool.revision, { instructions: 'Winner', members: [low] });
-  await page.evaluate(() => { scoreControls.Crew = {}; });
-  await dialog.getByRole('button', { name: 'Save', exact: true }).press('Enter');
-  await dialog.getByRole('alert').filter({ hasText: 'pool changed' }).waitFor();
-  assert.equal(await instructions.inputValue(), 'local draft');
-  await page.waitForFunction(() => !!scorePending.Crew);
-  await page.keyboard.press('Escape');
-  await button('backend').focus(); await button('backend').press('Enter');
-  await dialog.getByRole('status').filter({ hasText: 'Reading pool settings' }).waitFor();
-  assert.equal(await instructions.count(), 0);
+  await reopenDuringConflict('Winner', [low]);
   await page.screenshot({ path: `${output}/${name}-pool-recovery.png`, animations: 'disabled' });
   await page.evaluate(() => scorePending.Crew());
   await instructions.waitFor();
@@ -137,5 +169,5 @@ export async function checkWorkerRouting({ page, open, name, output, errors }) {
   assert.equal(await dialog.getByText(/可用状态未知/).count(), 2);
   await page.screenshot({ path: `${output}/${name}-pool-offline.png`, animations: 'disabled' });
   assert.deepEqual(errors, []);
-  console.log(`${name}: production Settings, immediate reopen during conflict recovery, last saved revision, late refresh, keyboard focus and offline membership/score display PASS`);
+  console.log(`${name}: production Settings, conflict recovery and cancellation, focus on the original or newly chosen Edit, last saved revision, late refresh and offline membership/score display PASS`);
 }
