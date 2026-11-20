@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -251,6 +252,13 @@ func TestRunOnceStopsPendingSubmissionAndDrains(t *testing.T) {
 				t.Fatalf("%+v", res)
 			}
 			id := ID(y.Name, yesmen.LeadName)
+			var want []RunInterruptedAgent
+			if status == "timed_out" {
+				want = []RunInterruptedAgent{{ID: id, Role: RoleLead, Since: y.HiredAt.UTC(), Phase: "input_pending"}}
+			}
+			if !slices.Equal(res.InterruptedAgents, want) {
+				t.Fatalf("snapshot = %+v, want %+v", res.InterruptedAgents, want)
+			}
 			if m.running(id) != nil {
 				t.Fatal("trial process is still running")
 			}
