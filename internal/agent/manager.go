@@ -774,7 +774,7 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			if !e.Aborted {
 				// Its report, not yet sent, which a restart keeps track of.
 				a.reportRun++
-				a.handoff = reportHandoff{run: a.reportRun, state: restart.ReportNotSent}
+				a.handoff = reportHandoff{run: a.reportRun, state: restart.ReportNotSent, active: true}
 			}
 		}
 		a.info.Status, a.info.Detail, a.info.Dialog, a.info.UpdatedAt = Idle, "", nil, time.Now()
@@ -797,12 +797,13 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 		}()
 		if handoff {
 			go func() {
-				defer m.handoffDone(a)
 				if !e.Aborted {
+					defer m.handoffDone(a, run.report)
 					defer m.endHandoff(a, run.report)
 					m.reportToLead(a, run, modelFailed)
 					return
 				}
+				defer m.handoffDone(a, 0)
 				// The user stopped its run. A worker being put to sleep, removed
 				// or shut down with the app tells nobody: telling the lead would
 				// start it again.
@@ -918,7 +919,7 @@ func (m *Manager) watch(a *agent, p *proc) {
 	m.changed()
 	if failed && worker {
 		go func() {
-			defer m.handoffDone(a)
+			defer m.handoffDone(a, 0)
 			// Recorded for its generation, so that the failure outlives a
 			// restart and is told about once.
 			if err := m.cfg.Yesmen.FailWorker(a.info.Yesman, a.info.Name, since, time.Now().UTC()); err != nil {
@@ -1736,9 +1737,13 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 
 // handoffDone releases the report reservation after delivery and closing.
 // The lead may already have settled while the handoff was still pending.
-func (m *Manager) handoffDone(a *agent) {
+// run is zero for a stop or failure notice with no final-report receipt.
+func (m *Manager) handoffDone(a *agent, run uint64) {
 	m.mu.Lock()
 	a.reports--
+	if run != 0 && a.handoff.run == run {
+		a.handoff.active = false
+	}
 	lead := m.agents[ID(a.info.Yesman, yesmen.LeadName)]
 	current := !a.retiring && (lead == nil || lead.workspaceSince.IsZero() || lead.workspaceSince.Equal(a.workspaceSince))
 	if current {

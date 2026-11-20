@@ -300,14 +300,14 @@ func (m *Manager) interruptedRunAgentsLocked(y yesmen.Yesman) []RunInterruptedAg
 			}
 		case live && (a.prompts > 0 || runInputQueuedLocked(a, worker)):
 			e.Phase = "input_pending"
-		case worker && (a.reports > 0 || a.handoff.state != ""):
-			accepted := a.reports <= 1 && a.handoff.state == restart.ReportAccepted
+		case worker && a.reports > 0:
+			// The latest receipt can outlive its reservation while an older
+			// report or a notice is still pending. Require a unique match.
+			accepted := a.reports == 1 && a.handoff.active && a.handoff.state == restart.ReportAccepted
 			if accepted && !live {
 				continue // its accepted report is only finishing cleanup
 			}
 			e.Phase, e.ReportStatus = "reporting", "unknown"
-			// Only the latest final report is tracked. An outstanding notice
-			// or a retry has no reliable negative receipt for the whole handoff.
 			if accepted {
 				e.ReportStatus = "accepted"
 			}

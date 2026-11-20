@@ -17,11 +17,14 @@ import (
 
 // handoff is how far a worker's report of one run has got: one of the
 // restart.Report states, and the digest of its final message once read.
-// run tells this report from the next run's; guarded by the manager's mu.
+// run tells this report from the next run's. active ties that run to a
+// reservation in agent.reports, which can outlast or overlap other handoffs.
+// All fields are guarded by the manager's mu.
 type reportHandoff struct {
 	run    uint64
 	state  string
 	digest string
+	active bool
 }
 
 func (h reportHandoff) report() *restart.Report {
@@ -474,11 +477,11 @@ func (m *Manager) resumeReport(ctx context.Context, r restart.Agent, id string, 
 		a.reports++ // busy until the report reaches the lead, as after a run
 		a.reportRun++
 		run = a.reportRun
-		a.handoff = reportHandoff{run: run, state: restart.ReportNotSent, digest: r.Report.Digest}
+		a.handoff = reportHandoff{run: run, state: restart.ReportNotSent, digest: r.Report.Digest, active: true}
 	}); outcome != "" {
 		return outcome, err
 	}
-	defer m.handoffDone(a)
+	defer m.handoffDone(a, run)
 	defer m.endHandoff(a, run)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
