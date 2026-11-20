@@ -43,7 +43,9 @@ var patches = []patch{
 	// image. It is included before the installed-file list and signatures.
 	if goos == "windows" || goos == "linux" {
 		launcher := *c
-		launcher.Main = "./tools/launcher"
+		// Main is this module's root: "." in mygo.json, or its absolute path
+		// in the derived configuration scripts/release_build.py builds from.
+		launcher.Main = c.Main + "/tools/launcher"
 		legacy := c.slug()
 		flags := []string{"-trimpath", "-ldflags", "-s -w"}
 		if goos == "windows" {
