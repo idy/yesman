@@ -1,9 +1,7 @@
 package yesmen
 
 import (
-	"errors"
 	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -26,6 +24,8 @@ type WorktreeRecord struct {
 	Attempts      []WorktreeAttempt   `json:"attempts,omitempty"`
 	Removed       bool                `json:"removed,omitempty"`
 	RetiredReason string              `json:"retiredReason,omitempty"`
+	// BoardRound binds an automatic completion to the particular task close.
+	BoardRound time.Time `json:"boardRound,omitzero"`
 	// Root identifies the checkout's directory as yesman created it. It is
 	// written once, with the record, and never filled in later: records
 	// without it (older ones, or a file system with no creation time) get
@@ -58,31 +58,43 @@ type WorktreeCompletion struct {
 	Evidence string    `json:"evidence"`
 	Unused   bool      `json:"unused"`
 	SavedAt  time.Time `json:"savedAt,omitzero"`
+	// SourceBranch is the explicitly reported PR head ref when this local
+	// branch was pushed under a different name. The local branch itself is
+	// still checked against the original checkout registration.
+	SourceBranch string `json:"sourceBranch,omitempty"`
+	// Publication identifies the publisher's external publication and verification receipt.
+	Publication string `json:"publication,omitempty"`
+	// The server sets the identity of the actor returning this exact instance.
+	CertifiedBy    string    `json:"certifiedBy,omitempty"`
+	CertifiedSince time.Time `json:"certifiedSince,omitzero"`
+}
+
+// WorktreeReturn accompanies the normal task result on the Board. It releases
+// this exact temporary checkout for collection. A proposed return can wait
+// for a merge. Only the verified Completion in the registry freezes the HEAD.
+type WorktreeReturn struct {
+	Checkout string `json:"checkout"`
+	WorktreeCompletion
 }
 
 func (s *Store) WorktreeRecords(name string) ([]WorktreeRecord, error) {
-	s.metaMu.Lock()
-	defer s.metaMu.Unlock()
-	y, err := s.get(name)
+	y, err := s.Get(name)
 	if err != nil {
 		return nil, err
 	}
 	var records []WorktreeRecord
-	err = readJSON(filepath.Join(y.MetaDir(), "worktrees.json"), &records)
-	if errors.Is(err, os.ErrNotExist) {
-		err = nil
-	}
+	err = s.withWorktreeMeta(y, func(meta *os.Root) error {
+		return worktreeJSON(meta, "worktrees.json", &records, true)
+	})
 	return records, err
 }
 
 // SaveWorktreeRecords is used by the serialized checkout/remove API. It never
 // removes old evidence when a directory is reused for another checkout.
 func (s *Store) SaveWorktreeRecords(name string, records []WorktreeRecord) error {
-	s.metaMu.Lock()
-	defer s.metaMu.Unlock()
-	y, err := s.get(name)
+	y, err := s.Get(name)
 	if err != nil {
 		return err
 	}
-	return writeJSON(filepath.Join(y.MetaDir(), "worktrees.json"), records)
+	return s.withWorktreeMeta(y, func(meta *os.Root) error { return writeWorktreeRecords(meta, records) })
 }

@@ -243,7 +243,14 @@ var errChanged = errors.New("the file changed on disk since it was opened")
 // something else, it is left alone and the error says it changed. An empty
 // base writes regardless, also to a file that is gone.
 func (s *service) WriteFile(yesman, file, text, base string) (FileView, error) {
-	root, err := s.workspaceRoot(yesman)
+	// An editor save already in progress finishes before service-owned
+	// worktree reclamation can take its exclusive workspace lease.
+	y, release, err := s.app.yesmen.BeginUse(yesman)
+	if err != nil {
+		return FileView{}, err
+	}
+	defer release()
+	root, err := os.OpenRoot(y.Path)
 	if err != nil {
 		return FileView{}, err
 	}

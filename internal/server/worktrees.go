@@ -16,6 +16,7 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/safefs"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -215,21 +216,15 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 			return retain("only the owner or lead may certify completion")
 		}
 		v := *req.Completion
-		if !exactHeadRE.MatchString(v.Head) || strings.TrimSpace(v.Ref) == "" || strings.TrimSpace(v.Evidence) == "" || len(v.Ref) > 2048 || len(v.Evidence) > 16000 || !v.Unused {
-			return retain("completion needs exact HEAD, PR/ref, durable evidence and unused=true")
-		}
-		valid := v.Outcome == "done" && rec.Purpose != "review"
-		if rec.Purpose == "review" {
-			valid = v.Outcome == "pass" || v.Outcome == "findings-handed-off" || v.Outcome == "waiting-release" || v.Outcome == "audit-complete"
-		}
-		if !valid || rec.Purpose == "review" && v.Head != rec.Head {
-			return retain("outcome or reviewed HEAD does not match this checkout")
+		if reason := completionProblem(*rec, v); reason != "" {
+			return retain(reason)
 		}
 		if rec.Completion != nil && !sameWorktreeCompletion(*rec.Completion, v) {
 			return retain("completion already saved; reconstruct a new checkout for another round")
 		}
 		if rec.Completion == nil {
 			v.SavedAt = time.Now().UTC()
+			v.CertifiedBy, v.CertifiedSince = c.agent.Name, c.agent.Since
 			if rec.Purpose != "review" {
 				candidate := *rec
 				candidate.Completion = &v
@@ -312,20 +307,8 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Idempotent recovery after git removed the tree but the app exited
-		// before the final metadata save. A replacement path is never touched.
-		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-			registered, err := s.Pool.HasWorktreeRegistration(ctx, "", path)
-			if err != nil {
-				return err
-			}
-			if registered {
-				return errors.New("missing path is still registered; retain for recovery")
-			}
-		} else {
-			if err := s.Pool.RemoveTemporaryWorktree(ctx, y.Path, expectedWorktree(*rec)); err != nil {
-				return err
-			}
+		if err := s.removeCompletedInstance(ctx, y, *rec); err != nil {
+			return err
 		}
 		// Successful removal must be recorded even if cancellation just arrived.
 		// The process gate still keeps Stop/Archive from finishing before save.
@@ -340,11 +323,15 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 }
 
 func sameWorktreeCompletion(a, b yesmen.WorktreeCompletion) bool {
-	return a.Head == b.Head && a.Outcome == b.Outcome && a.Ref == b.Ref && a.Evidence == b.Evidence && a.Unused == b.Unused
+	return a.Head == b.Head && a.Outcome == b.Outcome && a.Ref == b.Ref && a.Evidence == b.Evidence && a.Unused == b.Unused && a.SourceBranch == b.SourceBranch && a.Publication == b.Publication
 }
 
 func expectedWorktree(rec yesmen.WorktreeRecord) pool.Worktree {
-	return pool.Worktree{Repo: rec.Repo, Dir: rec.Dir, Head: rec.Completion.Head, Branch: rec.Branch, Detached: rec.Purpose == "review", CleanupID: rec.ID}
+	wt := pool.Worktree{Repo: rec.Repo, Dir: rec.Dir, Head: rec.Completion.Head, Branch: rec.Branch, Detached: rec.Purpose == "review", CleanupID: rec.ID}
+	if rec.Root != nil {
+		wt.Root = &safefs.Identity{Ino: rec.Root.Ino, Birth: rec.Root.Birth, HasBirth: true}
+	}
+	return wt
 }
 
 func (s *Server) verifyBranchCompletion(ctx context.Context, y yesmen.Yesman, rec yesmen.WorktreeRecord) error {
@@ -363,6 +350,11 @@ func (s *Server) verifyBranchCompletion(ctx context.Context, y yesmen.Yesman, re
 	if !finished {
 		return errors.New("associated author/release task is unfinished")
 	}
+	if rec.Completion.SourceBranch != "" && rec.Completion.SourceBranch != rec.Branch {
+		if err := s.checkOpenPulls(ctx, rec); err != nil {
+			return err
+		}
+	}
 	return s.verifyMerged(ctx, rec)
 }
 
@@ -379,7 +371,7 @@ func (s *Server) withWorktreeUsers(workspace string, rec yesmen.WorktreeRecord, 
 
 func (s *Server) verifyMerged(ctx context.Context, rec yesmen.WorktreeRecord) error {
 	u, err := url.Parse(rec.Completion.Ref)
-	if err != nil || u.Scheme != "https" || u.Host != "github.com" {
+	if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("branch completion needs a GitHub PR URL")
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
@@ -391,7 +383,7 @@ func (s *Server) verifyMerged(ctx context.Context, rec yesmen.WorktreeRecord) er
 		return errors.New("invalid PR number")
 	}
 	target := parts[0] + "/" + parts[1]
-	r, err := s.Pool.Get(rec.Repo)
+	r, err := s.Pool.RecordedRepo(ctx, rec.Repo)
 	if err != nil {
 		return err
 	}
@@ -407,8 +399,23 @@ func (s *Server) verifyMerged(ctx context.Context, rec yesmen.WorktreeRecord) er
 	if err != nil {
 		return fmt.Errorf("cannot verify merged PR: %w", err)
 	}
-	if !pr.Merged || pr.State != "closed" || pr.MergedAt.IsZero() || !exactHeadRE.MatchString(pr.MergeCommit) || pr.Head.SHA != rec.Completion.Head || pr.Head.Ref != rec.Branch || !strings.EqualFold("github.com/"+pr.Head.Repo.FullName, rec.Repo) {
+	if !pr.Merged || pr.State != "closed" || pr.MergedAt.IsZero() || !exactHeadRE.MatchString(pr.MergeCommit) || pr.Head.SHA != rec.Completion.Head || pr.Head.Ref != publishedBranch(rec) || !strings.EqualFold("github.com/"+pr.Head.Repo.FullName, rec.Repo) {
 		return errors.New("PR is not merged at this exact source repository/branch/HEAD")
+	}
+	if rec.Purpose == "release" && rec.Completion.Publication != "" {
+		base := "https://github.com/" + target + "/releases/tag/"
+		tag, ok := strings.CutPrefix(rec.Completion.Publication, base)
+		if !ok || tag == "" || strings.ContainsAny(tag, "?#%") {
+			return errors.New("publication needs the published GitHub release URL in the PR's repository")
+		}
+		readTag := s.ReadPublishedTag
+		if readTag == nil {
+			readTag = github.ReadPublishedTag
+		}
+		head, err := readTag(ctx, target, tag)
+		if err != nil || head != pr.MergeCommit && head != pr.Head.SHA {
+			return errors.New("cannot verify publication of this release PR at its tag")
+		}
 	}
 	return nil
 }

@@ -134,6 +134,8 @@ func (w Worker) Subject(b Board) string {
 type Store struct {
 	root, archive string
 	mu            sync.Mutex
+	// Workspace-scoped lifecycle I/O, including background discovery.
+	worktreeLocks map[string]*sync.Mutex
 	metaMu        sync.Mutex // serialize metadata reads with atomic replacement on Windows
 
 	lmu    sync.Mutex

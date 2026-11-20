@@ -18,7 +18,7 @@ func (p *Pool) HasWorktreeRegistration(ctx context.Context, repo, path string) (
 	var repos []Repo
 	if repo == "" {
 		var err error
-		repos, err = p.List()
+		repos, err = p.repositoryPaths(ctx)
 		if err != nil {
 			return false, err
 		}
@@ -46,7 +46,7 @@ func (p *Pool) HasWorktreeRegistration(ctx context.Context, repo, path string) (
 // CheckTemporaryWorktree validates source identity without freezing a cleanup
 // authorization or changing refs. Remove rechecks the same instance under lock.
 func (p *Pool) CheckTemporaryWorktree(ctx context.Context, workspace string, expected Worktree) error {
-	r, err := p.Get(expected.Repo)
+	r, err := p.RecordedRepo(ctx, expected.Repo)
 	if err != nil {
 		return err
 	}
@@ -79,6 +79,12 @@ func (p *Pool) checkTemporaryWorktree(ctx context.Context, r Repo, workspace str
 		if wt.CleanupID != expected.CleanupID {
 			return "", fmt.Errorf("retain %s: worktree instance changed or marker missing", expected.Dir)
 		}
+		if expected.Root != nil {
+			root, err := rootIdentity(r.Path, path, expected.CleanupID)
+			if err != nil || root.Ino != expected.Root.Ino || root.Birth != expected.Root.Birth {
+				return "", fmt.Errorf("retain %s: checkout directory identity changed", expected.Dir)
+			}
+		}
 		if wt.Head != expected.Head || wt.Branch != expected.Branch || wt.Detached != expected.Detached {
 			return "", fmt.Errorf("retain %s: HEAD or checkout changed since completion", expected.Dir)
 		}
@@ -96,21 +102,46 @@ func (p *Pool) checkTemporaryWorktree(ctx context.Context, r Repo, workspace str
 // immutable recovery ref keeps the exact source alive even after squash merge
 // and remote branch pruning. Existing branches, refs and tags are never changed.
 func (p *Pool) RemoveTemporaryWorktree(ctx context.Context, workspace string, expected Worktree) error {
-	r, err := p.Get(expected.Repo)
+	return p.removeTemporary(ctx, workspace, expected, nil)
+}
+
+// TryReclaimTemporary uses the same checks and no-force removal. Housekeeping
+// yields to interactive repository and file operations instead of holding up
+// this workspace. certify saves the verified proof before any deletion.
+func (p *Pool) TryReclaimTemporary(ctx context.Context, workspace string, expected Worktree, certify func() error) error {
+	if certify == nil {
+		return fmt.Errorf("worktree reclamation needs a completion receipt")
+	}
+	return p.removeTemporary(ctx, workspace, expected, certify)
+}
+
+func (p *Pool) removeTemporary(ctx context.Context, workspace string, expected Worktree, certify func() error) error {
+	r, err := p.RecordedRepo(ctx, expected.Repo)
 	if err != nil {
 		return err
 	}
 	l := p.lock(r.Name)
-	l.Lock()
+	if certify == nil {
+		l.Lock()
+	} else if !l.TryLock() {
+		return fmt.Errorf("repository is in use")
+	}
 	defer l.Unlock()
-	// Managed file writes into this checkout (WithWorktree) finish first;
-	// none starts until the removal is decided.
 	tl := p.treeLock(filepath.Join(workspace, expected.Dir))
-	tl.Lock()
+	if certify == nil {
+		tl.Lock()
+	} else if !tl.TryLock() {
+		return fmt.Errorf("checkout is in use")
+	}
 	defer tl.Unlock()
 	path, err := p.checkTemporaryWorktree(ctx, r, workspace, expected)
 	if err != nil {
 		return err
+	}
+	if certify != nil {
+		if err := certify(); err != nil {
+			return err
+		}
 	}
 	// git worktree remove alone does not protect ignored files. Include every
 	// unknown path and disable status configuration that hides untracked files.
@@ -131,7 +162,7 @@ func (p *Pool) RemoveTemporaryWorktree(ctx context.Context, workspace string, ex
 			return fmt.Errorf("retain %s: index flags may hide local work", expected.Dir)
 		}
 	}
-	for _, state := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer", "BISECT_LOG"} {
+	for _, state := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer", "BISECT_LOG", "index.lock"} {
 		statePath, err := git(ctx, path, "rev-parse", "--git-path", state)
 		if err != nil {
 			return err
@@ -149,11 +180,14 @@ func (p *Pool) RemoveTemporaryWorktree(ctx context.Context, workspace string, ex
 		return fmt.Errorf("retain %s: invalid checkout ID", expected.Dir)
 	}
 	checkpoint := "refs/yesman/worktrees/" + expected.CleanupID
+	if _, err := git(ctx, path, "symbolic-ref", "--quiet", checkpoint); err == nil {
+		return fmt.Errorf("retain %s: recovery ref is symbolic", expected.Dir)
+	}
 	if old, err := git(ctx, path, "rev-parse", "--verify", checkpoint); err == nil {
 		if old != expected.Head {
 			return fmt.Errorf("retain %s: recovery ref changed", expected.Dir)
 		}
-	} else if _, err := git(ctx, path, "update-ref", checkpoint, expected.Head, strings.Repeat("0", len(expected.Head))); err != nil {
+	} else if _, err := git(ctx, path, "update-ref", "--no-deref", checkpoint, expected.Head, strings.Repeat("0", len(expected.Head))); err != nil {
 		return fmt.Errorf("retain %s: cannot preserve exact HEAD: %w", expected.Dir, err)
 	}
 	// Re-read the actual private Git marker and source immediately before

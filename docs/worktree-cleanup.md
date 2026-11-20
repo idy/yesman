@@ -2,7 +2,32 @@
 
 Agent runs finish independently of PRs and releases. A completed review round can retire its detached checkout while a PR is open, has findings handed off, or waits for a release. Author branches require an exact merged PR source HEAD and a finished task. Release branches also require their release task to be **done**, after publication and verification.
 
-`BuildContext` supplies this policy to both roles before every run. Workers save their conclusion and reclaim their own temporary resources before reporting. The lead checks missed completion evidence and delegates one batch cleanup task. Stopped/failed processes, `FinishedAt`, restart, detached status and directory names do not establish review completion. Unfinished reviews resume first.
+## Returning a checkout with its task
+
+After stopping processes and checking that the directory has no remaining consumer, the owner or lead returns it in the normal `yesman_board` update. Save the conclusion and any publication or push evidence in the task note or a report it references. Use an explicit empty `worktrees: []` when the directories are still needed. The current extension asks for this disposition when closing a task with managed temporary checkouts. Older clients can still finish tasks. Their unstructured notes and rejected cleanup attempts grant no new authority.
+
+```json
+{
+  "update": [{
+    "id": "t3",
+    "status": "done",
+    "note": "Tests passed. Saved the review handoff and push receipt in .yesman/evidence/t3/author/report.md.",
+    "worktrees": [{
+      "checkout": "<cleanupId>",
+      "head": "<full-source-commit>",
+      "ref": "https://github.com/owner/repo/pull/7",
+      "outcome": "done",
+      "unused": true
+    }]
+  }]
+}
+```
+
+The task and its returns are saved together. An unmerged PR can be returned for later collection. `sourceBranch` names the actual published head ref if it differs from the registered local branch. Cite the push or PR creation in the evidence. The service preserves both names and checks the source repository, published ref and full commit against the merged PR. It also checks the local and published refs for another open PR in the repository or its upstream. A release return additionally supplies `publication`, the published GitHub release URL. The service resolves its tag to the verified PR source or merge commit. The publisher verifies the delivery and records those results in the note.
+
+The service discovers saved returns on startup after restart recovery and after relevant board or management changes. One background worker processes identified instances. Owner retirement wakes its waiting jobs. Outstanding local or remote checks retry with backoff from one minute to one hour while the app runs. Before removal it rechecks the same workspace hire, task result, owner and delegate generations and process reservations. Reopening or reassigning a task withdraws its board return. Open, paused or dropped tasks, another open assignment of an owner, a changed checkout root, and older checkouts without a recorded directory identity remain available. Verified legacy completions on eligible instances can be retried. A pre-existing release completion without publication proof stays on the manual path.
+
+A detached review round that hands off findings before its board task finishes can still use the explicit tool. Both roles receive the return and recovery instructions in their run context.
 
 ## Management tools
 
@@ -44,6 +69,6 @@ Each eligible cleanup preserves the exact source in `refs/yesman/worktrees/<clea
 
 On resuming, check whether the old path exists. If absent, read the report/lifecycle record, reopen the task when necessary, and call `yesman_checkout` with the recorded repository and **exact full HEAD** as `ref`. Verify HEAD before continuing. A fresh checkout gets a fresh ID and no completion, so an old cleanup event cannot remove a new review round at the same path. Removed records and worker sessions remain available as evidence; they are also indexed in role context and `yesman_repos`.
 
-There is no startup sweep, PR watcher, background janitor, legacy ownership inference or directory-name heuristic. Repeated cleanup after successful removal is harmless. An absent path with a remaining Git registration is retained for recovery instead of pruning unrelated registrations. If an explicit checkout request finds an earlier same-owner record but both its directory and all Git registrations are already gone, it retires only that history record and creates a fresh instance, including for older calls that omitted purpose. This never completes an unfinished task, adopts an existing unknown tree, or transfers another owner's resource. A replacement directory is never deleted. Legacy resources need separate provenance review; they are not automatically adopted by this policy.
+The service works from the registered checkout and its saved completion proof. It never adopts existing directories or infers ownership from a name. Repeated cleanup after successful removal is harmless. An absent path with a remaining Git registration is retained for recovery instead of pruning unrelated registrations. If an explicit checkout request finds an earlier same-owner record but both its directory and all Git registrations are already gone, it retires only that history record and creates a fresh instance, including for older calls that omitted purpose. This never completes an unfinished task, adopts an existing unknown tree, or transfers another owner's resource. A replacement directory is never deleted. Legacy resources need separate provenance review; they are not automatically adopted by this policy.
 
 Tests use isolated local Git repositories/workspaces and mocked GitHub merge responses. They exercise the real checkout/remove handlers, durable records, role contexts, exact reconstruction, squash source preservation through fetch/prune/GC, ownership handoff, active-owner reservations and retention cases without invoking external models.

@@ -65,7 +65,10 @@ type Server struct {
 	worktreeMu    sync.Mutex
 	worktreeLocks map[string]*sync.Mutex // serialize checkout lifecycle and managed file I/O per workspace
 	// ReadPullMerge overrides GitHub only in isolated workflow tests.
-	ReadPullMerge func(context.Context, string, int) (github.PullMerge, error)
+	ReadPullMerge    func(context.Context, string, int) (github.PullMerge, error)
+	HasOpenPull      func(context.Context, string, string, string) (bool, error)
+	ReadPublishedTag func(context.Context, string, string) (string, error)
+	Reclaimer        *WorktreeReclaimer
 	// beginChange replaces Agents.BeginChange in tests that run no agent.
 	beginChange func(token string, y yesmen.Yesman) (func(), error)
 	// beforeBoardChange holds an admitted ordinary write or a staged
@@ -398,6 +401,9 @@ func (s *Server) removeWorktree(ctx context.Context, c caller, r *http.Request) 
 		return nil, err
 	}
 	s.changed()
+	if !out.Removed && out.Record != nil && out.Record.Completion != nil {
+		s.Reclaimer.BoardResult(c.yesman)
+	}
 	return out, nil
 }
 
@@ -591,12 +597,25 @@ func agentBoardOf(b yesmen.Board) agentBoard {
 // workspace's Use and the caller's process's admission (agent.BeginChange),
 // so that it lands before that process finishes stopping, or not at all.
 func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any, error) {
-	var change yesmen.BoardChange
-	if err := decode(r, &change); err != nil {
+	var in struct {
+		yesmen.BoardChange
+		ReportWorktrees bool `json:"reportWorktrees"`
+	}
+	if err := decode(r, &in); err != nil {
 		return nil, err
 	}
+	change := in.BoardChange
 	if change.Empty() {
 		return s.board(context.Background(), c, r)
+	}
+	returns := slices.ContainsFunc(change.Update, func(e yesmen.TaskEdit) bool { return e.Worktrees != nil })
+	closing := slices.ContainsFunc(change.Update, func(e yesmen.TaskEdit) bool {
+		return e.Status != nil && strings.EqualFold(strings.TrimSpace(*e.Status), yesmen.TaskDone)
+	})
+	if returns || in.ReportWorktrees && closing {
+		l := s.worktreeLock(c.yesman.Name)
+		l.Lock()
+		defer l.Unlock()
 	}
 	var b yesmen.Board
 	if err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
@@ -608,6 +627,11 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 			return err
 		}
 		defer release()
+		if returns || in.ReportWorktrees && closing {
+			if err := s.prepareReturns(c, &change, in.ReportWorktrees); err != nil {
+				return err
+			}
+		}
 		if change.Delivery == nil {
 			if s.beforeBoardChange != nil {
 				s.beforeBoardChange()
@@ -644,6 +668,9 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 		return err
 	}); err != nil {
 		return nil, err
+	}
+	if returns || len(change.Remove) > 0 || slices.ContainsFunc(change.Update, func(e yesmen.TaskEdit) bool { return e.Status != nil || e.Owner != nil || e.Wait != nil }) {
+		s.Reclaimer.BoardResult(c.yesman)
 	}
 	if s.BoardChanged != nil {
 		s.BoardChanged(c.yesman.Name)

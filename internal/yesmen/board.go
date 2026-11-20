@@ -52,6 +52,9 @@ type Task struct {
 	// Delivered marks this task as the final step of a confirmed delivery.
 	// It survives a status edit or restart so that delivery cannot replay.
 	Delivered bool `json:"delivered,omitempty"`
+	// Returns holds the checkout-specific handoffs for this task's current
+	// result. Reopening or reassigning work withdraws them.
+	Returns []WorktreeReturn `json:"worktreeReturns,omitzero"`
 	// OwnerSince is when the worker it was handed to started: a worker of
 	// the same name hired later is not its owner. Zero means whichever
 	// worker has that name now, as for a task handed to a worker before it
@@ -128,6 +131,9 @@ type TaskEdit struct {
 	Note   *string `json:"note,omitempty"`
 	// Wait sets what the task waits for, which makes it blocked.
 	Wait *WaitEdit `json:"wait,omitempty"`
+	// The server authenticates these against the checkout registry before
+	// committing them with the task. An explicit empty list retains all.
+	Worktrees *[]WorktreeReturn `json:"worktrees,omitempty"`
 }
 
 // BoardChange is one change to a board, applied whole or not at all.
@@ -515,11 +521,21 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 		}
 		t := work.Tasks[i]
 		wasDone := t.Status == TaskDone
+		oldOwner := t.Owner
 		if err := edit(&t, e); err != nil {
 			return fmt.Errorf("task %s: %w", t.ID, err)
 		}
 		t.UpdatedAt = now
 		markDone(&t, wasDone, now)
+		if t.Status != TaskDone || oldOwner != t.Owner {
+			t.Returns = nil
+		}
+		if e.Worktrees != nil {
+			if t.Status != TaskDone || oldOwner != t.Owner || t.DoneOwner != t.Owner {
+				return fmt.Errorf("task %s: return worktrees with the result of their owner's finished task", t.ID)
+			}
+			t.Returns = slices.Clone(*e.Worktrees)
+		}
 		owned(e, t.ID)
 		work.Tasks[i] = t
 	}
