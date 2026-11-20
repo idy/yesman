@@ -29,6 +29,24 @@ func TestRunOnceWaitsForRecordedInputsWorkersAndContinuations(t *testing.T) {
 		}
 	}
 	check("completed")
+	// The last worker run ended on a model error. It can be replaced or
+	// retried, and its diagnostic persists while the Lead decides what to do.
+	w.givenWork = true
+	w.info.RunError = &RunError{Message: "worker request refused"}
+	check("completed")
+	w.info.Status = Failed // a worker start or process exit, already reported
+	check("completed")
+	w.proc, w.info.Status = &proc{}, Working // the Lead retried it
+	check("")
+	w.info.Status = Idle
+	check("") // still closing this worker or preparing the retry
+	w.handoff.state = "not-sent"
+	w.inbox++ // a later prompt was admitted before its agent_start
+	check("")
+	w.settledInbox = w.inbox
+	check("failure") // exhausted report delivery, with the worker now idle
+	w.handoff = reportHandoff{}
+	w.proc, w.info.Status = nil, Stopped
 	r.recorded = false
 	check("")
 	r.recorded = true
@@ -68,6 +86,111 @@ func TestRunOnceWaitsForRecordedInputsWorkersAndContinuations(t *testing.T) {
 	lead.info.Status, w.info.Status = Idle, Stopped
 	lead.info.RunError = &RunError{Message: "provider unavailable"}
 	check("failure")
+	// A replacement succeeding cannot close the run while the Lead still
+	// has to process its report, even if the Lead's last turn also failed.
+	r.pending[origin] = 1
+	check("")
+	delete(r.pending, origin)
+	lead.info.RunError = nil
+	check("completed")
+	lead.info.Status = Failed
+	check("failure")
+}
+
+// A crashed worker's failure notice and a settled worker's final report use
+// different handoff bookkeeping. A refused notification is a delivery error
+// in both cases, even though the worker's own error is recoverable.
+func TestRunOnceRequiresDeliveryOfWorkerNotices(t *testing.T) {
+	for _, crash := range []string{"", "1"} {
+		t.Run("crash="+crash, func(t *testing.T) {
+			m, store := newTestManager(t, 0, "FAKE_PI_CRASH_WORKERS="+crash, "FAKE_PI_FAIL_REPORTS=1")
+			y, err := store.Get("alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			lead, p, err := m.ensure("alice/lead")
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.mu.Lock()
+			m.run = &singleRun{lead: lead.info.ID, recorded: true, pending: map[Origin]int{}}
+			m.mu.Unlock()
+			m.record(lead, p, "agent_settled", runSettled)
+			old := reportBackoff
+			reportBackoff = time.Millisecond
+			defer func() { reportBackoff = old }()
+			if _, err := m.StartWorker(t.Context(), y.Name, "first", "Write", "a task"); err != nil {
+				t.Fatal(err)
+			}
+			var out RunResult
+			eventually(t, "delivery failure", func() bool {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				m.checkRunLocked(y, true, &out)
+				return out.Status != ""
+			})
+			if out.Status != "failure" || !strings.Contains(out.Error, "alice/first") || !strings.Contains(out.Error, "rejected") {
+				t.Fatalf("lost worker message: %+v", out)
+			}
+		})
+	}
+}
+
+func TestRunOnceReportsLeadErrorWithUnidentifiedOriginal(t *testing.T) {
+	m, store := newTestManager(t, 0)
+	y, err := store.Get("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This external Pi reports the terminal assistant error and settle,
+	// with no identity for the original submission.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	out := m.RunOnce(ctx, y, "test-run:error")
+	if out.Status != "failure" || !strings.Contains(out.Error, "alice/lead: model error:") {
+		t.Fatalf("Lead model error: %+v", out)
+	}
+}
+
+func TestRunOnceReportsAReceiptDrainFailure(t *testing.T) {
+	m, store := newTestManager(t, 0, "FAKE_PI_HOLD_PROMPTS=1")
+	y, err := store.Get("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.cfg.deliveryWrite = func(path string, data []byte) error {
+		m.mu.Lock()
+		closed := m.closed
+		m.mu.Unlock()
+		if closed {
+			return errors.New("synthetic final receipt write failed")
+		}
+		return writeDeliveryFile(path, data)
+	}
+	gotPrompt := make(chan struct{}, 1)
+	m.cfg.OnEvent = func(ev Event) {
+		if strings.Contains(string(ev.Data), `"type":"test_prompt_received"`) {
+			gotPrompt <- struct{}{}
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	done := make(chan RunResult, 1)
+	go func() { done <- m.RunOnce(ctx, y, "a task") }()
+	select {
+	case <-gotPrompt:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	m.mu.Lock()
+	a := m.agents["alice/lead"]
+	p := a.proc
+	m.mu.Unlock()
+	m.record(a, p, "extension_ui_request", json.RawMessage(`{"type":"extension_ui_request","id":"q","method":"confirm"}`))
+	out := <-done
+	if out.Status != "failure" || !strings.Contains(out.Error, "synthetic final receipt write failed") {
+		t.Fatalf("failed drain: %+v", out)
+	}
 }
 
 func TestRunOnceRejectsEffectiveModelBeforeSubmitting(t *testing.T) {

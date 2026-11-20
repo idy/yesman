@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,10 +21,9 @@ import (
 )
 
 // Runs the public CLI with a prepared managed Pi and a deterministic, local
-// pi-messages server. The real Lead uses its tool to start a real worker. A
-// gate holds the worker until the Lead has settled its first turn. The caller
-// must get the Lead's subsequent report reply, and the resumed session must
-// include the original request exactly once.
+// pi-messages server. The first worker's provider rejects its request. The
+// Lead reads the diagnostic, starts a replacement and delegates a check of
+// the bytes it wrote. Hold the replacement across a Lead settlement.
 func TestRunCLIWithManagedPi(t *testing.T) {
 	managed := os.Getenv("YESMAN_TEST_RUNTIME")
 	if managed == "" || runtime.GOOS == "windows" {
@@ -44,7 +44,12 @@ func TestRunCLIWithManagedPi(t *testing.T) {
 	originalJSON, _ := json.Marshal(original)
 	const second = "A second message"
 	const ask = "Ask for my choice"
-	var workerCalls, leadCalls, askCalls atomic.Int32
+	const failLead = "Fail the final Lead request"
+	const rejection = "synthetic request exceeds fixture limit"
+	const candidate = "from the shared working directory"
+	checksum := fmt.Sprintf("%x", sha256.Sum256([]byte(candidate)))
+	var workerCalls, leadCalls, askCalls, reviewCalls atomic.Int32
+	var inspected, assignedReplacement, assignedReview atomic.Bool
 	gate := make(chan struct{})
 	workerStarted := make(chan struct{}, 1)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,17 +71,35 @@ func TestRunCLIWithManagedPi(t *testing.T) {
 		reason := "stop"
 		bodyText := string(data)
 		switch {
+		case strings.Contains(bodyText, failLead):
+			http.Error(w, "synthetic Lead request refused", http.StatusForbidden)
+			return
+		case strings.Contains(bodyText, `You are \"review\", a worker`):
+			if reviewCalls.Add(1) == 1 {
+				cmd := `node -e 'const fs=require("node:fs"), crypto=require("node:crypto"); console.log(crypto.createHash("sha256").update(fs.readFileSync("worker.txt")).digest("hex"))'`
+				events, reason = call("check", "bash", map[string]any{"command": cmd}), "toolUse"
+			} else {
+				if !strings.Contains(bodyText, checksum) {
+					t.Error("checking worker did not receive the digest of the replacement's bytes")
+				}
+				events = text("Checked worker.txt SHA-256 " + checksum)
+			}
 		case strings.Contains(bodyText, "a worker of the yesman named"):
 			switch workerCalls.Add(1) {
 			case 1:
+				events, reason = call("draft", "write", map[string]any{"path": "worker.txt", "content": "draft"}), "toolUse"
+			case 2:
+				http.Error(w, rejection, http.StatusRequestEntityTooLarge)
+				return
+			case 3:
 				workerStarted <- struct{}{}
 				select {
 				case <-gate:
 				case <-r.Context().Done():
 					return
 				}
-				events, reason = call("wr", "write", map[string]any{"path": "worker.txt", "content": "from the shared working directory"}), "toolUse"
-			case 2:
+				events, reason = call("wr", "write", map[string]any{"path": "worker.txt", "content": candidate}), "toolUse"
+			case 4:
 				events, reason = call("task", "yesman_board", map[string]any{"add": []any{map[string]any{"title": "Wrote shared file", "status": "done", "owner": "helper"}}}), "toolUse"
 			default:
 				events = text("Worker report delivered")
@@ -92,10 +115,16 @@ func TestRunCLIWithManagedPi(t *testing.T) {
 				t.Error("resumed provider context lost the original message")
 			}
 			events = text("Resumed reply")
-		case strings.Contains(bodyText, "Its final message:"):
-			events = text("Final Lead reply after worker report")
+		case strings.Contains(bodyText, `[yesman] Worker \"review\"`) && strings.Contains(bodyText, "Checked worker.txt SHA-256 "+checksum):
+			events = text("Final Lead reply after checking worker report")
+		case strings.Contains(bodyText, `[yesman] Worker \"helper\"`) && assignedReview.CompareAndSwap(false, true):
+			events, reason = call("review", "yesman_worker_start", map[string]any{"name": "review", "title": "Check candidate", "task": "Report the current SHA-256 of worker.txt."}), "toolUse"
+		case strings.Contains(bodyText, `[yesman] Worker \"first\"`) && inspected.CompareAndSwap(false, true):
+			events, reason = call("inspect", "yesman_agents", map[string]any{}), "toolUse"
+		case strings.Contains(bodyText, rejection) && assignedReplacement.CompareAndSwap(false, true):
+			events, reason = call("replace", "yesman_worker_start", map[string]any{"name": "helper", "title": "Write candidate", "task": "Write worker.txt and report."}), "toolUse"
 		case leadCalls.Add(1) == 1:
-			events, reason = call("start", "yesman_worker_start", map[string]any{"name": "helper", "title": "Shared directory", "task": "Write worker.txt and report."}), "toolUse"
+			events, reason = call("start", "yesman_worker_start", map[string]any{"name": "first", "title": "First attempt", "task": "Write worker.txt and report."}), "toolUse"
 		default:
 			events = text("Lead delegated")
 		}
@@ -141,7 +170,10 @@ func TestRunCLIWithManagedPi(t *testing.T) {
 	}
 	done := make(chan agent.RunResult, 1)
 	go func() {
-		out, _ := run(append(args, "--new", "--root", root, "--prompt-file", promptFile), "")
+		out, code := run(append(args, "--new", "--root", root, "--prompt-file", promptFile), "")
+		if code != 0 {
+			t.Errorf("run exited %d after reassignment: %+v", code, out)
+		}
 		done <- out
 	}()
 	select {
@@ -165,10 +197,10 @@ func TestRunCLIWithManagedPi(t *testing.T) {
 	}
 	close(gate)
 	out := <-done
-	if out.Status != "completed" || out.Reply != "Final Lead reply after worker report" || out.SubmissionID == "" {
-		t.Fatalf("first result: %+v", out)
+	if out.Status != "completed" || out.Reply != "Final Lead reply after checking worker report" || out.SubmissionID == "" {
+		t.Errorf("first result: %+v", out)
 	}
-	if b, err := os.ReadFile(filepath.Join(root, "worker.txt")); err != nil || string(b) != "from the shared working directory" {
+	if b, err := os.ReadFile(filepath.Join(root, "worker.txt")); err != nil || string(b) != candidate {
 		t.Fatalf("worker output: %q %v", b, err)
 	}
 	var board yesmen.Board
@@ -176,20 +208,21 @@ func TestRunCLIWithManagedPi(t *testing.T) {
 	if err != nil || json.Unmarshal(data, &board) != nil || len(board.Tasks) != 1 || board.Tasks[0].Status != "done" {
 		t.Fatalf("worker board was not preserved: %s %v", data, err)
 	}
-	for _, name := range []string{"lead", "helper"} {
+	for _, name := range []string{"lead", "first", "helper", "review"} {
 		logs, _ := filepath.Glob(filepath.Join(root, ".yesman", "sessions", name, "*.jsonl"))
 		if len(logs) != 1 {
 			t.Fatalf("%s session files: %v", name, logs)
 		}
 		data, _ := os.ReadFile(logs[0])
 		n := 0
+		var sawFailure bool
 		for _, line := range bytes.Split(data, []byte("\n")) {
 			var e struct {
 				Type    string
 				Cwd     string
 				Message struct {
-					Role, Model, Provider string
-					Content               json.RawMessage
+					Role, Model, Provider, StopReason, ErrorMessage string
+					Content                                         json.RawMessage
 				}
 			}
 			_ = json.Unmarshal(line, &e)
@@ -199,9 +232,18 @@ func TestRunCLIWithManagedPi(t *testing.T) {
 			if e.Message.Role == "assistant" && (e.Message.Model != model || e.Message.Provider != "fixture") {
 				t.Fatalf("%s selection: %s/%s", name, e.Message.Provider, e.Message.Model)
 			}
+			if name == "first" && e.Message.Role == "assistant" && e.Message.StopReason == "error" && strings.Contains(e.Message.ErrorMessage, rejection) {
+				sawFailure = true
+			}
+			if name == "lead" && e.Message.Role == "user" && bytes.Contains(e.Message.Content, []byte(`[yesman] Worker \"first\"`)) && bytes.Contains(e.Message.Content, []byte("model error")) {
+				sawFailure = true
+			}
 			if name == "lead" && e.Message.Role == "user" && bytes.Contains(e.Message.Content, originalJSON) {
 				n++
 			}
+		}
+		if (name == "lead" || name == "first") && !sawFailure {
+			t.Errorf("%s session lacks the first worker's model diagnostic", name)
 		}
 		if name == "lead" && n != 1 {
 			t.Fatalf("the Lead recorded %d original messages", n)
@@ -212,5 +254,8 @@ func TestRunCLIWithManagedPi(t *testing.T) {
 	}
 	if out, code := run(args, ask); code != 2 || out.Status != "needs_input" || len(out.Handoffs) != 1 || out.Handoffs[0].Title != "Choose a color" {
 		t.Fatalf("handoff: %+v (exit %d)", out, code)
+	}
+	if out, code := run(args, failLead); code != 1 || out.Status != "failure" || !strings.Contains(out.Error, "synthetic Lead request refused") {
+		t.Fatalf("failed Lead: %+v (exit %d)", out, code)
 	}
 }

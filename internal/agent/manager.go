@@ -747,7 +747,7 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 	m.observeRun(a, p, kind, raw)
 	m.observeNativeInput(a, p, kind, raw)
 	m.observeDelivery(a, p, kind, raw)
-	m.follow(a, p, kind, raw)
+	modelFailed := m.follow(a, p, kind, raw)
 	switch kind {
 	case "queue_resume_start":
 		// Native Session reserved preparation; no message has been taken and no
@@ -800,7 +800,7 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 				defer m.handoffDone(a)
 				if !e.Aborted {
 					defer m.endHandoff(a, run.report)
-					m.reportToLead(a, run)
+					m.reportToLead(a, run, modelFailed)
 					return
 				}
 				// The user stopped its run. A worker being put to sleep, removed
@@ -1750,7 +1750,7 @@ func (m *Manager) handoffDone(a *agent) {
 // reportToLead hands a worker's final message to its lead, which starts a
 // run or reads it after the current one. A report that cannot be delivered
 // after a few tries is shown on the worker, for the user.
-func (m *Manager) reportToLead(a *agent, run runMark) {
+func (m *Manager) reportToLead(a *agent, run runMark, modelFailed bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	report, err := m.readFinal(ctx, run.p)
@@ -1764,7 +1764,13 @@ func (m *Manager) reportToLead(a *agent, run runMark) {
 		}
 		m.mu.Unlock()
 	}
-	if m.tellLeadRun(ctx, a, run, "report", reportText(a.info.Name, report, false)) == nil {
+	msg := reportText(a.info.Name, report, false)
+	if modelFailed {
+		// Keep provider diagnostics in the worker's JSONL and in the normal
+		// secret-filtered agents tool. The final assistant text may be empty.
+		msg += "\n\n[yesman] This worker's run ended with a model error. Read its runError with yesman_agents for details."
+	}
+	if m.tellLeadRun(ctx, a, run, "report", msg) == nil {
 		m.closeIfFinished(a, run, time.Now().UTC())
 	}
 }
@@ -1939,7 +1945,15 @@ func (m *Manager) tellLeadRun(ctx context.Context, a *agent, run runMark, kind, 
 	if kind == "report" && run.report != 0 {
 		track = m.reportTrack(ctx, a, run.report, false)
 	}
-	return m.tellLeadTracked(ctx, a, run, kind, msg, track)
+	err := m.tellLeadTracked(ctx, a, run, kind, msg, track)
+	if err != nil && !errors.Is(err, errStopped) && !errors.Is(err, errLeadPaused) {
+		m.mu.Lock()
+		if m.run != nil && !m.closed && !a.retiring {
+			m.run.handoffErr = fmt.Errorf("%s: %s notice could not reach the Lead: %w", a.info.ID, kind, err)
+		}
+		m.mu.Unlock()
+	}
+	return err
 }
 
 func (m *Manager) tellLeadTracked(ctx context.Context, a *agent, run runMark, kind, msg string, track *sendTrack) error {

@@ -34,13 +34,14 @@ type RunDialog struct {
 // intake and a worker report can start a new Lead turn after an earlier settle.
 // Count the Lead's admitted inputs until Pi identifies their recorded message.
 type singleRun struct {
-	id, lead  string
-	pending   map[Origin]int
-	recorded  bool
-	lastInput uint64 // lead.settled when its last tracked user message ended
-	aborted   bool
-	reply     string
-	err       error
+	id, lead   string
+	pending    map[Origin]int
+	recorded   bool
+	lastInput  uint64 // lead.settled when its last tracked user message ended
+	aborted    bool
+	reply      string
+	handoffErr error // a worker report or failure notice could not reach the Lead
+	err        error
 }
 
 func checkExactModel(s modelState, want Choice) error {
@@ -258,7 +259,7 @@ func (m *Manager) checkRunLocked(y yesmen.Yesman, submitted bool, out *RunResult
 		return
 	}
 	var dialogs []RunDialog
-	var failed []string
+	var undelivered []string
 	for _, a := range m.agents {
 		if a.info.Yesman != y.Name || !a.workspaceSince.Equal(y.HiredAt) {
 			continue
@@ -270,19 +271,23 @@ func (m *Manager) checkRunLocked(y yesmen.Yesman, submitted bool, out *RunResult
 		if busyLocked(a) || a.calls > 0 || len(a.operations) > 0 || a.removing || a.proc != nil && a.stopping {
 			return
 		}
-		if a.info.Status == Failed || a.info.RunError != nil || a.handoff.state != "" && a.reports == 0 {
-			detail := a.info.Detail
-			if a.info.RunError != nil {
-				detail = "model error: " + a.info.RunError.Message
-			}
-			failed = append(failed, a.info.ID+": "+detail)
+		if a.proc != nil && (a.queue.Steering+a.queue.FollowUp > 0 || a != lead && a.inbox != a.settledInbox) {
+			return // includes a worker given new work after an earlier error
+		}
+		if a.handoff.state != "" {
+			// reports is zero here. Delivery attempts have ended, yet the
+			// worker has no receipt, so its normal close may never happen.
+			undelivered = append(undelivered, fmt.Sprintf("%s: worker report %s", a.info.ID, a.handoff.state))
 			continue
 		}
-		if a.proc != nil && (a.inbox != a.settledInbox || a.queue.Steering+a.queue.FollowUp > 0 || a.info.Role == RoleWorker && a.givenWork) {
-			return
+		if a != lead && a.proc != nil && a.givenWork {
+			return // the worker's final report closes it
 		}
 	}
-	if lead.info.Status == Idle {
+	// A rejected prompt increments the Lead inbox but can never settle it.
+	// Check the recorded inputs below even if that transport failure prevents
+	// the usual idle check from succeeding.
+	if lead.info.Status == Idle && r.handoffErr == nil && len(undelivered) == 0 {
 		if _, _, _, state := m.leadStateLocked(y.Name); state != leadIdle {
 			return // includes a just-exited process awaiting its watcher
 		}
@@ -297,12 +302,35 @@ func (m *Manager) checkRunLocked(y yesmen.Yesman, submitted bool, out *RunResult
 	if !submitted {
 		return
 	}
-	if len(failed) > 0 {
-		slices.Sort(failed)
-		out.Status, out.Error = "failure", strings.Join(failed, "\n")
+	if lead.info.Status == Failed {
+		out.Status, out.Error = "failure", lead.info.ID+": "+lead.info.Detail
 		return
 	}
-	if !r.recorded || len(r.pending) != 0 || lead.settled <= r.lastInput {
+	// A terminal error can be known even if an external Pi never identified
+	// the original user message. Every later Lead input still has to drain.
+	pending := len(r.pending)
+	if !r.recorded && r.pending[Origin{Source: OriginUser, Submission: r.id}] == 1 {
+		pending--
+	}
+	if pending != 0 || lead.settled <= r.lastInput {
+		return
+	}
+	if r.handoffErr != nil {
+		out.Status, out.Error = "failure", r.handoffErr.Error()
+		return
+	}
+	if len(undelivered) != 0 {
+		slices.Sort(undelivered)
+		out.Status, out.Error = "failure", strings.Join(undelivered, "\n")
+		return
+	}
+	// The Lead's final execution outcome governs the CLI result. Its reply
+	// and the board describe what the team delivered.
+	if lead.info.RunError != nil {
+		out.Status, out.Error = "failure", lead.info.ID+": model error: "+lead.info.RunError.Message
+		return
+	}
+	if !r.recorded {
 		return
 	}
 	if r.aborted {

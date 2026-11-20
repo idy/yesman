@@ -277,11 +277,13 @@ Specify `--provider`, `--model` and `--effort` together to give the whole team o
 
 | JSON `status` | Exit | Meaning |
 | --- | ---: | --- |
-| `completed` | 0 | Pi recorded the submission and the Lead, its workers, queued messages, reports and automatic board notices settled. Read `reply` and the board for the outcome of the work. |
+| `completed` | 0 | Pi recorded the submission, the crew and its reports settled, and the Lead finished its final turn. Read `reply` and the board for the outcome of the work. |
 | `needs_input` | 2 | A Lead dialog, a worker question handed to the user, or an open Needs You handoff requires attention. The result includes `dialogs` or `handoffs`. |
 | `timed_out` | 124 | The whole-run deadline expired (default `30m`). |
 | `cancelled` | 130 | The process received an interrupt/termination signal or Pi aborted the Lead's run. |
-| `failure` | 1 | Configuration, submission, agent execution or shutdown failed. Inspect `error`. |
+| `failure` | 1 | Configuration, submission, report delivery, Lead execution or shutdown failed. Inspect `error`. |
+
+A worker’s model error reaches the Lead in its report. `yesman_agents` exposes the worker’s latest `runError`, and its session JSONL keeps the original error. The Lead decides whether to retry, reassign or finish with the available evidence. After those turns settle, the CLI uses the Lead’s final state.
 
 The result includes `workspace`, `root`, `submissionId` and the last visible Lead `reply` when available. The native session JSONL, submission receipts and board are under `root/.yesman`. Each exit closes the run's Pi processes and drains receipts. An interrupted live dialog is described in the output. A later invocation resumes by sending a new message. Free-text questions appear in `reply`. Machine-readable human waits use the structured dialog and handoff tools.
 

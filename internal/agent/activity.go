@@ -14,13 +14,15 @@ import (
 // follow keeps an agent's Activity and RunStartedAt from the events of its
 // run. Activity names only what the events show: the tool running, the
 // model thinking or writing, a compaction or a retry. It runs on the
-// process's reader, like record.
-func (m *Manager) follow(a *agent, p *proc, kind string, raw json.RawMessage) {
+// process's reader, like record. It returns true only for the settle of a
+// run whose final assistant message reported a model error.
+func (m *Manager) follow(a *agent, p *proc, kind string, raw json.RawMessage) bool {
 	m.mu.Lock()
 	if p != nil && a.proc != p {
 		m.mu.Unlock()
-		return
+		return false
 	}
+	var modelFailed bool
 	before, started, failed := a.info.Activity, a.info.RunStartedAt, a.info.RunError
 	switch kind {
 	case "agent_start":
@@ -45,6 +47,7 @@ func (m *Manager) follow(a *agent, p *proc, kind string, raw json.RawMessage) {
 			a.info.RunError = nil
 		} else if a.runSaid {
 			a.info.RunError = a.runEnd
+			modelFailed = a.runEnd != nil
 		}
 		a.runEnd, a.runSaid = nil, false
 		a.endRun()
@@ -137,6 +140,7 @@ func (m *Manager) follow(a *agent, p *proc, kind string, raw json.RawMessage) {
 	if changed {
 		m.changed()
 	}
+	return modelFailed
 }
 
 const waitingForModel = "Waiting for the model"
