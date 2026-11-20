@@ -1061,6 +1061,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .cleanup-path { font-size: var(--mds-text-note); color: var(--mds-ink); user-select: text; }
 .cleanup-parent { color: var(--mds-ink-secondary); }
 .cleanup-source, .cleanup-reason { margin-top: 4px; color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; user-select: text; }
+.worktree-cleanup .cleanup-warning { margin: 4px 0 0; color: var(--mds-warn-detail); font-size: var(--mds-text-note); line-height: 1.5; }
 .cleanup-source, .cleanup-source code { font-family: var(--mds-mono); }
 .cleanup-kept summary { padding: 8px 0; color: var(--mds-muted); font-size: var(--mds-text-note); cursor: pointer; }
 .worktree-cleanup .mds-dialog-actions { flex-shrink: 0; }

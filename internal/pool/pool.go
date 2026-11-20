@@ -81,6 +81,9 @@ type Worktree struct {
 	// measured right after creation through a handle of that directory
 	// carrying CleanupID. Only AddWorktree sets it.
 	Root *safefs.Identity `json:"-"`
+	// Set only by a desktop preview. The final local check requires the same
+	// tracking branch that was included in the open pull request lookup.
+	observedTracking *string
 }
 
 // NameFromURL derives a pool name from a remote URL: host and path without
@@ -169,8 +172,21 @@ func (p *Pool) lock(name string) *sync.Mutex {
 
 // List returns the pool's repositories, sorted by name.
 func (p *Pool) List() ([]Repo, error) {
+	repos, err := p.repositoryPaths(context.Background())
+	for i, r := range repos {
+		repos[i] = p.info(r.Name, r.Path)
+	}
+	return repos, err
+}
+
+// Checking for a leftover registration needs each bare repository's path,
+// without fetching unrelated remote metadata or starting git config for it.
+func (p *Pool) repositoryPaths(ctx context.Context) ([]Repo, error) {
 	var repos []Repo
 	err := filepath.WalkDir(p.root, func(path string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil
@@ -188,7 +204,7 @@ func (p *Pool) List() ([]Repo, error) {
 			if err != nil {
 				return err
 			}
-			repos = append(repos, p.info(filepath.ToSlash(rel), path))
+			repos = append(repos, Repo{Name: filepath.ToSlash(rel), Path: path})
 			return filepath.SkipDir
 		}
 		return nil
@@ -238,9 +254,31 @@ func (p *Pool) Get(name string) (Repo, error) {
 	}
 }
 
+// RecordedRepo looks up an exact lifecycle name. Unlike a user's short repo
+// query, it does not run Git in every other pool repository.
+func (p *Pool) RecordedRepo(ctx context.Context, name string) (Repo, error) {
+	parts := strings.Split(name, "/")
+	if len(parts) >= 2 {
+		for _, part := range parts {
+			if !validSegment(part) {
+				return Repo{}, fmt.Errorf("invalid recorded repository name %q", name)
+			}
+		}
+		path := p.dir(name)
+		if realPath(path) == filepath.Join(realPath(p.root), filepath.FromSlash(name)+".git") && fileExists(filepath.Join(path, "HEAD")) {
+			return p.repoInfo(ctx, name, path), ctx.Err()
+		}
+	}
+	return Repo{}, fmt.Errorf("recorded repository %q is missing or replaced", name)
+}
+
 func (p *Pool) info(name, dir string) Repo {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	return p.repoInfo(ctx, name, dir)
+}
+
+func (p *Pool) repoInfo(ctx context.Context, name, dir string) Repo {
 	r := Repo{Name: name, Path: dir}
 	r.URL, _ = git(ctx, dir, "config", "--get", "remote.origin.url")
 	r.Upstream, _ = git(ctx, dir, "config", "--get", "remote.upstream.url")
@@ -527,7 +565,10 @@ func (p *Pool) AddWorktree(ctx context.Context, r Repo, opts WorktreeOptions) (W
 	if err := os.MkdirAll(filepath.Dir(opts.Dest), 0o755); err != nil {
 		return Worktree{}, err
 	}
-	tl := p.treeLock(opts.Dest)
+	tl, err := p.treeLock(opts.Dest)
+	if err != nil {
+		return Worktree{}, err
+	}
 	tl.Lock()
 	if _, err := git(ctx, r.Path, args...); err != nil {
 		tl.Unlock()
@@ -674,7 +715,10 @@ func (p *Pool) RemoveWorktree(ctx context.Context, path string, force bool) erro
 	l := p.lock(filepath.ToSlash(strings.TrimSuffix(rel, ".git")))
 	l.Lock()
 	defer l.Unlock()
-	tl := p.treeLock(path)
+	tl, err := p.treeLock(path)
+	if err != nil {
+		return err
+	}
 	tl.Lock()
 	defer tl.Unlock()
 	args := []string{"worktree", "remove", path}
@@ -742,14 +786,7 @@ func refExists(ctx context.Context, dir, ref string) bool {
 }
 
 func git(ctx context.Context, dir string, args ...string) (string, error) {
-	return gitInput(ctx, dir, "", args...)
-}
-
-func gitInput(ctx context.Context, dir, input string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
-	if input != "" {
-		cmd.Stdin = strings.NewReader(input)
-	}
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	if os.Getenv("GIT_SSH_COMMAND") == "" {
@@ -772,14 +809,13 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// realPath resolves symbolic links, such as macOS's /tmp, so that paths
-// git reports compare with the ones yesman builds.
+// realPath returns the physical spelling used to compare Git registrations
+// with configured paths. A missing checkout can still have a registered path.
 func realPath(path string) string {
-	if r, err := filepath.EvalSymlinks(path); err == nil {
+	if r, err := resolveExistingPath(path); err == nil {
 		return r
 	}
-	// The path may not exist yet: resolve its parent.
-	if r, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+	if r, err := resolveExistingPath(filepath.Dir(path)); err == nil {
 		return filepath.Join(r, filepath.Base(path))
 	}
 	return filepath.Clean(path)

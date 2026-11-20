@@ -134,7 +134,10 @@ func (w Worker) Subject(b Board) string {
 type Store struct {
 	root, archive string
 	mu            sync.Mutex
-	metaMu        sync.Mutex // serialize metadata reads with atomic replacement on Windows
+	// Workspace-scoped lifecycle I/O, including background discovery.
+	worktreeLocks map[string]*sync.Mutex
+	returnLocks   map[string]*sync.Mutex // final retirement vs this workspace's board and worker writers
+	metaMu        sync.Mutex             // serialize metadata reads with atomic replacement on Windows
 
 	lmu    sync.Mutex
 	locks  map[string]*sync.RWMutex  // per yesman: Use reads, Archive writes
@@ -448,6 +451,7 @@ func number(ws []Worker) {
 
 // AddWorker records a new worker.
 func (s *Store) AddWorker(name string, w Worker) error {
+	defer s.lockReturnState(name)()
 	if err := ValidName(w.Name); err != nil {
 		return err
 	}
@@ -596,6 +600,7 @@ func (s *Store) FailWorker(name, worker string, since, at time.Time) error {
 // updateWorker changes a worker's record, writing it only when fn reports a
 // change. A worker no longer listed is left alone.
 func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, error) {
+	defer s.lockReturnState(name)()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ws, err := s.workers(name)
@@ -620,6 +625,7 @@ func (s *Store) RemoveWorker(name, worker string) error {
 // RemoveWorkerIf rolls back a failed start only while its exact record is
 // still present. A zero since is an ordinary explicit removal by name.
 func (s *Store) RemoveWorkerIf(name, worker string, since time.Time) error {
+	defer s.lockReturnState(name)()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ws, err := s.workers(name)
@@ -643,7 +649,9 @@ func (s *Store) RemoveWorkerIf(name, worker string, since time.Time) error {
 		bound := false
 		for j := range b.Tasks {
 			if t := &b.Tasks[j]; t.Owner == worker && t.OwnerSince.IsZero() {
+				previous := *t
 				t.OwnerSince, bound = ws[i].StartedAt, true
+				t.recordWorktreeGeneration(previous)
 			}
 		}
 		if bound {

@@ -51,7 +51,7 @@ func TestCleanupPrivateHistoryBoundaries(t *testing.T) {
 		name, field string
 		data        []byte
 	}{
-		{"oversized reflog", log, []byte(strings.Repeat("x", maxPrivateReflog+1))},
+		{"oversized reflog", log, []byte(strings.Repeat("x", maxHistoryFile+1))},
 		{"truncated reflog", log, []byte(old + " " + wt.Head + " a")},
 		{"noncommit", orig, []byte(run(t, wt.Path, "rev-parse", "HEAD^{tree}") + "\n")},
 		{"missing object", orig, []byte(strings.Repeat("b", len(old)) + "\n")},

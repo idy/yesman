@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,7 +49,8 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 	}
 	s := hireService(t)
 	a := s.app
-	a.desktopWorktrees.Server = &server.Server{Pool: a.pool, Yesmen: a.yesmen, Agents: a.agents}
+	a.desktopWorktrees.Server = &server.Server{Pool: a.pool, Yesmen: a.yesmen, Agents: a.agents,
+		HasOpenPull: func(context.Context, string, string, string) (bool, error) { return false, nil }}
 	y, err := a.yesmen.Hire("studio")
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +84,8 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 	}
 	var records []yesmen.WorktreeRecord
 	str := func(v string) *string { return &v }
-	for _, dir := range []string{"gizmoth-artifact-rows", "review-a", "review-b", "locked", "legacy"} {
+	var gizmoTask string
+	for _, dir := range []string{"gizmoth-artifact-rows", "review-a", "review-b", "locked", "legacy", "saved-conflict", "unverified-index"} {
 		since := time.Now().UTC()
 		if err := a.yesmen.AddWorker(y.Name, yesmen.Worker{Name: dir, StartedAt: since}); err != nil {
 			t.Fatal(err)
@@ -107,8 +110,31 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			r.Completion = &yesmen.WorktreeCompletion{Head: w.Head, Ref: w.Head, Outcome: "pass", Unused: true, Evidence: "Fixture review on board", SavedAt: since}
 		} else {
 			r.Purpose = "author"
+			gizmoTask = r.Task
 		}
-		if dir == "locked" {
+		switch dir {
+		case "saved-conflict":
+			git(w.Path, "switch", "-qc", "fixture-conflict")
+			readme := filepath.Join(w.Path, "README")
+			if err := os.WriteFile(readme, []byte("Other version\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			git(w.Path, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qam", "Other version")
+			if err := os.WriteFile(readme, []byte("Local version\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			git(w.Path, "switch", "--merge", "--detach", w.Head)
+			git(w.Path, "checkout", "--ours", "--", "README")
+			git(w.Path, "add", "README")
+		case "unverified-index":
+			private, err := exec.Command("git", "-C", w.Path, "rev-parse", "--absolute-git-dir").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(strings.TrimSpace(string(private)), "index"), []byte("partial"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		case "locked":
 			git(repo.Path, "worktree", "lock", w.Path)
 		}
 		records = append(records, r)
@@ -142,6 +168,16 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 				}
 			}
 			value, err = a.pool.AddWorktree(r.Context(), repo, pool.WorktreeOptions{Dest: dest, Ref: "origin/replacement"})
+		case "KeepGizmo":
+			keep := []yesmen.WorktreeReturn{}
+			_, err = a.yesmen.ChangeBoard(y.Name, yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: gizmoTask, Status: str(yesmen.TaskDone), Worktrees: &keep}}})
+		case "FaultAfterGit":
+			// After success Git removes the checkout and its private directory.
+			// A reference hook injects an independent registry failure into this fixture.
+			err = os.Remove(filepath.Join(y.Path, "review-b", "keep"))
+			if err == nil {
+				err = installFixtureRegistryFault(repo.Path, y.MetaDir())
+			}
 		case "DirtyReview":
 			err = os.WriteFile(filepath.Join(y.Path, "review-b", "keep"), []byte("Still in use"), 0600)
 		case "Verify":
@@ -199,4 +235,18 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 	defer fixture.Close()
 	fmt.Println("WORKTREE_BROWSER_URL=" + fixture.URL)
 	_, _ = io.Copy(io.Discard, os.Stdin)
+}
+
+// Redirecting this synthetic registry only when recovery refs commit lets the
+// browser exercise a successful Git removal followed by a bookkeeping error.
+func installFixtureRegistryFault(repo, meta string) error {
+	cmd := exec.Command("git", "-C", repo, "config", "fixture.registry", filepath.ToSlash(filepath.Join(meta, "worktrees.json")))
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(repo, "hooks", "reference-transaction"), []byte(`#!/bin/sh
+if test "$1" = committed && grep -q ' refs/yesman/worktrees/'; then
+  mv "$(git config --get fixture.registry)" "$(git config --get fixture.registry).saved"
+fi
+`), 0700)
 }

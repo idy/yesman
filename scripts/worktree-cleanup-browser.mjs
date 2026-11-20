@@ -131,6 +131,8 @@ async function run(engine, name, language) {
     await dialog.locator('summary').click();
     assert.match(await dialog.innerText(), zh ? /锁定/ : /Git has locked/);
     assert.match(await dialog.innerText(), zh ? /临时工作树/ : /temporary checkout record/);
+    assert.match(await dialog.innerText(), zh ? /还原冲突的文件版本/ : /versions of a resolved conflict/);
+    assert.match(await dialog.innerText(), zh ? /无法验证 Git 索引/ : /Git index could not be verified/);
     if (output) await dialog.screenshot({path:join(output, `bulk-${name}-${language}.png`)});
     await page.keyboard.press('Escape');
     await dialog.waitFor({state:'detached'});
@@ -174,10 +176,24 @@ async function run(engine, name, language) {
     }
     await giz.press('Shift+F10');
     await button.waitFor();
+    assert.equal(await dialog.locator('.cleanup-warning').count(), 0);
+    await page.evaluate(() => api('KeepGizmo'));
+    await button.click();
+    await dialog.getByText(zh ? /重新打开预览/ : /Open a new preview/).waitFor();
+    assert.ok((await page.evaluate(() => api('Verify'))).trees.some(w => w.dir === 'gizmoth-artifact-rows'));
+    await cancel.click();
+    await giz.press('Shift+F10');
+    await button.waitFor();
+    const warning = dialog.locator('.cleanup-warning');
+    assert.equal(await button.getAttribute('aria-describedby'), await warning.getAttribute('id'));
+    assert.match(await warning.textContent(), zh ? /看板已指定保留此工作树/ : /Board says to keep this worktree/);
+    assert.ok(await focused(cancel));
+    assert.equal(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth), true);
+    if (output) await dialog.screenshot({path:join(output, `keep-warning-${name}-${language}.png`)});
     await page.evaluate(() => { window.failInfo = true; });
     await button.evaluate(e => { e.click(); e.click(); });
     await giz.waitFor({state:'detached'});
-    assert.equal(await commits(),1);
+    assert.equal(await commits(),2);
     await info.getByText(/Fixture refresh unavailable/).waitFor();
     await page.evaluate(() => { window.failInfo = false; });
     const verify = () => page.evaluate(() => api('Verify'));
@@ -200,8 +216,8 @@ async function run(engine, name, language) {
     await dialog.getByText(zh ? /未提交的改动/ : /uncommitted changes/).waitFor();
     const actual = await verify();
     assert.deepEqual(actual.checkpoints.sort(),['gizmoth-artifact-rows','review-a']);
-    assert.deepEqual(actual.trees.map(w => w.dir).sort(),['legacy','locked','review-b']);
-    assert.equal(await commits(),2);
+    assert.deepEqual(actual.trees.map(w => w.dir).sort(),['legacy','locked','review-b','saved-conflict','unverified-index']);
+    assert.equal(await commits(),3);
     assert.equal(await info.locator('.info-merged-toggle').count(), 0);
     assert.equal(await row('review-b').count(),1);
     await page.keyboard.press('Escape');
@@ -251,8 +267,19 @@ async function run(engine, name, language) {
       await openFiles('locked'); assert.equal(await editorText(),'Keep this other draft');
       console.log(`${name} Files kept the unrelated draft, retired both worktree and All files tabs, ignored a late read and refused a delayed save across checkout replacement`);
     }
+    await page.evaluate(() => api('FaultAfterGit'));
+    await row('review-b').click({button:'right'});
+    await button.waitFor();
+    await button.click();
+    await dialog.getByText(zh ? /工作树记录更新失败/ : /checkout record could not be updated/).first().waitFor();
+    await row('review-b').waitFor({state:'detached'});
+    assert.ok((await verify()).checkpoints.includes('review-b'));
+    assert.ok(await focused(cancel));
+    await cancel.press('Enter');
+    await dialog.waitFor({state:'detached'});
+    assert.ok(await focused(headingButton));
     assert.deepEqual(errors,[]);
-    console.log(`${name} ${language} passed native-menu dispatch, Cancel, Escape, opener focus, single removal without PR, double execution guard, partial batch, list and Git recovery refs`);
+    console.log(`${name} ${language} passed Board withdrawal and warning, both index holds, post-removal registry failure, menu, Cancel, Escape, focus, no-PR single, one-use confirmation, partial batch and list refresh`);
   } catch (err) {
     if (page) console.error(await page.evaluate(() => ({ calls: calls.slice(-12).map(c => c[0]), active: document.activeElement?.outerHTML?.slice(0, 380), dialogs: [...document.querySelectorAll('dialog[open]')].map(e=>e.textContent), toast: document.querySelector('.toast')?.textContent })));
     throw err;

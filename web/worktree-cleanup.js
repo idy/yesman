@@ -71,6 +71,11 @@ export function createWorktreeMenu(host) {
         if (ready.length) {
           hint.textContent = t('Close any programs using these directories. Git saves each commit in the shared repository and keeps your branches and tags.');
           listing.append(rowList(ready));
+          if (selected && ready[0]?.keepWarning) {
+            const warning = h('p', { id: 'worktree-cleanup-warning', class: 'cleanup-warning', role: 'status' }, t(ready[0].keepWarning));
+            listing.append(warning);
+            confirm.setAttribute('aria-describedby', warning.id);
+          }
           confirm.textContent = selected ? t('Remove worktree') : tn(ready.length, 'Remove 1 worktree', 'Remove {n} worktrees');
           confirm.hidden = false;
         } else {
@@ -102,7 +107,8 @@ export function createWorktreeMenu(host) {
           dialog.close();
         } else {
           listing.replaceChildren(rowList(issues));
-          if (removed.length) listing.append(h('details', { class: 'cleanup-kept' }, h('summary', null, t('Removed directories')), rowList(removed)));
+          const saved = removed.filter(row => !row.reason);
+          if (saved.length) listing.append(h('details', { class: 'cleanup-kept' }, h('summary', null, t('Removed directories')), rowList(saved)));
           end(t('Cleanup results'), tn(removed.length, 'Removed 1 worktree.', 'Removed {n} worktrees.'));
         }
       } catch (err) {

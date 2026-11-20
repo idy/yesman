@@ -103,6 +103,7 @@ func newCleanupFixture(t *testing.T) *cleanupFixture {
 	f.owner = f.caller(t, "owner")
 	f.lead = f.caller(t, "lead")
 	f.delegate = f.caller(t, "cleanup")
+	s.HasOpenPull = func(context.Context, string, string, string) (bool, error) { return false, nil }
 	s.ReadPullMerge = func(_ context.Context, repo string, number int) (github.PullMerge, error) {
 		if repo != "acme/demo" || number != 7 {
 			return github.PullMerge{}, fmt.Errorf("unexpected PR %s#%d", repo, number)
@@ -148,7 +149,11 @@ func (f *cleanupFixture) removeRequest(ctx context.Context, c caller, r *http.Re
 	l := f.s.worktreeLock(c.yesman.Name)
 	l.Lock()
 	defer l.Unlock()
-	return f.s.cleanupWorktree(ctx, c, c.yesman, req)
+	proof, err := f.s.verifyRemoval(ctx, c, c.yesman, req)
+	if err != nil {
+		return nil, err
+	}
+	return f.s.commitRemoval(ctx, c, c.yesman, req, proof)
 }
 
 func (f *cleanupFixture) checkout(t *testing.T, purpose, dir string) pool.Worktree {
