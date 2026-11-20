@@ -339,11 +339,7 @@ func (a *app) agentsChanged(list []agent.Info) {
 	// A lead that ends a run often carries on at once, with a worker's
 	// report or a reminder of open tasks: tell the user only once the whole
 	// yesman has stayed settled for a moment.
-	a.completions.update(list, func(i agent.Info) {
-		if a.yesmanSettled(i.Yesman) {
-			a.notify(i.ID, a.yesmanLabel(i.Yesman), tr("Finished and waiting for you."))
-		}
-	})
+	a.completions.update(list, a.notifySettled)
 	for _, n := range notes {
 		a.notify(n.id, n.title, n.body)
 	}
@@ -378,21 +374,31 @@ func (a *app) yesmanLabel(name string) string {
 // finished.
 const settleGrace = 4 * time.Second
 
-// yesmanSettled reports whether a yesman's lead is idle and none of its
-// workers works, starts or waits for an answer.
-func (a *app) yesmanSettled(yesman string) bool {
+// notifySettled rechecks the team when the quiet timer fires. Use the
+// current outcome of the same Lead, since a retry or a worker report may
+// have changed it since the timer was armed.
+func (a *app) notifySettled(scheduled agent.Info) {
+	var lead agent.Info
 	for _, i := range a.agents.List() {
-		if i.Yesman != yesman {
+		if i.Yesman != scheduled.Yesman {
 			continue
 		}
-		switch {
-		case i.Role == agent.RoleLead && i.Status != agent.Idle:
-			return false
-		case i.Status == agent.Working || i.Status == agent.Starting || i.Status == agent.Waiting:
-			return false
+		switch i.Status {
+		case agent.Working, agent.Starting, agent.Waiting:
+			return
+		}
+		if i.Role == agent.RoleLead && i.Status == agent.Idle && i.Since.Equal(scheduled.Since) {
+			lead = i
 		}
 	}
-	return true
+	if lead.ID == "" {
+		return
+	}
+	body := "Finished and waiting for you."
+	if lead.RunError != nil {
+		body = "The model request failed. Open the conversation for details."
+	}
+	a.notify(lead.ID, a.yesmanLabel(lead.Yesman), tr(body))
 }
 
 // notify shows a notification about an agent, unless the window has focus;

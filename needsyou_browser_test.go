@@ -32,7 +32,9 @@ import (
 // asks the dialog given, which holds the run until it is answered. A prompt
 // "NEEDSYOU {…}" makes the call the extension's yesman_needs_you tool makes:
 // POST /v1/needs-you with this agent's own credential, recorded in its
-// history as that tool call. Every prompt is reported as test_prompt.
+// history as that tool call. "ASSISTANT {…}" ends a turn with the given
+// assistant message for desktop notification tests. Every prompt is reported
+// as test_prompt.
 func needsYouFakePi() {
 	out := bufio.NewWriter(os.Stdout)
 	write := func(v any) {
@@ -76,6 +78,9 @@ func needsYouFakePi() {
 				d["type"] = "extension_ui_request"
 				write(d)
 				continue
+			case strings.HasPrefix(cmd.Message, "ASSISTANT "):
+				message := json.RawMessage(strings.TrimPrefix(cmd.Message, "ASSISTANT "))
+				write(map[string]any{"type": "message_end", "message": message})
 			case strings.HasPrefix(cmd.Message, "NEEDSYOU "):
 				body := strings.TrimPrefix(cmd.Message, "NEEDSYOU ")
 				var args map[string]any

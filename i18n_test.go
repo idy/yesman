@@ -21,6 +21,7 @@ func TestTrIn(t *testing.T) {
 	for _, c := range []struct{ locale, msg, want string }{
 		{"en", "Open Yes Man", "Open Yes Man"},
 		{"zh-Hans", "Open Yes Man", "打开 Yes Man"},
+		{"zh-Hans", "The model request failed. Open the conversation for details.", "模型请求失败。打开对话可查看详情。"},
 		{"zh-Hans", "an untranslated message", "an untranslated message"},
 	} {
 		if got := trIn(c.locale, c.msg); got != c.want {
