@@ -61,6 +61,13 @@ func boardProof(y yesmen.Yesman, rec yesmen.WorktreeRecord, t *yesmen.Task) *yes
 // completions use their own existing admission rules.
 func CheckSavedWorktreeReturn(y yesmen.Yesman, rec yesmen.WorktreeRecord, b yesmen.Board, workers []yesmen.Worker) error {
 	if rec.BoardRound.IsZero() {
+		d := WorktreeDecisionFor(b, rec)
+		if d.KeepsCheckout() {
+			return errors.New("the task explicitly keeps this checkout. Its owner or lead can update the Board disposition")
+		}
+		if d.explicit && rec.Completion != nil {
+			return errors.New("the current Board return supersedes the standalone completion. Wait for the service to verify this return")
+		}
 		if rec.Completion != nil && rec.Completion.ReturnID != "" {
 			return errors.New("Board certification is missing its task round")
 		}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"time"
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/yesmen"
@@ -16,9 +17,58 @@ import (
 // for local work. A new caller admission covers the subsequent local commit.
 type removalVerification struct {
 	record        *yesmen.WorktreeRecord
+	decision      WorktreeTaskDecision
 	missing       bool
 	branchChecked bool
 	branchErr     error
+}
+
+// WorktreeTaskDecision captures the authorization-relevant task state for one
+// checkout. Compare snapshots before and after remote verification.
+// A note edit, Board reorder or change to another task leaves it equal.
+// Its fields come from the same durable Board snapshot as the registry read.
+// The zero value describes a task with no recorded disposition.
+type WorktreeTaskDecision struct {
+	status, owner, doneOwner   string
+	created, ownerSince, round time.Time
+	paused, explicit           bool
+	returned                   yesmen.WorktreeCompletion
+}
+
+// KeepsCheckout reports an explicit Board choice to retain this instance.
+func (d WorktreeTaskDecision) KeepsCheckout() bool { return d.explicit && d.returned.Head == "" }
+
+// WorktreeDecisionFor returns the decision for this instance in b.
+func WorktreeDecisionFor(b yesmen.Board, rec yesmen.WorktreeRecord) WorktreeTaskDecision {
+	for _, task := range b.Tasks {
+		if task.ID != rec.Task {
+			continue
+		}
+		d := WorktreeTaskDecision{status: task.Status, owner: task.Owner, doneOwner: task.DoneOwner,
+			created: task.CreatedAt, ownerSince: task.OwnerSince, round: task.DoneAt,
+			paused: task.Paused(), explicit: task.Returns != nil}
+		for _, ret := range task.Returns {
+			if ret.Checkout == rec.ID {
+				d.returned = ret.WorktreeCompletion
+				break
+			}
+		}
+		return d
+	}
+	return WorktreeTaskDecision{}
+}
+
+// A proposal made while the Board has explicitly disposed of this instance
+// uses that return and its authority through later retries and delegation.
+func (d WorktreeTaskDecision) bind(rec yesmen.WorktreeRecord, proposed yesmen.WorktreeCompletion) (yesmen.WorktreeRecord, error) {
+	if d.explicit {
+		if d.KeepsCheckout() || !sameReturnedSource(proposed, d.returned) || proposed.Outcome != d.returned.Outcome {
+			return rec, errors.New("the manual proposal does not match the current Board disposition")
+		}
+		rec.BoardRound, proposed = d.round, d.returned
+	}
+	rec.Completion = &proposed
+	return rec, nil
 }
 
 func (s *Server) verifyRemoval(ctx context.Context, c caller, y yesmen.Yesman, req removeWorktreeRequest) (removalVerification, error) {
@@ -36,6 +86,7 @@ func (s *Server) verifyRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 	}
 	rec := records[i]
 	proof.record = &records[i]
+	proof.decision = WorktreeDecisionFor(b, rec)
 	_, err = os.Lstat(filepath.Join(y.Path, rec.Dir))
 	proof.missing = errors.Is(err, os.ErrNotExist)
 	if rec.Removed || rec.Purpose == "review" || !temporaryPurpose(rec.Purpose) || proof.missing && rec.Completion != nil || CheckSavedWorktreeReturn(y, rec, b, users) != nil {
@@ -48,10 +99,15 @@ func (s *Server) verifyRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 		return proof, nil
 	}
 	if req.Completion != nil {
-		if completionProblem(rec, *req.Completion) != "" || rec.Completion != nil && !sameWorktreeCompletion(*rec.Completion, *req.Completion) {
+		if completionProblem(rec, *req.Completion) != "" || !matchesSavedProposal(rec, *req.Completion) {
 			return proof, nil
 		}
-		rec.Completion = req.Completion
+		if rec.Completion == nil {
+			rec, err = proof.decision.bind(rec, *req.Completion)
+			if err != nil || CheckSavedWorktreeReturn(y, rec, b, users) != nil {
+				return proof, nil
+			}
+		}
 	}
 	if rec.Completion == nil {
 		return proof, nil

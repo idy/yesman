@@ -201,6 +201,11 @@ func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 		if err := CheckSavedWorktreeReturn(y, *rec, board, workers); err != nil {
 			return retain(err.Error())
 		}
+		// A first manual proposal has no saved certificate yet. The task can
+		// be reopened, closed again or explicitly kept during a remote check.
+		if proof.decision != WorktreeDecisionFor(board, *rec) {
+			return retain("the associated task changed during verification. Check its current disposition before trying again")
+		}
 		if !rec.BoardRound.IsZero() && heldByUsers(*rec, board, workers) {
 			return retain("recorded user has open or paused work")
 		}
@@ -218,16 +223,24 @@ func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 		if reason := completionProblem(*rec, v); reason != "" {
 			return retain(reason)
 		}
-		if rec.Completion != nil && !sameWorktreeCompletion(*rec.Completion, v) {
+		if !matchesSavedProposal(*rec, v) {
 			return retain("completion already saved; reconstruct a new checkout for another round")
 		}
 		if rec.Completion == nil {
 			v.SavedAt = time.Now().UTC()
 			v.ReturnID = ""
 			v.CertifiedBy, v.CertifiedSince = c.agent.Name, c.agent.Since
+			candidate, err := proof.decision.bind(*rec, v)
+			if err != nil {
+				return retain(err.Error())
+			}
+			if err := CheckSavedWorktreeReturn(y, candidate, board, workers); err != nil {
+				return retain(err.Error())
+			}
+			if !candidate.BoardRound.IsZero() && heldByUsers(candidate, board, workers) {
+				return retain("recorded user has open or paused work")
+			}
 			if rec.Purpose != "review" {
-				candidate := *rec
-				candidate.Completion = &v
 				err := proof.branchProof(board, candidate)
 				if err == nil {
 					err = s.Pool.CheckTemporaryWorktree(ctx, y.Path, expectedWorktree(candidate))
@@ -249,7 +262,10 @@ func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 			if err := ctx.Err(); err != nil {
 				return out, err
 			}
-			rec.Completion = &v
+			rec.Completion, rec.BoardRound = candidate.Completion, candidate.BoardRound
+			if !rec.BoardRound.IsZero() {
+				reservationCaller = ""
+			}
 			if err := s.Yesmen.SaveWorktreeRecords(y.Name, records); err != nil {
 				return out, err
 			}
@@ -322,6 +338,15 @@ func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 	}
 	out.Removed = true
 	return out, nil
+}
+
+// A Board certification keeps the task's evidence. Retrying the owner's
+// original request can therefore supply a different external evidence note.
+func matchesSavedProposal(rec yesmen.WorktreeRecord, v yesmen.WorktreeCompletion) bool {
+	if rec.Completion == nil || sameWorktreeCompletion(*rec.Completion, v) {
+		return true
+	}
+	return !rec.BoardRound.IsZero() && sameReturnedSource(*rec.Completion, v) && rec.Completion.Outcome == v.Outcome && rec.Completion.Unused == v.Unused
 }
 
 func sameWorktreeCompletion(a, b yesmen.WorktreeCompletion) bool {

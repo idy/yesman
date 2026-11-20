@@ -68,6 +68,11 @@ func (p *Pool) checkTemporaryWorktree(ctx context.Context, r Repo, workspace str
 	if !cleanupIDRE.MatchString(expected.CleanupID) {
 		return "", fmt.Errorf("retain %s: invalid checkout ID", expected.Dir)
 	}
+	// Inspect this registration's inputs through verified handles before Git
+	// reads them. Unexpected private state must survive the entire operation.
+	if _, err := readPrivateHistory(r, path, expected); err != nil {
+		return "", fmt.Errorf("retain %s: %w", expected.Dir, err)
+	}
 	wts, err := p.worktrees(ctx, r)
 	if err != nil {
 		return "", err
@@ -150,7 +155,7 @@ func (p *Pool) removeTemporary(ctx context.Context, workspace string, expected W
 	}
 	// git worktree remove alone does not protect ignored files. Include every
 	// unknown path and disable status configuration that hides untracked files.
-	status, err := git(ctx, path, "status", "--porcelain=v1", "--untracked-files=all", "--ignored", "--ignore-submodules=none")
+	status, err := git(ctx, path, "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "status", "--porcelain=v1", "--untracked-files=all", "--ignored", "--ignore-submodules=none")
 	if err != nil {
 		return err
 	}
@@ -167,33 +172,10 @@ func (p *Pool) removeTemporary(ctx context.Context, workspace string, expected W
 			return fmt.Errorf("retain %s: index flags may hide local work", expected.Dir)
 		}
 	}
-	for _, state := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer", "BISECT_LOG", "index.lock"} {
-		statePath, err := git(ctx, path, "rev-parse", "--git-path", state)
-		if err != nil {
-			return err
-		}
-		if !filepath.IsAbs(statePath) {
-			statePath = filepath.Join(path, statePath)
-		}
-		if _, err := os.Lstat(statePath); err == nil || !os.IsNotExist(err) {
-			return fmt.Errorf("retain %s: git operation in progress or state unreadable", expected.Dir)
-		}
-	}
-	// A remote-tracking ref can disappear on the next fetch after a squash
-	// merge. Pin this generation's source before removing its last checkout.
-	if !cleanupIDRE.MatchString(expected.CleanupID) {
-		return fmt.Errorf("retain %s: invalid checkout ID", expected.Dir)
-	}
-	checkpoint := "refs/yesman/worktrees/" + expected.CleanupID
-	if _, err := git(ctx, path, "symbolic-ref", "--quiet", checkpoint); err == nil {
-		return fmt.Errorf("retain %s: recovery ref is symbolic", expected.Dir)
-	}
-	if old, err := git(ctx, path, "rev-parse", "--verify", checkpoint); err == nil {
-		if old != expected.Head {
-			return fmt.Errorf("retain %s: recovery ref changed", expected.Dir)
-		}
-	} else if _, err := git(ctx, path, "update-ref", "--no-deref", checkpoint, expected.Head, strings.Repeat("0", len(expected.Head))); err != nil {
-		return fmt.Errorf("retain %s: cannot preserve exact HEAD: %w", expected.Dir, err)
+	// Preserve the current source, private history and recovery metadata as
+	// one ref transaction before deleting this registration.
+	if err := preserveWorktreeHistory(ctx, r, path, expected); err != nil {
+		return fmt.Errorf("retain %s: %w", expected.Dir, err)
 	}
 	// Re-read the actual private Git marker and source immediately before
 	// deleting, under the same lock used by every pool checkout/removal path.
