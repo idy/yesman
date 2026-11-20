@@ -1,30 +1,43 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/idy/yesman/internal/agent"
 )
 
-// completionNotices waits for an uninterrupted quiet interval before saying
-// that a yesman finished. Work resuming invalidates the old timer, including
-// a callback that already started and is waiting for the mutex.
+// completionNotices waits for uninterrupted quiet. The timer and any delivery
+// it started share a lifetime, bounded by both the Lead's run and crew activity.
 type completionNotices struct {
 	mu     sync.Mutex
 	states map[string]*completionState
 }
 
 type completionState struct {
-	worked   bool
-	revision uint64
-	timer    *time.Timer
+	since  time.Time
+	run    context.Context
+	worked bool
+	timer  *time.Timer
+	cancel context.CancelFunc
 }
 
-// update follows the whole snapshot. Merely starting a process to read its
-// history is not work; at least one agent must have worked or asked a
-// question before the yesman can finish.
-func (c *completionNotices) update(list []agent.Info, notify func(agent.Info)) {
+func (s *completionState) stop() {
+	if s.cancel != nil {
+		s.cancel()
+		s.cancel = nil
+	}
+	if s.timer != nil {
+		s.timer.Stop()
+		s.timer = nil
+	}
+}
+
+// update follows the whole snapshot. Starting a process to read its history
+// is passive. A new settled run also identifies work when status updates were
+// coalesced and the observer saw idle twice.
+func (c *completionNotices) update(list []agent.Info, notify func(context.Context, agent.Info)) {
 	type workspace struct {
 		lead   agent.Info
 		busy   bool
@@ -54,41 +67,50 @@ func (c *completionNotices) update(list []agent.Info, notify func(agent.Info)) {
 		c.states = map[string]*completionState{}
 	}
 	for name, s := range c.states {
-		if _, ok := groups[name]; !ok {
-			if s.timer != nil {
-				s.timer.Stop()
-			}
+		if groups[name] == nil {
+			s.stop()
 			delete(c.states, name)
 		}
 	}
 	for name, g := range groups {
+		lead := g.lead
+		run := lead.SettledRun()
+		if lead.Status == agent.Idle && run.Err() != nil {
+			continue // a snapshot of a run the Manager already retired
+		}
 		s := c.states[name]
-		if s == nil {
-			s = &completionState{}
+		if s == nil || !s.since.Equal(lead.Since) {
+			if s != nil {
+				s.stop()
+			}
+			s = &completionState{since: lead.Since, run: run}
 			c.states[name] = s
+		} else if lead.Status == agent.Idle && s.run != run && run != context.Background() {
+			// A real settlement identifies new work, even if the intervening
+			// busy snapshot was coalesced. A passive startup has no such run.
+			s.stop()
+			s.run, s.worked = run, true
 		}
 		s.worked = s.worked || g.worked
-		if g.busy || g.lead.ID == "" || g.lead.Status != agent.Idle {
-			s.revision++
-			if s.timer != nil {
-				s.timer.Stop()
-				s.timer = nil
-			}
+		if g.busy || lead.ID == "" || lead.Status != agent.Idle {
+			s.stop()
 			continue
 		}
 		if !s.worked || s.timer != nil {
 			continue
 		}
-		revision, lead := s.revision, g.lead
+		ctx, cancel := context.WithCancel(run)
+		s.cancel = cancel
 		s.timer = time.AfterFunc(settleGrace, func() {
+			defer cancel()
 			c.mu.Lock()
-			if c.states[name] != s || s.revision != revision {
+			if ctx.Err() != nil {
 				c.mu.Unlock()
 				return
 			}
 			s.timer, s.worked = nil, false
 			c.mu.Unlock()
-			notify(lead)
+			notify(ctx, lead)
 		})
 	}
 }

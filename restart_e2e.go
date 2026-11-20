@@ -29,7 +29,7 @@ func init() {
 		return
 	}
 	e2eReady = func(a *app) {
-		a.notifier = func(id, title, body string) { log.Printf("e2e notification for %s: %s", id, title) }
+		a.notifier = func(_ context.Context, id, title, body string) { log.Printf("e2e notification for %s: %s", id, title) }
 		go e2eRestart(a)
 	}
 }

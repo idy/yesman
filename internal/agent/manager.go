@@ -100,6 +100,18 @@ type Info struct {
 	Effort       string    `json:"effort,omitempty"`
 	EffortLevels []string  `json:"effortLevels,omitempty"`
 	UpdatedAt    time.Time `json:"updatedAt,omitzero"`
+
+	settledRun context.Context // host-only lifetime of the Lead's most recent settled run
+}
+
+// SettledRun identifies the Lead's last settled run for delayed notifications.
+// Starting another run or retiring the process cancels this context.
+// Before the first settlement it returns context.Background().
+func (i Info) SettledRun() context.Context {
+	if i.settledRun == nil {
+		return context.Background()
+	}
+	return i.settledRun
 }
 
 // RunError is how an agent's last finished run failed, from pi's own record
@@ -258,7 +270,8 @@ type agent struct {
 	closeRun   uint64
 	// settled counts the runs that settled: a report closes its worker only
 	// while no later run settled (see runMark).
-	settled uint64
+	settled          uint64
+	cancelSettlement context.CancelFunc // guarded by Manager.mu
 	// inbox changes when a message is queued or registered. settledInbox is
 	// the inbox at the last settle, so accepted prompts awaiting agent_start
 	// still defer telling the lead about its tasks. Both are guarded by the manager's mu.
@@ -416,12 +429,23 @@ func (m *Manager) changed() {
 	}
 }
 
+// endSettlementLocked invalidates undelivered notifications for this run.
+func (a *agent) endSettlementLocked() {
+	if a.cancelSettlement != nil {
+		a.cancelSettlement()
+		a.cancelSettlement = nil
+	}
+}
+
 // setStatus records a status, unless the process it comes from was replaced.
 func (m *Manager) setStatus(a *agent, p *proc, s Status, detail string) {
 	m.mu.Lock()
 	if p != nil && a.proc != p {
 		m.mu.Unlock()
 		return
+	}
+	if s != Idle {
+		a.endSettlementLocked()
 	}
 	a.info.Status, a.info.Detail, a.info.UpdatedAt = s, detail, time.Now()
 	if s != Waiting {
@@ -780,6 +804,10 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 		a.info.Status, a.info.Detail, a.info.Dialog, a.info.UpdatedAt = Idle, "", nil, time.Now()
 		a.settledInbox = a.inbox
 		a.settled++
+		if !worker && !retiring && !stopping {
+			a.endSettlementLocked()
+			a.info.settledRun, a.cancelSettlement = context.WithCancel(context.Background())
+		}
 		// The run that settled: its report may close the worker only while
 		// nothing was given to it since and no later run settled.
 		run := runMark{p: p, inbox: a.inbox, run: a.settled, report: a.reportRun}
@@ -833,6 +861,7 @@ func (m *Manager) record(a *agent, p *proc, kind string, raw json.RawMessage) {
 			m.mu.Lock()
 			current := a.proc == p || a.proc == nil
 			if current {
+				a.endSettlementLocked()
 				now := time.Now()
 				a.info.Status, a.info.Dialog, a.info.DialogAt, a.info.UpdatedAt = Waiting, raw, now, now
 				if a.handedOver != d.ID {
@@ -1426,6 +1455,7 @@ func (m *Manager) Stop(id string) {
 // same name since. With only set, only that process of a is stopped, the
 // one the caller checked; a process started since is left alone.
 func (m *Manager) stopAgentLocked(a *agent, only *proc) {
+	a.endSettlementLocked()
 	a.stopping = true
 	cancelOperationsLocked(a, a.tokenProc)
 	if a.startCancel != nil {
@@ -1505,6 +1535,7 @@ func (m *Manager) SleepIfIdle(id string, startedBefore time.Time) bool {
 // retire p's credential (retireCredential), which already forgot it.
 func (m *Manager) clearLocked(a *agent, p *proc) {
 	if a.proc == p {
+		a.endSettlementLocked()
 		a.proc = nil
 	}
 	a.turn = nil

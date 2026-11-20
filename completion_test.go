@@ -5,18 +5,20 @@ import (
 	"encoding/json"
 	"os"
 	"slices"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/idy/yesman/internal/agent"
+	"github.com/idy/yesman/internal/yesmen"
 )
 
 func TestCompletionWaitsForUninterruptedQuiet(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var notices completionNotices
 		got := make(chan agent.Info, 10)
-		notify := func(i agent.Info) { got <- i }
+		notify := func(_ context.Context, i agent.Info) { got <- i }
 		lead := agent.Info{ID: "alice/lead", Yesman: "alice", Role: agent.RoleLead, Status: agent.Working}
 		list := []agent.Info{lead}
 		notices.update(list, notify)
@@ -53,11 +55,20 @@ func TestCompletionWaitsForUninterruptedQuiet(t *testing.T) {
 	})
 }
 
-// Drive the production desktop observer and notification callback. The real
-// Manager supplies the live Lead state when the quiet timer expires. The
-// scripted Pi emits assistant messages locally and the fake clock controls
-// when the desktop receives its snapshots.
-func TestDesktopNotificationAfterModelError(t *testing.T) {
+type noticeFixture struct {
+	*app
+	workspace yesmen.Yesman
+	lead      string
+	settled   chan struct{}
+}
+
+const (
+	failedTurn    = `ASSISTANT {"role":"assistant","stopReason":"error","errorMessage":"fixture connection refused"}`
+	recoveredTurn = `ASSISTANT {"role":"assistant","stopReason":"stop"}`
+)
+
+func newNoticeFixture(t *testing.T) *noticeFixture {
+	t.Helper()
 	a, _ := crewApp(t)
 	workspace, err := a.yesmen.HireNamed("Test Project", "")
 	if err != nil {
@@ -80,42 +91,55 @@ func TestDesktopNotificationAfterModelError(t *testing.T) {
 	})
 	t.Cleanup(a.agents.StopAll)
 	a.keepAwake = func(string) func() { return func() {} }
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	const failed = `ASSISTANT {"role":"assistant","stopReason":"error","errorMessage":"fixture connection refused"}`
-	const succeeded = `ASSISTANT {"role":"assistant","stopReason":"stop"}`
-	waitForLead := func(t *testing.T) {
-		t.Helper()
-		select {
-		case <-settled:
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		}
+	return &noticeFixture{app: a, workspace: workspace, lead: id, settled: settled}
+}
+
+func (f *noticeFixture) waitForLead(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.settled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("scripted Lead did not settle")
 	}
-	if _, err := a.agents.StartWorker(ctx, workspace.Name, "helper", "First attempt", failed); err != nil {
+}
+
+func (f *noticeFixture) finish(t *testing.T, message string) []agent.Info {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := f.agents.Prompt(ctx, f.lead, message); err != nil {
 		t.Fatal(err)
 	}
-	waitForLead(t) // the worker's model error has reached its Lead
+	f.waitForLead(t)
+	return f.agents.List()
+}
+
+// Drive the production desktop observer and notification callback. The real
+// Manager supplies the live Lead state when the quiet timer expires.
+func TestDesktopNotificationAfterModelError(t *testing.T) {
+	a := newNoticeFixture(t)
+	if _, err := a.agents.StartWorker(t.Context(), a.workspace.Name, "helper", "First attempt", failedTurn); err != nil {
+		t.Fatal(err)
+	}
+	a.waitForLead(t) // the worker's model error has reached its Lead
 	for _, tc := range []struct {
 		name, message, body string
 	}{
-		{"failed", failed, "The model request failed. Open the conversation for details."},
-		{"recovered", succeeded, "Finished and waiting for you."},
+		{"failed", failedTurn, "The model request failed. Open the conversation for details."},
+		{"recovered", recoveredTurn, "Finished and waiting for you."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := a.agents.Prompt(ctx, id, tc.message); err != nil {
-				t.Fatal(err)
-			}
-			waitForLead(t)
-			list := a.agents.List()
-			if len(list) != 2 || list[0].Status != agent.Idle || (list[0].RunError != nil) != (tc.message == failed) || list[1].RunError == nil {
+			list := a.finish(t, tc.message)
+			if len(list) != 2 || list[0].Status != agent.Idle || (list[0].RunError != nil) != (tc.message == failedTurn) || list[1].RunError == nil {
 				t.Fatalf("unexpected settled team: %+v", list)
 			}
+			// The Manager owns the run lifetime outside the timer's fake clock.
+			_ = list[0].SettledRun().Done()
 			synctest.Test(t, func(t *testing.T) {
 				var notices []string
-				a.notifier = func(gotID, title, body string) {
-					if gotID != id || title != workspace.Label() {
-						t.Errorf("notification for %q (%q), want %q (%q)", gotID, title, id, workspace.Label())
+				a.notifier = func(_ context.Context, gotID, title, body string) {
+					if gotID != a.lead || title != a.workspace.Label() {
+						t.Errorf("notification for %q (%q), want %q (%q)", gotID, title, a.lead, a.workspace.Label())
 					}
 					notices = append(notices, body)
 				}
@@ -155,7 +179,7 @@ func TestDesktopNotificationAfterModelError(t *testing.T) {
 		current := a.agents.List()[0]
 		synctest.Test(t, func(t *testing.T) {
 			var bodies []string
-			a.notifier = func(_, _, body string) { bodies = append(bodies, body) }
+			a.notifier = func(_ context.Context, _, _, body string) { bodies = append(bodies, body) }
 			send := func(lead agent.Info, status agent.Status) {
 				lead.Status = status
 				a.agentsChanged([]agent.Info{lead})
@@ -186,11 +210,158 @@ func TestDesktopNotificationAfterModelError(t *testing.T) {
 	})
 }
 
+// Pause the first notification after its timer has fired. The second run
+// finishes on the very same Lead and process. Only its own grace interval
+// can authorize delivery. Exercise both the callback and a queued platform
+// delivery (e.g. while waiting for notification permission).
+func TestExpiredNoticeCannotAnnounceNextRun(t *testing.T) {
+	type delivery struct {
+		body string
+		at   time.Time
+	}
+	for _, stage := range []string{"before live recheck", "during platform delivery"} {
+		t.Run(stage, func(t *testing.T) {
+			a := newNoticeFixture(t)
+			old := a.finish(t, failedTurn)[0]
+			if old.Status != agent.Idle || old.RunError == nil {
+				t.Fatalf("first run: %+v", old)
+			}
+			entered, release, returned := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			defer unblock()
+			seen := make(chan delivery, 4)
+			first := true
+			a.notifier = func(ctx context.Context, _, _, body string) {
+				if stage == "during platform delivery" && first {
+					first = false
+					close(entered)
+					<-release
+				}
+				if ctx.Err() == nil {
+					seen <- delivery{body, time.Now()}
+				}
+			}
+			working := old
+			working.Status = agent.Working
+			a.agentsChanged([]agent.Info{working})
+			a.completions.update([]agent.Info{old}, func(ctx context.Context, lead agent.Info) {
+				defer close(returned)
+				if stage == "before live recheck" {
+					close(entered)
+					<-release
+				}
+				a.notifySettled(ctx, lead)
+			})
+			select {
+			case <-entered:
+			case <-time.After(settleGrace + 3*time.Second):
+				t.Fatal("first timer did not enter dispatch")
+			}
+			if stage == "before live recheck" {
+				a.agentsChanged([]agent.Info{working})
+			}
+			current := a.finish(t, recoveredTurn)[0]
+			if current.RunError != nil || !old.Since.Equal(current.Since) || !old.StartedAt.Equal(current.StartedAt) {
+				t.Fatalf("second run: %+v", current)
+			}
+			// At the platform boundary also exercise a coalesced Working
+			// snapshot. The Manager cancels delivery before the UI sees Idle.
+			if stage == "during platform delivery" && old.SettledRun().Err() == nil {
+				t.Fatal("second run left the first notification live")
+			}
+			armed := time.Now()
+			a.agentsChanged([]agent.Info{current})
+			unblock()
+			<-returned
+			select {
+			case d := <-seen:
+				elapsed := d.at.Sub(armed)
+				if d.body != "Finished and waiting for you." || elapsed < settleGrace {
+					t.Fatalf("notification %q at %s into the new quiet interval", d.body, elapsed)
+				}
+				t.Logf("second run dispatched %q after %s of quiet", d.body, elapsed)
+			case <-time.After(settleGrace + 3*time.Second):
+				t.Fatal("second timer did not notify")
+			}
+			// The old callback has returned and the new timer sends only once.
+			select {
+			case d := <-seen:
+				t.Fatalf("extra notification: %q", d.body)
+			default:
+			}
+		})
+	}
+}
+
+func TestWorkerResumingCancelsPendingDelivery(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var notices completionNotices
+		team := []agent.Info{
+			{ID: "alice/lead", Yesman: "alice", Role: agent.RoleLead, Status: agent.Idle},
+			{ID: "alice/w", Yesman: "alice", Role: agent.RoleWorker, Status: agent.Working},
+		}
+		started := make(chan context.Context, 1)
+		done := make(chan struct{}, 1)
+		pending := func(ctx context.Context, _ agent.Info) { started <- ctx; <-ctx.Done() }
+		notices.update(team, pending)
+		team[1].Status = agent.Stopped
+		notices.update(team, pending)
+		time.Sleep(settleGrace)
+		ctx := <-started // its timer has already fired
+		team[1].Status = agent.Working
+		notices.update(team, pending)
+		if ctx.Err() == nil {
+			t.Fatal("worker activity left the first delivery live")
+		}
+		team[1].Status = agent.Stopped
+		notices.update(team, func(context.Context, agent.Info) { done <- struct{}{} })
+		time.Sleep(settleGrace - time.Millisecond)
+		synctest.Wait()
+		if len(done) != 0 {
+			t.Fatal("announced before the crew's new quiet interval")
+		}
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+		if len(done) != 1 {
+			t.Fatalf("crew notifications = %d", len(done))
+		}
+	})
+}
+
+func TestSettledNoticeAfterRehire(t *testing.T) {
+	a := newNoticeFixture(t)
+	first := a.finish(t, recoveredTurn)[0]
+	if err := a.agents.StopYesmanContext(t.Context(), a.workspace.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.yesmen.Archive(a.workspace.Name, nil); err != nil {
+		t.Fatal(err)
+	}
+	a.agents.ForgetYesman(a.workspace.Name, a.workspace.HiredAt)
+	if _, err := a.yesmen.HireAs(a.workspace.Name, ""); err != nil {
+		t.Fatal(err)
+	}
+	current := a.finish(t, recoveredTurn)[0]
+	if first.ID != current.ID || first.Since.Equal(current.Since) {
+		t.Fatal("expected a new hire with the same ID")
+	}
+	var bodies []string
+	a.notifier = func(_ context.Context, _, _, body string) { bodies = append(bodies, body) }
+	a.notifySettled(context.Background(), first)
+	if len(bodies) != 0 {
+		t.Fatalf("retired hire notified: %q", bodies)
+	}
+	a.notifySettled(current.SettledRun(), current)
+	if !slices.Equal(bodies, []string{"Finished and waiting for you."}) {
+		t.Fatalf("new hire notifications: %q", bodies)
+	}
+}
+
 func TestCompletionWaitsForWorkersAndIgnoresPassiveStarts(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var notices completionNotices
 		notified := make(chan struct{}, 10)
-		notify := func(agent.Info) { notified <- struct{}{} }
+		notify := func(context.Context, agent.Info) { notified <- struct{}{} }
 		list := []agent.Info{
 			{ID: "alice/lead", Yesman: "alice", Role: agent.RoleLead, Status: agent.Starting},
 		}

@@ -107,7 +107,7 @@ type app struct {
 	handed                         map[string]string // the handed-over dialog each worker was announced for
 	// notifier and keepAwake, when set, stand in for the system's
 	// notifications and power management, in tests.
-	notifier  func(id, title, body string)
+	notifier  func(ctx context.Context, id, title, body string)
 	keepAwake func(reason string) func()
 
 	fmu          sync.Mutex
@@ -377,7 +377,10 @@ const settleGrace = 4 * time.Second
 // notifySettled rechecks the team when the quiet timer fires. Use the
 // current outcome of the same Lead, since a retry or a worker report may
 // have changed it since the timer was armed.
-func (a *app) notifySettled(scheduled agent.Info) {
+func (a *app) notifySettled(ctx context.Context, scheduled agent.Info) {
+	if ctx.Err() != nil {
+		return
+	}
 	var lead agent.Info
 	for _, i := range a.agents.List() {
 		if i.Yesman != scheduled.Yesman {
@@ -387,7 +390,7 @@ func (a *app) notifySettled(scheduled agent.Info) {
 		case agent.Working, agent.Starting, agent.Waiting:
 			return
 		}
-		if i.Role == agent.RoleLead && i.Status == agent.Idle && i.Since.Equal(scheduled.Since) {
+		if i.Role == agent.RoleLead && i.Status == agent.Idle && i.Since.Equal(scheduled.Since) && i.SettledRun() == scheduled.SettledRun() {
 			lead = i
 		}
 	}
@@ -398,14 +401,21 @@ func (a *app) notifySettled(scheduled agent.Info) {
 	if lead.RunError != nil {
 		body = "The model request failed. Open the conversation for details."
 	}
-	a.notify(lead.ID, a.yesmanLabel(lead.Yesman), tr(body))
+	a.notifyContext(ctx, lead.ID, a.yesmanLabel(lead.Yesman), tr(body))
 }
 
 // notify shows a notification about an agent, unless the window has focus;
 // clicking it shows that agent.
 func (a *app) notify(id, title, body string) {
+	a.notifyContext(context.Background(), id, title, body)
+}
+
+func (a *app) notifyContext(ctx context.Context, id, title, body string) {
+	if ctx.Err() != nil {
+		return
+	}
 	if a.notifier != nil {
-		a.notifier(id, title, body)
+		a.notifier(ctx, id, title, body)
 		return
 	}
 	if a.windowFocused() {
@@ -419,5 +429,6 @@ func (a *app) notify(id, title, body string) {
 		a.showWindow()
 		_ = focusEvent.Broadcast(id) // an open page shows it now; a new one calls TakeFocus
 	})
-	_ = notification.Show()
+	// Keep cancellation active through the UI queue and native authorization.
+	_ = notification.ShowContext(ctx)
 }

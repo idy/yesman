@@ -20,7 +20,7 @@ func TestNeedsYouBesideOversizedMetadata(t *testing.T) {
 	s, alice, bob, original := metadataServiceFixture(t)
 	a := s.app
 	a.keepAwake = func(string) func() { return func() {} }
-	a.notifier = func(string, string, string) {}
+	a.notifier = func(context.Context, string, string, string) {}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	ha, _, err := a.yesmen.AddHandoff("alice", yesmen.Handoff{Type: yesmen.HandoffManual, Title: "alice's step"})

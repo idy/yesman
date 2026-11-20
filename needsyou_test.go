@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -18,7 +19,7 @@ func TestHandedOverQuestionIsAnnouncedOnce(t *testing.T) {
 	a, _ := crewApp(t)
 	a.keepAwake = func(string) func() { return func() {} }
 	var notes []string
-	a.notifier = func(id, _, body string) { notes = append(notes, id+": "+body) }
+	a.notifier = func(_ context.Context, id, _, body string) { notes = append(notes, id+": "+body) }
 	worker := func(handed bool, request string) []agent.Info {
 		return []agent.Info{{ID: "alice/w1", Yesman: "alice", Name: "w1", Role: agent.RoleWorker, Status: agent.Waiting, HandedOver: handed,
 			Dialog: json.RawMessage(`{"id":"` + request + `","method":"confirm"}`)}}
@@ -48,7 +49,7 @@ func TestHandoffsCountAndNotice(t *testing.T) {
 	a, _ := crewApp(t)
 	a.keepAwake = func(string) func() { return func() {} }
 	var notes []string
-	a.notifier = func(id, _, body string) { notes = append(notes, id+": "+body) }
+	a.notifier = func(_ context.Context, id, _, body string) { notes = append(notes, id+": "+body) }
 	a.agents = agent.New(agent.Config{Yesmen: a.yesmen})
 	t.Cleanup(a.agents.StopAll)
 	y, err := a.yesmen.Hire("alice")
@@ -105,11 +106,11 @@ func TestStartupCountsKeptHandoffs(t *testing.T) {
 		t.Fatal(err)
 	}
 	var notes []string
-	restarted := &app{yesmen: original.yesmen, notifier: func(_, _, body string) { notes = append(notes, body) }}
+	restarted := &app{yesmen: original.yesmen, notifier: func(_ context.Context, _, _, body string) { notes = append(notes, body) }}
 	restarted.keepAwake = func(string) func() { return func() {} }
 	// This app has no agent manager: a lead going idle here must not leave
 	// a finished notice to fire after the test, while later tests run.
-	t.Cleanup(func() { restarted.completions.update(nil, func(agent.Info) {}) })
+	t.Cleanup(func() { restarted.completions.update(nil, func(context.Context, agent.Info) {}) })
 	restarted.countHandoffs()
 	if restarted.waiting != 1 || len(notes) != 0 {
 		t.Fatalf("on startup: waiting %d, notifications %q", restarted.waiting, notes)

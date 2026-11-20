@@ -129,7 +129,7 @@ func TestNeedsYouBrowserBridge(t *testing.T) {
 	var mu sync.Mutex
 	var notes []map[string]string
 	prompts := map[string][]string{}
-	a.notifier = func(id, title, body string) {
+	a.notifier = func(_ context.Context, id, title, body string) {
 		mu.Lock()
 		notes = append(notes, map[string]string{"id": id, "title": title, "body": body})
 		mu.Unlock()
