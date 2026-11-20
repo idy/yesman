@@ -91,7 +91,9 @@ func (p *Pool) checkTemporaryWorktree(ctx context.Context, r Repo, workspace str
 		if wt.Branch != "" && (wt.Branch == r.DefaultBranch || wt.Branch == "main" || wt.Branch == "master") {
 			return "", fmt.Errorf("retain %s: primary branch", expected.Dir)
 		}
-		return path, nil
+		// Use the spelling from Git's own registration for its commands.
+		// Windows Git may store a different path through a directory junction.
+		return wt.Path, nil
 	}
 	return "", fmt.Errorf("retain %s: not registered in this workspace", expected.Dir)
 }

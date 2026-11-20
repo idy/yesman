@@ -806,14 +806,13 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// realPath resolves symbolic links, such as macOS's /tmp, so that paths
-// git reports compare with the ones yesman builds.
+// realPath returns the physical spelling used to compare Git registrations
+// with configured paths. A missing checkout can still have a registered path.
 func realPath(path string) string {
-	if r, err := filepath.EvalSymlinks(path); err == nil {
+	if r, err := resolveExistingPath(path); err == nil {
 		return r
 	}
-	// The path may not exist yet: resolve its parent.
-	if r, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+	if r, err := resolveExistingPath(filepath.Dir(path)); err == nil {
 		return filepath.Join(r, filepath.Base(path))
 	}
 	return filepath.Clean(path)
