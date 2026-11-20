@@ -3,6 +3,8 @@
 // lead weighs when choosing a model for a worker, in their original units.
 import { $, h, icon } from './dom.js';
 import { openDialog } from './mds/js/magpie.js';
+import { workerPools } from './worker-pools.js';
+import { editLeadModel } from './lead-model.js';
 import { t, tNodes, locale, formatNumber } from './i18n.js';
 
 const EFFORTS = { off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' };
@@ -22,7 +24,7 @@ const FIELDS = [
   { key: 'minutesPerTask', label: 'Time per task', unit: 'min' },
 ];
 
-export function createCrew({ call, fail, shown, rerender, openPage, openUsage, preferenceRow }) {
+export function createCrew({ call, fail, shown, rerender, openPage, openUsage, preferenceRow, leads = () => [], acceptLead = () => {} }) {
   let view = null; // Yesman.Crew
   let loading = null; // the load under way
   let refreshing = false;
@@ -30,6 +32,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
   let revision = 0; // a saved change makes an earlier read obsolete
   let patchError = '';
   let patchExport = '';
+  let leadKey = ''; // exact workspace generation selected in this window
 
   function load(refresh = false) {
     if (loading && !refresh) return loading;
@@ -93,10 +96,10 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
 
   // ---------- Adding an option, and the user's own scores ----------
 
-  function scoreFields(score) {
+  function scoreFields(score, optional = false) {
     const inputs = FIELDS.map((f) => h('input', {
       class: 'mds-input', type: 'number', name: f.key, min: 0, max: f.max, step: 'any', inputmode: 'decimal',
-      value: score?.[f.key] ?? null, required: f.required, 'aria-describedby': f.key === 'intelligence' ? 'crew-intelligence-hint' : null,
+      value: score?.[f.key] ?? null, required: f.required && !optional, 'aria-describedby': f.key === 'intelligence' ? 'crew-intelligence-hint' : null,
     }));
     const el = h('div', { class: 'crew-scores' }, FIELDS.map((f, i) => h('label', { class: 'field' },
       h('span', null, t(f.label), f.unit ? h('span', { class: 'mds-optional' }, f.unit) : null), inputs[i])),
@@ -114,7 +117,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
       read() {
         const out = {};
         FIELDS.forEach((f, i) => { if (inputs[i].value !== '') out[f.key] = Number(inputs[i].value); });
-        return out;
+        return optional && !Object.keys(out).length ? null : out;
       },
     };
   }
@@ -124,7 +127,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
   async function openOption(member) {
     if (busy) return;
     const dialog = $('#crew-dialog');
-    const scores = scoreFields(member?.source === 'patch' ? member.estimate : member?.score);
+    const scores = scoreFields(member?.source === 'patch' ? member.estimate : member?.score, !member);
     const error = h('p', { class: 'danger', role: 'alert', hidden: true });
     const submit = h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, member ? t('Save') : t('Add'));
     const lead = h('p', { class: 'dialog-hint' });
@@ -154,7 +157,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
         const m = view.models[model.value];
         const need = !!effort.value && !m.scored.includes(effort.value);
         lead.textContent = need
-          ? t('Artificial Analysis has no record of this model at this effort. Give your own estimate, so the lead can weigh it against the rest.')
+          ? t('This effort has no scores yet. Leave the estimate blank or enter your own, starting with intelligence.')
           : t('The lead weighs the available scores for this model when choosing a worker.');
         scores.need(need);
         submit.disabled = !effort.value;
@@ -239,7 +242,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
     if (m.source === 'aa') status = t('Scored by Artificial Analysis');
     else if (m.source === 'user') status = t('Your estimate');
     else if (m.source === 'patch') status = t('User CSV patch');
-    else status = h('span', { class: 'danger' }, t('No scores: give yours'));
+    else status = t('No scores yet');
     const name = optionName(m);
     return h('div', { class: 'card-row crew-row' },
       h('div', { class: 'card-row-text' }, h('strong', { title: m.key }, name),
@@ -305,6 +308,23 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
         h('p', null, t('The patch supplies scores only. Configure models in pi and add them to Models separately.'))));
   }
 
+  function leadRow() {
+    const options = leads();
+    if (!options.length) return null;
+    const key = (a) => `${a.id}@${a.since}`;
+    const choose = h('select', { class: 'mds-select', 'aria-label': t('Workspace lead'), onchange: () => { leadKey = choose.value; } },
+      options.map((a) => h('option', { value: key(a) }, a.label)));
+    choose.value = options.some((a) => key(a) === leadKey) ? leadKey : key(options.find((a) => a.selected) || options[0]);
+    const change = h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-edit-lead': '', onclick: () => {
+      const lead = options.find((a) => key(a) === choose.value);
+      const current = () => leads().some((a) => key(a) === key(lead));
+      if (lead && current()) editLeadModel({ lead, current, accept: (info) => acceptLead(lead, info), call, effortName,
+        restore: () => shown() && $('[data-edit-lead]')?.focus() });
+    } }, t('Model and effort…'));
+    return preferenceRow(t('Workspace lead'), h('p', null, t('Change the model and effort for an existing Yes Man.')),
+      h('div', { class: 'lead-model-actions' }, choose, change));
+  }
+
   function renderPage(inner) {
     if (!view) {
       inner.append(h('p', { class: 'toolbar-lead' }, t('Reading pi’s models…')));
@@ -325,15 +345,16 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
       view.error ? h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' },
         h('div', null, h('strong', null, t('Could not read pi’s models')), h('p', null, view.error))) : null,
       h('section', { class: 'settings-section' },
-        h('div', { class: 'mds-section-heading' }, h('h2', null, t('New yesmen'))),
-        h('div', { class: 'mds-group' }, preferenceRow(t('Model'),
-          h('p', null, t('A new yesman’s lead runs as this, and so do its workers unless the lead chooses another. You can change an agent’s model while you talk to it.')), yesman))),
+        h('div', { class: 'mds-section-heading' }, h('h2', null, 'Yes Man')),
+        h('div', { class: 'mds-group' }, preferenceRow(t('New yesmen'),
+          h('p', null, t('The model and effort a lead starts with when you hire a new yesman.')), yesman), leadRow())),
+      workerPools({ view, busy, save, load, fail, shown, preferenceRow, optionName }),
       h('section', { class: 'settings-section' },
         h('div', { class: 'mds-section-heading' }, h('h2', null, t('Models')),
-          h('p', null, t('The models, each at one effort, that agents run as. The lead chooses one for each worker by how smart, fast and costly it is for the task.'))),
+          h('p', null, t('Add model and effort combinations here to use them in worker pools.'))),
         h('div', { class: 'mds-toolbar crew-toolbar' }, h('div', { class: 'mds-toolbar-actions' }, refresh, add)),
         h('div', { class: 'card-list', 'aria-busy': String(busy) }, view.members.length ? view.members.map(memberRow)
-          : h('div', { class: 'card-empty' }, h('strong', null, t('No models yet')), h('span', null, t('Add the models agents may run as. Until there is one, no yesman can be hired and no worker started.'))))),
+          : h('div', { class: 'card-empty' }, h('strong', null, t('No models yet')), h('span', null, t('Add a model to hire a new yesman. Existing leads can dispatch workers using their own model and effort.'))))),
       h('p', { class: 'crew-source' }, tNodes('Built-in scores from {source}, {date}, found by each model’s name.', { source, date }), ' ',
         t('Intelligence is Artificial Analysis’s Intelligence Index; coding is the mean of its coding evaluations. Cost and time are per task of that index. Missing figures are shown as —.'), ' ',
         tNodes('These are benchmark scores, not measured here: what your agents actually used is in {usage}.', {

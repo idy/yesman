@@ -476,6 +476,18 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .score-patch-columns { display: grid; gap: 6px; }
 .score-patch-columns > div { display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .score-patch-columns dd { margin: 0; }
+.lead-model-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+.lead-model-actions select { min-width: 0; max-width: 100%; }
+.lead-model-editor, .pool-fields { display: grid; gap: 12px; }
+.pool-fields, .pool-options { min-width: 0; border: 0; margin: 0; padding: 0; }
+.crew-dialog .pool-fields .field, .pool-fields .mds-hint { margin: 0; }
+.pool-fields .mds-textarea { width: 100%; }
+.pool-options legend { padding: 0; margin-bottom: 6px; font-size: var(--mds-text-note); }
+.pool-options { display: grid; gap: 4px; }
+.pool-member { min-width: 0; min-height: 36px; padding: 4px; color: var(--mds-ink); overflow-wrap: anywhere; }
+.pool-member small { display: block; color: var(--mds-muted); font-size: var(--mds-text-caption); }
+.pool-member:has(input:focus-visible) { background: var(--mds-hover); }
+.worker-pools .mds-row--preference { grid-template-columns: minmax(0, 1fr) auto; }
 .crew-default { flex: none; }
 .crew-source { margin: 0; color: var(--mds-muted); font-size: var(--mds-text-caption); }
 .inline-link { min-height: 0; padding: 0; border: 0; color: var(--mds-ink); font: inherit; text-decoration: underline; text-underline-offset: 2px; }

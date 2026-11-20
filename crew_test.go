@@ -121,7 +121,6 @@ func TestCrewOptions(t *testing.T) {
 	}{
 		{"magpie", "nope", "low", "pi has no model", nil},
 		{"magpie", "auto/claude-opus-5-5", "high", "does not take the high effort", nil},
-		{"magpie", tinyName, "off", "give your own", nil},
 		{"magpie", tinyName, "off", "intelligence score", &crew.Score{Intelligence: 0}},
 	} {
 		if _, err := s.AddCrewOption(ctx, c.provider, c.model, c.effort, c.score); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -211,7 +210,7 @@ func TestHireRunsAsTheYesmanModel(t *testing.T) {
 	if _, err := a.yesmanModel(ctx); err == nil {
 		t.Error("a new yesman runs as a model pi lacks")
 	}
-	if members := a.leadCrew(ctx); len(members) != 1 || !members[0].Missing {
+	if members := a.workerRouting(ctx, nil).Members; len(members) != 1 || !members[0].Missing {
 		t.Errorf("lead's crew = %+v", members)
 	}
 }

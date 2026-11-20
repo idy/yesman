@@ -20,6 +20,10 @@ import (
 	"github.com/idy/yesman/internal/server"
 )
 
+func allInDefault(members []crew.Member) crew.Routing {
+	return crew.Routing{Members: members, Pools: crew.Pools{crew.DefaultLabel: {Members: memberKeys(members)}}}
+}
+
 const syntheticPatch = crew.PatchHeader + "magpie,auto/claude-opus-5-5,max,0,,,,\nmagpie,local/tiny,off,,123.4,,,0\n"
 
 func TestScorePatchServicePersistenceAndRollback(t *testing.T) {
@@ -46,10 +50,10 @@ func TestScorePatchServicePersistenceAndRollback(t *testing.T) {
 	if len(v.Members) != 2 || v.Members[0].Score.Intelligence != 0 || !v.Members[1].Score.IntelligenceMissing {
 		t.Fatalf("view: %+v", v)
 	}
-	if !reflect.DeepEqual(a.leadCrew(ctx), v.Members) {
+	if !reflect.DeepEqual(a.workerRouting(ctx, nil).Members, v.Members) {
 		t.Fatal("Lead and Models disagree")
 	}
-	text := server.CrewContext(a.leadCrew(ctx), agent.Info{})
+	text := server.CrewContext(allInDefault(a.workerRouting(ctx, nil).Members), agent.Info{})
 	for _, want := range []string{"intelligence 0 (user CSV)", "inherited AA", "intelligence unavailable", "speed 123.4 tok/s (user CSV)", "time 0 min per task (user CSV)"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("context lacks %q: %s", want, text)
@@ -116,19 +120,19 @@ func TestScorePatchSettingsAndSourceProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := server.CrewContext(crew.Resolve(c, nil, snap, patch), agent.Info{})
+	text := server.CrewContext(allInDefault(crew.Resolve(c, nil, snap, patch)), agent.Info{})
 	for _, want := range []string{"time 0 min per task (inherited AA) (source record; actual time unverified)", "AA effort not specified by source", "speed 0 tok/s (user CSV)"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("lost provenance %q: %s", want, text)
 		}
 	}
 	patch, _ = crew.ParsePatch([]byte(crew.PatchHeader + "r,plain,high,,,,,0\n"))
-	text = server.CrewContext(crew.Resolve(c, nil, snap, patch), agent.Info{})
+	text = server.CrewContext(allInDefault(crew.Resolve(c, nil, snap, patch)), agent.Info{})
 	if strings.Contains(text, "actual time unverified") || !strings.Contains(text, "time 0 min per task (user CSV)") {
 		t.Fatalf("misattributed explicit zero: %s", text)
 	}
 	snap.Scores[0].Effort = "high"
-	text = server.CrewContext(crew.Resolve(c, nil, snap, patch), agent.Info{})
+	text = server.CrewContext(allInDefault(crew.Resolve(c, nil, snap, patch)), agent.Info{})
 	if !strings.Contains(text, "AA source effort: high") {
 		t.Fatalf("lost named effort: %s", text)
 	}
@@ -255,7 +259,16 @@ func TestScorePatchBrowserBridge(t *testing.T) {
 				s = &service{app: a}
 				value = s.Crew(r.Context())
 			case "FixtureContext":
-				value = server.CrewContext(a.leadCrew(r.Context()), agent.Info{})
+				value = server.CrewContext(allInDefault(a.workerRouting(r.Context(), nil).Members), agent.Info{})
+			case "SetWorkerPool":
+				var id, revision string
+				var p crew.Pool
+				arg(0, &id)
+				arg(1, &revision)
+				arg(2, &p)
+				if err == nil {
+					value, err = s.SetWorkerPool(r.Context(), id, revision, p)
+				}
 			case "FixtureExport":
 				var data []byte
 				data, err = os.ReadFile(destination)

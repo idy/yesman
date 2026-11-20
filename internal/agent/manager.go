@@ -960,15 +960,15 @@ func (m *Manager) admitAuto(y yesmen.Yesman, more func() error) func() error {
 // promptAdmitted is promptDelivery where yesman's own message to a lead is
 // admitted only as it is written, by its pause and by more (see admitAuto).
 func (m *Manager) promptAdmitted(ctx context.Context, id, text, behavior, messageID string, owner *agent, scope *time.Time, origin Origin, more func() error, images ...Image) error {
-	return m.promptTrackedAdmitted(ctx, id, text, behavior, messageID, owner, scope, origin, nil, more, images...)
+	return m.promptWithSetup(ctx, id, text, behavior, messageID, owner, scope, origin, nil, more, nil, images...)
 }
 
 func (m *Manager) promptTracked(ctx context.Context, id, text, behavior, messageID string, owner *agent, scope *time.Time, origin Origin, track *sendTrack, images ...Image) error {
-	return m.promptTrackedAdmitted(ctx, id, text, behavior, messageID, owner, scope, origin, track, nil, images...)
+	return m.promptWithSetup(ctx, id, text, behavior, messageID, owner, scope, origin, track, nil, nil, images...)
 }
 
-// promptTrackedAdmitted combines restart delivery tracking and automatic admission.
-func (m *Manager) promptTrackedAdmitted(ctx context.Context, id, text, behavior, messageID string, owner *agent, scope *time.Time, origin Origin, track *sendTrack, more func() error, images ...Image) error {
+// promptWithSetup serializes initial worker configuration with prompt admission.
+func (m *Manager) promptWithSetup(ctx context.Context, id, text, behavior, messageID string, owner *agent, scope *time.Time, origin Origin, track *sendTrack, more func() error, setup *workerSetup, images ...Image) error {
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return errors.New("empty message")
 	}
@@ -992,7 +992,7 @@ func (m *Manager) promptTrackedAdmitted(ctx context.Context, id, text, behavior,
 	for {
 		var err error
 		start := context.Background()
-		if bounded {
+		if bounded || setup != nil {
 			start = ctx
 		}
 		if a, p, err = m.ensureScopedCtx(start, id, owner, messageID, scope, auto, true); err != nil {
@@ -1031,6 +1031,14 @@ func (m *Manager) promptTrackedAdmitted(ctx context.Context, id, text, behavior,
 		m.mu.Unlock()
 		if retiring {
 			return errStopped
+		}
+	}
+	if setup != nil {
+		// Configure only the worker this start created, on its exact process.
+		// Hold modelMu through prompt registration so no change can slip in.
+		if err := m.prepareWorker(ctx, setup, a, p); err != nil {
+			a.modelMu.Unlock()
+			return err
 		}
 	}
 	m.mu.Lock()
@@ -1620,6 +1628,17 @@ func (m *Manager) StartWorker(ctx context.Context, yesman, name, title, task str
 // StartWorkerAs is StartWorker with the model and effort the worker runs
 // as, in place of the workers' default; a zero Choice keeps the default.
 func (m *Manager) StartWorkerAs(ctx context.Context, yesman, name, title, task string, as Choice) (Info, error) {
+	return m.startWorker(ctx, yesman, name, title, task, as, nil, nil)
+}
+
+// StartWorkerRouted chooses from the new process's live catalog immediately
+// before its first prompt. Reopening a worker goes through the ordinary prompt
+// path and restores its session, without reapplying dispatch settings.
+func (m *Manager) StartWorkerRouted(ctx context.Context, yesman, name, title, task string, route WorkerRoute, admit func(yesmen.Yesman) (func(), error)) (Info, error) {
+	return m.startWorker(ctx, yesman, name, title, task, Choice{}, route, admit)
+}
+
+func (m *Manager) startWorker(ctx context.Context, yesman, name, title, task string, as Choice, route WorkerRoute, admit func(yesmen.Yesman) (func(), error)) (Info, error) {
 	if strings.TrimSpace(task) == "" {
 		return Info{}, errors.New("a worker needs a task")
 	}
@@ -1627,19 +1646,36 @@ func (m *Manager) StartWorkerAs(ctx context.Context, yesman, name, title, task s
 	if n := utf8.RuneCountInString(title); n > titleLimit {
 		return Info{}, fmt.Errorf("the title has %d characters: name the subject in at most %d, and put the rest in the task", n, titleLimit)
 	}
-	if err := m.cfg.Yesmen.AddWorker(yesman, yesmen.Worker{Name: name, Title: title, Task: task, StartedAt: time.Now().UTC()}); err != nil {
+	since := time.Now().UTC()
+	var generation time.Time
+	if err := m.cfg.Yesmen.Use(yesman, func(y yesmen.Yesman) error {
+		generation = y.HiredAt
+		if admit != nil {
+			release, err := admit(y)
+			if err != nil {
+				return err
+			}
+			defer release()
+		}
+		return m.cfg.Yesmen.AddWorker(yesman, yesmen.Worker{Name: name, Title: title, Task: task, StartedAt: since})
+	}); err != nil {
 		return Info{}, err
 	}
 	id := ID(yesman, name)
 	if !as.IsZero() {
 		if _, err := m.RunAs(ctx, id, as); err != nil {
-			return Info{}, errors.Join(fmt.Errorf("run as %s: %w", as, err), m.RemoveWorker(yesman, name))
+			return Info{}, errors.Join(fmt.Errorf("run as %s: %w", as, err), m.removeWorker(yesman, name, since))
 		}
 	}
-	if err := m.prompt(ctx, id, task, "followUp", Origin{Source: OriginLead, Kind: "task"}); err != nil {
-		// Leave no worker that never got its task, so the name can be
-		// used again.
-		return Info{}, errors.Join(err, m.RemoveWorker(yesman, name))
+	var setup *workerSetup
+	if route != nil {
+		setup = &workerSetup{since: since, route: route}
+	}
+	if err := m.promptWithSetup(ctx, id, task, "followUp", "", nil, &generation, Origin{Source: OriginLead, Kind: "task"}, nil, nil, setup); err != nil {
+		if errors.Is(err, errWorkerClaimed) {
+			return Info{}, err
+		}
+		return Info{}, errors.Join(err, m.removeWorker(yesman, name, since))
 	}
 	return m.Get(id)
 }
@@ -1647,6 +1683,10 @@ func (m *Manager) StartWorkerAs(ctx context.Context, yesman, name, title, task s
 // RemoveWorker stops a worker and takes it off its yesman's list. Its
 // session log stays in the workspace.
 func (m *Manager) RemoveWorker(yesman, name string) error {
+	return m.removeWorker(yesman, name, time.Time{})
+}
+
+func (m *Manager) removeWorker(yesman, name string, since time.Time) error {
 	if name == yesmen.LeadName {
 		return errors.New("the lead cannot be removed")
 	}
@@ -1659,7 +1699,7 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 	m.mu.Lock()
 	a := m.agents[id]
 	if a != nil {
-		if a.removing {
+		if a.removing || (!since.IsZero() && !a.info.Since.Equal(since)) {
 			m.mu.Unlock()
 			return errStopped
 		}
@@ -1679,8 +1719,9 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 		if err := m.ensureDeliveries(a, filepath.Join(y.SessionDir(name), "delivery.json")); err != nil {
 			return fail(err)
 		}
+		m.mu.Lock()
+		m.stopAgentLocked(a, nil)
 	}
-	m.Stop(id)
 	if a != nil {
 		m.mu.Lock()
 		var writer *deliveryWriter
@@ -1703,7 +1744,7 @@ func (m *Manager) RemoveWorker(yesman, name string) error {
 			}
 		}
 	}
-	if err = m.cfg.Yesmen.RemoveWorker(yesman, name); err != nil {
+	if err = m.cfg.Yesmen.RemoveWorkerIf(yesman, name, since); err != nil {
 		return fail(err)
 	}
 	m.mu.Lock()

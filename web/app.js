@@ -3057,6 +3057,7 @@ function renderSideFoot() {
 }
 
 function showSettings(page) {
+  if (selectedAgent()) state.settingsWorkspace = selectedAgent().yesman;
   state.settingsPage = page;
   state.view = { kind: 'settings', page };
   render();
@@ -3163,6 +3164,8 @@ const crewPage = createCrew({
   rerender: () => renderBody(),
   openPage: () => showSettings('yesman'),
   openUsage: () => showSettings('usage'),
+  leads: () => state.snap.agents.filter((a) => a.role === 'lead').map((a) => ({ ...a, label: yesmanLabel(a.yesman), selected: a.yesman === state.settingsWorkspace })),
+  acceptLead: acceptModelInfo,
   preferenceRow,
 });
 // Settings › Model usage: what agents actually used, in usage.js.
