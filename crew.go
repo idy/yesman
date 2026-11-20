@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -115,12 +116,22 @@ func (a *app) crew(ctx context.Context) ([]crew.Member, error) {
 	return crew.Resolve(a.crewConfig(), models, crew.Embedded(), patch), err
 }
 
-// leadCrew is the crew a lead starts its workers as.
-func (a *app) leadCrew(ctx context.Context) []crew.Member {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	members, _ := a.crew(ctx)
-	return members
+// workerRouting reads the current settings and score patch. The lead sees the
+// Settings catalog. At dispatch, live is the newly started worker's catalog.
+func (a *app) workerRouting(ctx context.Context, live []agent.Model) crew.Routing {
+	var models []crew.Model
+	if live == nil {
+		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		// Resolve keeps the saved tuples and their scores when a cold probe
+		// has not succeeded. A successful empty catalog verifies absence.
+		models, _, _ = a.catalog.get(ctx, false)
+	} else {
+		models = crewModels(live)
+	}
+	c := a.crewConfig()
+	patch, _ := a.effectiveScorePatch()
+	return crew.Routing{Pools: c.Pools, Members: crew.Resolve(c, models, crew.Embedded(), patch), CatalogUnknown: models == nil}
 }
 
 // yesmanModel is the option a new yesman's lead runs as.
@@ -136,6 +147,7 @@ func (a *app) yesmanModel(ctx context.Context) (string, error) {
 // CrewView is what Settings › yesman shows.
 type CrewView struct {
 	Patch ScorePatchView `json:"patch"`
+	Pools []PoolView     `json:"pools"`
 	// Date is the day of the Artificial Analysis scores, and Source where
 	// they come from.
 	Date   string `json:"date"`
@@ -152,6 +164,16 @@ type CrewView struct {
 	// ReadAt is when pi's catalog was read, and Error why it could not be.
 	ReadAt time.Time `json:"readAt,omitzero"`
 	Error  string    `json:"error,omitempty"`
+	// CatalogUnknown keeps a failed first probe distinct from a verified empty catalog.
+	CatalogUnknown bool `json:"catalogUnknown,omitempty"`
+}
+
+// PoolView pairs the fixed label and its editable settings with a revision
+// for an optimistic save. Two windows editing different pools can both save.
+type PoolView struct {
+	crew.Label
+	crew.Pool
+	Revision string `json:"revision"`
 }
 
 // CrewModel is a model of pi's catalog.
@@ -175,8 +197,13 @@ func (a *app) crewView(ctx context.Context, refresh bool) CrewView {
 	}
 	c := a.crewConfig()
 	v.ReadAt, v.Yesman = at, c.Yesman
+	for _, label := range crew.Labels {
+		p := c.Pools[label.ID]
+		v.Pools = append(v.Pools, PoolView{Label: label, Pool: p, Revision: p.Revision()})
+	}
 	patch, status := a.effectiveScorePatch()
 	v.Patch = status
+	v.CatalogUnknown = models == nil
 	v.Members = crew.Resolve(c, models, snap, patch)
 	for _, m := range models {
 		cm := CrewModel{Model: m, Key: m.Key(), Scored: []string{}}
@@ -218,8 +245,7 @@ func (s *service) Crew(ctx context.Context) CrewView { return s.app.crewView(ctx
 func (s *service) RefreshCrew(ctx context.Context) CrewView { return s.app.crewView(ctx, true) }
 
 // AddCrewOption adds one of pi's models at an effort to the crew. score is
-// the user's own, which an option Artificial Analysis has no scores for
-// needs, and others ignore. The first option is what new yesmen run as.
+// optional estimate when no source scores exist. The first option is what new yesmen run as.
 func (s *service) AddCrewOption(ctx context.Context, provider, model, effort string, score *crew.Score) (CrewView, error) {
 	models, _, err := s.app.catalog.get(ctx, false)
 	i := slices.IndexFunc(models, func(m crew.Model) bool { return m.Provider == provider && m.ID == model })
@@ -232,10 +258,7 @@ func (s *service) AddCrewOption(ctx context.Context, provider, model, effort str
 	o := crew.Option{Provider: provider, Model: model, Effort: effort}
 	patch, _ := s.app.effectiveScorePatch()
 	resolved := crew.Resolve(crew.Config{Options: []crew.Option{o}}, models, crew.Embedded(), patch)
-	if resolved[0].Score == nil {
-		if score == nil {
-			return CrewView{}, errors.New(tr("Artificial Analysis has no scores for %s at this effort: give your own", crew.ShortName(models[i].Name, model)))
-		}
+	if resolved[0].Score == nil && score != nil {
 		if o.Score, err = ownScore(*score); err != nil {
 			return CrewView{}, err
 		}
@@ -279,6 +302,10 @@ func (s *service) RemoveCrewOption(ctx context.Context, key string) (CrewView, e
 			return errors.New(tr("%s is not in the crew", key))
 		}
 		c.Options = slices.Delete(c.Options, i, i+1)
+		for id, p := range c.Pools {
+			p.Members = slices.DeleteFunc(p.Members, func(k string) bool { return k == key })
+			c.Pools[id] = p
+		}
 		if c.Yesman == key {
 			c.Yesman = ""
 			if len(c.Options) > 0 {
@@ -290,12 +317,68 @@ func (s *service) RemoveCrewOption(ctx context.Context, key string) (CrewView, e
 	return s.app.crewView(ctx, false), err
 }
 
+// LeadModels reads or changes one workspace lead's selection from Settings.
+func (s *service) LeadModels(ctx context.Context, workspace string, since time.Time, expected, change agent.Choice) (agent.ModelOptions, error) {
+	return s.app.agents.LeadModels(ctx, workspace, since, expected, change)
+}
+
+// SetWorkerPool edits just one fixed label. Recheck the saved pool and Crew
+// under the settings lock so a stale form cannot put a removed member back.
+func (s *service) SetWorkerPool(ctx context.Context, label, revision string, p crew.Pool) (CrewView, error) {
+	if !slices.ContainsFunc(crew.Labels[:], func(l crew.Label) bool { return l.ID == label }) {
+		return CrewView{}, errors.New(tr("Unknown worker label."))
+	}
+	if err := p.Validate(); err != nil {
+		return CrewView{}, errors.New(tr(err.Error()))
+	}
+	p.Instructions = strings.TrimSpace(p.Instructions)
+	err := s.app.changeCrew(func(c *crew.Config) error {
+		prev := c.Pools[label]
+		if revision != prev.Revision() {
+			return errors.New(tr("This pool changed. Reopen it to edit the latest settings."))
+		}
+		models := s.app.catalog.peek()
+		var keys []string
+		for _, key := range p.Members {
+			i := c.Index(key)
+			if i < 0 {
+				return errors.New(tr("A selected model was removed. Reopen the pool to update your selection."))
+			}
+			o := c.Options[i]
+			if !slices.Contains(prev.Members, key) && !slices.ContainsFunc(models, func(m crew.Model) bool {
+				return m.Provider == o.Provider && m.ID == o.Model && slices.Contains(m.Levels, o.Effort)
+			}) {
+				return errors.New(tr("A selected model or effort is unavailable. Read pi’s models again."))
+			}
+			if !slices.Contains(keys, key) {
+				keys = append(keys, key)
+			}
+		}
+		p.Members = keys
+		if c.Pools == nil {
+			c.Pools = crew.Pools{}
+		}
+		c.Pools[label] = p
+		return nil
+	})
+	if err != nil {
+		return CrewView{}, err
+	}
+	return s.Crew(ctx), nil
+}
+
 // SetYesmanModel chooses the option new yesmen's leads run as, by its key.
 func (s *service) SetYesmanModel(ctx context.Context, key string) (CrewView, error) {
 	members, err := s.app.crew(ctx)
 	if !crew.Usable(members, key) {
 		return CrewView{}, errors.Join(errors.New(tr("%s is not in the crew", key)), err)
 	}
-	err = s.app.changeCrew(func(c *crew.Config) error { c.Yesman = key; return nil })
+	err = s.app.changeCrew(func(c *crew.Config) error {
+		if c.Index(key) < 0 {
+			return errors.New(tr("%s is not in the crew", key))
+		}
+		c.Yesman = key
+		return nil
+	})
 	return s.app.crewView(ctx, false), err
 }

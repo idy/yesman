@@ -614,18 +614,28 @@ func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, 
 // RemoveWorker forgets a worker. Its session log stays, and so does when
 // it started (see WorkerStarts).
 func (s *Store) RemoveWorker(name, worker string) error {
+	return s.RemoveWorkerIf(name, worker, time.Time{})
+}
+
+// RemoveWorkerIf rolls back a failed start only while its exact record is
+// still present. A zero since is an ordinary explicit removal by name.
+func (s *Store) RemoveWorkerIf(name, worker string, since time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ws, err := s.workers(name)
 	if err != nil {
 		return err
 	}
+	i := slices.IndexFunc(ws, func(x Worker) bool { return x.Name == worker })
+	if !since.IsZero() && (i < 0 || !ws[i].StartedAt.Equal(since)) {
+		return fmt.Errorf("the worker was removed or replaced")
+	}
 	y, _ := s.Get(name)
 	s.noteStarts(y, ws)
 	// Its tasks stay its own: a worker of the same name hired later does
 	// not own them, whatever it works on. Bound first, under the same lock,
 	// so that no reader sees the name free with its tasks unbound.
-	if i := slices.IndexFunc(ws, func(x Worker) bool { return x.Name == worker }); i >= 0 {
+	if i >= 0 {
 		b, err := s.board(name)
 		if err != nil {
 			return err

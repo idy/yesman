@@ -175,6 +175,10 @@ func fakePi() {
 		case "get_available_thinking_levels":
 			data = map[string]any{"levels": levels()}
 		case "set_model":
+			if cmd.Provider == "beta" && os.Getenv("FAKE_PI_REFUSE_BETA") != "" {
+				write(map[string]any{"type": "response", "id": cmd.ID, "command": cmd.Type, "success": false, "error": "fixture slot unavailable"})
+				continue
+			}
 			found := false
 			for _, choice := range models {
 				if choice.Provider == cmd.Provider && choice.ID == cmd.ModelID {

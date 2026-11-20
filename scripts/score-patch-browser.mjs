@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { checkWorkerRouting } from './worker-routing-browser.mjs';
 const { chromium, webkit } = await import(process.env.YESMAN_PLAYWRIGHT || 'playwright');
 const cwd = fileURLToPath(new URL('..', import.meta.url));
 const scratch = await mkdtemp(`${tmpdir()}/yesman-score-patch-`);
@@ -44,9 +45,10 @@ try {
           const res = await fetch('/fixture/call', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ method, args }) });
           const body = await res.json(); if (body.error) throw Error(body.error); return body.value;
         };
-        window.mygo = { locale: localStorage.getItem('fixture.locale') || 'en', on() {}, async call(method, ...args) {
+        window.fixtureHandlers = {};
+        window.mygo = { locale: localStorage.getItem('fixture.locale') || 'en', on(event, handler) { window.fixtureHandlers[event] = handler; }, async call(method, ...args) {
           const m = method.replace('Yesman.', '');
-          if (['Crew', 'RefreshCrew', 'ImportScorePatch', 'ExportScorePatch', 'SetScorePatchEnabled', 'AddCrewOption', 'SetCrewScore', 'RemoveCrewOption', 'SetYesmanModel'].includes(m)) {
+          if (['Crew', 'RefreshCrew', 'ImportScorePatch', 'ExportScorePatch', 'SetScorePatchEnabled', 'AddCrewOption', 'SetCrewScore', 'RemoveCrewOption', 'SetYesmanModel', 'SetWorkerPool'].includes(m)) {
             window.scoreCalls.push(m);
             const control = window.scoreControls[m];
             delete window.scoreControls[m];
@@ -85,6 +87,10 @@ try {
         await page.screenshot({ path: `${output}/${name}-baseline.png`, fullPage: true });
         continue;
       }
+      if (process.env.YESMAN_WORKER_ROUTING_BROWSER === '1') {
+        await checkWorkerRouting({ page, open, name, output, errors });
+        continue;
+      }
       const patch = page.locator('.score-patch');
       const rows = page.locator('.crew-row');
       const snapshot = async (label) => page.screenshot({ path: `${output}/${name}-${label}.png`, fullPage: true });
@@ -120,7 +126,7 @@ try {
       assert.equal(await page.evaluate(() => fixtureCall('FixtureExport')), csv);
       await patch.getByRole('combobox', { name: 'Use score patch' }).selectOption('off');
       await patch.getByText('2 score rows · Disabled', { exact: true }).waitFor();
-      assert.match(await rows.nth(1).innerText(), /No scores: give yours/);
+      assert.match(await rows.nth(1).innerText(), /No scores yet/);
       // Existing estimate editor remains available, and survives patch toggles.
       await rows.nth(1).getByRole('button', { name: /^Your scores for/ }).click();
       await dialog.locator('input[name=intelligence]').fill('25');

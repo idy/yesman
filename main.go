@@ -168,7 +168,7 @@ func main() {
 		DeliveryConfirmed: a.chimes.Notify,
 		NeedsYouChanged:   func(yesman string, added *yesmen.Handoff) { a.needsYouChanged(yesman, added) },
 		TopicsChanged:     a.topicsChanged,
-		Secrets:           a.vault, Variables: a.variables, Crew: a.leadCrew, GitHubApp: a.githubApp}
+		Secrets:           a.vault, Variables: a.variables, Routing: a.workerRouting, GitHubApp: a.githubApp}
 	if err := srv.Start(); err != nil {
 		log.Fatal(err)
 	}
