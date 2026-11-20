@@ -742,7 +742,14 @@ func refExists(ctx context.Context, dir, ref string) bool {
 }
 
 func git(ctx context.Context, dir string, args ...string) (string, error) {
+	return gitInput(ctx, dir, "", args...)
+}
+
+func gitInput(ctx context.Context, dir, input string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	if os.Getenv("GIT_SSH_COMMAND") == "" {

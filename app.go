@@ -22,6 +22,7 @@ import (
 	"github.com/idy/yesman/internal/restart"
 	"github.com/idy/yesman/internal/schedule"
 	"github.com/idy/yesman/internal/secrets"
+	"github.com/idy/yesman/internal/server"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -137,8 +138,9 @@ type app struct {
 	grantsOnce sync.Once
 	grants     *nativepermissions.Manager
 
-	infoOnce sync.Once
-	info     *infoCache // what the info panel measured
+	desktopWorktrees server.DesktopWorktrees
+	infoOnce         sync.Once
+	info             *infoCache // what the info panel measured
 }
 
 // titlebarHeight is the height of the titlebar the page draws.

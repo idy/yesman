@@ -127,7 +127,8 @@ export function createFiles(host) {
   // knowledge, or a worktree by its directory.
   const WORKSPACE = { kind: 'workspace' };
   const scopeOf = (y) => scopes.get(workspaceKey(y)) ?? WORKSPACE;
-  const scopeKey = (sc) => (sc.kind === 'worktree' ? `worktree:${sc.dir}` : sc.kind);
+  const scopeKey = (sc) => (sc.kind === 'worktree' ? `worktree:${sc.dir}:${sc.cleanupId || ''}` : sc.kind);
+  const worktreeScope = w => ({ kind: 'worktree', dir: w.dir, repo: w.repo, cleanupId: w.cleanupId });
   const rootOf = (sc) => (sc.kind === 'knowledge' ? KNOWLEDGE : sc.kind === 'worktree' ? sc.dir : '.');
   const within = (rel, root) => root === '.' || rel === root || rel.startsWith(`${root}/`);
   // Knowledge and the working log read as rendered pages.
@@ -136,6 +137,8 @@ export function createFiles(host) {
   const isChanges = (p) => p?.scope.kind === 'worktree' && p.show === 'changes';
 
   const workspaceKey = (y) => `${y.name}\u0001${y.hiredAt ?? ''}`;
+  const retired = new Set(); // prevents a delayed State/Info answer from reviving an older nonce
+  const retiredKey = (y, w) => `${workspaceKey(y)}\u0001${w.cleanupId}`;
   function pane(y, scope = scopeOf(y)) {
     const key = `${workspaceKey(y)}\u0001${scopeKey(scope)}`;
     let p = panes.get(key);
@@ -187,22 +190,23 @@ export function createFiles(host) {
   }
 
   async function loadView(p, rel) {
+    const tab = tabOf(p, rel);
+    if (!tab) return;
     p.loads ??= new Map();
     const seq = (p.loads.get(rel) ?? 0) + 1;
     p.loads.set(rel, seq);
     if (!p.views.has(rel)) p.views.set(rel, 'loading');
     try {
-      const v = await host.call('ReadFile', p.name, rel);
-      if (p.loads.get(rel) !== seq || !tabOf(p, rel)) return;
-      const tab = tabOf(p, rel);
-      if (tab && v.kind === 'text' && !editor?.has(keyOf(p, rel))) {
+      const v = await readTab(p, tab);
+      if (p.loads.get(rel) !== seq || tabOf(p, rel) !== tab) return;
+      if (v.kind === 'text' && !editor?.has(keyOf(p, rel))) {
         tab.base = v.hash;
         tab.readOnly = Boolean(v.truncated) || locked(p, rel);
       }
       p.views.set(rel, v);
       if (p.scope.kind === 'knowledge' && rel === KNOWLEDGE_INDEX) p.catalog = v.kind === 'text' && !v.truncated ? knowledgeCatalog(v.text) : null;
     } catch (err) {
-      if (p.loads.get(rel) !== seq || !tabOf(p, rel)) return;
+      if (p.loads.get(rel) !== seq || tabOf(p, rel) !== tab) return;
       p.views.set(rel, { error: err?.message || String(err) });
       if (p.scope.kind === 'knowledge' && rel === KNOWLEDGE_INDEX) p.catalog = null;
     }
@@ -222,8 +226,12 @@ export function createFiles(host) {
   // Every text file shows in one editor, made the first time it is needed.
   let editor = null;
   let editorLoading = null;
-  const keyOf = (p, rel) => `${p.key}\u0000${rel}`;
+  let nextTab = 0;
   const tabOf = (p, rel) => p?.tabs.find((t) => t.path === rel);
+  const keyOf = (p, rel) => tabOf(p, rel)?.key;
+  const readTab = (p, tab) => tab.checkout
+    ? host.call('ReadWorktreeFile', p.name, tab.path, tab.checkout)
+    : host.call('ReadFile', p.name, tab.path);
 
   function ensureEditor() {
     editorLoading ??= createEditor({ onChange: edited, onSave: (k) => { const [p, rel] = byKey(k); if (p) save(p, rel); } })
@@ -233,7 +241,9 @@ export function createFiles(host) {
 
   function byKey(k) {
     const at = k.indexOf('\u0000');
-    return [panes.get(k.slice(0, at)), k.slice(at + 1)];
+    const p = panes.get(k.slice(0, at));
+    const rel = k.slice(k.indexOf('\n', at) + 1);
+    return [tabOf(p, rel)?.key === k ? p : null, rel];
   }
 
   // edited follows a change the user made in a file: its tab stays, shows
@@ -252,11 +262,12 @@ export function createFiles(host) {
 
   const timers = new Map();
   function scheduleSave(p, rel) {
-    const k = keyOf(p, rel);
+    const tab = tabOf(p, rel);
+    const k = tab.key;
     clearTimeout(timers.get(k));
     timers.set(k, setTimeout(() => {
       timers.delete(k);
-      if (prefs.autoSave) save(p, rel);
+      if (prefs.autoSave && tabOf(p, rel) === tab) save(p, rel);
     }, 800));
   }
 
@@ -279,13 +290,16 @@ export function createFiles(host) {
     clearTimeout(timers.get(k));
     const text = editor.text(k);
     try {
-      const v = await host.call('WriteFile', p.name, rel, text, force ? '' : (tab.base ?? ''));
+      const args = [p.name, rel, text, force ? '' : (tab.base ?? '')];
+      const v = tab.checkout ? await host.call('WriteWorktreeFile', ...args, tab.checkout) : await host.call('WriteFile', ...args);
+      if (tabOf(p, rel) !== tab) return false;
       tab.base = v.hash;
       tab.conflict = null;
       tab.dirty = editor.text(k) !== text;
       p.views.set(rel, v);
       return true;
     } catch (err) {
+      if (tabOf(p, rel) !== tab) return false;
       if (/changed on disk/.test(err?.message || String(err))) tab.conflict = 'changed';
       else host.fail(err);
       return false;
@@ -310,8 +324,10 @@ export function createFiles(host) {
     if (locked(p, rel)) { await loadView(p, rel); return; }
     let v;
     try {
-      v = await host.call('ReadFile', p.name, rel);
+      v = await readTab(p, tab);
+      if (tabOf(p, rel) !== tab) return;
     } catch (err) {
+      if (tabOf(p, rel) !== tab) return;
       if (tab.dirty) tab.conflict = 'deleted';
       else p.views.set(rel, { error: err?.message || String(err) });
       if (current() === p && p.active === rel) (tab.dirty ? renderBanner : renderView)();
@@ -385,11 +401,11 @@ export function createFiles(host) {
       if (pin) p.tabs[at].pinned = true;
     } else {
       const preview = p.tabs.findIndex((t) => !t.pinned && !t.dirty);
-      const tab = { path: rel, pinned: pin, dirty: false, base: null, conflict: null, readOnly: locked(p, rel) };
+      const w = p.scope.kind === 'worktree' ? p.scope : host.worktrees?.(y)?.find(w => within(rel, w.dir));
+      const checkout = w?.cleanupId ? { repo: w.repo, dir: w.dir, cleanupId: w.cleanupId, hiredAt: y.hiredAt } : null;
+      const tab = { path: rel, key: `${p.key}\u0000${++nextTab}\n${rel}`, checkout, pinned: pin, dirty: false, base: null, conflict: null, readOnly: locked(p, rel) };
       if (preview >= 0) {
-        const gone = p.tabs[preview].path;
-        p.views.delete(gone);
-        editor?.forget(keyOf(p, gone));
+        forgetTab(p, p.tabs[preview]);
         p.tabs[preview] = tab;
       } else {
         p.tabs.push(tab);
@@ -426,11 +442,8 @@ export function createFiles(host) {
     }
     const at = p.tabs.indexOf(tab);
     if (at < 0) return;
-    clearTimeout(timers.get(keyOf(p, rel)));
-    editor?.forget(keyOf(p, rel));
+    forgetTab(p, tab);
     p.tabs.splice(at, 1);
-    p.views.delete(rel);
-    p.loads?.set(rel, (p.loads.get(rel) ?? 0) + 1);
     if (p.active === rel) p.active = p.tabs[Math.min(at, p.tabs.length - 1)]?.path ?? null;
     if (logRoute()?.name === p.name) {
       if (isTaskLog(p.active)) saveLogRoute(p.name, p.active);
@@ -472,6 +485,7 @@ export function createFiles(host) {
   function setScope(scope, show) {
     const y = host.yesman();
     if (!y) return null;
+    if (scope?.cleanupId && retired.has(retiredKey(y, scope))) return null;
     if (scope && scope.kind !== 'workspace') scopes.set(workspaceKey(y), scope);
     else scopes.delete(workspaceKey(y));
     const p = pane(y);
@@ -496,8 +510,8 @@ export function createFiles(host) {
   }
 
   // openWorktree shows a worktree: its changes, or its files.
-  function openWorktree(dir, show = 'changes') {
-    setScope({ kind: 'worktree', dir }, show);
+  function openWorktree(w, show = 'changes') {
+    setScope(worktreeScope(w), show);
   }
 
   // shown says what the pane shows: null when closed, else the part of the
@@ -977,7 +991,7 @@ export function createFiles(host) {
     for (const w of wts) {
       const pull = w.pull;
       const aside = pull ? h('span', { class: 'files-menu-aside' }, `#${pull.number}`) : w.changes?.files ? counts(w.changes) : null;
-      items.push(item({ kind: 'worktree', dir: w.dir }, pull ? (pull.state === 'merged' ? 'merge' : 'pullRequest') : 'branch', w.dir, aside,
+      items.push(item(worktreeScope(w), pull ? (pull.state === 'merged' ? 'merge' : 'pullRequest') : 'branch', w.dir, aside,
         [w.dir, pull ? pull.title : w.branch].filter(Boolean).join('\n')));
     }
     frame.fill(items);
@@ -1039,10 +1053,9 @@ export function createFiles(host) {
       h('div', { class: 'files-tree-list', id: 'files-tree-list', role: 'tree', 'aria-label': p.label, onkeydown: (e) => treeKey(e, p), onfocusin: (e) => treeFocus(e, p) }));
   }
 
-  let findSeq = 0;
   async function find(p, query) {
     p.query = query;
-    const seq = ++findSeq;
+    const seq = p.findSeq = (p.findSeq ?? 0) + 1;
     if (!query.trim()) {
       p.results = null;
       renderTree();
@@ -1050,10 +1063,10 @@ export function createFiles(host) {
     }
     try {
       const results = await host.call('FindFiles', p.name, query, p.root);
-      if (seq !== findSeq) return;
+      if (seq !== p.findSeq) return;
       p.results = results;
     } catch (err) {
-      if (seq !== findSeq) return; // a newer query answers
+      if (seq !== p.findSeq) return; // a newer query answers
       p.results = [];
       host.fail(err);
     }
@@ -1401,7 +1414,7 @@ export function createFiles(host) {
     section.replaceChildren(...[banner, notice, slot].filter(Boolean));
     renderBanner();
     ensureEditor().then((ed) => {
-      if (!slot.isConnected || current() !== p || p.active !== rel) return;
+      if (!slot.isConnected || current() !== p || p.active !== rel || tabOf(p, rel) !== tab) return;
       slot.replaceChildren(ed.dom);
       ed.show(k, { text: v.text, lang, readOnly: Boolean(tab?.readOnly || v.truncated || locked(p)) });
     }, (err) => slot.replaceChildren(h('p', { class: 'files-note' }, t('The editor did not load: {error}', { error: err?.message || err }))));
@@ -1473,5 +1486,78 @@ export function createFiles(host) {
     return t('The workspace is empty. Agents check repositories out into it.');
   }
 
-  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, shown, onChange, onKey, focusFind, toggleTree, current: () => !!current() };
+  function unsavedWorktrees(y) {
+    const dirs = new Set();
+    for (const p of panesOf(y.name)) {
+      for (const tab of p.tabs) if (tab.dirty) dirs.add(tab.path.split('/')[0]);
+    }
+    return [...dirs];
+  }
+
+  function forgetTab(p, tab) {
+    clearTimeout(timers.get(tab.key));
+    timers.delete(tab.key);
+    editor?.forget(tab.key);
+    p.loads?.delete(tab.path);
+    p.views.delete(tab.path);
+    p.mode.delete(tab.path);
+  }
+
+  // Receipts and later inventories retire only the obsolete checkout's views,
+  // including tabs opened from All files. A failed inventory proves no absence.
+  function removedWorktrees(y, rows) {
+    if (!rows.length) return;
+    for (const w of rows) if (w.cleanupId) retired.add(retiredKey(y, w));
+    const removed = w => w && rows.some(r => r.dir === w.dir && r.cleanupId === w.cleanupId);
+    const before = current();
+    let redraw = false;
+    for (const p of panes.values()) {
+      if (p.name !== y.name || p.hiredAt !== y.hiredAt) continue;
+      const retire = removed(p.scope);
+      for (const tab of [...p.tabs]) {
+        if (!retire && !removed(tab.checkout)) continue;
+        forgetTab(p, tab);
+        p.tabs.splice(p.tabs.indexOf(tab), 1);
+        if (p.active === tab.path) p.active = p.tabs.at(-1)?.path ?? null;
+        redraw ||= p === before;
+      }
+      if (retire) {
+        p.findSeq = (p.findSeq ?? 0) + 1;
+        p.dirLoads.clear();
+        panes.delete(p.key);
+        changes.forget(p);
+        redraw ||= p === before;
+      } else if (p.scope.kind === 'workspace') {
+        for (const path of [...p.dirs.keys()]) {
+          if (path === '.' || rows.some(r => within(path, r.dir))) {
+            p.dirLoads.delete(path);
+            p.dirs.delete(path);
+            p.expanded.delete(path);
+            redraw ||= p === before;
+          }
+        }
+        p.findSeq = (p.findSeq ?? 0) + 1;
+        if (p.results) p.results = p.results.filter(path => !rows.some(r => within(path, r.dir)));
+      }
+    }
+    if (removed(scopeOf(y))) scopes.delete(workspaceKey(y));
+    if (redraw) render();
+  }
+
+  function reconcileWorktrees(y, rows, complete) {
+    // The two inventories arrive independently. An answer containing a
+    // known retired nonce cannot establish that a newer checkout is gone.
+    if (rows.some(w => w.cleanupId && retired.has(retiredKey(y, w)))) return;
+    const byDir = new Map(rows.map(row => [row.dir, row.cleanupId]));
+    const gone = new Map();
+    for (const p of panes.values()) {
+      if (p.name !== y.name || p.hiredAt !== y.hiredAt) continue;
+      for (const w of [p.scope, ...p.tabs.map(tab => tab.checkout)]) {
+        if (w?.cleanupId && (complete || byDir.has(w.dir)) && byDir.get(w.dir) !== w.cleanupId) gone.set(w.cleanupId, w);
+      }
+    }
+    removedWorktrees(y, [...gone.values()]);
+  }
+
+  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, unsavedWorktrees, removedWorktrees, reconcileWorktrees, shown, onChange, onKey, focusFind, toggleTree, current: () => !!current() };
 }
