@@ -27,9 +27,10 @@ type DesktopWorktrees struct {
 
 type WorktreeCleanupRow struct {
 	pool.Worktree
-	Reason  string `json:"reason,omitempty"`
-	Detail  string `json:"detail,omitempty"`
-	Removed bool   `json:"removed,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	Removed     bool   `json:"removed,omitempty"`
+	observation *pool.CheckoutObservation
 }
 
 type WorktreeCleanupPreview struct {
@@ -44,12 +45,14 @@ type desktopPreview struct {
 	token    string
 	bulk     bool
 	eligible []desktopCandidate
+	timer    *time.Timer
 }
 
 type desktopCandidate struct {
-	row      int // index in the non-destructive preview
-	worktree pool.Worktree
-	record   yesmen.WorktreeRecord
+	row         int // index in the non-destructive preview
+	worktree    pool.Worktree
+	record      yesmen.WorktreeRecord
+	observation *pool.CheckoutObservation
 }
 
 const (
@@ -74,6 +77,7 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 	plan := &desktopPreview{name: name, since: since, bulk: selected == nil, token: rand.Text()}
 	out := WorktreeCleanupPreview{Rows: []WorktreeCleanupRow{}}
 	d.mu.Lock()
+	d.pending.close()
 	d.pending = plan
 	d.mu.Unlock()
 	l := s.worktreeLock(name)
@@ -104,7 +108,7 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 				row = s.desktopWorktree(ctx, y, state, w, plan.bulk, false)
 			}
 			if row.Reason == "" {
-				candidates = append(candidates, desktopCandidate{len(out.Rows), row.Worktree, state.Records[latestWorktree(state.Records, w.Dir)]})
+				candidates = append(candidates, desktopCandidate{len(out.Rows), row.Worktree, state.Records[latestWorktree(state.Records, w.Dir)], row.observation})
 			}
 			out.Rows = append(out.Rows, row)
 		}
@@ -126,26 +130,33 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 	l.Unlock()
 	// GitHub may be slow. No workspace, agent or pool lock spans a network
 	// read. Final admission compares the same certification under the lease.
+	var eligible []desktopCandidate
 	if err == nil {
 		for _, c := range candidates {
 			if e := d.verifySource(ctx, plan, c); e != nil {
 				out.Rows[c.row].Reason, out.Rows[c.row].Detail = unverifiedMerge, e.Error()
+				c.observation.Close()
 			} else {
-				plan.eligible = append(plan.eligible, c)
+				eligible = append(eligible, c)
 			}
 		}
 		err = ctx.Err()
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.pending != plan {
-		return out, errors.New("This preview expired or was already used. Open a new preview.")
-	}
-	if err != nil || len(plan.eligible) == 0 {
+	if d.pending != plan || err != nil || len(eligible) == 0 {
+		for _, c := range candidates {
+			c.observation.Close()
+		}
+		if d.pending != plan {
+			return out, errors.New("This preview expired or was already used. Open a new preview.")
+		}
 		d.pending = nil
 		return out, err
 	}
+	plan.eligible = eligible
 	plan.expires = time.Now().Add(10 * time.Minute)
+	plan.timer = time.AfterFunc(time.Until(plan.expires), func() { d.Cancel(plan.token) })
 	out.Token = plan.token
 	return out, nil
 }
@@ -157,10 +168,23 @@ func (d *DesktopWorktrees) verifySource(ctx context.Context, plan *desktopPrevie
 	return nil
 }
 
+func (p *desktopPreview) close() {
+	if p == nil {
+		return
+	}
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	for _, c := range p.eligible {
+		c.observation.Close()
+	}
+}
+
 func (d *DesktopWorktrees) Cancel(token string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.pending != nil && d.pending.token == token {
+		d.pending.close()
 		d.pending = nil
 	}
 }
@@ -177,6 +201,7 @@ func (d *DesktopWorktrees) Confirm(ctx context.Context, name string, since time.
 	}
 	d.pending = nil
 	d.mu.Unlock()
+	defer plan.close()
 	s := d.Server
 	var results []WorktreeCleanupRow
 	changed := false
@@ -305,7 +330,10 @@ func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, state *ye
 		return state.RecordRemoval(i, w.Head)
 	})
 	if err == nil && !remove {
-		row.Root, err = s.Pool.InspectTemporaryWorktree(ctx, y.Path, w)
+		row.observation, err = s.Pool.InspectTemporaryWorktree(ctx, y.Path, w)
+		if err == nil {
+			row.Root = &row.observation.Identity
+		}
 	}
 	if err != nil {
 		var hold *pool.RemovalHold

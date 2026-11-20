@@ -1049,7 +1049,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 
 
 .dialog-hint { margin: 6px 0 12px; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.6; }
-/* Keep the shadow close to the dialog: broad fades band against the dimmed canvas. */
+
 .worktree-heading { padding: 2px 4px; margin-left: -4px; color: inherit; background: none; font: inherit; border: 0; border-radius: var(--mds-radius-sm); }
 .worktree-heading:hover { background: var(--mds-hover); }
 .worktree-heading:focus-visible { outline: 2px solid var(--mds-accent-ink); }
@@ -1065,6 +1065,7 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .cleanup-kept summary { padding: 8px 0; color: var(--mds-muted); font-size: var(--mds-text-note); cursor: pointer; }
 .worktree-cleanup .mds-dialog-actions { flex-shrink: 0; }
 .worktree-cleanup [hidden] { display: none; }
+/* Keep the shadow close to the dialog: broad fades band against the dimmed canvas. */
 .mds-dialog { box-shadow: 0 8px 24px var(--mds-dialog-shadow); }
 .mds-dialog h2 { margin: 0; }
 .mds-dialog .field { margin-top: 4px; }

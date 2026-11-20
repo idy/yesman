@@ -950,6 +950,8 @@ export default {
   "This preview expired or was already used. Open a new preview.": "预览已过期或已使用，请重新打开预览。",
   "The Git directory points to a different shared repository.": "Git 目录指向其他共享仓库。",
   "Git reports a different checkout directory.": "Git 登记的检出目录与此目录不符。",
+  "The checkout’s Git history could not be verified.": "无法核实工作树中的 Git 历史。",
+  "Git history changed. Review this worktree again.": "Git 历史已改变，请重新检查此工作树。",
   "Git has locked this worktree.": "此工作树已被 Git 锁定。",
   "The checkout contains a Git lock, operation or private state.": "此工作树含有 Git 锁、进行中的操作或私有状态。",
   "There are uncommitted changes, untracked files or ignored files.": "有未提交的改动、未跟踪文件或忽略文件。",

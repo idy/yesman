@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/idy/yesman/internal/safefs"
@@ -91,8 +92,12 @@ func (p *Pool) checkTemporaryWorktree(ctx context.Context, r Repo, workspace str
 			return "", &RemovalHold{"The primary branch is protected.", wt.Branch}
 		}
 		if expected.Root != nil {
-			id, err := rootIdentity(r.Path, path, expected.CleanupID)
-			if err != nil || id.Ino != expected.Root.Ino || id.Birth != expected.Root.Birth || (expected.Root.Dev != 0 && expected.Root.Dev != id.Dev) {
+			dir, id, err := openInstanceRoot(r.Path, path, expected.CleanupID)
+			if err != nil {
+				return "", err
+			}
+			dir.Close()
+			if !sameCleanupRoot(*expected.Root, id) {
 				return "", &RemovalHold{"The checkout directory is missing or was replaced.", expected.Dir}
 			}
 		}
@@ -101,10 +106,34 @@ func (p *Pool) checkTemporaryWorktree(ctx context.Context, r Repo, workspace str
 	return "", &RemovalHold{"Git has no current registration for this recorded directory.", expected.Dir}
 }
 
-// InspectTemporaryWorktree checks the same Git and filesystem state as removal,
-// leaving refs and the directory intact. The desktop confirmation compares the
-// returned directory identity even when an older registration only has a nonce.
-func (p *Pool) InspectTemporaryWorktree(ctx context.Context, workspace string, expected Worktree) (*safefs.Identity, error) {
+// CheckoutObservation spans the preview and its one-use confirmation. With no
+// birth time, holding the original directory open prevents inode reuse. These
+// short-lived observations are never persisted or used as managed write grants.
+type CheckoutObservation struct {
+	Identity safefs.Identity
+	pin      *safefs.Dir
+}
+
+func (o *CheckoutObservation) Close() {
+	if o != nil && o.pin != nil {
+		o.pin.Close()
+		o.pin = nil
+	}
+}
+
+func sameCleanupRoot(expected, actual safefs.Identity) bool {
+	if expected.Ino == 0 || actual.Ino != expected.Ino {
+		return false
+	}
+	if expected.HasBirth { // a recorded root never falls back to inode-only
+		return expected.Usable() && actual.Usable() && expected.Birth == actual.Birth && (expected.Dev == 0 || expected.Dev == actual.Dev)
+	}
+	return !actual.Usable() && expected.Dev != 0 && expected.Dev == actual.Dev
+}
+
+// InspectTemporaryWorktree leaves refs and the directory intact. The caller
+// closes the observation at confirmation, cancellation, replacement or expiry.
+func (p *Pool) InspectTemporaryWorktree(ctx context.Context, workspace string, expected Worktree) (*CheckoutObservation, error) {
 	r, err := p.Get(expected.Repo)
 	if err != nil {
 		return nil, err
@@ -119,11 +148,29 @@ func (p *Pool) InspectTemporaryWorktree(ctx context.Context, workspace string, e
 	if err != nil {
 		return nil, err
 	}
-	id, err := rootIdentity(r.Path, path, expected.CleanupID)
+	dir, id, err := openInstanceRoot(r.Path, path, expected.CleanupID)
 	if err != nil {
 		return nil, err
 	}
-	return id, checkRemovalContents(ctx, r, path, expected)
+	o := &CheckoutObservation{Identity: id, pin: dir}
+	if id.Ino == 0 || (!id.Usable() && id.Dev == 0) || (expected.Root != nil && !sameCleanupRoot(*expected.Root, id)) {
+		o.Close()
+		return nil, &RemovalHold{"The checkout directory is missing or was replaced.", expected.Dir}
+	}
+	if err := checkRemovalContents(ctx, r, path, expected); err != nil {
+		o.Close()
+		return nil, err
+	}
+	if _, err := readRecoverableHistory(ctx, r, path, expected); err != nil {
+		o.Close()
+		return nil, err
+	}
+	if id.Usable() {
+		o.Close()
+	} else {
+		o.Identity.HasBirth, o.Identity.Birth = false, 0
+	}
+	return o, nil
 }
 
 // RemoveTemporaryWorktree removes exactly the registered checkout inspected by
@@ -156,7 +203,11 @@ func (p *Pool) RemoveTemporaryWorktree(ctx context.Context, workspace string, ex
 	if !cleanupIDRE.MatchString(expected.CleanupID) {
 		return fmt.Errorf("retain %s: invalid checkout ID", expected.Dir)
 	}
-	if err := preserveWorktreeHistory(ctx, r, path, expected); err != nil {
+	history, err := readRecoverableHistory(ctx, r, path, expected)
+	if err != nil {
+		return err
+	}
+	if err := preserveWorktreeHistory(ctx, r, expected, history); err != nil {
 		return err
 	}
 	checkpoint := "refs/yesman/worktrees/" + expected.CleanupID
@@ -182,6 +233,13 @@ func (p *Pool) RemoveTemporaryWorktree(ctx context.Context, workspace string, ex
 	}
 	if _, err := p.checkTemporaryWorktree(ctx, r, workspace, expected); err != nil {
 		return err
+	}
+	latest, err := privateHistory(r.Path, path, expected)
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(latest, history) {
+		return &RemovalHold{"Git history changed. Review this worktree again.", expected.Dir}
 	}
 	_, err = git(ctx, r.Path, "worktree", "remove", path)
 	return err

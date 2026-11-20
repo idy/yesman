@@ -68,6 +68,14 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 	}
 	git(origin, "add", "README")
 	git(origin, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "Fixture")
+	git(origin, "switch", "-qc", "replacement")
+	git(origin, "rm", "-q", "README")
+	if err := os.WriteFile(filepath.Join(origin, "replacement.txt"), []byte("New checkout\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	git(origin, "add", "replacement.txt")
+	git(origin, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "Replacement fixture")
+	git(origin, "switch", "-q", "main")
 	repo, err := a.pool.Add(t.Context(), origin, "")
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +133,15 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 		var value any
 		var err error
 		switch req.Method {
+		case "Recreate", "ReplaceAgain":
+			dest := filepath.Join(y.Path, "gizmoth-artifact-rows")
+			if req.Method == "ReplaceAgain" {
+				err = a.pool.RemoveWorktree(r.Context(), dest, false)
+				if err != nil {
+					break
+				}
+			}
+			value, err = a.pool.AddWorktree(r.Context(), repo, pool.WorktreeOptions{Dest: dest, Ref: "origin/replacement"})
 		case "DirtyReview":
 			err = os.WriteFile(filepath.Join(y.Path, "review-b", "keep"), []byte("Still in use"), 0600)
 		case "Verify":
@@ -137,7 +154,7 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			}
 			value, err = map[string]any{"trees": wts, "checkpoints": refs}, e
 		default:
-			if !slices.Contains([]string{"State", "Info", "Usage", "PreviewWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
+			if !slices.Contains([]string{"State", "Info", "Usage", "ListFiles", "ReadFile", "ReadWorktreeFile", "WriteWorktreeFile", "PreviewWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
 				http.Error(w, "method", 400)
 				return
 			}

@@ -70,14 +70,14 @@ export function createWorktreeMenu(host) {
         const kept = result.rows.filter(row => row.reason);
         if (ready.length) {
           hint.textContent = t('Close any programs using these directories. Git saves each commit in the shared repository and keeps your branches and tags.');
-          listing.append(rowList(ready, selected));
+          listing.append(rowList(ready));
           confirm.textContent = selected ? t('Remove worktree') : tn(ready.length, 'Remove 1 worktree', 'Remove {n} worktrees');
           confirm.hidden = false;
         } else {
           end(selected ? t('Worktree kept') : t('No worktrees to remove'), kept.length ? t('These directories will stay in the workspace.') : t('This workspace has no registered worktrees.'));
         }
         if (kept.length) {
-          const keptList = rowList(kept, selected);
+          const keptList = rowList(kept);
           listing.append(ready.length ? h('details', { class: 'cleanup-kept' }, h('summary', null, tn(kept.length, 'Keep 1 worktree', 'Keep {n} worktrees')), keptList) : keptList);
         }
       } catch (err) {
@@ -101,8 +101,8 @@ export function createWorktreeMenu(host) {
           host.toast(tn(removed.length, 'Removed 1 worktree.', 'Removed {n} worktrees.'));
           dialog.close();
         } else {
-          listing.replaceChildren(rowList(issues, selected));
-          if (removed.length) listing.append(h('details', { class: 'cleanup-kept' }, h('summary', null, t('Removed directories')), rowList(removed, false)));
+          listing.replaceChildren(rowList(issues));
+          if (removed.length) listing.append(h('details', { class: 'cleanup-kept' }, h('summary', null, t('Removed directories')), rowList(removed)));
           end(t('Cleanup results'), tn(removed.length, 'Removed 1 worktree.', 'Removed {n} worktrees.'));
         }
       } catch (err) {
@@ -124,10 +124,10 @@ export function createWorktreeMenu(host) {
   return open;
 }
 
-function rowList(rows, single) {
+function rowList(rows) {
   return h('ul', { class: 'cleanup-rows', role: 'list' }, rows.map(row => h('li', null,
     h('div', { class: 'cleanup-path', dir: 'auto' }, row.path.endsWith(row.dir) && row.dir
       ? [h('span', { class: 'cleanup-parent' }, row.path.slice(0, -row.dir.length)), h('span', null, row.dir)] : row.path),
-    !row.reason ? h('div', { class: 'cleanup-source' }, row.branch ? `${row.branch} · ` : '', h('code', { title: row.head }, single ? row.head : row.head.slice(0, 12))) : null,
+    !row.reason ? h('div', { class: 'cleanup-source' }, row.branch ? `${row.branch} · ` : '', h('code', { title: row.head }, row.head)) : null,
     row.reason ? h('div', { class: 'cleanup-reason' }, t(row.reason), row.detail ? ` ${row.detail}` : '') : null)));
 }

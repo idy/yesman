@@ -36,21 +36,49 @@ async function run(engine, name, language) {
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
     await page.addInitScript(({ language, zh }) => {
+      localStorage.setItem('yesman.files.autosave', 'off');
       window.calls = [];
+      window.events = {};
       window.api = async (method, ...args) => {
         const r = await fetch('/fixture', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({method,args}) });
         const answer = await r.json();
         if (answer.error) throw new Error(answer.error);
         return answer.value;
       };
-      window.mygo = { locale: language, platform: 'darwin', on() {}, async call(method, ...args) {
+      window.mygo = { locale: language, platform: 'darwin', on(name, cb) { events[name] = cb; }, async call(method, ...args) {
         const m = method.replace('Yesman.', '');
         calls.push([m, ...structuredClone(args)]);
         switch (m) {
           case 'WorktreeMenu': return window.choice ?? (args[0] ? 'remove' : 'cleanup');
           case 'Reveal': return;
           case 'Info': if (window.failInfo) throw Error('Fixture refresh unavailable'); return api(m,...args);
-          case 'State': case 'Usage': case 'PreviewWorktreeCleanup': case 'CancelWorktreeCleanup': case 'ConfirmWorktreeCleanup': return api(m, ...args);
+          case 'ReadWorktreeFile': {
+            const value = await api(m, ...args);
+            if (args[1] === window.holdRead) {
+              delete window.holdRead;
+              await new Promise(resolve => { window.releaseRead = resolve; });
+              window.lateReadReturned = true;
+            }
+            return value;
+          }
+          case 'WriteWorktreeFile':
+            if (args[1] === window.holdSave) {
+              delete window.holdSave;
+              await new Promise(resolve => { window.releaseSave = resolve; });
+              try { return await api(m, ...args); } catch (err) { window.saveRefusal = err.message; throw err; }
+            }
+            return api(m, ...args);
+          case 'ListFiles': case 'ReadFile': return api(m,...args);
+          case 'State': {
+            const value = await api(m,...args);
+            if (window.holdState) {
+              window.holdState = false;
+              await new Promise(resolve => { window.releaseState = resolve; });
+              window.lateStateReturned = true;
+            }
+            return value;
+          }
+          case 'Usage': case 'PreviewWorktreeCleanup': case 'CancelWorktreeCleanup': case 'ConfirmWorktreeCleanup': return api(m, ...args);
           case 'Settings': return { appearance: zh ? 'dark' : 'light', autoFetch: 0 };
           case 'Pulls': return [{ dir: 'review-a', pull: { state: 'merged', number: 42, repo: 'demo/repo', title: 'Reviewed change', additions: 1, deletions: 0 } }];
           case 'Models': return {models:[], agent:{id:args[0]}};
@@ -99,6 +127,7 @@ async function run(engine, name, language) {
     assert.match(await button.textContent(), /2/);
     assert.equal((await menuCalls()).at(-1)[1],false);
     assert.equal(await dialog.locator('code[title]').count(), 2);
+    assert.ok(await dialog.locator('code[title]').evaluateAll(nodes => nodes.every(el => el.textContent === el.title && /^[a-f0-9]{40}$/.test(el.textContent))));
     await dialog.locator('summary').click();
     assert.match(await dialog.innerText(), zh ? /锁定/ : /Git has locked/);
     assert.match(await dialog.innerText(), zh ? /临时工作树/ : /temporary checkout record/);
@@ -125,6 +154,24 @@ async function run(engine, name, language) {
     assert.match(await dialog.innerText(), /review-a/);
     await page.keyboard.press('Escape');
     await dialog.waitFor({ state: 'detached' });
+    const files = page.locator('#files');
+    const openFiles = dir => info.getByRole('button', {name:`Show the files of ${dir}`, exact:true}).click();
+    const file = rel => files.locator(`[data-path="${rel}"][role="treeitem"]`);
+    const editor = files.locator('.cm-content');
+    const editorText = () => editor.locator('.cm-line').allTextContents().then(lines => lines.join('\n'));
+    const fileOf = (dir, name = 'README') => file(`${dir}/${name}`);
+    if (!zh) {
+      await page.setViewportSize({width:1470,height:870});
+      await openFiles('locked'); await fileOf('locked').click();
+      await editor.fill('Keep this other draft');
+      await openFiles('gizmoth-artifact-rows'); await fileOf('gizmoth-artifact-rows').click();
+      await page.waitForFunction(() => document.querySelector('.cm-content')?.textContent.includes('Fixture'));
+      await page.evaluate(() => {
+        window.holdRead = 'gizmoth-artifact-rows/README';
+        events.files({yesman:'studio',paths:[holdRead]});
+      });
+      await page.waitForFunction(() => !!window.releaseRead);
+    }
     await giz.press('Shift+F10');
     await button.waitFor();
     await page.evaluate(() => { window.failInfo = true; });
@@ -136,6 +183,16 @@ async function run(engine, name, language) {
     const verify = () => page.evaluate(() => api('Verify'));
     assert.ok((await verify()).checkpoints.includes('gizmoth-artifact-rows'));
     if (await dialog.count()) await cancel.click();
+    if (!zh) {
+      assert.equal(await files.locator('.files-tab').count(),0);
+      await openFiles('review-a'); await fileOf('review-a').click();
+      await page.waitForFunction(() => document.querySelector('.cm-content')?.textContent.includes('Fixture'));
+      // Open the same file via All files as well. Both panes belong to A.
+      await files.locator('.files-crumb--scope').click();
+      await page.locator('.files-menu-item').filter({hasText:'All files'}).click();
+      await file('review-a').click(); await fileOf('review-a').click();
+      await page.waitForFunction(() => document.querySelector('.cm-content')?.textContent.includes('Fixture'));
+    }
     await headingButton.click({button:'right'});
     await button.waitFor();
     await page.evaluate(() => api('DirtyReview'));
@@ -151,9 +208,49 @@ async function run(engine, name, language) {
     await dialog.waitFor({state:'detached'});
     assert.ok(await focused(headingButton));
     await row('locked').click({button:'right'});
-    await dialog.getByText(zh ? /Git 锁定/ : /Git has locked/).waitFor();
+    await dialog.getByText(zh ? /Git 锁定/ : /unsaved edits/).waitFor();
     assert.equal(await button.isVisible(),false);
     await cancel.click();
+    if (!zh) {
+      assert.equal(await files.locator('.files-tab').count(),0);
+      const dir = 'gizmoth-artifact-rows';
+      const refreshTo = async id => {
+        await info.locator('.info-refresh').click();
+        await info.locator(`[data-info-entry="worktree:${dir}:${id}"]`).waitFor();
+      };
+      const first = await page.evaluate(() => api('Recreate'));
+      await refreshTo(first.cleanupId); await openFiles(dir);
+      assert.equal(await files.locator('.files-tab').count(),0);
+      await fileOf(dir,'replacement.txt').click();
+      await page.waitForFunction(() => document.querySelector('.cm-content')?.textContent.includes('New checkout'));
+      await page.evaluate(() => releaseRead());
+      await page.waitForFunction(() => window.lateReadReturned);
+      assert.equal(await editorText(),'New checkout\n');
+      await editor.fill('Old pending save');
+      await page.evaluate(() => { window.holdSave = 'gizmoth-artifact-rows/replacement.txt'; });
+      await editor.press('Meta+s'); await page.waitForFunction(() => !!window.releaseSave);
+      await editor.press('Meta+s');
+      await page.evaluate(() => { window.holdState = true; events.changed(); });
+      await page.waitForFunction(() => !!window.releaseState);
+      const next = await page.evaluate(() => api('ReplaceAgain'));
+      assert.notEqual(first.cleanupId,next.cleanupId); assert.equal(first.head,next.head);
+      await refreshTo(next.cleanupId); await openFiles(dir);
+      assert.equal(await files.locator('.files-tab').count(),0);
+      await fileOf(dir,'replacement.txt').click();
+      await page.waitForFunction(() => document.querySelector('.cm-content')?.textContent.includes('New checkout'));
+      await page.evaluate(() => releaseSave()); await page.waitForFunction(() => !!window.saveRefusal);
+      const disk = await page.evaluate(() => api('ReadFile','studio','gizmoth-artifact-rows/replacement.txt'));
+      assert.equal(disk.text,'New checkout\n');
+      assert.equal((await page.evaluate(() => calls.filter(([m]) => m === 'WriteWorktreeFile'))).length,1);
+      if (output) await files.screenshot({path:join(output,`replacement-${name}.png`)});
+      await editor.fill('Saved by the replacement');
+      await page.evaluate(() => releaseState()); await page.waitForFunction(() => window.lateStateReturned);
+      assert.equal(await editorText(), 'Saved by the replacement');
+      await editor.press('Meta+s');
+      await page.waitForFunction(async () => (await api('ReadFile','studio','gizmoth-artifact-rows/replacement.txt')).text === 'Saved by the replacement');
+      await openFiles('locked'); assert.equal(await editorText(),'Keep this other draft');
+      console.log(`${name} Files kept the unrelated draft, retired both worktree and All files tabs, ignored a late read and refused a delayed save across checkout replacement`);
+    }
     assert.deepEqual(errors,[]);
     console.log(`${name} ${language} passed native-menu dispatch, Cancel, Escape, opener focus, single removal without PR, double execution guard, partial batch, list and Git recovery refs`);
   } catch (err) {

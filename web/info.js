@@ -22,7 +22,7 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   yesman()               the yesman whose agent is shown, or null
 //   isOpen()               whether the panel shows
 //   files()                what the files pane shows (files.shown())
-//   openKnowledge(), openTaskLog(), openWorktree(dir, show), checkout(y)
+//   openKnowledge(), openTaskLog(), openWorktree(worktree, show), checkout(y)
 //   openTasks(), tasksOpen(), tasksSummary(y)   the Tasks pane and its summary
 //   needsYou(y)            what waits on the user from y: { count, error,
 //                          refused, open (the Needs you pane shows) }
@@ -50,7 +50,13 @@ export function createInfo(host) {
     d.busy[part] = true;
     if (part !== 'info') render();
     try {
-      if (part === 'info') d.info = await host.call('Info', name);
+      if (part === 'info') {
+        d.info = await host.call('Info', name);
+        const y = host.yesman();
+        if (data.get(name) === d && y?.name === name && y.hiredAt === d.hire && Array.isArray(d.info.worktrees)) {
+          host.reconcile?.(y, d.info.worktrees, !d.info.worktreesError);
+        }
+      }
       else if (part === 'pulls') d.pulls = Object.fromEntries((await host.call('Pulls', name, refresh)).map((p) => [p.dir, p]));
       else d.usage = await host.call('Usage', name, refresh);
       d.error[part] = null;
@@ -257,14 +263,14 @@ export function createInfo(host) {
 
   const menu = createWorktreeMenu({ ...host, updated(y, removed) {
     const d = data.get(y.name);
-    if (!d || d.hire !== y.hiredAt) return;
+    if (!d || d.hire !== y.hiredAt) { host.removed(y, removed); return; }
     const keep = w => !removed.some(r => r.dir === w.dir && r.cleanupId === w.cleanupId);
     if (d.info) d.info.worktrees = d.info.worktrees.filter(keep);
     const live = host.yesman();
     if (live?.name === y.name && live.hiredAt === y.hiredAt) {
       live.worktrees = (live.worktrees ?? []).filter(keep);
-      host.removed(y, removed);
     }
+    host.removed(y, removed);
     // Reads already in flight still own d. They cannot publish a pre-removal
     // list into the new state, even when rereading the current list fails.
     data.set(y.name, { ...d, at: {}, busy: {}, error: {} });
@@ -324,10 +330,10 @@ export function createInfo(host) {
     const pull = d.pulls?.[w.dir]?.pull;
     const shown = host.files();
     const current = shown?.yesman === y.name && shown.kind === 'worktree' && shown.dir === w.dir;
-    const open = () => host.openWorktree(w.dir, 'changes');
+    const open = () => host.openWorktree(w, 'changes');
     const row = { class: 'info-row', 'data-current': current ? 'true' : null, oncontextmenu: e => menu(e, y, w) };
     const main = { class: 'info-row-main', type: 'button', 'data-info-entry': worktreeEntry(w), 'aria-haspopup': 'menu', onclick: open };
-    const filesButton = h('button', { class: 'mds-icon-button mds-icon-button--compact info-row-action', type: 'button', title: t('Show its files'), 'aria-label': t('Show the files of {name}', { name: w.dir }), onclick: () => host.openWorktree(w.dir, 'files') }, icon('folder'));
+    const filesButton = h('button', { class: 'mds-icon-button mds-icon-button--compact info-row-action', type: 'button', title: t('Show its files'), 'aria-label': t('Show the files of {name}', { name: w.dir }), onclick: () => host.openWorktree(w, 'files') }, icon('folder'));
     if (pull) {
       const checks = pull.checks;
       const tone = pull.state === 'merged' ? 'merged' : pull.state === 'closed' ? 'closed' : pull.draft ? 'draft' : 'open';

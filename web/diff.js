@@ -85,10 +85,10 @@ function linesHTML(lines, from, to) {
 //   render()          draws the pane again
 //   openFile(rel)     opens a file of the workspace in the worktree's files
 export function createChanges(host) {
-  const states = new Map(); // yesman + worktree dir -> its changes
+  const states = new Map(); // Files pane key, including hire and checkout
 
   function stateOf(p) {
-    const key = `${p.name}\u0001${p.scope.dir}`;
+    const key = p.key;
     let s = states.get(key);
     if (!s) {
       s = {
@@ -682,6 +682,13 @@ export function createChanges(host) {
 
   return {
     ensure, invalidate, tree, view, actions, onFiles, cached, list,
+    forget(p) {
+      const s = states.get(p.key);
+      if (s) s.seq++;
+      clearTimeout(timers.get(p.key));
+      timers.delete(p.key);
+      states.delete(p.key);
+    },
     // What shows: the file whose diff shows, else the folder whose files
     // show, as path; '' or null for the top or the summary.
     shown: (p) => {
