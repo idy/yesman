@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -53,11 +54,11 @@ func (p *Pool) CheckTemporaryWorktree(ctx context.Context, workspace string, exp
 	l := p.lock(r.Name)
 	l.Lock()
 	defer l.Unlock()
-	_, err = p.checkTemporaryWorktree(ctx, r, workspace, expected)
+	_, err = p.checkTemporaryWorktree(ctx, r, workspace, expected, nil)
 	return err
 }
 
-func (p *Pool) checkTemporaryWorktree(ctx context.Context, r Repo, workspace string, expected Worktree) (string, error) {
+func (p *Pool) checkTemporaryWorktree(ctx context.Context, r Repo, workspace string, expected Worktree, pinned privateHistory) (string, error) {
 	path := filepath.Join(workspace, expected.Dir)
 	if filepath.Base(expected.Dir) != expected.Dir || expected.Dir == "." || realPath(path) != filepath.Join(realPath(workspace), expected.Dir) {
 		return "", fmt.Errorf("retain %s: not a direct worktree of this workspace", expected.Dir)
@@ -70,8 +71,12 @@ func (p *Pool) checkTemporaryWorktree(ctx context.Context, r Repo, workspace str
 	}
 	// Inspect this registration's inputs through verified handles before Git
 	// reads them. Unexpected private state must survive the entire operation.
-	if _, err := readPrivateHistory(r, path, expected); err != nil {
+	history, _, err := inspectWorktreeHistory(ctx, r, path, expected)
+	if err != nil {
 		return "", fmt.Errorf("retain %s: %w", expected.Dir, err)
+	}
+	if pinned != nil && !maps.Equal(history, pinned) {
+		return "", fmt.Errorf("retain %s: private Git history changed during recovery", expected.Dir)
 	}
 	wts, err := p.worktrees(ctx, r)
 	if err != nil {
@@ -144,7 +149,7 @@ func (p *Pool) removeTemporary(ctx context.Context, workspace string, expected W
 		return fmt.Errorf("checkout is in use")
 	}
 	defer tl.Unlock()
-	path, err := p.checkTemporaryWorktree(ctx, r, workspace, expected)
+	path, err := p.checkTemporaryWorktree(ctx, r, workspace, expected, nil)
 	if err != nil {
 		return err
 	}
@@ -153,6 +158,26 @@ func (p *Pool) removeTemporary(ctx context.Context, workspace string, expected W
 			return err
 		}
 	}
+	if err := checkWorktreeFiles(ctx, path, expected.Dir); err != nil {
+		return err
+	}
+	pinned, err := preserveWorktreeHistory(ctx, r, path, expected)
+	if err != nil {
+		return fmt.Errorf("retain %s: %w", expected.Dir, err)
+	}
+	if err := checkWorktreeFiles(ctx, path, expected.Dir); err != nil {
+		return err
+	}
+	// Verify the unchanged instance, pinned history and current index under
+	// the physical checkout lease, after the recovery writes and before Git.
+	if _, err := p.checkTemporaryWorktree(ctx, r, workspace, expected, pinned); err != nil {
+		return err
+	}
+	_, err = git(ctx, r.Path, "worktree", "remove", path)
+	return err
+}
+
+func checkWorktreeFiles(ctx context.Context, path, dir string) error {
 	// git worktree remove alone does not protect ignored files. Include every
 	// unknown path and disable status configuration that hides untracked files.
 	status, err := git(ctx, path, "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "status", "--porcelain=v1", "--untracked-files=all", "--ignored", "--ignore-submodules=none")
@@ -160,7 +185,7 @@ func (p *Pool) removeTemporary(ctx context.Context, workspace string, expected W
 		return err
 	}
 	if status != "" {
-		return fmt.Errorf("retain %s: uncommitted, untracked or ignored files", expected.Dir)
+		return fmt.Errorf("retain %s: uncommitted, untracked or ignored files", dir)
 	}
 	// Index flags can hide tracked edits from status and worktree remove.
 	entries, err := git(ctx, path, "ls-files", "-v", "-z")
@@ -169,19 +194,8 @@ func (p *Pool) removeTemporary(ctx context.Context, workspace string, expected W
 	}
 	for _, entry := range strings.Split(entries, "\x00") {
 		if entry != "" && !strings.HasPrefix(entry, "H ") {
-			return fmt.Errorf("retain %s: index flags may hide local work", expected.Dir)
+			return fmt.Errorf("retain %s: index flags may hide local work", dir)
 		}
 	}
-	// Preserve the current source, private history and recovery metadata as
-	// one ref transaction before deleting this registration.
-	if err := preserveWorktreeHistory(ctx, r, path, expected); err != nil {
-		return fmt.Errorf("retain %s: %w", expected.Dir, err)
-	}
-	// Re-read the actual private Git marker and source immediately before
-	// deleting, under the same lock used by every pool checkout/removal path.
-	if _, err := p.checkTemporaryWorktree(ctx, r, workspace, expected); err != nil {
-		return err
-	}
-	_, err = git(ctx, r.Path, "worktree", "remove", path)
-	return err
+	return nil
 }

@@ -649,7 +649,9 @@ func (s *Store) RemoveWorkerIf(name, worker string, since time.Time) error {
 		bound := false
 		for j := range b.Tasks {
 			if t := &b.Tasks[j]; t.Owner == worker && t.OwnerSince.IsZero() {
+				previous := *t
 				t.OwnerSince, bound = ws[i].StartedAt, true
+				t.recordWorktreeGeneration(previous)
 			}
 		}
 		if bound {

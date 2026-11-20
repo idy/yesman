@@ -1,6 +1,7 @@
 package yesmen
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -49,6 +50,10 @@ type Task struct {
 	// done before yesman recorded this have neither.
 	DoneAt    time.Time `json:"doneAt,omitzero"`
 	DoneOwner string    `json:"doneOwner,omitempty"`
+	// WorktreeGeneration identifies the current task state for cleanup decisions.
+	// A status, ownership or pause transition starts a new generation, including
+	// another close as dropped. A note edit keeps it. Older tasks start empty.
+	WorktreeGeneration string `json:"worktreeGeneration,omitempty"`
 	// Delivered marks this task as the final step of a confirmed delivery.
 	// It survives a status edit or restart so that delivery cannot replay.
 	Delivered bool `json:"delivered,omitempty"`
@@ -285,10 +290,12 @@ func (s *Store) changeBoard(name string, c BoardChange, lead bool, scope *Yesman
 				continue
 			}
 			t := &b.Tasks[i]
+			previous := *t
 			t.OwnerSince = time.Time{}
 			if j := slices.IndexFunc(ws, func(w Worker) bool { return w.Name == t.Owner }); j >= 0 && t.Owner != "" {
 				t.OwnerSince = ws[j].StartedAt
 			}
+			t.recordWorktreeGeneration(previous)
 		}
 		b.ownerSet = nil
 	}
@@ -476,6 +483,7 @@ func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task
 			t.Returns = nil
 		}
 		now := time.Now().UTC()
+		t.recordWorktreeGeneration(b.Tasks[i])
 		markDone(&t, b.Tasks[i].Status == TaskDone, now)
 		t.UpdatedAt = now
 		b.Tasks[i] = t
@@ -532,6 +540,7 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 			return fmt.Errorf("task %s: %w", t.ID, err)
 		}
 		t.UpdatedAt = now
+		t.recordWorktreeGeneration(work.Tasks[i])
 		markDone(&t, wasDone, now)
 		if t.Status != TaskDone || oldOwner != t.Owner {
 			t.Returns = nil
@@ -564,6 +573,7 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 		if err := edit(&t, e); err != nil {
 			return fmt.Errorf("new task %q: %w", *e.Title, err)
 		}
+		t.recordWorktreeGeneration(Task{})
 		markDone(&t, false, now)
 		owned(e, t.ID)
 		work.Tasks = append(work.Tasks, t)
@@ -594,6 +604,15 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 	}
 	*b = work
 	return nil
+}
+
+// Keep the generation in the same Board write as the transition. Checking
+// each edit also distinguishes a reopen and close within one atomic batch.
+func (t *Task) recordWorktreeGeneration(previous Task) {
+	t.WorktreeGeneration = previous.WorktreeGeneration
+	if t.Status != previous.Status || t.Owner != previous.Owner || !t.OwnerSince.Equal(previous.OwnerSince) || t.Paused() != previous.Paused() {
+		t.WorktreeGeneration = rand.Text()
+	}
 }
 
 // markDone records when a task became done and who owned it then, and

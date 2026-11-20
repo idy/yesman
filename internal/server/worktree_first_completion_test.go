@@ -12,7 +12,7 @@ import (
 )
 
 func TestFirstManualCompletionUsesCurrentTaskDecision(t *testing.T) {
-	for _, mode := range []string{"keep", "keep-handoff", "reopen-keep", "already-kept", "note-only", "handoff-then-reopen"} {
+	for _, mode := range []string{"keep", "keep-handoff", "reopen-keep", "already-kept", "note-only", "handoff-then-reopen", "dropped-reopen", "dropped-reopen-handoff", "dropped-note-only"} {
 		t.Run(mode, func(t *testing.T) {
 			x, wt, result := returnFixture(t, "author", "")
 			submitReturn(t, x, result)
@@ -34,6 +34,9 @@ func TestFirstManualCompletionUsesCurrentTaskDecision(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if strings.HasPrefix(mode, "dropped-") {
+				post(map[string]any{"status": "dropped"})
+			}
 			if mode == "already-kept" {
 				post(map[string]any{"worktrees": []any{}})
 			}
@@ -42,8 +45,11 @@ func TestFirstManualCompletionUsesCurrentTaskDecision(t *testing.T) {
 				switch mode {
 				case "already-kept":
 					t.Fatal("remote check for a checkout the Board keeps")
-				case "note-only":
+				case "note-only", "dropped-note-only":
 					post(map[string]any{"note": "Moved the external evidence pointer"})
+				case "dropped-reopen", "dropped-reopen-handoff":
+					post(map[string]any{"status": "doing"})
+					post(map[string]any{"status": "dropped"})
 				case "reopen-keep":
 					post(map[string]any{"status": "doing"})
 					post(map[string]any{"status": "done", "worktrees": []any{}})
@@ -62,6 +68,10 @@ func TestFirstManualCompletionUsesCurrentTaskDecision(t *testing.T) {
 			case "note-only":
 				if !out.Removed || rec.BoardRound.IsZero() || rec.Completion.ReturnID == "" {
 					t.Fatalf("current return did not remove: %+v", out)
+				}
+			case "dropped-note-only":
+				if !out.Removed || rec.Completion == nil {
+					t.Fatalf("a note edit prevented a current dropped-task completion: %+v", out)
 				}
 			case "handoff-then-reopen":
 				if out.Removed || rec.BoardRound.IsZero() || rec.CleanupOwner != request.Handoff {

@@ -35,13 +35,13 @@ func TestWorktreePrivateHistorySurvivesGC(t *testing.T) {
 	}
 	orig := run(t, wt.Path, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit-tree", wt.Head+"^{tree}", "-m", "only in ORIG_HEAD")
 	run(t, wt.Path, "update-ref", "ORIG_HEAD", orig)
-	before, err := readPrivateHistory(repo, wt.Path, wt)
+	before, err := readPrivateHistory(t.Context(), repo, wt.Path, wt)
 	if err != nil || !strings.HasPrefix(before["logs/HEAD"], old+" ") {
 		t.Fatal("unexpected private history", err)
 	}
 	// Recover across an interrupted removal. A retry must verify existing
 	// pins and leave each earlier snapshot intact.
-	if err := preserveWorktreeHistory(t.Context(), repo, wt.Path, wt); err != nil {
+	if _, err := preserveWorktreeHistory(t.Context(), repo, wt.Path, wt); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.RemoveTemporaryWorktree(t.Context(), workspace, wt); err != nil {
@@ -64,6 +64,28 @@ func TestWorktreePrivateHistorySurvivesGC(t *testing.T) {
 		data, err := gitBytes(t.Context(), repo.Path, "cat-file", "blob", ref)
 		if err != nil || !bytes.Equal(data, []byte(raw)) {
 			t.Fatalf("%s metadata recovery failed: %v", name, err)
+		}
+	}
+}
+
+func TestWorktreeReflogRequiresCompleteRecords(t *testing.T) {
+	head, prior := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	prefix := prior + " " + head + " "
+	identity := "A. Contributor <a@example.invalid> 1795204800 +0530"
+	for _, name := range []string{"logs/HEAD", "logs/ORIG_HEAD"} {
+		for _, tail := range []string{"", "missing identity\n", "name <mail>\n", "name <mail> 100\n", "name <mail> 100 +05\n", identity, identity + "\tpartial message", identity + "\x00\n"} {
+			if _, err := (privateHistory{name: prefix + tail}).targets(head); err == nil {
+				t.Errorf("%s accepted an incomplete record ending in %q", name, tail)
+			}
+		}
+		for _, tail := range []string{identity + "\n", identity + "\t\n", identity + "\trecord with a tab\tand spaces\n", "作者 <a@example.invalid> 0 -0400\n"} {
+			ids, err := (privateHistory{name: prefix + tail}).targets(head)
+			if err != nil || ids[prior] != "commit" || ids[head] != "commit" {
+				t.Errorf("%s valid record: %v %v", name, ids, err)
+			}
+		}
+		if _, err := (privateHistory{name: ""}).targets(head); err != nil {
+			t.Fatalf("empty reflog after expiration: %v", err)
 		}
 	}
 }

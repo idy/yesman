@@ -30,6 +30,7 @@ type removalVerification struct {
 // The zero value describes a task with no recorded disposition.
 type WorktreeTaskDecision struct {
 	status, owner, doneOwner   string
+	generation                 string
 	created, ownerSince, round time.Time
 	paused, explicit           bool
 	returned                   yesmen.WorktreeCompletion
@@ -44,7 +45,7 @@ func WorktreeDecisionFor(b yesmen.Board, rec yesmen.WorktreeRecord) WorktreeTask
 		if task.ID != rec.Task {
 			continue
 		}
-		d := WorktreeTaskDecision{status: task.Status, owner: task.Owner, doneOwner: task.DoneOwner,
+		d := WorktreeTaskDecision{status: task.Status, owner: task.Owner, doneOwner: task.DoneOwner, generation: task.WorktreeGeneration,
 			created: task.CreatedAt, ownerSince: task.OwnerSince, round: task.DoneAt,
 			paused: task.Paused(), explicit: task.Returns != nil}
 		for _, ret := range task.Returns {

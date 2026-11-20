@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -22,6 +22,10 @@ const (
 	maxHistoryFile    = 1 << 20
 	maxHistoryObjects = 256
 )
+
+// Git can omit the tab and message, but the identity, timestamp and offset
+// are always present. A reflog can begin after expiration or a logging gap.
+var reflogIdentity = regexp.MustCompile(`^[^<>\x00\r\n]*<[^<>\x00\r\n]*> [0-9]+ [+-][0-9]{4}(\t[^\n]*)?$`)
 
 type privateHistory map[string]string // exact bytes of the recoverable private files
 
@@ -37,7 +41,7 @@ func privateNames(d *safefs.Dir) ([]string, error) {
 	return names, nil
 }
 
-func readPrivateHistory(repo Repo, path string, wt Worktree) (privateHistory, error) {
+func readPrivateHistory(ctx context.Context, repo Repo, path string, wt Worktree) (privateHistory, error) {
 	d, dir, err := openPrivate(repo.Path, path)
 	if err != nil {
 		return nil, err
@@ -58,8 +62,14 @@ func readPrivateHistory(repo Repo, path string, wt Worktree) (privateHistory, er
 	if realPath(shared) != realPath(repo.Path) {
 		return nil, errors.New("private Git directory points to another repository")
 	}
+	if err := checkIndexFile(d, len(wt.Head)); err != nil {
+		return nil, err
+	}
 	history := privateHistory{}
 	if err := history.read(d, ""); err != nil {
+		return nil, err
+	}
+	if err := checkIndexRecovery(ctx, path, dir); err != nil {
 		return nil, err
 	}
 	return history, nil
@@ -90,15 +100,7 @@ func (h privateHistory) read(d *safefs.Dir, prefix string) error {
 				return err
 			}
 		case "index":
-			f, err := d.OpenFile(name, os.O_RDONLY, 0)
-			if err != nil {
-				return err
-			}
-			info, err := f.Stat()
-			f.Close()
-			if err != nil || !info.Mode().IsRegular() {
-				return fmt.Errorf("irregular private Git file %s", file)
-			}
+			// checkIndexFile verified this entry through the private directory.
 		case "logs/HEAD", "logs/ORIG_HEAD", "ORIG_HEAD", "FETCH_HEAD", "COMMIT_EDITMSG":
 			data, err := safefs.ReadSmall(d, name, maxHistoryFile)
 			if err != nil {
@@ -148,19 +150,21 @@ func (h privateHistory) targets(head string) (map[string]string, error) {
 				return nil, err
 			}
 		case "logs/HEAD", "logs/ORIG_HEAD", "FETCH_HEAD":
-			for line := range strings.SplitSeq(strings.TrimSuffix(raw, "\n"), "\n") {
-				if raw == "" {
-					break
+			for raw != "" {
+				line, rest, complete := strings.Cut(raw, "\n")
+				if !complete || strings.IndexByte(line, 0) >= 0 {
+					return nil, fmt.Errorf("incomplete private Git record in %s", file)
 				}
+				raw = rest
 				if strings.HasPrefix(file, "logs/") {
-					old, rest, ok := strings.Cut(line, " ")
-					current, _, ok2 := strings.Cut(rest, " ")
-					if !ok || !ok2 || add(old, file) != nil || add(current, file) != nil {
-						return nil, errors.New("invalid or oversized private HEAD reflog")
+					old, rest, _ := strings.Cut(line, " ")
+					current, tail, _ := strings.Cut(rest, " ")
+					if !reflogIdentity.MatchString(strings.TrimSuffix(tail, "\r")) || add(old, file) != nil || add(current, file) != nil {
+						return nil, fmt.Errorf("invalid or oversized private reflog in %s", file)
 					}
 				} else {
-					oid, _, ok := strings.Cut(line, "\t")
-					if !ok || add(oid, file) != nil {
+					oid, tail, ok := strings.Cut(line, "\t")
+					if !ok || !strings.Contains(tail, "\t") || add(oid, file) != nil {
 						return nil, errors.New("invalid or oversized private FETCH_HEAD")
 					}
 				}
@@ -170,21 +174,35 @@ func (h privateHistory) targets(head string) (map[string]string, error) {
 	return oids, nil
 }
 
-// preserveWorktreeHistory is shared by all managed removal paths. Call it
-// under the exclusive checkout lease after source and content checks. Create
-// or verify the complete set of immutable recovery refs before Git removes
-// the private registration. A retry can use pins left by an interrupted run.
-func preserveWorktreeHistory(ctx context.Context, repo Repo, path string, wt Worktree) error {
-	if !cleanupIDRE.MatchString(wt.CleanupID) {
-		return errors.New("invalid checkout ID")
-	}
-	h, err := readPrivateHistory(repo, path, wt)
+// inspectWorktreeHistory is the read-only history admission for a preview
+// and for the final removal under the physical checkout lease.
+func inspectWorktreeHistory(ctx context.Context, repo Repo, path string, wt Worktree) (privateHistory, map[string]string, error) {
+	h, err := readPrivateHistory(ctx, repo, path, wt)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	oids, err := h.targets(wt.Head)
 	if err != nil {
-		return err
+		return nil, nil, err
+	}
+	if err := verifyWorktreeObjects(ctx, repo, oids); err != nil {
+		return nil, nil, err
+	}
+	return h, oids, nil
+}
+
+// preserveWorktreeHistory is shared by all managed removal paths. Call it
+// under the exclusive checkout lease after source and content checks. Create
+// or verify the complete set of immutable recovery refs before Git removes
+// the private registration. Return the exact files those refs preserve for
+// comparison at final admission. A retry can verify existing recovery refs.
+func preserveWorktreeHistory(ctx context.Context, repo Repo, path string, wt Worktree) (privateHistory, error) {
+	if !cleanupIDRE.MatchString(wt.CleanupID) {
+		return nil, errors.New("invalid checkout ID")
+	}
+	h, oids, err := inspectWorktreeHistory(ctx, repo, path, wt)
+	if err != nil {
+		return nil, err
 	}
 	pins := map[string]string{"refs/yesman/worktrees/" + wt.CleanupID: wt.Head}
 	for oid := range oids {
@@ -195,31 +213,24 @@ func preserveWorktreeHistory(ctx context.Context, repo Repo, path string, wt Wor
 	for name, data := range h {
 		oid, err := historyGit(ctx, repo, data, "hash-object", "-w", "--stdin")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !historyOID(oid, len(wt.Head)) {
-			return errors.New("could not store private Git metadata")
+			return nil, errors.New("could not store private Git metadata")
 		}
 		if oids[oid] == "commit" {
-			return fmt.Errorf("private Git history names a metadata blob as a commit in %s", name)
+			return nil, fmt.Errorf("private Git history names a metadata blob as a commit in %s", name)
 		}
 		oids[oid] = "blob"
 		pins["refs/yesman/worktree-metadata/"+wt.CleanupID+"/"+name+"/"+oid] = oid
 	}
 	if err := verifyWorktreeObjects(ctx, repo, oids); err != nil {
-		return err
+		return nil, err
 	}
 	if err := pinWorktreeObjects(ctx, repo, wt, pins); err != nil {
-		return err
+		return nil, err
 	}
-	current, err := readPrivateHistory(repo, path, wt)
-	if err != nil {
-		return err
-	}
-	if !maps.Equal(h, current) {
-		return errors.New("private Git history changed during recovery")
-	}
-	return nil
+	return h, nil
 }
 
 // Input is a bounded metadata file or a list of validated object/ref names.

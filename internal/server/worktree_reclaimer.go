@@ -233,9 +233,10 @@ func (r *WorktreeReclaimer) scan(y yesmen.Yesman) error {
 var checkoutID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 type checkoutCandidate struct {
-	record    yesmen.WorktreeRecord
-	round     time.Time
-	fromBoard bool
+	record         yesmen.WorktreeRecord
+	round          time.Time
+	taskGeneration string
+	fromBoard      bool
 }
 
 // All authority comes from one exact registered instance and either an
@@ -268,7 +269,7 @@ func candidate(y yesmen.Yesman, records []yesmen.WorktreeRecord, b yesmen.Board,
 	if completionProblem(rec, *rec.Completion) != "" || rec.Purpose == "release" && strings.TrimSpace(rec.Completion.Publication) == "" {
 		return none, false
 	}
-	return checkoutCandidate{record: rec, round: t.DoneAt, fromBoard: t.Returns != nil}, true
+	return checkoutCandidate{record: rec, round: t.DoneAt, taskGeneration: t.WorktreeGeneration, fromBoard: t.Returns != nil}, true
 }
 
 type reclaimWait int
