@@ -1473,5 +1473,20 @@ export function createFiles(host) {
     return t('The workspace is empty. Agents check repositories out into it.');
   }
 
-  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, shown, onChange, onKey, focusFind, toggleTree, current: () => !!current() };
+  function unsavedWorktrees(y) {
+    const dirs = new Set();
+    for (const p of panesOf(y.name)) {
+      for (const tab of p.tabs) if (tab.dirty) dirs.add(tab.path.split('/')[0]);
+    }
+    return [...dirs];
+  }
+
+  function removedWorktrees(y, rows) {
+    if (scopeOf(y).kind === 'worktree' && rows.some(w => w.dir === scopeOf(y).dir)) {
+      scopes.delete(workspaceKey(y));
+      if (host.isOpen()) render();
+    }
+  }
+
+  return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, unsavedWorktrees, removedWorktrees, shown, onChange, onKey, focusFind, toggleTree, current: () => !!current() };
 }

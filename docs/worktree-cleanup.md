@@ -4,6 +4,16 @@ Agent runs finish independently of PRs and releases. A completed review round ca
 
 `BuildContext` supplies this policy to both roles before every run. Workers save their conclusion and reclaim their own temporary resources before reporting. The lead checks missed completion evidence and delegates one batch cleanup task. Stopped/failed processes, `FinishedAt`, restart, detached status and directory names do not establish review completion. Unfinished reviews resume first.
 
+## Cleanup from the Worktrees panel
+
+Open the context menu on **Worktrees** in the Info panel and choose **Clean up worktrees…**. The preview lists the local directories eligible for removal. Expand **Keep** to see why other directories will stay. Bulk cleanup uses saved completion evidence and verifies the merged pull request again for an author or release branch.
+
+Open the context menu on a directory or pull-request row and choose **Remove Worktree…** to review just that checkout. This also works for a clean, unused checkout of a completed or dropped task whose branch was never published. The dialog shows its full directory and current commit. Close programs using the directory before confirming. Escape or Cancel keeps it. The menu key or Shift+F10 opens either context menu from the keyboard.
+
+Each confirmation checks the workspace hire, original checkout and directory identity, current commit, board and owners again. The Files pane keeps directories with unsaved edits. Tracked changes, untracked or ignored files, hidden index flags, unknown directory entries, locks, submodules, protected branches and unfinished or paused tasks keep a checkout in place. Historical registrations with matching private markers and both Git links can be verified even if they predate the recorded directory inode. A missing registration or ambiguous link stays available for inspection.
+
+Git saves the source in `refs/yesman/worktrees/<cleanupId>` before removing the directory. Local branches, tags, the shared repository and lifecycle records stay available. Commits that would lose their last lasting reference with the checkout’s private HEAD reflog get references under `refs/yesman/worktree-history/<cleanupId>/`. Use the recorded repository and full commit to check out that revision again. The desktop records a user removal separately from the task’s completion. Each directory in a batch has its own result.
+
 ## Management tools
 
 Create temporary work with an explicit `dir`, `purpose` (`review`, `author`, `release`) and an open board `task` owned by the caller. A review also needs `ref` and must be read-only/detached. `purpose: primary`, omitted/unknown lifecycle purposes, UI/user checkouts and legacy trees without lifecycle records stay protected.

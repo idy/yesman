@@ -1050,6 +1050,21 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 
 .dialog-hint { margin: 6px 0 12px; color: var(--mds-muted); font-size: var(--mds-text-note); line-height: 1.6; }
 /* Keep the shadow close to the dialog: broad fades band against the dimmed canvas. */
+.worktree-heading { padding: 2px 4px; margin-left: -4px; color: inherit; background: none; font: inherit; border: 0; border-radius: var(--mds-radius-sm); }
+.worktree-heading:hover { background: var(--mds-hover); }
+.worktree-heading:focus-visible { outline: 2px solid var(--mds-accent-ink); }
+.mds-dialog.worktree-cleanup { width: min(540px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); box-sizing: border-box; }
+.mds-dialog.worktree-cleanup[open] { display: flex; flex-direction: column; }
+.cleanup-listing { min-height: 0; overflow-y: auto; overflow-wrap: anywhere; }
+.cleanup-rows { list-style: none; margin: 0; padding: 0; }
+.cleanup-rows li { padding: 9px 0; border-top: 1px solid var(--mds-line); }
+.cleanup-path { font-size: var(--mds-text-note); color: var(--mds-ink); user-select: text; }
+.cleanup-parent { color: var(--mds-ink-secondary); }
+.cleanup-source, .cleanup-reason { margin-top: 4px; color: var(--mds-muted); font-size: var(--mds-text-caption); line-height: 1.5; user-select: text; }
+.cleanup-source, .cleanup-source code { font-family: var(--mds-mono); }
+.cleanup-kept summary { padding: 8px 0; color: var(--mds-muted); font-size: var(--mds-text-note); cursor: pointer; }
+.worktree-cleanup .mds-dialog-actions { flex-shrink: 0; }
+.worktree-cleanup [hidden] { display: none; }
 .mds-dialog { box-shadow: 0 8px 24px var(--mds-dialog-shadow); }
 .mds-dialog h2 { margin: 0; }
 .mds-dialog .field { margin-top: 4px; }

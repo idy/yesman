@@ -4180,6 +4180,9 @@ const info = createInfo({
     return a ? yesmanOf(a.id) : null;
   },
   isOpen: () => infoShown(),
+  toast,
+  unsaved: y => files.unsavedWorktrees(y),
+  removed: (y, rows) => files.removedWorktrees(y, rows),
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
@@ -4733,7 +4736,9 @@ async function refreshState() {
     return;
   }
   const sidebarFocus = $('#yesmen').contains(document.activeElement) ? document.activeElement : null;
+  const worktreeFocus = document.activeElement?.closest('#yesman-info [data-info-entry^="worktree"]')?.dataset.infoEntry;
   render();
+  if (worktreeFocus) ($(`#yesman-info [data-info-entry="${CSS.escape(worktreeFocus)}"]`) || $('#yesman-info .worktree-heading'))?.focus({ preventScroll: true });
   palette.refresh();
   // The rebuilt composer can take initial focus during a full state refresh.
   // Preserve the sidebar's stable agent + semantic entry after that rebuild.
