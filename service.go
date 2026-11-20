@@ -143,6 +143,15 @@ func (s *service) Dismiss(name string) (string, error) {
 	var archivedSince time.Time
 	dest, err := a.yesmen.Archive(name, func(y yesmen.Yesman) error {
 		archivedSince = y.HiredAt
+		records, err := a.yesmen.WorktreeRecords(name)
+		if err != nil {
+			return err
+		}
+		for _, r := range records {
+			if r.Archive != nil && (r.Archive.Phase == "archiving" || r.Archive.Phase == "restoring") {
+				return errors.New("finish the pending worktree move before dismissing this workspace")
+			}
+		}
 		// No scheduled run starts for it from now; one on its way finds the
 		// workspace gone and writes nothing into the archive.
 		if a.schedules != nil {
@@ -151,7 +160,6 @@ func (s *service) Dismiss(name string) (string, error) {
 		if err := a.agents.StopYesmanContext(ctx, name); err != nil {
 			return err
 		}
-		var err error
 		wts, err = a.pool.Worktrees(ctx, y.Path)
 		return err
 	})
@@ -242,13 +250,22 @@ func (s *service) Checkout(yesman string, req server.CheckoutRequest) (pool.Work
 	var wt pool.Worktree
 	err := s.app.yesmen.Use(yesman, func(y yesmen.Yesman) error {
 		var err error
-		wt, err = server.Checkout(ctx, s.app.pool, y, req)
+		wt, err = server.CheckoutForUser(ctx, s.app.pool, s.app.yesmen, y, req)
 		return err
 	})
 	if err == nil {
 		s.app.notifyChanged()
 	}
 	return wt, err
+}
+
+// MoveWorktree previews a single checkout, or applies the state the user confirmed.
+func (s *service) MoveWorktree(ctx context.Context, req server.WorktreeMove) (server.MovePreview, error) {
+	out, err := s.app.worktreeServer.WorktreeMove(ctx, req)
+	if req.Confirm != "" {
+		s.app.notifyChanged()
+	} // a pending intent is visible too
+	return out, err
 }
 
 // Schedules returns a yesman's scheduled tasks (Tasks) and their runs.

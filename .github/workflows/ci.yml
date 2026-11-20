@@ -95,6 +95,13 @@ jobs:
       - name: Build
         run: go build ./... && go build -tags e2e ./...
 
+      # Run the real link and junction fixtures first so their individual
+      # results remain available even if a later suite fails.
+      - name: Managed write and link refusal (verbose)
+        env:
+          YESMAN_REQUIRE_LINK_TESTS: "1"
+        run: go test -count=1 -v -run 'TestSafeFS|TestWorktreeRegistration|TestWorktreeInstance|TestManagedFiles|TestManagedWriteAndEdit|TestManagedEdit|TestManagedWorktree|TestWorktreeMoveGitPathThroughStorageAlias|TestWorktreeMoveRefusesOverlappingAliasRegistrations|TestWorktreeCancelPendingMoveAtSource' ./internal/safefs ./internal/pool ./internal/server
+
       # The race detector needs cgo, which Windows runners lack a setup for.
       - name: Test
         run: |
@@ -103,14 +110,6 @@ jobs:
           else
             go test -race ./...
           fi
-
-      # Each managed write/edit and link-refusal test, by name, with its own
-      # PASS or SKIP. Links must be creatable here: a test that cannot make
-      # its symbolic link or (Windows) junction fails instead of skipping.
-      - name: Managed write and link refusal (verbose)
-        env:
-          YESMAN_REQUIRE_LINK_TESTS: "1"
-        run: go test -count=1 -v -run 'TestSafeFS|TestWorktreeRegistration|TestWorktreeInstance|TestManagedFiles|TestManagedWriteAndEdit|TestManagedEdit|TestManagedWorktree' ./internal/safefs ./internal/pool ./internal/server
 
       - name: Check the published naming-pair downloader offline
         if: runner.os == 'Linux'

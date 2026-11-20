@@ -21,6 +21,7 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/idy/yesman/internal/tasklog"
+	"github.com/idy/yesman/internal/yesmen"
 )
 
 // filesEvent says which files of a yesman's workspace changed, while the
@@ -243,6 +244,16 @@ var errChanged = errors.New("the file changed on disk since it was opened")
 // something else, it is left alone and the error says it changed. An empty
 // base writes regardless, also to a file that is gone.
 func (s *service) WriteFile(yesman, file, text, base string) (FileView, error) {
+	var saved FileView
+	err := s.app.yesmen.Use(yesman, func(yesmen.Yesman) error {
+		var err error
+		saved, err = s.writeWorkspaceFile(yesman, file, text, base)
+		return err
+	})
+	return saved, err
+}
+
+func (s *service) writeWorkspaceFile(yesman, file, text, base string) (FileView, error) {
 	root, err := s.workspaceRoot(yesman)
 	if err != nil {
 		return FileView{}, err

@@ -107,6 +107,11 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 	if err != nil {
 		return pool.Worktree{}, err
 	}
+	for _, r := range records {
+		if strings.EqualFold(r.Dir, req.Dir) && r.ReservedForArchive() {
+			return pool.Worktree{}, errors.New("directory reserved for worktree restoration")
+		}
+	}
 	if i := latestWorktree(records, req.Dir); i >= 0 && !records[i].Removed {
 		if err := s.retireMissingWorktree(ctx, c, y, records, i); err != nil {
 			return pool.Worktree{}, err
@@ -141,6 +146,9 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 // registration, and never treats a missing unfinished task as completed.
 func (s *Server) retireMissingWorktree(ctx context.Context, c caller, y yesmen.Yesman, records []yesmen.WorktreeRecord, i int) error {
 	rec := &records[i]
+	if rec.ReservedForArchive() {
+		return errors.New("worktree directory reserved for archive or restoration")
+	}
 	if rec.Owner != c.agent.Name || !rec.OwnerSince.Equal(c.agent.Since) {
 		return errors.New("recorded checkout belongs to another owner; retain it")
 	}
@@ -200,6 +208,9 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	}
 	out := cleanupResult{Record: rec}
 	retain := func(reason string) (cleanupResult, error) { out.Reason = "retain: " + reason; return out, nil }
+	if rec.ReservedForArchive() {
+		return retain("original checkout has a user archive record; use Worktrees to finish or restore it")
+	}
 	owner := rec.Owner == c.agent.Name && rec.OwnerSince.Equal(c.agent.Since)
 	lead := c.agent.Role == agent.RoleLead
 	delegate := rec.CleanupOwner == c.agent.Name && rec.CleanupSince.Equal(c.agent.Since)

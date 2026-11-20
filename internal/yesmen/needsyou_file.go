@@ -179,6 +179,10 @@ func readRegular(root *os.Root, name string, limit int64, lock sync.Locker) ([]b
 
 // readRegularFile is readRegular, also returning the file read as opened.
 func readRegularFile(root *os.Root, name string, limit int64, lock sync.Locker) ([]byte, os.FileInfo, error) {
+	return readRegularLinks(root, name, limit, lock, false)
+}
+
+func readRegularLinks(root *os.Root, name string, limit int64, lock sync.Locker, singleLink bool) ([]byte, os.FileInfo, error) {
 	fi, err := root.Lstat(name)
 	if err != nil {
 		return nil, nil, err
@@ -207,6 +211,11 @@ func readRegularFile(root *os.Root, name string, limit int64, lock sync.Locker) 
 	}
 	if !opened.Mode().IsRegular() || !os.SameFile(fi, opened) {
 		return nil, nil, errors.New("it changed while it was opened")
+	}
+	if singleLink {
+		if n, err := linkCount(file, opened); err != nil || n != 1 {
+			return nil, nil, fmt.Errorf("%s must have one file link", name)
+		}
 	}
 	data, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {

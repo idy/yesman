@@ -188,6 +188,7 @@ func main() {
 		OnChange: a.agentsChanged,
 	})
 	srv.Agents = a.agents
+	a.worktreeServer = srv
 	// Scheduled tasks run while the app runs, in the tray too; one app per
 	// data directory runs them.
 	a.schedules = schedule.New(schedule.Config{

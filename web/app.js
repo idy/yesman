@@ -4174,6 +4174,8 @@ const files = createFiles({
 // the files pane.
 const info = createInfo({
   call,
+  confirm: confirmAction,
+  hasUnsavedWorktree: files.hasUnsavedWorktree,
   fail,
   yesman: () => {
     const a = selectedAgent();

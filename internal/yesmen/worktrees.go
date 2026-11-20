@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/idy/yesman/internal/pool"
 )
 
 // WorktreeRecord tracks agent-created temporary resources, independently of
@@ -31,6 +33,33 @@ type WorktreeRecord struct {
 	// without it (older ones, or a file system with no creation time) get
 	// no write/edit grant through the managed entry.
 	Root *WorktreeRoot `json:"root,omitempty"`
+	// Archive is the user's last move of this instance. Completion, owner,
+	// branch and HEAD above still describe the original lifecycle.
+	Archive *WorktreeArchive `json:"archive,omitempty"`
+}
+
+// WorktreeArchive journals one human-confirmed transition. Keep the last
+// transition after restoration so a previous confirmation cannot be replayed.
+// Its paths are evidence, never accepted as destinations from the client.
+type WorktreeArchive struct {
+	pool.LinkedLocation
+	Phase       string             `json:"phase"` // archiving, archived, restoring, restored
+	Transaction string             `json:"transaction"`
+	ConfirmedAt time.Time          `json:"confirmedAt"`
+	TaskOwner   string             `json:"taskOwner"`
+	Users       []WorktreeMoveUser `json:"users,omitempty"`
+	CanceledAt  time.Time          `json:"canceledAt,omitzero"`
+}
+
+// WorktreeMoveUser retains a worker generation verified at move admission.
+// Its name continues to be reserved against live activity during recovery.
+type WorktreeMoveUser struct {
+	Name  string    `json:"name"`
+	Since time.Time `json:"since"`
+}
+
+func (r WorktreeRecord) ReservedForArchive() bool {
+	return r.Archive != nil && r.Archive.Phase != "restored"
 }
 
 // WorktreeRoot is a checkout directory's inode number (file index on
@@ -61,14 +90,15 @@ type WorktreeCompletion struct {
 }
 
 func (s *Store) WorktreeRecords(name string) ([]WorktreeRecord, error) {
-	s.metaMu.Lock()
-	defer s.metaMu.Unlock()
-	y, err := s.get(name)
+	y, err := s.Get(name)
 	if err != nil {
 		return nil, err
 	}
 	var records []WorktreeRecord
-	err = readJSON(filepath.Join(y.MetaDir(), "worktrees.json"), &records)
+	err = s.WorktreeMoveFile(y, func(rows []WorktreeRecord, _ func(int, WorktreeArchive) error) error {
+		records = rows
+		return nil
+	})
 	if errors.Is(err, os.ErrNotExist) {
 		err = nil
 	}

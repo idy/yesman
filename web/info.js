@@ -253,6 +253,36 @@ export function createInfo(host) {
 
   // ---------- Worktrees ----------
 
+  const moving = new Set();
+  async function moveTree(y, dir, id, action) {
+    if (moving.has(id)) return;
+    moving.add(id);
+    render();
+    const current = () => shows(y.name) && host.yesman()?.hiredAt === y.hiredAt;
+    const checkEditor = () => {
+      if (host.hasUnsavedWorktree(y, dir)) throw Error(t('Save or discard the edits in this worktree before moving it.'));
+    };
+    try {
+      checkEditor();
+      const req = { workspace: y.name, since: y.hiredAt, dir, id, action };
+      const p = await host.call('MoveWorktree', req);
+      if (!current()) return;
+      const cancel = action === 'cancel';
+      const archive = action === 'archive';
+      const title = cancel ? t('Cancel the pending move of {name}?', { name: dir }) : archive ? t('Archive {name}?', { name: dir }) : t('Restore {name}?', { name: dir });
+      const label = cancel ? t('Cancel pending move') : archive ? t('Archive worktree') : t('Restore worktree');
+      const body = [cancel ? t('The worktree is still at its original location. Canceling releases it there.') : archive ? t('The entire worktree stays on disk, including ignored files. You can restore it here.') : t('The entire worktree will return to its original directory.'),
+        t('Current path: {path}', { path: p.physical }), cancel ? '' : t('Destination: {path}', { path: p.to }),
+        t('Branch: {branch}', { branch: p.branch }), `HEAD: ${p.head}`, t('Confirm that no other agent, task, editor or process is using this worktree.')].filter(Boolean).join('\n\n');
+      if (await host.confirm(title, body, label) && current()) {
+        checkEditor();
+        const result = await host.call('MoveWorktree', { ...req, confirm: p.stamp });
+        if (result?.warning) host.fail(result.warning);
+      }
+    } catch (err) { host.fail(err); }
+    finally { moving.delete(id); load(y.name, 'info'); render(); }
+  }
+
   function worktrees(y, d) {
     const list = d.info?.worktrees;
     const busy = d.busy.info || d.busy.pulls;
@@ -276,7 +306,30 @@ export function createInfo(host) {
         merged.length ? mergedFold(y, d, merged) : null,
       ];
     }
-    return section(t('Worktrees'), refresh, body);
+    return section(t('Worktrees'), refresh, body,
+      d.info?.archiveError ? h('p', { class: 'info-note danger' }, d.info.archiveError) : null,
+      archiveGroup(y, d));
+  }
+
+  function archiveGroup(y, d) {
+    const moves = d.info?.archiveMoves;
+    if (!moves?.length) return null;
+    const toggle = h('button', { class: 'info-merged-toggle', type: 'button', 'data-info-entry': 'archived',
+      'aria-expanded': String(!!d.archivedOpen), onclick: () => { d.archivedOpen = !d.archivedOpen; render(); } },
+      icon('chevron', 'mds-icon info-chevron'), t('Worktree archives ({n})', { n: formatNumber(moves.length) }));
+    function row(m) {
+      const label = { archived: t('Restore worktree'), archiving: t('Finish archive'), restoring: t('Finish restore') }[m.phase];
+      return h('li', { class: 'info-row' }, h('button', { class: 'info-row-main', type: 'button',
+        'data-info-entry': `move-${m.id}`, disabled: !label || moving.has(m.id),
+        onclick: () => moveTree(y, m.dir, m.id, m.phase === 'archiving' ? 'archive' : 'restore') },
+        h('span', { class: 'info-row-icon' }, icon('archive')), h('span', { class: 'info-row-title' }, m.dir),
+        h('span', { class: 'info-row-meta' }, label || t('Cannot be read'))),
+        m.phase === 'archiving' || m.phase === 'restoring' ? h('div', { class: 'info-row-actions' },
+          h('button', { type: 'button', class: 'mds-icon-button mds-icon-button--compact info-row-action', 'data-info-entry': `cancel-move-${m.id}`,
+            title: t('Cancel pending move'), 'aria-label': t('Cancel the pending move of {name}', { name: m.dir }), disabled: moving.has(m.id),
+            onclick: () => moveTree(y, m.dir, m.id, 'cancel') }, icon('undo'))) : null);
+    }
+    return h('div', { class: 'info-merged' }, toggle, d.archivedOpen ? h('ul', { class: 'info-list' }, moves.map(row)) : null);
   }
 
   // Whether the merged worktrees show, kept across launches.
@@ -302,6 +355,7 @@ export function createInfo(host) {
     const current = shown?.yesman === y.name && shown.kind === 'worktree' && shown.dir === w.dir;
     const open = () => host.openWorktree(w.dir, 'changes');
     const filesButton = h('button', { class: 'mds-icon-button mds-icon-button--compact info-row-action', type: 'button', title: t('Show its files'), 'aria-label': t('Show the files of {name}', { name: w.dir }), onclick: () => host.openWorktree(w.dir, 'files') }, icon('folder'));
+    const archiveButton = w.canArchive ? h('button', { class: 'mds-icon-button mds-icon-button--compact info-row-action', type: 'button', 'data-info-entry': `move-${w.cleanupId}`, title: t('Archive worktree'), 'aria-label': t('Archive {name}', { name: w.dir }), disabled: moving.has(w.cleanupId), onclick: () => moveTree(y, w.dir, w.cleanupId, 'archive') }, icon('archive')) : null;
     if (pull) {
       const checks = pull.checks;
       const tone = pull.state === 'merged' ? 'merged' : pull.state === 'closed' ? 'closed' : pull.draft ? 'draft' : 'open';
@@ -315,7 +369,7 @@ export function createInfo(host) {
             pullState(pull, tone),
             checks ? checksEl(checks) : null)),
         h('div', { class: 'info-row-actions' },
-          filesButton,
+          archiveButton, filesButton,
           h('button', { class: 'mds-icon-button mds-icon-button--compact info-row-action', type: 'button', title: t('Open on GitHub'), 'aria-label': t('Open #{number} on GitHub', { number: pull.number }), onclick: () => host.openURL(pull.url) }, icon('external'))));
     }
     const c = w.changes;
@@ -335,7 +389,7 @@ export function createInfo(host) {
         h('span', { class: 'info-row-icon' }, icon('branch')),
         h('span', { class: 'info-row-title' }, w.dir),
         h('span', { class: 'info-row-meta' }, meta)),
-      h('div', { class: 'info-row-actions' }, filesButton));
+      h('div', { class: 'info-row-actions' }, archiveButton, filesButton));
   }
 
   function pullState(pull, tone) {
