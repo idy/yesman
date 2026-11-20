@@ -651,6 +651,8 @@ export default function yesman(pi: ExtensionAPI) {
 				outcome: Type.String({ description: "pass, findings-handed-off, waiting-release, audit-complete; or done for a finished author/release task" }),
 				ref: Type.String({ description: "Reviewed PR/ref; author/release cleanup requires the merged https://github.com/owner/repo/pull/number URL" }),
 				evidence: Type.String({ description: "Saved conclusion/handoff and evidence outside this tree (board/session/Working log), including reconstruction details" }),
+				sourceBranch: Type.Optional(Type.String({ description: "Actual published PR head branch when different from the local checkout. Cite its push or PR provenance in the evidence." })),
+				publication: Type.Optional(Type.String({ description: "Published GitHub release URL; record verification evidence outside the tree" })),
 				unused: Type.Boolean({ description: "True after stopping tree processes and confirming no other agent/task uses it" }),
 			})),
 			handoff: Type.Optional(Type.String({ description: "Lead only: name of the cleanup worker to delegate this verified resource to; saves permission without removal" })),
@@ -696,6 +698,15 @@ export default function yesman(pi: ExtensionAPI) {
 			),
 		),
 	};
+	const worktreeReturns = Type.Optional(Type.Array(Type.Object({
+		checkout: Type.String({ description: "This checkout's cleanupId" }),
+		head: Type.String({ description: "Full source commit being returned" }),
+		ref: Type.String({ description: "Reviewed ref or, for a branch, its exact GitHub PR URL (may still be open)" }),
+		outcome: Type.String({ description: "done for author/release, or pass, findings-handed-off, waiting-release, audit-complete for a review" }),
+		unused: Type.Boolean({ description: "True confirms you stopped its processes and checked that no other task or person needs this directory" }),
+		sourceBranch: Type.Optional(Type.String({ description: "Published PR head ref if different from the local branch. Cite push provenance in the result note." })),
+		publication: Type.Optional(Type.String({ description: "For a release, its published GitHub release URL. Record verification evidence in the task note." })),
+	}), { description: "With a finished task's result note, return its unused temporary checkouts for automatic cleanup. Supply [] to retain them for further work." }));
 	pi.registerTool({
 		name: "yesman_board",
 		label: "yesman: board",
@@ -703,7 +714,7 @@ export default function yesman(pi: ExtensionAPI) {
 			"Read or change this yesman's board: its task list, which the user watches beside the conversation. Call it with no arguments to read it. One call can add, update, remove and order tasks, and is applied whole or not at all. Tasks have IDs such as t3, given by the board. Statuses: todo, doing, blocked, done, dropped.",
 		parameters: Type.Object({
 			add: Type.Optional(Type.Array(Type.Object({ ...taskFields, title: Type.String({ description: "One line, up to 200 characters" }) }), { description: "New tasks, added at the end; status defaults to todo" })),
-			update: Type.Optional(Type.Array(Type.Object({ id: Type.String({ description: "The task's ID, such as t3" }), ...taskFields }), { description: "Changes to tasks: only the fields given change" })),
+			update: Type.Optional(Type.Array(Type.Object({ id: Type.String({ description: "The task's ID, such as t3" }), ...taskFields, worktrees: worktreeReturns }), { description: "Changes to tasks: only the fields given change" })),
 			remove: Type.Optional(Type.Array(Type.String(), { description: "IDs of tasks to delete. Mark finished work done or dropped instead; remove only mistakes." })),
 			order: Type.Optional(Type.Array(Type.String(), { description: "Task IDs in the order to show them; tasks left out follow in their current order" })),
 			...(ROLE === "lead" ? { delivery: Type.Optional(Type.Object({
@@ -715,7 +726,7 @@ export default function yesman(pi: ExtensionAPI) {
 			const change = Object.fromEntries(Object.entries(params).filter(([key, v]) =>
 				key === "delivery" ? ROLE === "lead" && v !== undefined : Array.isArray(v) && v.length));
 			const board = Object.keys(change).length
-				? await call("POST", "/v1/board", change, signal)
+				? await call("POST", "/v1/board", { ...change, ...(params.update?.some(e => e.status?.trim().toLowerCase() === "done") ? {reportWorktrees: true} : {}) }, signal)
 				: await call("GET", "/v1/board", undefined, signal);
 			const view = publicBoard(board);
 			return result(boardText(view), view);

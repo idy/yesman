@@ -157,7 +157,7 @@ func TestCleanupContextBothRolesAndRecoveryIndex(t *testing.T) {
 			}
 		}
 		if who.agent.Role == agent.RoleLead {
-			for _, want := range []string{"one batch cleanup worker", "handoff", "Resume unfinished reviews first", "Stopped, failed, FinishedAt"} {
+			for _, want := range []string{"normal yesman_board update", "handoff", "Resume unfinished reviews first", "Stopped, failed, FinishedAt"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("lead lacks %q", want)
 				}

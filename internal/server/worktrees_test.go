@@ -148,7 +148,11 @@ func (f *cleanupFixture) removeRequest(ctx context.Context, c caller, r *http.Re
 	l := f.s.worktreeLock(c.yesman.Name)
 	l.Lock()
 	defer l.Unlock()
-	return f.s.cleanupWorktree(ctx, c, c.yesman, req)
+	proof, err := f.s.verifyRemoval(ctx, c, c.yesman, req)
+	if err != nil {
+		return nil, err
+	}
+	return f.s.commitRemoval(ctx, c, c.yesman, req, proof)
 }
 
 func (f *cleanupFixture) checkout(t *testing.T, purpose, dir string) pool.Worktree {
