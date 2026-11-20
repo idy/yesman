@@ -190,7 +190,10 @@ func (p *Pool) InstanceOf(name, path string, dotGit []byte) (string, error) {
 // Lock order: a caller may hold the workspace's lease and an agent's change
 // lease; the pool takes the repository lock before this one, never after.
 func (p *Pool) WithWorktree(path string, fn func() error) error {
-	l := p.treeLock(path)
+	l, err := p.treeLock(path)
+	if err != nil {
+		return err
+	}
 	l.RLock()
 	defer l.RUnlock()
 	return fn()
@@ -198,8 +201,25 @@ func (p *Pool) WithWorktree(path string, fn func() error) error {
 
 // treeLock is the lock of the worktree directory at path. The pool takes
 // it, after the repository's lock, while it adds or removes that directory.
-func (p *Pool) treeLock(path string) *sync.RWMutex {
-	key := filepath.Clean(path)
+func (p *Pool) treeLock(path string) (*sync.RWMutex, error) {
+	// Git reports the physical path. Configuration may reach it through
+	// a symlink, junction, different case or short Windows path. Identify
+	// the parent and its directory entry, including before checkout creates
+	// the child. Failure to identify the parent cannot grant a second lock.
+	resolved := realPath(path)
+	parent, err := safefs.Open(filepath.Dir(resolved))
+	if err != nil {
+		return nil, err
+	}
+	id, err := parent.Identity()
+	parent.Close()
+	if err != nil {
+		return nil, err
+	}
+	if id.Ino == 0 {
+		return nil, errors.New("cannot identify the worktree's parent directory")
+	}
+	key := fmt.Sprintf("%d/%d/%s", id.Dev, id.Ino, strings.ToLower(filepath.Base(resolved)))
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.trees == nil {
@@ -210,7 +230,7 @@ func (p *Pool) treeLock(path string) *sync.RWMutex {
 		l = &sync.RWMutex{}
 		p.trees[key] = l
 	}
-	return l
+	return l, nil
 }
 
 func readWorktreeInstance(repo, path string) (string, error) {

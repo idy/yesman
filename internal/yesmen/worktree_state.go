@@ -87,6 +87,27 @@ func (s *Store) WorktreeState(y Yesman) (records []WorktreeRecord, board Board, 
 	return
 }
 
+// A caller may already have a workspace Use lease or a process change gate.
+// These writers share a separate, per-workspace decision lock with the final
+// local removal. Disk work for one checkout leaves other workspaces free.
+func (s *Store) returnLock(name string) *sync.Mutex {
+	s.lmu.Lock()
+	defer s.lmu.Unlock()
+	if s.returnLocks == nil {
+		s.returnLocks = map[string]*sync.Mutex{}
+	}
+	if s.returnLocks[name] == nil {
+		s.returnLocks[name] = new(sync.Mutex)
+	}
+	return s.returnLocks[name]
+}
+
+func (s *Store) lockReturnState(name string) func() {
+	l := s.returnLock(name)
+	l.Lock()
+	return l.Unlock
+}
+
 // TryWorktreeCommit takes the workspace's exclusive lifetime lease only for
 // the final local operation. Board updates, worker replacement, checkout and
 // archive must happen wholly before or after it. Never wait for an in-flight
@@ -97,6 +118,11 @@ func (s *Store) TryWorktreeCommit(y Yesman, fn func() error) error {
 		return errors.New("workspace is in use")
 	}
 	defer lock.Unlock()
+	state := s.returnLock(y.Name)
+	if !state.TryLock() {
+		return errors.New("board or worker state is being updated")
+	}
+	defer state.Unlock()
 	current, err := s.Get(y.Name)
 	if err != nil || y.HiredAt.IsZero() || !y.HiredAt.Equal(current.HiredAt) {
 		return errors.New("workspace generation changed")

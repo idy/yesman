@@ -3,10 +3,8 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
-	"os"
-	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -90,7 +88,11 @@ func (r *WorktreeReclaimer) BoardResult(y yesmen.Yesman) {
 	if r.closed {
 		return
 	}
-	r.jobs[checkoutKey{workspace: y.Name, hire: y.HiredAt}] = checkoutJob{y: y}
+	key := checkoutKey{workspace: y.Name, hire: y.HiredAt}
+	now := time.Now()
+	if existing, queued := r.jobs[key]; !queued || existing.due.After(now) {
+		r.jobs[key] = checkoutJob{y: y, due: now}
+	}
 	r.signal()
 }
 
@@ -104,8 +106,8 @@ func (r *WorktreeReclaimer) OwnerRetired(workspace, owner string) {
 		return
 	}
 	for key, job := range r.jobs {
-		if job.waitForIdle && key.workspace == workspace && (job.owner == owner || job.delegate == owner) {
-			job.due = time.Time{}
+		if job.waitForIdle && key.workspace == workspace && (job.owner == owner || job.delegate == owner) && job.due.After(time.Now()) {
+			job.due = time.Now()
 			r.jobs[key] = job
 			r.signal()
 		}
@@ -192,12 +194,11 @@ func (r *WorktreeReclaimer) scan(y yesmen.Yesman) error {
 	if err != nil || y.HiredAt.IsZero() || !current.HiredAt.Equal(y.HiredAt) {
 		return nil
 	}
-	records, board, _, err := r.s.Yesmen.WorktreeState(y)
+	records, board, workers, err := r.s.Yesmen.WorktreeState(y)
 	if err != nil {
 		return err
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	now := time.Now()
 	for _, rec := range records {
 		if rec.Removed || !temporaryPurpose(rec.Purpose) || !checkoutID.MatchString(rec.ID) || rec.Root == nil {
 			continue
@@ -206,8 +207,24 @@ func (r *WorktreeReclaimer) scan(y yesmen.Yesman) error {
 			return t.ID == rec.Task && slices.ContainsFunc(t.Returns, func(v yesmen.WorktreeReturn) bool { return v.Checkout == rec.ID })
 		})
 		key := checkoutKey{y.Name, y.HiredAt, rec.ID}
-		if _, queued := r.jobs[key]; hasProof && !queued {
-			r.jobs[key] = checkoutJob{y: y, owner: rec.Owner, delegate: rec.CleanupOwner}
+		if !hasProof {
+			continue
+		}
+		r.mu.Lock()
+		job, queued := r.jobs[key]
+		if !queued {
+			r.jobs[key] = checkoutJob{y: y, owner: rec.Owner, delegate: rec.CleanupOwner, due: now}
+		}
+		r.mu.Unlock()
+		if queued && job.waitForIdle && job.due.After(now) && !heldByUsers(rec, board, workers) {
+			if err := r.s.withWorktreeUsers(y.Name, rec, "", func() error { return nil }); err == nil {
+				r.mu.Lock()
+				if waiting := r.jobs[key]; waiting.waitForIdle && waiting.due.After(now) {
+					waiting.due = now
+					r.jobs[key] = waiting
+				}
+				r.mu.Unlock()
+			}
 		}
 	}
 	return nil
@@ -216,8 +233,9 @@ func (r *WorktreeReclaimer) scan(y yesmen.Yesman) error {
 var checkoutID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 type checkoutCandidate struct {
-	record yesmen.WorktreeRecord
-	round  time.Time
+	record    yesmen.WorktreeRecord
+	round     time.Time
+	fromBoard bool
 }
 
 // All authority comes from one exact registered instance and either an
@@ -234,53 +252,23 @@ func candidate(y yesmen.Yesman, records []yesmen.WorktreeRecord, b yesmen.Board,
 	if rec.Removed || !temporaryPurpose(rec.Purpose) || !dirRE.MatchString(rec.Dir) || rec.Root == nil || !strings.HasPrefix(rec.Repo, "github.com/") || latestWorktree(records, rec.Dir) != i {
 		return none, false
 	}
-	generation := func(name string, since time.Time) bool {
-		if since.IsZero() {
-			return false
-		}
-		if name == yesmen.LeadName {
-			return y.HiredAt.Equal(since)
-		}
-		return slices.ContainsFunc(workers, func(w yesmen.Worker) bool {
-			return w.Name == name && w.StartedAt.Equal(since)
-		})
-	}
-	if !generation(rec.Owner, rec.OwnerSince) || rec.CleanupOwner != "" && !generation(rec.CleanupOwner, rec.CleanupSince) {
+	t, ok := returnedTask(y, rec, b, workers)
+	if !ok {
 		return none, false
 	}
-	idx := slices.IndexFunc(b.Tasks, func(t yesmen.Task) bool { return t.ID == rec.Task })
-	if idx < 0 {
-		return none, false
-	}
-	t := b.Tasks[idx]
-	if t.Status != yesmen.TaskDone || t.Paused() || t.Owner != rec.Owner || t.DoneOwner != rec.Owner || t.DoneAt.IsZero() || !t.OwnerSince.IsZero() && !rec.OwnerSince.Equal(t.OwnerSince) {
-		return none, false
-	}
-	at := slices.IndexFunc(t.Returns, func(v yesmen.WorktreeReturn) bool { return v.Checkout == id })
-	if t.Returns != nil && at < 0 {
-		return none, false // explicit keep, including a returned empty list
-	}
-	if at >= 0 {
-		v := t.Returns[at]
-		if !(v.CertifiedBy == rec.Owner && v.CertifiedSince.Equal(rec.OwnerSince) || v.CertifiedBy == yesmen.LeadName && v.CertifiedSince.Equal(y.HiredAt)) {
+	if t.Returns != nil {
+		v := boardProof(y, rec, t)
+		if v == nil || rec.Completion != nil && !sameReturnedSource(*rec.Completion, *v) {
 			return none, false
 		}
-	}
-	if rec.Completion == nil {
-		if at < 0 {
-			return none, false
-		}
-		rec.Completion = &t.Returns[at].WorktreeCompletion
-	} else if !rec.BoardRound.IsZero() && (at < 0 || !rec.BoardRound.Equal(t.DoneAt) || !sameWorktreeCompletion(*rec.Completion, t.Returns[at].WorktreeCompletion)) {
-		return none, false
-	} else if at < 0 && rec.Completion.SavedAt.Before(t.DoneAt) {
-		// Old evidence followed by a new close is not a return of that round.
+		rec.Completion = v
+	} else if rec.Completion == nil || !rec.BoardRound.IsZero() || rec.Completion.SavedAt.Before(t.DoneAt) {
 		return none, false
 	}
 	if completionProblem(rec, *rec.Completion) != "" || rec.Purpose == "release" && strings.TrimSpace(rec.Completion.Publication) == "" {
 		return none, false
 	}
-	return checkoutCandidate{rec, t.DoneAt}, true
+	return checkoutCandidate{record: rec, round: t.DoneAt, fromBoard: t.Returns != nil}, true
 }
 
 type reclaimWait int
@@ -307,6 +295,9 @@ func (s *Server) reconcileCheckout(ctx context.Context, y yesmen.Yesman, id stri
 	if err != nil {
 		return retryLater
 	}
+	if w, handled := s.recoverMissingReturn(ctx, y, records, id); handled {
+		return w
+	}
 	first, ok := candidate(y, records, b, workers, id)
 	if !ok {
 		return collectedOrIneligible
@@ -320,13 +311,7 @@ func (s *Server) reconcileCheckout(ctx context.Context, y yesmen.Yesman, id stri
 	if err := s.withWorktreeUsers(y.Name, rec, "", func() error { return nil }); err != nil {
 		return waitForOwner
 	}
-	path := filepath.Join(y.Path, rec.Dir)
-	_, statErr := os.Lstat(path)
-	missing := errors.Is(statErr, os.ErrNotExist)
-	if missing && records[latestWorktree(records, rec.Dir)].Completion == nil {
-		return collectedOrIneligible // never freeze a proposed return against an absent checkout
-	}
-	if !missing && rec.Purpose != "review" {
+	if rec.Purpose != "review" {
 		if err := s.verifyMerged(ctx, rec); err != nil {
 			return retryLater
 		}
@@ -345,35 +330,35 @@ func (s *Server) reconcileCheckout(ctx context.Context, y yesmen.Yesman, id stri
 			return err
 		}
 		current, ok := candidate(y, records, b, workers, id)
-		if !ok || heldByUsers(current.record, b, workers) || !first.round.Equal(current.round) || !sameWorktreeCompletion(*rec.Completion, *current.record.Completion) {
+		if !ok || heldByUsers(current.record, b, workers) || !reflect.DeepEqual(first, current) {
 			return errors.New("task or proof changed during verification")
 		}
 		i := latestWorktree(records, rec.Dir)
-		if i < 0 || records[i].ID != id || current.record.Branch != rec.Branch || current.record.Repo != rec.Repo || current.record.Purpose != rec.Purpose || current.record.Owner != rec.Owner || !current.record.OwnerSince.Equal(rec.OwnerSince) {
-			return fmt.Errorf("checkout identity changed")
-		}
 		return s.withWorktreeUsers(y.Name, current.record, "", func() error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if missing {
-				// A crash after git removal needs only local bookkeeping. Do
-				// not fall through to deletion if a path appeared meanwhile.
-				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) || records[i].Completion == nil {
-					return errors.New("missing checkout was replaced")
+			if err := s.Pool.TryReclaimTemporary(ctx, y.Path, expectedWorktree(current.record), func() error {
+				before := records[i]
+				if !current.fromBoard {
+					return CheckSavedWorktreeReturn(y, before, b, workers)
 				}
-				if err := s.checkMissingInstance(ctx, records[i], path); err != nil {
+				after := before
+				after.Completion, after.BoardRound = current.record.Completion, current.round
+				if err := CheckSavedWorktreeReturn(y, after, b, workers); err != nil {
 					return err
 				}
-			} else if err := s.Pool.TryReclaimTemporary(ctx, y.Path, expectedWorktree(current.record), func() error {
-				if records[i].Completion != nil {
+				if before.BoardRound.Equal(after.BoardRound) && before.Completion != nil && sameCertifiedReturn(*before.Completion, *after.Completion) {
 					return nil
 				}
-				v := *current.record.Completion
-				v.SavedAt = time.Now().UTC()
-				before := records[i]
-				records[i].Completion, records[i].BoardRound = &v, current.round
-				return s.Yesmen.CommitWorktreeRecord(y, before, records[i])
+				if before.Completion != nil {
+					after.PriorReturns = append(slices.Clone(before.PriorReturns), yesmen.VerifiedWorktreeReturn{Round: before.BoardRound, Completion: *before.Completion})
+				}
+				if err := s.Yesmen.CommitWorktreeRecord(y, before, after); err != nil {
+					return err
+				}
+				records[i] = after
+				return nil
 			}); err != nil {
 				return err
 			}

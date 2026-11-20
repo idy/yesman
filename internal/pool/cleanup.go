@@ -127,7 +127,10 @@ func (p *Pool) removeTemporary(ctx context.Context, workspace string, expected W
 		return fmt.Errorf("repository is in use")
 	}
 	defer l.Unlock()
-	tl := p.treeLock(filepath.Join(workspace, expected.Dir))
+	tl, err := p.treeLock(filepath.Join(workspace, expected.Dir))
+	if err != nil {
+		return err
+	}
 	if certify == nil {
 		tl.Lock()
 	} else if !tl.TryLock() {

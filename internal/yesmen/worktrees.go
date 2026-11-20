@@ -26,11 +26,19 @@ type WorktreeRecord struct {
 	RetiredReason string              `json:"retiredReason,omitempty"`
 	// BoardRound binds an automatic completion to the particular task close.
 	BoardRound time.Time `json:"boardRound,omitzero"`
+	// Superseded Board certifications remain available for audit and exact
+	// recovery. Only the current Board disposition can authorize collection.
+	PriorReturns []VerifiedWorktreeReturn `json:"priorReturns,omitempty"`
 	// Root identifies the checkout's directory as yesman created it. It is
 	// written once, with the record, and never filled in later: records
 	// without it (older ones, or a file system with no creation time) get
 	// no write/edit grant through the managed entry.
 	Root *WorktreeRoot `json:"root,omitempty"`
+}
+
+type VerifiedWorktreeReturn struct {
+	Round      time.Time          `json:"round"`
+	Completion WorktreeCompletion `json:"completion"`
 }
 
 // WorktreeRoot is a checkout directory's inode number (file index on
@@ -67,6 +75,9 @@ type WorktreeCompletion struct {
 	// The server sets the identity of the actor returning this exact instance.
 	CertifiedBy    string    `json:"certifiedBy,omitempty"`
 	CertifiedSince time.Time `json:"certifiedSince,omitzero"`
+	// ReturnID distinguishes repeat submissions of the same Board result,
+	// including when the system clock repeats an earlier time.
+	ReturnID string `json:"returnId,omitempty"`
 }
 
 // WorktreeReturn accompanies the normal task result on the Board. It releases

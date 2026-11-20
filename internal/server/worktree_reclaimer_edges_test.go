@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -186,10 +187,14 @@ func TestReclaimYieldsToFileAndWorkspaceLeases(t *testing.T) {
 	x, wt, v := returnFixture(t, "review", "")
 	submitReturn(t, x, v)
 	x.f.m.Stop(x.me.agent.ID)
-	s := x.f.srv
+	// Use a fresh Manager, as at startup, so the only outstanding users
+	// during this lease test are the file and workspace readers below.
+	m := agent.New(agent.Config{Yesmen: x.f.store})
+	t.Cleanup(m.StopAll)
+	s := &Server{Yesmen: x.f.store, Pool: x.cf.s.Pool, Agents: m}
 	try := func() error {
-		if s.reconcileCheckout(context.Background(), x.y, wt.CleanupID) != retryLater {
-			t.Fatal("did not retain while resource was leased")
+		if current := s.reconcileCheckout(context.Background(), x.y, wt.CleanupID); current != retryLater {
+			t.Fatalf("leased checkout wait=%v (want retryLater=%v), git path=%q, store path=%q, removed=%t", current, retryLater, wt.Path, filepath.Join(x.y.Path, wt.Dir), recordOf(t, x, wt.Dir).Removed)
 		}
 		assertRetained(t, x, wt)
 		return nil

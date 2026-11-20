@@ -236,6 +236,7 @@ func (s *Store) changeBoardAndForget(name string, c BoardChange, lead bool, scop
 }
 
 func (s *Store) changeBoard(name string, c BoardChange, lead bool, scope *Yesman, commit func(func() error) error) (Board, []Task, error) {
+	defer s.lockReturnState(name)()
 	var handoffs Handoffs
 	var file *handoffsFile
 	if scope != nil {
@@ -418,6 +419,7 @@ func (b *Board) checkWaits(before []Task) error {
 // or recovered after a crash never gets a second task. added reports whether
 // this call added it.
 func (s *Store) AddScheduledTask(name string, link TaskSchedule, title, detail string) (task Task, added bool, err error) {
+	defer s.lockReturnState(name)()
 	if link.Plan == "" || link.Run == "" {
 		return Task{}, false, errors.New("a scheduled task's board task needs its plan and run")
 	}
@@ -451,6 +453,7 @@ func (s *Store) AddScheduledTask(name string, link TaskSchedule, title, detail s
 // reports a change, and returns it. A task no longer on the board is left
 // alone; found reports whether it is there.
 func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task Task, changed bool, err error) {
+	defer s.lockReturnState(name)()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, err := s.board(name)
@@ -469,6 +472,9 @@ func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task
 			return b.Tasks[i], false, fmt.Errorf("status %q is not one of %s", t.Status, strings.Join(TaskStatuses, ", "))
 		}
 		t.Schedule = b.Tasks[i].Schedule
+		if t.Status != TaskDone || t.Owner != b.Tasks[i].Owner {
+			t.Returns = nil
+		}
 		now := time.Now().UTC()
 		markDone(&t, b.Tasks[i].Status == TaskDone, now)
 		t.UpdatedAt = now

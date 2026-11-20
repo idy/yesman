@@ -392,10 +392,19 @@ func (s *Server) removeWorktree(ctx context.Context, c caller, r *http.Request) 
 	if !dirRE.MatchString(req.Dir) {
 		return nil, fmt.Errorf("%q is not a worktree directory of this workspace", req.Dir)
 	}
+	remote, finish, err := s.Agents.BeginOperation(ctx, c.token, c.agent, c.yesman.HiredAt)
+	if err != nil {
+		return nil, err
+	}
+	proof, err := s.verifyRemoval(remote, c, c.yesman, req)
+	finish()
+	if err != nil {
+		return nil, err
+	}
 	var out cleanupResult
 	if err := s.worktreeOperation(ctx, c, func(ctx context.Context, y yesmen.Yesman) error {
 		var err error
-		out, err = s.cleanupWorktree(ctx, c, y, req)
+		out, err = s.commitRemoval(ctx, c, y, req, proof)
 		return err
 	}); err != nil {
 		return nil, err

@@ -562,7 +562,10 @@ func (p *Pool) AddWorktree(ctx context.Context, r Repo, opts WorktreeOptions) (W
 	if err := os.MkdirAll(filepath.Dir(opts.Dest), 0o755); err != nil {
 		return Worktree{}, err
 	}
-	tl := p.treeLock(opts.Dest)
+	tl, err := p.treeLock(opts.Dest)
+	if err != nil {
+		return Worktree{}, err
+	}
 	tl.Lock()
 	if _, err := git(ctx, r.Path, args...); err != nil {
 		tl.Unlock()
@@ -709,7 +712,10 @@ func (p *Pool) RemoveWorktree(ctx context.Context, path string, force bool) erro
 	l := p.lock(filepath.ToSlash(strings.TrimSuffix(rel, ".git")))
 	l.Lock()
 	defer l.Unlock()
-	tl := p.treeLock(path)
+	tl, err := p.treeLock(path)
+	if err != nil {
+		return err
+	}
 	tl.Lock()
 	defer tl.Unlock()
 	args := []string{"worktree", "remove", path}

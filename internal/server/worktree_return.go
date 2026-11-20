@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -108,6 +110,7 @@ func (s *Server) prepareReturns(c caller, change *yesmen.BoardChange, requireDis
 			}
 			v.Evidence = fmt.Sprintf("Board %s: %s\nReconstruct %s from %s at %s with a new owned checkout.", id, strings.TrimSpace(*e.Note), rec.Dir, rec.Repo, v.Head)
 			v.SavedAt = time.Now().UTC()
+			v.ReturnID = rand.Text()
 			v.CertifiedBy, v.CertifiedSince = c.agent.Name, c.agent.Since
 			if reason := completionProblem(rec, v.WorktreeCompletion); reason != "" {
 				return errors.New(reason)
@@ -115,8 +118,8 @@ func (s *Server) prepareReturns(c caller, change *yesmen.BoardChange, requireDis
 			if rec.Purpose == "release" && strings.TrimSpace(v.Publication) == "" {
 				return errors.New("a release return needs the publisher's external publication and verification receipt")
 			}
-			if rec.Completion != nil && !sameWorktreeCompletion(*rec.Completion, v.WorktreeCompletion) {
-				return errors.New("completion already saved for this checkout")
+			if rec.Completion != nil && !sameReturnedSource(*rec.Completion, v.WorktreeCompletion) {
+				return errors.New("source already verified for this checkout. Use a new checkout for another source")
 			}
 		}
 	}
@@ -127,9 +130,54 @@ func (s *Server) removeCompletedInstance(ctx context.Context, y yesmen.Yesman, r
 	path := filepath.Join(y.Path, rec.Dir)
 	wt := expectedWorktree(rec)
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-		return s.Pool.RemoveTemporaryWorktree(ctx, y.Path, wt)
+		return s.Pool.TryReclaimTemporary(ctx, y.Path, wt, ctx.Err)
 	}
 	return s.checkMissingInstance(ctx, rec, path)
+}
+
+// recoverMissingReturn can finish the registry write interrupted after Git
+// succeeded, even if the Board has since withdrawn its return. Only this
+// record can change. A path appearing during recovery stops the operation.
+func (s *Server) recoverMissingReturn(ctx context.Context, y yesmen.Yesman, records []yesmen.WorktreeRecord, id string) (reclaimWait, bool) {
+	i := slices.IndexFunc(records, func(r yesmen.WorktreeRecord) bool { return r.ID == id })
+	if i < 0 {
+		return collectedOrIneligible, false
+	}
+	rec := records[i]
+	if rec.Removed || rec.Root == nil || rec.Completion == nil || !checkoutID.MatchString(id) || !dirRE.MatchString(rec.Dir) || !temporaryPurpose(rec.Purpose) || latestWorktree(records, rec.Dir) != i || completionProblem(rec, *rec.Completion) != "" {
+		return collectedOrIneligible, false
+	}
+	path := filepath.Join(y.Path, rec.Dir)
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return collectedOrIneligible, false
+	}
+	l := s.worktreeLock(y.Name)
+	if !l.TryLock() {
+		return retryLater, true
+	}
+	err := s.Yesmen.TryWorktreeCommit(y, func() error {
+		fresh, err := s.Yesmen.WorktreeRecords(y.Name)
+		if err != nil {
+			return err
+		}
+		j := latestWorktree(fresh, rec.Dir)
+		if j < 0 || !reflect.DeepEqual(fresh[j], rec) {
+			return errors.New("checkout changed during recovery")
+		}
+		if err := s.checkMissingInstance(ctx, rec, path); err != nil {
+			return err
+		}
+		after := rec
+		after.Removed = true
+		after.RetiredReason = "recovered completed Git removal from its checkpoint"
+		return s.Yesmen.CommitWorktreeRecord(y, rec, after)
+	})
+	l.Unlock()
+	if err != nil {
+		return retryLater, true
+	}
+	s.changed()
+	return collectedOrIneligible, true
 }
 
 func (s *Server) checkMissingInstance(ctx context.Context, rec yesmen.WorktreeRecord, path string) error {
@@ -140,7 +188,13 @@ func (s *Server) checkMissingInstance(ctx context.Context, rec yesmen.WorktreeRe
 	if registered {
 		return errors.New("missing path is still registered; retain for recovery")
 	}
-	return s.Pool.CheckWorktreeCheckpoint(ctx, expectedWorktree(rec))
+	if err := s.Pool.CheckWorktreeCheckpoint(ctx, expectedWorktree(rec)); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("missing checkout was replaced")
+	}
+	return nil
 }
 
 // Check each repository in which this pool branch can target a PR. An alias

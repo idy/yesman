@@ -180,25 +180,11 @@ type cleanupResult struct {
 	Record  *yesmen.WorktreeRecord `json:"record,omitempty"`
 }
 
-func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman, req removeWorktreeRequest) (cleanupResult, error) {
+func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, req removeWorktreeRequest, proof removalVerification, records []yesmen.WorktreeRecord, i int, board yesmen.Board, workers []yesmen.Worker) (cleanupResult, error) {
 	if err := ctx.Err(); err != nil {
 		return cleanupResult{}, err
 	}
-	if req.Force {
-		return cleanupResult{}, errors.New("agent cleanup never uses force")
-	}
-	records, err := s.Yesmen.WorktreeRecords(y.Name)
-	if err != nil {
-		return cleanupResult{}, err
-	}
-	i := latestWorktree(records, req.Dir)
-	if i < 0 {
-		return cleanupResult{Reason: "retain: unknown ownership; no agent lifecycle record"}, nil
-	}
 	rec := &records[i]
-	if req.Checkout == "" || req.Checkout != rec.ID {
-		return cleanupResult{Reason: "retain: checkout ID changed or missing; old cleanup cannot affect a new round"}, nil
-	}
 	out := cleanupResult{Record: rec}
 	retain := func(reason string) (cleanupResult, error) { out.Reason = "retain: " + reason; return out, nil }
 	owner := rec.Owner == c.agent.Name && rec.OwnerSince.Equal(c.agent.Since)
@@ -209,6 +195,19 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	}
 	if rec.Purpose != "review" && rec.Purpose != "author" && rec.Purpose != "release" {
 		return retain("primary or unknown purpose")
+	}
+	recoveryOnly := proof.missing && rec.Completion != nil && req.Handoff == ""
+	if !rec.Removed && !recoveryOnly {
+		if err := CheckSavedWorktreeReturn(y, *rec, board, workers); err != nil {
+			return retain(err.Error())
+		}
+		if !rec.BoardRound.IsZero() && heldByUsers(*rec, board, workers) {
+			return retain("recorded user has open or paused work")
+		}
+	}
+	reservationCaller := c.agent.ID
+	if !rec.BoardRound.IsZero() {
+		reservationCaller = ""
 	}
 	branchVerified := false
 	if req.Completion != nil {
@@ -224,11 +223,12 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 		}
 		if rec.Completion == nil {
 			v.SavedAt = time.Now().UTC()
+			v.ReturnID = ""
 			v.CertifiedBy, v.CertifiedSince = c.agent.Name, c.agent.Since
 			if rec.Purpose != "review" {
 				candidate := *rec
 				candidate.Completion = &v
-				err := s.verifyBranchCompletion(ctx, y, candidate)
+				err := proof.branchProof(board, candidate)
 				if err == nil {
 					err = s.Pool.CheckTemporaryWorktree(ctx, y.Path, expectedWorktree(candidate))
 				}
@@ -258,6 +258,11 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	if rec.Completion == nil {
 		return retain("no saved completion evidence; stopped/restarted is not completed")
 	}
+	if !rec.Removed && rec.Purpose != "review" && !branchVerified && !recoveryOnly {
+		if err := proof.branchProof(board, *rec); err != nil {
+			return retain(err.Error())
+		}
+	}
 	if req.Handoff != "" {
 		if !lead {
 			return retain("only the lead delegates cleanup")
@@ -266,7 +271,7 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 		if err != nil || target.Role != agent.RoleWorker {
 			return retain("handoff needs a worker in this workspace")
 		}
-		err = s.withWorktreeUsers(y.Name, *rec, c.agent.ID, func() error {
+		err = s.withWorktreeUsers(y.Name, *rec, reservationCaller, func() error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -287,13 +292,6 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 		out.Removed = true
 		return out, nil
 	}
-	// Fresh merge evidence is required for branches, including squash merges.
-	// Release tasks stay open through publication/verification, after PR merge.
-	if rec.Purpose != "review" && !branchVerified {
-		if err := s.verifyBranchCompletion(ctx, y, *rec); err != nil {
-			return retain(err.Error())
-		}
-	}
 	// Refuse a reused worker name. A removed worker's durable records still
 	// exist, but only the lead can take responsibility for that evidence.
 	if info, err := s.Agents.Get(agent.ID(y.Name, rec.Owner)); err == nil {
@@ -303,11 +301,15 @@ func (s *Server) cleanupWorktree(ctx context.Context, c caller, y yesmen.Yesman,
 	} else if !lead && !delegate {
 		return retain("owner cannot be verified")
 	}
-	err = s.withWorktreeUsers(y.Name, *rec, c.agent.ID, func() error {
+	err := s.withWorktreeUsers(y.Name, *rec, reservationCaller, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := s.removeCompletedInstance(ctx, y, *rec); err != nil {
+		if recoveryOnly {
+			if err := s.checkMissingInstance(ctx, *rec, path); err != nil {
+				return err
+			}
+		} else if err := s.removeCompletedInstance(ctx, y, *rec); err != nil {
 			return err
 		}
 		// Successful removal must be recorded even if cancellation just arrived.
@@ -334,28 +336,19 @@ func expectedWorktree(rec yesmen.WorktreeRecord) pool.Worktree {
 	return wt
 }
 
-func (s *Server) verifyBranchCompletion(ctx context.Context, y yesmen.Yesman, rec yesmen.WorktreeRecord) error {
-	b, err := s.Yesmen.Board(y.Name)
-	if err != nil {
-		return err
-	}
+func branchTaskFinished(b yesmen.Board, rec yesmen.WorktreeRecord) error {
 	finished := false
 	for _, t := range b.Tasks {
 		terminal := !t.Open()
 		if rec.Purpose == "release" {
 			terminal = t.Status == yesmen.TaskDone
 		}
-		finished = finished || t.ID == rec.Task && t.Owner == rec.Owner && terminal
+		finished = finished || t.ID == rec.Task && t.Owner == rec.Owner && (t.OwnerSince.IsZero() || rec.OwnerSince.Equal(t.OwnerSince)) && terminal
 	}
 	if !finished {
 		return errors.New("associated author/release task is unfinished")
 	}
-	if rec.Completion.SourceBranch != "" && rec.Completion.SourceBranch != rec.Branch {
-		if err := s.checkOpenPulls(ctx, rec); err != nil {
-			return err
-		}
-	}
-	return s.verifyMerged(ctx, rec)
+	return nil
 }
 
 // Reserve every recorded user, including a prior cleanup delegate, so a lead
