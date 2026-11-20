@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,6 +73,19 @@ func TestWorkerRoutingWithPi(t *testing.T) {
 	}
 	setPool("backend", "Database deliverables (fixture guidance)", low, high)
 	setPool("default", "", fallback)
+	// The saved profile survives a cold open whose Settings catalog probe
+	// fails. Worker processes still report their own live catalog at dispatch.
+	cold := &app{home: h, settings: loadSettings(h.Settings()), catalog: newCatalog(func(context.Context) ([]agent.Model, error) {
+		return nil, errors.New("fixture catalog probe failed")
+	})}
+	var probeDown atomic.Bool
+	verified := a.workerRouting
+	srv.Routing = func(ctx context.Context, live []agent.Model) crew.Routing {
+		if live == nil && probeDown.Load() {
+			return cold.workerRouting(ctx, nil)
+		}
+		return verified(ctx, live)
+	}
 	lead := agent.ID(y.Name, yesmen.LeadName)
 	controls, err := s.LeadModels(ctx, y.Name, y.HiredAt, agent.Choice{}, agent.Choice{})
 	must(t, err)
@@ -149,8 +164,24 @@ func TestWorkerRoutingWithPi(t *testing.T) {
 	if !first.HasTool || !first.HasLabel || !strings.Contains(first.Route, "coding 89% (user CSV)") || !strings.Contains(first.Route, "Database deliverables (fixture guidance)") {
 		t.Fatalf("lead context/schema: %+v", first)
 	}
+	probeDown.Store(true)
+	start("catalog-down", "backend", "")
+	verify("catalog-down", "Deliver catalog-down", build, "high")
+	var advisory string
+	for _, e := range entries() {
+		if e.Agent == "lead" && strings.Contains(e.Text, `"name":"catalog-down"`) {
+			advisory = e.Route
+			break
+		}
+	}
+	for _, want := range []string{"availability is unknown", low, high, fallback, "coding 89% (user CSV)"} {
+		if !strings.Contains(advisory, want) {
+			t.Fatalf("failed probe lost %q in lead context: %s", want, advisory)
+		}
+	}
 	start("slot", "backend", high)
 	verify("slot", "Deliver slot", "fallback", "low")
+	probeDown.Store(false)
 	start("unmatched", "default", high)
 	verify("unmatched", "Deliver unmatched", "fallback", "low")
 	start("legacy", "", high)

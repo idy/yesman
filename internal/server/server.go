@@ -736,6 +736,9 @@ func CrewContext(r crew.Routing, me agent.Info) string {
 	w("\n## Crew\n\nFor yesman_worker_start, first match the task's primary deliverable to a label, using your judgment and the dispatch guidance below. Use default for unmatched tasks. Then compare only that pool's available members and pass your preferred key in crew. If the matched pool has no usable members, choose from default. If default is empty too, omit crew: the worker automatically inherits your current model and effort, even outside Crew. Continue without asking.\n")
 	w("Prioritize coding, intelligence, and qualitative fit for design, taste and creativity where known. Cost and speed are secondary. AA supplies no design/taste metric here. Intelligence is the AA Intelligence Index, coding is a percentage, speed is output tokens per second, cost and time are per index task. User CSV and estimates are user-provided. Missing scores are unknown, not zero.\n")
 	w("Scores use the Artificial Analysis snapshot dated %s (%s), with enabled CSV overrides and user estimates where indicated.\n", crew.Embedded().Date, crew.Source)
+	if r.CatalogUnknown {
+		w("Catalog availability is unknown. The candidates shown are saved Crew assignments. Compare their available scores and pass your preferred key. Each new worker verifies its own catalog and handles fallback.\n")
+	}
 	if me.Model != "" {
 		w("Your current model and effort: %s.\n", quotedRouteText(crew.MemberKey(me.Provider, me.Model, me.Effort)))
 	}

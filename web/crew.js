@@ -30,20 +30,24 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
   let refreshing = false;
   let busy = false; // a change is being saved
   let revision = 0; // a saved change makes an earlier read obsolete
+  let loadRevision = 0;
+  let poolNeedsRead = false; // a rejected edit needs a subsequent saved view
   let patchError = '';
   let patchExport = '';
   let leadKey = ''; // exact workspace generation selected in this window
 
   function load(refresh = false) {
-    if (loading && !refresh) return loading;
+    if (loading && !refresh && loadRevision === revision) return loading;
     refreshing = refresh;
-    const readRevision = revision;
+    const readRevision = loadRevision = revision;
     const p = call(refresh ? 'RefreshCrew' : 'Crew').then((v) => {
-      if (!busy && loading === p && revision === readRevision) view = v;
+      if (!busy && loading === p && revision === readRevision) { view = v; poolNeedsRead = false; }
     }, (err) => {
       if (!busy && loading === p && revision === readRevision) fail(err);
     }).finally(() => {
-      if (loading === p) { loading = null; refreshing = false; }
+      if (loading !== p) return;
+      loading = null;
+      refreshing = false;
       if (shown()) rerender();
     });
     loading = p;
@@ -70,7 +74,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
   }
 
   function save(method, ...args) {
-    return saving(async () => { view = await call(method, ...args); });
+    return saving(async () => { view = await call(method, ...args); poolNeedsRead = false; });
   }
 
   async function change(method, ...args) {
@@ -80,6 +84,20 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
       fail(err);
       return false;
     }
+  }
+
+  function reloadPool() {
+    poolNeedsRead = true;
+    return load();
+  }
+
+  async function poolViewForEdit() {
+    if (poolNeedsRead) {
+      await load();
+      // An explicit catalog refresh can supersede that read while it waits.
+      while (poolNeedsRead && loading) await loading;
+    }
+    return !busy && !poolNeedsRead ? view : null;
   }
 
   const yesmanMember = () => view?.members.find((m) => m.key === view.yesman && !m.missing);
@@ -248,7 +266,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
       h('div', { class: 'card-row-text' }, h('strong', { title: m.key }, name),
         h('span', null, `${m.provider}/${m.model} · `, status,
           (m.source === 'aa' || Object.values(m.fieldSources ?? {}).includes('aa')) && m.score && !m.score.effort ? ` · ${t('Effort not specified by source')}` : null,
-          m.missing ? h('span', { class: 'danger' }, ` · ${t('pi no longer has this model at this effort')}`) : null)),
+          m.missing ? h('span', { class: 'danger' }, ` · ${t('pi no longer has this model at this effort')}`) : view.catalogUnknown ? ` · ${t('Availability unknown')}` : null)),
       m.key === view.yesman ? h('span', { class: 'mds-pill crew-default' }, t('New yesmen')) : h('span'),
       h('div', { class: 'card-row-actions' },
         m.source !== 'aa' && m.fallbackSource !== 'aa' ? h('button', { class: 'mds-icon-button', type: 'button', disabled: busy, title: t(m.source === 'patch' ? 'Fallback estimate' : 'Your scores'), 'aria-label': t(m.source === 'patch' ? 'Fallback estimate for {model}' : 'Your scores for {model}', { model: name }), onclick: () => openOption(m) }, icon('sliders')) : null,
@@ -331,7 +349,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
       return;
     }
     const usable = view.members.filter((m) => !m.missing);
-    const yesman = h('select', { class: 'mds-select', 'aria-label': t('New yesmen run as'), disabled: busy || !usable.length, onchange: () => change('SetYesmanModel', yesman.value) },
+    const yesman = h('select', { class: 'mds-select', 'aria-label': t('New yesmen run as'), disabled: busy || view.catalogUnknown || !usable.length, onchange: () => change('SetYesmanModel', yesman.value) },
       usable.map((m) => h('option', { value: m.key, title: m.key }, optionName(m))));
     if (!yesmanMember()) yesman.prepend(h('option', { value: '', disabled: true }, usable.length ? t('Choose a model') : t('Add a model first')));
     yesman.value = yesmanMember()?.key ?? '';
@@ -348,7 +366,7 @@ export function createCrew({ call, fail, shown, rerender, openPage, openUsage, p
         h('div', { class: 'mds-section-heading' }, h('h2', null, 'Yes Man')),
         h('div', { class: 'mds-group' }, preferenceRow(t('New yesmen'),
           h('p', null, t('The model and effort a lead starts with when you hire a new yesman.')), yesman), leadRow())),
-      workerPools({ view, busy, save, load, fail, shown, preferenceRow, optionName }),
+      workerPools({ view, busy, save, reloadPool, poolViewForEdit, fail, shown, preferenceRow, optionName }),
       h('section', { class: 'settings-section' },
         h('div', { class: 'mds-section-heading' }, h('h2', null, t('Models')),
           h('p', null, t('Add model and effort combinations here to use them in worker pools.'))),

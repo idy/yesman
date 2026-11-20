@@ -119,17 +119,19 @@ func (a *app) crew(ctx context.Context) ([]crew.Member, error) {
 // workerRouting reads the current settings and score patch. The lead sees the
 // Settings catalog. At dispatch, live is the newly started worker's catalog.
 func (a *app) workerRouting(ctx context.Context, live []agent.Model) crew.Routing {
-	models := crewModels(live) // a non-nil empty list means no verified candidates
+	var models []crew.Model
 	if live == nil {
 		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		if found, _, err := a.catalog.get(ctx, false); err == nil {
-			models = found
-		}
+		// Resolve keeps the saved tuples and their scores when a cold probe
+		// has not succeeded. A successful empty catalog verifies absence.
+		models, _, _ = a.catalog.get(ctx, false)
+	} else {
+		models = crewModels(live)
 	}
 	c := a.crewConfig()
 	patch, _ := a.effectiveScorePatch()
-	return crew.Routing{Pools: c.Pools, Members: crew.Resolve(c, models, crew.Embedded(), patch)}
+	return crew.Routing{Pools: c.Pools, Members: crew.Resolve(c, models, crew.Embedded(), patch), CatalogUnknown: models == nil}
 }
 
 // yesmanModel is the option a new yesman's lead runs as.
@@ -162,6 +164,8 @@ type CrewView struct {
 	// ReadAt is when pi's catalog was read, and Error why it could not be.
 	ReadAt time.Time `json:"readAt,omitzero"`
 	Error  string    `json:"error,omitempty"`
+	// CatalogUnknown keeps a failed first probe distinct from a verified empty catalog.
+	CatalogUnknown bool `json:"catalogUnknown,omitempty"`
 }
 
 // PoolView pairs the fixed label and its editable settings with a revision
@@ -199,9 +203,7 @@ func (a *app) crewView(ctx context.Context, refresh bool) CrewView {
 	}
 	patch, status := a.effectiveScorePatch()
 	v.Patch = status
-	if models == nil {
-		models = []crew.Model{}
-	}
+	v.CatalogUnknown = models == nil
 	v.Members = crew.Resolve(c, models, snap, patch)
 	for _, m := range models {
 		cm := CrewModel{Model: m, Key: m.Key(), Scored: []string{}}

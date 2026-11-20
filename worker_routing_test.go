@@ -106,13 +106,33 @@ func TestWorkerPoolPersistenceAndAdmission(t *testing.T) {
 	if len(v.Pools[3].Members) != 0 {
 		t.Fatal(v.Pools)
 	}
-	// If the very first catalog read fails, an unknown catalog is never an
-	// affirmative membership grant, either in Settings or lead context.
+	// A failed first probe can still inform the Lead's preference. It cannot
+	// grant an assignment to a new worker or add an unverified Crew member.
 	a.catalog = newCatalog(func(context.Context) ([]agent.Model, error) { return nil, errors.New("offline") })
-	if v = s.Crew(ctx); v.Error == "" || !v.Members[0].Missing {
+	if v = s.Crew(ctx); v.Error == "" || !v.CatalogUnknown || v.Members[0].Missing {
 		t.Fatal(v)
 	}
-	check("backend", opusLow, "")
+	unverified := a.workerRouting(ctx, nil)
+	if !unverified.CatalogUnknown || !slices.Equal(memberKeys(unverified.Candidates("backend")), []string{opusLow}) {
+		t.Fatalf("unverified candidates: %+v", unverified)
+	}
+	if _, err := unverified.Select("backend", opusLow); err == nil {
+		t.Fatal("unverified catalog used for dispatch")
+	}
+	if err := set("operations", crew.Pool{Members: []string{opusLow}}); err == nil {
+		t.Fatal("saved a new unverified assignment")
+	}
+	if len(unverified.Candidates("default")) != 0 {
+		t.Fatal("empty Default gained an assignment")
+	}
+	// A successful empty probe proves absence, and so does an empty live catalog.
+	a.catalog = newCatalog(func(context.Context) ([]agent.Model, error) { return []agent.Model{}, nil })
+	if known := a.workerRouting(ctx, nil); known.CatalogUnknown || len(known.Candidates("backend")) != 0 {
+		t.Fatal(known)
+	}
+	if live := a.workerRouting(ctx, []agent.Model{}); live.CatalogUnknown || len(live.Candidates("backend")) != 0 {
+		t.Fatal(live)
+	}
 }
 
 func TestWorkerPoolConcurrentEditors(t *testing.T) {

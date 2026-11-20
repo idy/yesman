@@ -37,16 +37,37 @@ export async function checkWorkerRouting({ page, open, name, output, errors }) {
   let pool = (await cfg()).pools.find((p) => p.id === 'backend');
   assert.deepEqual(pool.members, [max, low]); assert.equal(pool.instructions, saved);
   assert.equal((await cfg()).yesman, max);
-  // A concurrent editor wins. The stale opening keeps its draft and the
-  // error. Reopening shows the actual winner and restores keyboard focus.
+  // Hold the older catalog response and the post-conflict settings read.
+  // A new opening can wait for the winner without adopting either old draft.
+  await page.evaluate(() => { scoreControls.RefreshCrew = {}; });
+  await page.getByRole('button', { name: 'Read pi’s models again' }).click();
+  await page.waitForFunction(() => !!scorePending.RefreshCrew);
   await openPool('backend'); await instructions.fill('local draft');
   await go('SetWorkerPool', 'backend', pool.revision, { instructions: 'Winner', members: [low] });
+  await page.evaluate(() => { scoreControls.Crew = {}; });
   await dialog.getByRole('button', { name: 'Save', exact: true }).press('Enter');
   await dialog.getByRole('alert').filter({ hasText: 'pool changed' }).waitFor();
-  assert.equal(await instructions.inputValue(), 'local draft'); assert.deepEqual((await cfg()).pools[1].members, [low]);
-  await page.keyboard.press('Escape'); await openPool('backend'); assert.equal(await instructions.inputValue(), 'Winner');
+  assert.equal(await instructions.inputValue(), 'local draft');
+  await page.waitForFunction(() => !!scorePending.Crew);
+  await page.keyboard.press('Escape');
+  await button('backend').focus(); await button('backend').press('Enter');
+  await dialog.getByRole('status').filter({ hasText: 'Reading pool settings' }).waitFor();
+  assert.equal(await instructions.count(), 0);
+  await page.screenshot({ path: `${output}/${name}-pool-recovery.png`, animations: 'disabled' });
+  await page.evaluate(() => scorePending.Crew());
+  await instructions.waitFor();
+  assert.equal(await instructions.inputValue(), 'Winner');
+  assert.deepEqual(await dialog.locator('input:checked').evaluateAll((boxes) => boxes.map((b) => b.value)), [low]);
+  assert.equal(await active(instructions), true);
   await dialog.getByRole('checkbox').first().check(); await instructions.fill(saved);
   await dialog.getByRole('button', { name: 'Save', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => document.activeElement?.dataset.pool === 'backend');
+  await page.evaluate(() => scorePending.RefreshCrew());
+  await page.waitForFunction(() => !!scoreFinished.RefreshCrew);
+  assert.equal(await active(button('backend')), true);
+  await openPool('backend'); assert.equal(await instructions.inputValue(), saved);
+  assert.equal((await cfg()).pools[1].instructions, saved);
+  await page.keyboard.press('Escape');
   // A delayed refresh started before a pool save cannot restore the old pool.
   await page.evaluate(() => { window.holdRefresh = true; });
   await page.getByRole('button', { name: 'Read pi’s models again' }).click();
@@ -104,6 +125,17 @@ export async function checkWorkerRouting({ page, open, name, output, errors }) {
   await page.keyboard.press('Escape'); await button('backend').focus();
   await page.screenshot({ path: `${output}/${name}-routing-zh.png` });
   assert.equal(await active(button('backend')), true);
+  await go('FixtureCatalogOffline');
+  await page.locator('#settings-nav [data-page="yesman"]').click();
+  await pools.getByText(/可用状态未知/).first().waitFor();
+  await openPool('operations');
+  assert.equal(await dialog.getByRole('checkbox').count(), 2);
+  assert.equal(await dialog.locator('input:disabled').count(), 2);
+  await page.keyboard.press('Escape');
+  await openPool('backend');
+  assert.equal(await dialog.locator('input:checked:enabled').count(), 2);
+  assert.equal(await dialog.getByText(/可用状态未知/).count(), 2);
+  await page.screenshot({ path: `${output}/${name}-pool-offline.png`, animations: 'disabled' });
   assert.deepEqual(errors, []);
-  console.log(`${name}: production Settings, pool membership and efforts, focus/keyboard, independent lead control, stale edit/refresh, persisted cold re-open, zh-Hans/narrow PASS`);
+  console.log(`${name}: production Settings, immediate reopen during conflict recovery, last saved revision, late refresh, keyboard focus and offline membership/score display PASS`);
 }

@@ -241,6 +241,9 @@ func TestScorePatchBrowserBridge(t *testing.T) {
 				value = s.Crew(r.Context())
 			case "RefreshCrew":
 				value = s.RefreshCrew(r.Context())
+			case "FixtureCatalogOffline":
+				a.catalog = newCatalog(func(context.Context) ([]agent.Model, error) { return nil, fmt.Errorf("fixture catalog offline") })
+				value = s.Crew(r.Context())
 			case "FixtureGPT62":
 				configureGPT62PatchCrew(t, a)
 				value = s.Crew(r.Context())

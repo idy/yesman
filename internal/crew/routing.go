@@ -72,6 +72,9 @@ func (p Pool) Validate() error {
 type Routing struct {
 	Pools   Pools
 	Members []Member
+	// CatalogUnknown identifies an advisory snapshot for the lead. Saved
+	// candidates and score provenance are available before Pi verifies them.
+	CatalogUnknown bool
 }
 
 // Candidates intersects the saved keys with usable, configured tuples. A
@@ -96,6 +99,9 @@ func (r Routing) Candidates(label string) []Member {
 // settings changed since its turn, the first remaining member in saved order
 // is a deterministic substitute. No available member means inherit the lead.
 func (r Routing) Select(label, preferred string) (Member, error) {
+	if r.CatalogUnknown {
+		return Member{}, fmt.Errorf("dispatch requires the worker’s live catalog")
+	}
 	if label == "" && len(r.Pools) == 0 && preferred != "" {
 		// Pre-label extensions explicitly selected a flat Crew member. Keep
 		// that contract only until the user configures routing.

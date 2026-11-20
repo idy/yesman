@@ -26,7 +26,7 @@ export default function (pi) {
         for (const t of msg.toolsRemoved || []) tools.delete(t.name);
       }
       const route = instructions.split('## Crew\n')[1]?.split('## ')[0] ?? '';
-      if (command?.name === 'matched') {
+      if (command?.name === 'matched' || command?.name === 'catalog-down') {
         // A deterministic lead can pick from the real score provenance it saw.
         command.crew = route.split('\n').find((l) => l.includes('coding 89% (user CSV)'))?.match(/^- "([^"]+)"/)?.[1];
       }
