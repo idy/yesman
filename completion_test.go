@@ -114,6 +114,68 @@ func (f *noticeFixture) finish(t *testing.T, message string) []agent.Info {
 	return f.agents.List()
 }
 
+// OnChange may coalesce the first turn's Working and Idle snapshots. Drive
+// the desktop observer with just the Idle snapshot from a real Manager.
+func TestFirstIdleSnapshotNotification(t *testing.T) {
+	for _, tc := range []struct {
+		name, turn string
+		retire     bool
+		want       []string
+	}{
+		{name: "failed turn", turn: failedTurn, want: []string{"The model request failed. Open the conversation for details."}},
+		{name: "successful turn", turn: recoveredTurn, want: []string{"Finished and waiting for you."}},
+		{name: "passive history read"},
+		{name: "retired turn", turn: failedTurn, retire: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newNoticeFixture(t)
+			var first []agent.Info
+			if tc.turn != "" {
+				first = a.finish(t, tc.turn)
+			} else {
+				if _, err := a.agents.Messages(t.Context(), a.lead); err != nil {
+					t.Fatal(err)
+				}
+				first = a.agents.List()
+			}
+			lead := first[0]
+			run := lead.SettledRun()
+			if lead.Status != agent.Idle || run.Err() != nil {
+				t.Fatalf("expected a current Idle snapshot: %+v", lead)
+			}
+			hasSettlement := run != context.Background()
+			if hasSettlement != (tc.turn != "") || (lead.RunError != nil) != (tc.turn == failedTurn) {
+				t.Fatalf("unexpected settlement or outcome: %+v", lead)
+			}
+			_ = run.Done() // allocate the Manager's channel outside the fake clock
+			if tc.retire {
+				a.finish(t, recoveredTurn)
+				if run.Err() == nil {
+					t.Fatal("the second turn did not retire the first")
+				}
+			}
+			synctest.Test(t, func(t *testing.T) {
+				var bodies []string
+				a.notifier = func(_ context.Context, _, _, body string) { bodies = append(bodies, body) }
+				expect := func(after time.Duration, want []string) {
+					t.Helper()
+					time.Sleep(after)
+					synctest.Wait()
+					if !slices.Equal(bodies, want) {
+						t.Fatalf("notifications = %q, want %q", bodies, want)
+					}
+				}
+				a.agentsChanged(first)
+				expect(settleGrace-time.Millisecond, nil)
+				a.agentsChanged(first)
+				expect(time.Millisecond, tc.want)
+				a.agentsChanged(first)
+				expect(settleGrace, tc.want)
+			})
+		})
+	}
+}
+
 // Drive the production desktop observer and notification callback. The real
 // Manager supplies the live Lead state when the quiet timer expires.
 func TestDesktopNotificationAfterModelError(t *testing.T) {

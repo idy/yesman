@@ -35,8 +35,8 @@ func (s *completionState) stop() {
 }
 
 // update follows the whole snapshot. Starting a process to read its history
-// is passive. A new settled run also identifies work when status updates were
-// coalesced and the observer saw idle twice.
+// is passive. A real settlement also identifies work when status updates are
+// coalesced, including when the first snapshot is already idle.
 func (c *completionNotices) update(list []agent.Info, notify func(context.Context, agent.Info)) {
 	type workspace struct {
 		lead   agent.Info
@@ -83,9 +83,10 @@ func (c *completionNotices) update(list []agent.Info, notify func(context.Contex
 			if s != nil {
 				s.stop()
 			}
-			s = &completionState{since: lead.Since, run: run}
+			s = &completionState{since: lead.Since}
 			c.states[name] = s
-		} else if lead.Status == agent.Idle && s.run != run && run != context.Background() {
+		}
+		if lead.Status == agent.Idle && s.run != run && run != context.Background() {
 			// A real settlement identifies new work, even if the intervening
 			// busy snapshot was coalesced. A passive startup has no such run.
 			s.stop()
