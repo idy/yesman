@@ -128,7 +128,7 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 	// read. Final admission compares the same certification under the lease.
 	if err == nil {
 		for _, c := range candidates {
-			if e := d.verifySource(ctx, plan.bulk, c); e != nil {
+			if e := d.verifySource(ctx, plan, c); e != nil {
 				out.Rows[c.row].Reason, out.Rows[c.row].Detail = unverifiedMerge, e.Error()
 			} else {
 				plan.eligible = append(plan.eligible, c)
@@ -150,9 +150,9 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 	return out, nil
 }
 
-func (d *DesktopWorktrees) verifySource(ctx context.Context, bulk bool, c desktopCandidate) error {
-	if bulk && c.record.Purpose != "review" {
-		return d.Server.verifyMerged(ctx, c.record)
+func (d *DesktopWorktrees) verifySource(ctx context.Context, plan *desktopPreview, c desktopCandidate) error {
+	if plan.bulk && c.record.Purpose != "review" {
+		return d.Server.verifyBranchCompletion(ctx, yesmen.Yesman{Name: plan.name, HiredAt: plan.since}, c.record)
 	}
 	return nil
 }
@@ -188,7 +188,7 @@ func (d *DesktopWorktrees) Confirm(ctx context.Context, name string, since time.
 			results = append(results, row)
 			continue
 		}
-		if err := d.verifySource(ctx, plan.bulk, c); err != nil {
+		if err := d.verifySource(ctx, plan, c); err != nil {
 			row.Reason, row.Detail = unverifiedMerge, err.Error()
 			results = append(results, row)
 			continue

@@ -37,7 +37,7 @@ func (m *Manager) WorktreeUserPaused(y yesmen.Yesman, name string, since time.Ti
 // stopped never means completed.
 func (m *Manager) WithWorktreeOwner(owner, caller string, remove func() error) error {
 	m.mu.Lock()
-	if m.worktreeCleanup[owner] {
+	if m.closed || m.worktreeCleanup[owner] {
 		m.mu.Unlock()
 		return errWorktreeCleanup
 	}
@@ -50,6 +50,9 @@ func (m *Manager) WithWorktreeOwner(owner, caller string, remove func() error) e
 			a.queue.Known && a.queue.Steering+a.queue.FollowUp > 0
 		for _, d := range a.deliveries {
 			busy = busy || d.State == "sending" && d.Session == ""
+		}
+		if caller == "" && (a.calls != 0 || a.deliveryErr != nil || len(a.operations) != 0 || m.workerPauses[owner] != nil && m.workerPauses[owner].paused) {
+			busy = true
 		}
 		if busy || a.prompts != 0 || a.recalls != 0 || owner != caller && (a.starting != nil || a.proc != nil || a.reports != 0 || a.info.Status == Starting || a.info.Status == Working || a.info.Status == Waiting || a.info.Status == Idle) {
 			m.mu.Unlock()
