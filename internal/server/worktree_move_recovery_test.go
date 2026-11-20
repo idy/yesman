@@ -247,7 +247,24 @@ func TestWorktreeCancelPendingMoveAtSource(t *testing.T) {
 			if _, err := f.s.WorktreeMove(context.Background(), req); err == nil || !strings.Contains(err.Error(), "protected") {
 				t.Fatal(err)
 			}
+			// An unrelated object arrives after the durable intent and its Git
+			// lock. Exercise both a plain directory and a separate linked checkout.
+			if action == "restore" {
+				cleanupGit(t, f.repo.Path, "worktree", "add", "--detach", p.To, "origin/main")
+			} else if err := os.Mkdir(p.To, 0700); err != nil {
+				t.Fatal(err)
+			}
+			sentinel := filepath.Join(p.To, "unrelated-file")
+			writeFixture(t, sentinel, "keep the unrelated destination")
+			destBefore, err := os.Lstat(p.To)
+			if err != nil {
+				t.Fatal(err)
+			}
 			restartForMove(t, f)
+			req.Confirm = ""
+			if _, err := f.s.WorktreeMove(context.Background(), req); err == nil || !strings.Contains(err.Error(), "destination already exists") {
+				t.Fatalf("finish with occupied destination: %v", err)
+			}
 			cancel := req
 			cancel.Action, cancel.Confirm = "cancel", ""
 			private := cleanupGit(t, p.From, "rev-parse", "--absolute-git-dir")
@@ -257,6 +274,18 @@ func TestWorktreeCancelPendingMoveAtSource(t *testing.T) {
 				t.Fatal(err)
 			}
 			preview := moveTest(t, f, cancel)
+			// Neither a colliding destination nor an old confirmation permits
+			// releasing the lock when the source's private nonce changes.
+			marker := filepath.Join(private, "yesman-instance")
+			writeFixture(t, marker, strings.Repeat("0", 32))
+			cancel.Confirm = preview.Stamp
+			rejectMove(t, f, cancel)
+			if got, err := os.ReadFile(lock); err != nil || string(got) != string(owned) {
+				t.Fatal("source identity refusal disturbed the lock", err)
+			}
+			writeFixture(t, marker, w.CleanupID)
+			cancel.Confirm = ""
+			preview = moveTest(t, f, cancel)
 			writeFixture(t, lock, "foreign lock")
 			cancel.Confirm = preview.Stamp
 			rejectMove(t, f, cancel)
@@ -271,6 +300,19 @@ func TestWorktreeCancelPendingMoveAtSource(t *testing.T) {
 			}
 			if _, err := os.Stat(lock); !os.IsNotExist(err) {
 				t.Fatal("owned lock remains", err)
+			}
+			if got, err := os.ReadFile(sentinel); err != nil || string(got) != "keep the unrelated destination" {
+				t.Fatal("destination data changed", err)
+			}
+			destAfter, err := os.Lstat(p.To)
+			if err != nil || !os.SameFile(destBefore, destAfter) {
+				t.Fatal("destination was replaced", err)
+			}
+			if got := cleanupGit(t, p.From, "rev-parse", "HEAD"); got != w.Head {
+				t.Fatal("original checkout changed", got)
+			}
+			if action == "restore" && cleanupGit(t, p.To, "rev-parse", "HEAD") != f.merge {
+				t.Fatal("unrelated checkout changed")
 			}
 			records, err := f.s.Yesmen.WorktreeRecords(f.y.Name)
 			if err != nil || records[0].Archive.CanceledAt.IsZero() || records[0].ReservedForArchive() != (action == "restore") {
@@ -305,6 +347,38 @@ func TestWorktreeMoveGitPathThroughStorageAlias(t *testing.T) {
 	completeMove(t, f, req)
 	if got := cleanupGit(t, w.Path, "rev-parse", "HEAD"); got != w.Head {
 		t.Fatal(got)
+	}
+}
+
+func TestWorktreeMoveRefusesOverlappingAliasRegistrations(t *testing.T) {
+	f, w, req := archiveFixture(t)
+	preview := moveTest(t, f, req)
+	base := filepath.Dir(filepath.Dir(f.y.Path))
+	alias := filepath.Join(t.TempDir(), "storage-link")
+	if runtime.GOOS == "windows" {
+		linktest.Junction(t, base, alias)
+	} else {
+		linktest.Symlink(t, base, alias)
+	}
+	other := filepath.Join(t.TempDir(), "other")
+	cleanupGit(t, f.repo.Path, "worktree", "add", "--detach", other, "origin/main")
+	private := cleanupGit(t, other, "rev-parse", "--absolute-git-dir")
+	aliased := filepath.Join(alias, "yesmen", f.y.Name, w.Dir)
+	for _, test := range []struct{ name, path, reason string }{
+		{"duplicate", aliased, "exactly one"},
+		{"missing nested", filepath.Join(aliased, "sub", "nested"), "another Git registration"},
+		{"ancestor", filepath.Dir(aliased), "another Git registration"},
+		{"destination", filepath.Join(alias, "archive", filepath.Base(preview.To)), "another Git registration"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			writeFixture(t, filepath.Join(private, "gitdir"), filepath.ToSlash(filepath.Join(test.path, ".git"))+"\n")
+			if _, err := f.s.WorktreeMove(context.Background(), req); err == nil || !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("overlapping registration: %v", err)
+			}
+			if got := cleanupGit(t, w.Path, "rev-parse", "HEAD"); got != w.Head {
+				t.Fatal("source changed", got)
+			}
+		})
 	}
 }
 

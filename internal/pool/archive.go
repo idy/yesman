@@ -46,6 +46,7 @@ type MoveRequest struct {
 type LinkedMove struct {
 	LinkedLocation
 	Physical, Registered string
+	gitPath              string // exact Git spelling of the authenticated private backpointer
 	locked               bool
 	req                  MoveRequest
 }
@@ -57,15 +58,31 @@ func (m LinkedMove) endpoints() (string, string) {
 	return m.Active, m.Stored
 }
 
+// Cancel only releases the pending move at its source. An unrelated object
+// can occupy the destination without participating in that operation.
+func (m LinkedMove) pathsToInspect() []string {
+	source, dest := m.endpoints()
+	if m.req.Cancel {
+		return []string{source}
+	}
+	return []string{source, dest}
+}
+
 var commitID = regexp.MustCompile(`^([a-f0-9]{40}|[a-f0-9]{64})$`)
 
 func (p *Pool) WithLinkedMove(ctx context.Context, req MoveRequest, fn func(*LinkedMove) error) error {
 	if !cleanupIDRE.MatchString(req.ID) || req.Ino == 0 || req.Birth == 0 {
 		return errors.New("missing original checkout identity")
 	}
+	m := &LinkedMove{LinkedLocation: LinkedLocation{Active: req.Active, Stored: req.Stored}, req: req}
 	for _, path := range []string{req.Active, req.Stored} {
-		if !filepath.IsAbs(path) || path != filepath.Clean(path) || strings.ContainsAny(path, "\r\n") || realPath(path) != path {
+		if !filepath.IsAbs(path) || path != filepath.Clean(path) || strings.ContainsAny(path, "\r\n") {
 			return errors.New("worktree move requires ordinary absolute paths")
+		}
+	}
+	for _, path := range m.pathsToInspect() {
+		if realPath(path) != path {
+			return errors.New("worktree path has changed or is a link")
 		}
 	}
 	if req.Active == req.Stored || filepath.Base(req.Stored) != "worktree-"+req.ID {
@@ -89,7 +106,7 @@ func (p *Pool) WithLinkedMove(ctx context.Context, req MoveRequest, fn func(*Lin
 	defer active.Unlock()
 	stored.Lock()
 	defer stored.Unlock()
-	m := &LinkedMove{LinkedLocation: LinkedLocation{Active: req.Active, Stored: req.Stored, Common: common}, req: req}
+	m.Common = common
 	if err := m.inspect(ctx); err != nil {
 		return err
 	}
@@ -115,6 +132,14 @@ func (p *Pool) WithLinkedMove(ctx context.Context, req MoveRequest, fn func(*Lin
 // Include prunable registrations and nested worktrees. Moving a directory
 // containing another checkout would strand the other checkout's backpointer.
 func (p *Pool) checkMoveRegistrations(ctx context.Context, m *LinkedMove) error {
+	protected := m.pathsToInspect()
+	for i, path := range protected {
+		physical, err := registrationPath(path)
+		if err != nil {
+			return err
+		}
+		protected[i] = physical
+	}
 	matches := 0
 	err := p.visitRepos(func(repo, dir string) error {
 		if found, err := exists(filepath.Join(dir, "worktrees")); err != nil || !found {
@@ -129,12 +154,18 @@ func (p *Pool) checkMoveRegistrations(ctx context.Context, m *LinkedMove) error 
 			if !ok {
 				continue
 			}
-			path = realPath(filepath.FromSlash(path))
-			switch {
-			case path == m.Registered && repo == m.req.Repo:
+			if repo == m.req.Repo && managedPathMatches(path, m.Registered, m.locationDepth(m.Registered)) {
 				matches++
-			case within(path, m.Active) || within(path, m.Stored) || within(m.Active, path) || within(m.Stored, path):
-				return fmt.Errorf("another Git registration uses %s", path)
+				continue
+			}
+			physical, err := registrationPath(filepath.FromSlash(path))
+			if err != nil {
+				return err
+			}
+			for _, endpoint := range protected {
+				if within(physical, endpoint) || within(endpoint, physical) {
+					return fmt.Errorf("another Git registration uses %s", path)
+				}
 			}
 		}
 		return nil
@@ -146,6 +177,28 @@ func (p *Pool) checkMoveRegistrations(ctx context.Context, m *LinkedMove) error 
 		return errors.New("expected exactly one matching pool Git registration")
 	}
 	return nil
+}
+
+// Git lists prunable registrations too. Resolve the nearest existing parent
+// so a junction still identifies a nested registration with a missing suffix.
+func registrationPath(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("invalid registered worktree path %q", path)
+	}
+	path = filepath.Clean(path)
+	for current := path; ; current = filepath.Dir(current) {
+		resolved, err := resolveExistingPath(current)
+		if err == nil {
+			suffix, err := filepath.Rel(current, path)
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(resolved, suffix), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) || current == filepath.Dir(current) {
+			return "", fmt.Errorf("inspect registration %s: %w", path, err)
+		}
+	}
 }
 
 func exists(path string) (bool, error) {
@@ -198,19 +251,25 @@ func (m *LinkedMove) inspect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	hasDst, err := exists(dest)
-	if err != nil {
-		return err
-	}
-	if hasSrc && hasDst {
-		return fmt.Errorf("destination already exists: %s", dest)
-	}
-	if !hasSrc && (!m.req.Pending || !hasDst) {
-		return fmt.Errorf("original checkout missing: %s", source)
-	}
 	m.Physical = source
-	if hasDst {
-		m.Physical = dest
+	if m.req.Cancel {
+		if !m.req.Pending || !hasSrc {
+			return errors.New("the original source is missing. Choose Finish to verify the moved directory")
+		}
+	} else {
+		hasDst, err := exists(dest)
+		if err != nil {
+			return err
+		}
+		if hasSrc && hasDst {
+			return fmt.Errorf("destination already exists: %s", dest)
+		}
+		if !hasSrc && (!m.req.Pending || !hasDst) {
+			return fmt.Errorf("original checkout missing: %s", source)
+		}
+		if hasDst {
+			m.Physical = dest
+		}
 	}
 	wt, err := openWorktree(m.Physical)
 	if err != nil {
@@ -224,7 +283,7 @@ func (m *LinkedMove) inspect(ctx context.Context) error {
 	if !root.Usable() || root.Ino != m.req.Ino || root.Birth != m.req.Birth {
 		return errors.New("worktree directory identity changed")
 	}
-	for _, path := range []string{source, dest} {
+	for _, path := range m.pathsToInspect() {
 		parent, err := openWorktree(filepath.Dir(path))
 		if err != nil {
 			return err
@@ -268,6 +327,7 @@ func (m *LinkedMove) inspect(ctx context.Context) error {
 	default:
 		return errors.New("private Git backpointer points to another worktree")
 	}
+	m.gitPath = filepath.ToSlash(filepath.Dir(filepath.FromSlash(backPath)))
 	commondir, err := safefs.ReadSmall(pd, "commondir", maxGitFile)
 	if err != nil || strings.TrimSpace(string(commondir)) != "../.." {
 		return errors.New("unexpected Git common directory")
@@ -373,7 +433,7 @@ func (m *LinkedMove) Finish(ctx context.Context, reason string) error {
 	}
 	src, dst := m.endpoints()
 	if !m.locked && m.Physical == src {
-		if _, err := git(ctx, m.Common, "worktree", "lock", "--reason", reason, "--", m.Registered); err != nil {
+		if _, err := git(ctx, m.Common, "worktree", "lock", "--reason", reason, "--", m.gitPath); err != nil {
 			return err
 		}
 	}
@@ -423,7 +483,7 @@ func (m *LinkedMove) Finish(ctx context.Context, reason string) error {
 		return errors.New("moved Git registration changed")
 	}
 	if m.locked {
-		if _, err := git(ctx, m.Common, "worktree", "unlock", "--", dst); err != nil {
+		if _, err := git(ctx, m.Common, "worktree", "unlock", "--", m.gitPath); err != nil {
 			return err
 		}
 		return syncDirectory(m.Private)
@@ -473,7 +533,7 @@ func (m *LinkedMove) Cancel(ctx context.Context) error {
 		return errors.New("checkout changed before cancellation")
 	}
 	if m.locked {
-		if _, err := git(ctx, m.Common, "worktree", "unlock", "--", src); err != nil {
+		if _, err := git(ctx, m.Common, "worktree", "unlock", "--", m.gitPath); err != nil {
 			return err
 		}
 	}
