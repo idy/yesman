@@ -31,7 +31,11 @@ type Identity struct {
 	Ino      uint64
 	Birth    int64
 	HasBirth bool
+	Mount    uint64 // Linux mount ID, to distinguish bind mounts on the same device
 }
+
+// FileIdentity measures an already open file or directory.
+func FileIdentity(f *os.File) (Identity, error) { return identity(f) }
 
 // ErrLink reports a name that is a link, junction or other reparse point.
 var ErrLink = errors.New("is a link; write and edit do not follow links")

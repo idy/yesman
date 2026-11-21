@@ -374,6 +374,11 @@ func (s *Service) spaceFor(y yesmen.Yesman) *space {
 	return sp
 }
 
+// BeginStorageChange holds the data folder's scheduled-task ownership while
+// a confirmed deletion retires the workspace. A concurrent Quit must wait
+// for the operation before another process can take over scheduling.
+func (s *Service) BeginStorageChange() (func(), error) { return s.begin(true) }
+
 // RetireYesman forgets a workspace generation being dismissed: no run is
 // claimed for it any more, and its pending writes find it gone. Archive
 // calls it with the workspace held, before moving it.

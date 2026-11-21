@@ -249,13 +249,24 @@ var errChanged = errors.New("the file changed on disk since it was opened")
 // something else, it is left alone and the error says it changed. An empty
 // base writes regardless, also to a file that is gone.
 func (s *service) WriteFile(yesman, file, text, base string) (FileView, error) {
-	// An editor save already in progress finishes before service-owned
-	// worktree reclamation can take its exclusive workspace lease.
+	y, err := s.app.yesmen.Get(yesman)
+	if err != nil {
+		return FileView{}, err
+	}
+	return s.SaveWorkspaceFile(yesman, file, text, base, y.HiredAt)
+}
+
+// SaveWorkspaceFile binds a delayed editor/autosave to the hire it read.
+// The lifecycle lease includes the write and its final rename.
+func (s *service) SaveWorkspaceFile(yesman, file, text, base string, since time.Time) (FileView, error) {
 	y, release, err := s.app.yesmen.BeginUse(yesman)
 	if err != nil {
 		return FileView{}, err
 	}
 	defer release()
+	if !y.HiredAt.Equal(since) {
+		return FileView{}, errors.New("the workspace was replaced. Reopen the file")
+	}
 	root, err := os.OpenRoot(y.Path)
 	if err != nil {
 		return FileView{}, err

@@ -235,8 +235,9 @@ func (s *Store) changeBoardAndForget(name string, c BoardChange, lead bool, scop
 	// After the Store's lock: the record's own I/O holds up only this
 	// yesman. A notice recorded meanwhile was refused by the revision this
 	// change counted before it wrote the board.
-	y, _ := s.Get(name)
-	_ = s.forgetNotices(y, before, b.Tasks) // best effort: never holds up the board
+	if y, err := s.Get(name); err == nil {
+		_ = s.forgetNotices(y, before, b.Tasks) // best effort, after the board committed
+	}
 	return b, nil
 }
 
@@ -305,7 +306,10 @@ func (s *Store) changeBoard(name string, c BoardChange, lead bool, scope *Yesman
 		}
 		return b, before, nil
 	}
-	y, _ := s.Get(name)
+	y, err := s.Get(name)
+	if err != nil {
+		return Board{}, nil, err
+	}
 	s.changing(name)
 	if err := writeJSON(y.BoardFile(), b); err != nil {
 		return Board{}, nil, err
@@ -448,7 +452,10 @@ func (s *Store) AddScheduledTask(name string, link TaskSchedule, title, detail s
 	}
 	i := len(b.Tasks) - 1
 	b.Tasks[i].Schedule = &TaskSchedule{Plan: link.Plan, Run: link.Run}
-	y, _ := s.Get(name)
+	y, err := s.Get(name)
+	if err != nil {
+		return Task{}, false, err
+	}
 	s.changing(name) // counted before it is written, as every board change (see Revision)
 	if err := writeJSON(y.BoardFile(), b); err != nil {
 		return Task{}, false, err
@@ -487,7 +494,10 @@ func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task
 		markDone(&t, b.Tasks[i].Status == TaskDone, now)
 		t.UpdatedAt = now
 		b.Tasks[i] = t
-		y, _ := s.Get(name)
+		y, err := s.Get(name)
+		if err != nil {
+			return Task{}, false, err
+		}
 		s.changing(name)
 		if err := writeJSON(y.BoardFile(), b); err != nil {
 			return Task{}, false, err

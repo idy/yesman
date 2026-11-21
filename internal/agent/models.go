@@ -114,7 +114,7 @@ func applyChoice(ctx context.Context, p *proc, c Choice) error {
 
 // WorkerRoute resolves a preference against the new worker's verified catalog.
 // A slot refused by pi is omitted on the next resolution before any task is sent.
-type WorkerRoute func([]Model) (Choice, error)
+type WorkerRoute func(context.Context, []Model) (Choice, error)
 
 type workerSetup struct {
 	since time.Time
@@ -146,7 +146,7 @@ func (m *Manager) prepareWorker(ctx context.Context, setup *workerSetup, a *agen
 	// retries even if settings keep changing. No model turn has started yet.
 	var lastErr error
 	for range 2*crew.MaxPoolMembers + 1 {
-		as, err := setup.route(models)
+		as, err := setup.route(ctx, models)
 		if err != nil {
 			return err
 		}
@@ -321,7 +321,9 @@ func (m *Manager) configure(ctx context.Context, id string, cmd map[string]any) 
 }
 
 func (m *Manager) configureOn(ctx context.Context, a *agent, p *proc, cmd map[string]any, expected *Choice) (Info, error) {
-	a.modelMu.Lock()
+	if err := lockWithin(ctx, &a.modelMu); err != nil {
+		return Info{}, err
+	}
 	defer a.modelMu.Unlock()
 	if a.prompts != 0 {
 		return Info{}, errors.New("wait for the current run to finish before changing its model or effort")

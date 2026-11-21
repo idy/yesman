@@ -104,7 +104,7 @@ func (m *Manager) StopYesmanContext(ctx context.Context, name string) error {
 	// waited for Submit's Use lease, but standalone stop also joins that boundary.
 	var errs []error
 	for _, a := range agents {
-		if err := m.ensureDeliveries(a, filepath.Join(y.SessionDir(a.info.Name), "delivery.json")); err != nil {
+		if err := m.joinDeliveryLoad(a); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -189,24 +189,26 @@ func (m *Manager) reopenWorkerInScope(a *agent, resume workerResume) (bool, erro
 	}
 	var reopened bool
 	err := m.cfg.Yesmen.Use(a.info.Yesman, func(y yesmen.Yesman) error {
-		m.mu.Lock()
-		active := !a.retiring && m.agents[a.info.ID] == a && a.workspaceSince.Equal(y.HiredAt)
-		m.mu.Unlock()
-		if !active {
-			return errStopped
-		}
-		if reviewR5BeforeStoreReopen != nil {
-			reviewR5BeforeStoreReopen() // tests: the write is slow to begin
-		}
 		var err error
-		// Only the worker that was given work: one of the same name started
-		// since keeps all it records.
-		reopened, err = m.cfg.Yesmen.ReopenWorkerIf(y.Name, a.info.Name, resume.since, func(yesmen.Worker) bool {
-			return m.workerSettingCurrent(resume.id, resume.hiredAt, resume.since, resume.epoch)
-		})
+		reopened, err = m.reopenWorkerIn(y, a, resume)
 		return err
 	})
 	return reopened, err
+}
+
+func (m *Manager) reopenWorkerIn(y yesmen.Yesman, a *agent, resume workerResume) (bool, error) {
+	m.mu.Lock()
+	active := !a.retiring && m.agents[a.info.ID] == a && a.workspaceSince.Equal(y.HiredAt)
+	m.mu.Unlock()
+	if !active {
+		return false, errStopped
+	}
+	if reviewR5BeforeStoreReopen != nil {
+		reviewR5BeforeStoreReopen()
+	}
+	return m.cfg.Yesmen.ReopenWorkerIf(y.Name, a.info.Name, resume.since, func(yesmen.Worker) bool {
+		return m.workerSettingCurrent(resume.id, resume.hiredAt, resume.since, resume.epoch)
+	})
 }
 
 // Snapshot only immutable generation information for asynchronous reports.

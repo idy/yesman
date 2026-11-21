@@ -45,7 +45,7 @@ function saveWidth(key, px) {
 //   fail(err)               shows an error
 //   yesman()                the yesman whose agent is shown, or null
 //   isOpen(), setOpen(on)   whether the pane shows
-//   checkout(y), dismiss(name)
+//   checkout(y), deleteWorkspace(y)
 //   confirm(title, body, ok)  asks before something is lost
 //   shown()                   after the pane draws, or what it shows changes
 //   keys()                    the shortcuts its menu's items show, by action
@@ -291,7 +291,9 @@ export function createFiles(host) {
     const text = editor.text(k);
     try {
       const args = [p.name, rel, text, force ? '' : (tab.base ?? '')];
-      const v = tab.checkout ? await host.call('WriteWorktreeFile', ...args, tab.checkout) : await host.call('WriteFile', ...args);
+      const v = tab.checkout
+        ? await host.call('WriteWorktreeFile', ...args, tab.checkout)
+        : await host.call('SaveWorkspaceFile', ...args, p.hiredAt ?? null);
       if (tabOf(p, rel) !== tab) return false;
       tab.base = v.hash;
       tab.conflict = null;
@@ -1021,7 +1023,7 @@ export function createFiles(host) {
         case 'task-log': openTaskLog(); break;
         case 'checkout': if (y) host.checkout(y); break;
         case 'reveal': host.call('Reveal', p.root === '.' ? p.path : absOf(p, p.root)).catch(host.fail); break;
-        case 'dismiss': host.dismiss(p.name); break;
+        case 'delete-workspace': if (y) host.deleteWorkspace(y); break;
       }
     } catch (err) {
       host.fail(err);

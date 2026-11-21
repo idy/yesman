@@ -7,6 +7,8 @@ Each release's section is what installed copies show as its release notes.
 - Yes Man automatically retries cleanup of returned temporary worktrees as they become eligible, including after a restart.
 - In the Info panel, right-click **Worktrees** and choose **Clean up worktrees…** to preview a batch, or right-click a row and choose **Remove Worktree…** to review one checkout.
 - Cleanup keeps branches, tags, and recoverable Git history. It leaves worktrees in place when they are in use, have local changes or saved conflicts, or cannot be verified.
+- **Delete Yes Man…** replaces Archive in the sidebar. The confirmation shows the workspace name. If you proceed, Yes Man stops its agents and permanently deletes its conversations, tasks, Knowledge, Working Logs, and workspace files. Handle its worktrees separately. Shared repositories, branches, and tags are preserved.
+- In **Settings › Storage › Stored workspaces**, you can review and delete an old workspace archive or finish an interrupted deletion one entry at a time.
 
 ## 0.1.58
 
