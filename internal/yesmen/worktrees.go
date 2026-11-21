@@ -3,8 +3,6 @@ package yesmen
 import (
 	"os"
 	"time"
-
-	"github.com/idy/yesman/internal/pool"
 )
 
 // WorktreeRecord tracks agent-created temporary resources, independently of
@@ -41,11 +39,22 @@ type WorktreeRecord struct {
 	Archive *WorktreeArchive `json:"archive,omitempty"`
 }
 
+// LinkedLocation records the actual branch, full commit, physical locations
+// and linked Git directories observed for a single checkout.
+type LinkedLocation struct {
+	Active  string `json:"activePath"`
+	Stored  string `json:"archivePath"`
+	Common  string `json:"commonDir"`
+	Private string `json:"privateDir"`
+	Branch  string `json:"branch"`
+	Head    string `json:"head"`
+}
+
 // WorktreeArchive journals one human-confirmed transition. Keep the last
 // transition after restoration so a previous confirmation cannot be replayed.
 // Its paths are evidence, never accepted as destinations from the client.
 type WorktreeArchive struct {
-	pool.LinkedLocation
+	LinkedLocation
 	Phase       string             `json:"phase"` // archiving, archived, restoring, restored
 	Transaction string             `json:"transaction"`
 	ConfirmedAt time.Time          `json:"confirmedAt"`

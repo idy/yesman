@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/safefs"
 	"github.com/idy/yesman/internal/safefs/linktest"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -94,12 +96,12 @@ func TestWorktreeArchiveThroughConfiguredRoot(t *testing.T) {
 	f.s = &Server{Yesmen: store, Pool: pool.New(filepath.Join(alias, "repos")), Agents: agent.New(agent.Config{Yesmen: store})}
 	t.Cleanup(f.s.Agents.StopAll)
 	moved := completeMove(t, f, req)
-	expectedPath, err := pool.PhysicalPath(w.Path)
+	expectedPath, err := safefs.PhysicalPath(w.Path)
 	// The source is now absent. Its verified physical parent still exists.
 	if !os.IsNotExist(err) {
 		t.Fatalf("old path still resolves to %s: %v", expectedPath, err)
 	}
-	parent, err := pool.PhysicalPath(filepath.Dir(w.Path))
+	parent, err := safefs.PhysicalPath(filepath.Dir(w.Path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +113,29 @@ func TestWorktreeArchiveThroughConfiguredRoot(t *testing.T) {
 	if got := cleanupGit(t, w.Path, "rev-parse", "HEAD"); got != w.Head {
 		t.Fatal(got)
 	}
+}
+
+func TestWorktreeArchiveKeepsWorkspaceAndRestoreRecord(t *testing.T) {
+	f, w, req := archiveFixture(t)
+	target, err := f.s.Yesmen.PrepareDeletion(f.y.Name, f.y.HiredAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := completeMove(t, f, req)
+	// Settings lists legacy workspace archives. A linked checkout lives
+	// outside the workspace, but still belongs to its original hire.
+	if entries, err := f.s.Yesmen.StoredWorkspaces(); err != nil || len(entries) != 0 {
+		t.Fatal(entries, err)
+	}
+	detached, err := f.s.Yesmen.Delete(t.Context(), target, f.s.Pool.CheckWorkspaceDeletion, func(yesmen.Yesman) error { t.Fatal("stopped a protected workspace"); return nil }, f.s.Pool.RelocatedPrimary)
+	if detached || err == nil || !strings.Contains(err.Error(), "saved archive") {
+		t.Fatal(detached, err)
+	}
+	if got := cleanupGit(t, moved.To, "rev-parse", "HEAD"); got != w.Head {
+		t.Fatal(got)
+	}
+	req.Action = "restore"
+	completeMove(t, f, req)
 }
 
 func TestWorktreeArchiveRestoreRequiresFreshBoardReturn(t *testing.T) {

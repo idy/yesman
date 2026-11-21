@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/safefs"
 )
 
@@ -112,11 +111,11 @@ func (s *Store) WorktreePaths(y Yesman, dir, id string) (string, string, error) 
 	if !filepath.IsLocal(dir) || filepath.Base(dir) != dir || !filepath.IsLocal(id) || filepath.Base(id) != id {
 		return "", "", errors.New("invalid worktree directory or instance")
 	}
-	wsParent, err := pool.PhysicalPath(s.root)
+	wsParent, err := safefs.PhysicalPath(s.root)
 	if err != nil {
 		return "", "", err
 	}
-	archiveParent, err := pool.PhysicalPath(filepath.Dir(s.archive))
+	archiveParent, err := safefs.PhysicalPath(filepath.Dir(s.archive))
 	if err != nil {
 		return "", "", err
 	}

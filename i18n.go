@@ -71,6 +71,27 @@ func inUseText(reason string) string {
 // zhHans translates the English messages Go shows to Simplified Chinese.
 // Each keeps the verbs of its English message, in their order.
 var zhHans = map[string]string{
+	"Use Git to move the primary worktree %q outside %s before deleting it.":                                                   "请先用 Git 将主工作树 %q 移到 %s 以外，再删除工作区。",
+	"Could not verify the new location of primary worktree %q. Move it with Git and keep its registration.":                    "无法确认主工作树 %q 的新位置。请用 Git 移动工作树并保留登记。",
+	"Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.": "无法保存工作树 %q 的迁移记录。请确认对 %s 有写入权限，且文件系统支持同步，然后重试。",
+	"Grant write access to directory %s or move its contents to safety before deleting the workspace.":                         "请先为目录 %s 授予写权限，或将其中的文件移到安全位置，再删除工作区。",
+	// Workspace deletion and its recovery instructions
+	"Move %q out of the workspace first. For a worktree, use Git or its managed cleanup.":                                                   "请先将 %q 移出工作区。如果是 Git 工作树，请用 Git 移动它，或完成受管回收。",
+	"%s contains a Git checkout. Move it with Git or finish its managed cleanup first.":                                                     "%s 包含 Git 工作树。请先用 Git 移动它，或完成受管回收。",
+	"%s contains Git repository data. Move the repository out of the workspace first.":                                                      "%s 包含 Git 仓库数据。请先将仓库移出工作区。",
+	"%s has a registered worktree at %s. Finish its managed cleanup or move the checkout with Git first.":                                   "仓库 %s 在 %s 登记了工作树。请先完成受管回收，或用 Git 移动工作树。",
+	"Worktree %q has a saved archive or a pending move. Finish or restore it in Worktrees before deleting this workspace.":                  "工作树 %q 已归档或有待完成的移动。请先在「工作树」中完成移动或恢复它，再删除此工作区。",
+	"Worktree %q (%s, owner %q, task %q) is still recorded. Finish its managed cleanup or recover the checkout and its registration first.": "工作树 %q（%s，负责人 %q，任务 %q）仍有登记。请先完成受管回收，或恢复工作树及其登记。",
+	"Move the linked or special metadata entry %s out of the workspace first.":                                                              "请先将元数据中的链接或特殊文件 %s 移出工作区。",
+	"Move the linked metadata file %s out of the workspace first.":                                                                          "请先将有硬链接的元数据文件 %s 移出工作区。",
+	"Unmount %s before deleting this workspace.":                                                                                            "请先卸载 %s，再删除工作区。",
+	"Check %s. It must be a directory inside the data folder.":                                                                              "请检查 %s，需要使用数据目录中的实际文件夹。",
+	"The agents could not finish saving. Check the workspace and try again.":                                                                "智能体未能完成保存。请检查工作区后重试。",
+	"Deletion is incomplete at %s. Check the remaining files, then retry in Settings → Storage → Stored workspaces.":                        "%s 删除未完成。请检查剩余文件，然后在「设置 → 存储 → 已存储的工作区」中重试。",
+	"the workspace changed since confirmation. Reopen its menu":                                                                             "工作区在确认期间已更改，请重新打开菜单。",
+	"the workspace was replaced. Reopen its menu":                                                                                           "工作区已被替换，请重新打开菜单。",
+	"This workspace is no longer here. Reopen its menu.":                                                                                    "这份工作区已不存在，请重新打开菜单。",
+	"cannot verify the workspace directory identity on this filesystem":                                                                     "此文件系统无法确认工作区目录的身份。",
 	// Settings › pi: sources refused before pi sees them
 	"enter a package source, such as npm:pi-web-access": "请输入包来源，例如 npm:pi-web-access",
 	"%q is not a package source":                        "%q 不是包来源",
@@ -126,7 +147,7 @@ var zhHans = map[string]string{
 	"Stop Current Run":    "停止当前运行",
 	"Put to Sleep":        "让它休眠",
 	"Remove Worker…":      "移除助手…",
-	"Archive yesman…":     "归档 yesman…",
+	"Delete Yes Man…":     "删除 Yes Man…",
 
 	// The files pane's menus
 	"Go to File…":             "转到文件…",
@@ -137,7 +158,6 @@ var zhHans = map[string]string{
 	"Open Knowledge Notes":    "打开知识笔记",
 	"Open Working Logs":       "打开工作日志",
 	"Check Out a Repository…": "检出仓库…",
-	"Dismiss yesman…":         "解雇 yesman…",
 	"Clean up worktrees…":     "清理工作树…",
 	"Remove Worktree…":        "移除工作树…",
 	"Reveal in Finder":        "在访达中显示",

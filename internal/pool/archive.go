@@ -14,20 +14,11 @@ import (
 	"time"
 
 	"github.com/idy/yesman/internal/safefs"
+	"github.com/idy/yesman/internal/yesmen"
 )
 
-// LinkedLocation describes what Git and the directory say now, separately
-// from what was checked out originally. Only ordinary absolute links and a
-// live local branch are supported. Moving a directory preserves its index,
-// tracked, untracked and ignored files, and the branch's reachability.
-type LinkedLocation struct {
-	Active  string `json:"activePath"`
-	Stored  string `json:"archivePath"`
-	Common  string `json:"commonDir"`
-	Private string `json:"privateDir"`
-	Branch  string `json:"branch"`
-	Head    string `json:"head"`
-}
+// LinkedLocation is the current Git identity used in the workspace move journal.
+type LinkedLocation = yesmen.LinkedLocation
 
 type MoveRequest struct {
 	Repo, ID, Active, Stored, OriginalBranch string
@@ -203,7 +194,7 @@ func registrationPath(path string) (string, error) {
 	}
 	path = filepath.Clean(path)
 	for current := path; ; current = filepath.Dir(current) {
-		resolved, err := PhysicalPath(current)
+		resolved, err := safefs.PhysicalPath(current)
 		if err == nil {
 			suffix, err := filepath.Rel(current, path)
 			if err != nil {

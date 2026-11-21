@@ -825,10 +825,10 @@ func fileExists(path string) bool {
 // realPath returns the physical spelling used to compare Git registrations
 // with configured paths. A missing checkout can still have a registered path.
 func realPath(path string) string {
-	if r, err := PhysicalPath(path); err == nil {
+	if r, err := safefs.PhysicalPath(path); err == nil {
 		return r
 	}
-	if r, err := PhysicalPath(filepath.Dir(path)); err == nil {
+	if r, err := safefs.PhysicalPath(filepath.Dir(path)); err == nil {
 		return filepath.Join(r, filepath.Base(path))
 	}
 	return filepath.Clean(path)

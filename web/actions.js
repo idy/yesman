@@ -168,9 +168,11 @@ export function registerActions(shortcuts, host) {
       when: needWorker, run: () => host.removeWorker(agent()),
     },
     {
-      id: 'yesman.dismiss', label: 'Dismiss this yesman…', group: 'This yesman', keywords: ['archive', 'delete'],
+      // A saved binding for yesman.dismiss still means archive on an older
+      // installation. Never reinterpret it as permission to delete.
+      id: 'yesman.delete', label: 'Delete Yes Man…', group: 'This yesman', keywords: ['delete workspace', 'remove'],
       when: () => (yesman() ? true : 'Open a conversation first.'),
-      run: () => host.dismiss(agent().yesman),
+      run: () => host.deleteWorkspace(yesman()),
     },
 
     // ---------- Settings ----------

@@ -13,6 +13,7 @@ import { renderMarkdown } from './markdown.js';
 import { project, originOf, FINISHED, dismissible, familyOf, joinInputs } from './conversation.js';
 import { $, h, icon, openModal } from './dom.js';
 import { createFiles } from './files.js';
+import { workspaceDeletion } from './workspace-delete.js';
 import { logRoute } from './task-log.js';
 import { createInfo } from './info.js';
 import { createBoard } from './board.js';
@@ -1388,11 +1389,11 @@ async function openAgentMenu(e, a) {
   const pointer = e.type === 'contextmenu' && (e.clientX !== 0 || e.clientY !== 0);
   const x = Math.round(pointer ? e.clientX : rect.left + 20);
   const y = Math.round(pointer ? e.clientY : rect.bottom);
+  const workspace = yesmanOf(a.id);
   try {
     const action = await call('AgentMenu', a.id, x, y, state.hideDone.has(a.yesman));
     const current = agentById(a.id);
-    if (!current || keyOf(current) !== keyOf(a)) return;
-    const workspace = yesmanOf(a.id);
+    if (!current || keyOf(current) !== keyOf(a) || yesmanOf(a.id)?.hiredAt !== workspace?.hiredAt) return;
     switch (action) {
       case 'open': selectAgent(a.id); break;
       case 'workspace':
@@ -1406,7 +1407,12 @@ async function openAgentMenu(e, a) {
       case 'abort': await call('Abort', a.id); break;
       case 'sleep': await call('Stop', a.id); break;
       case 'rename': await renameYesman(workspace); break;
-      case 'archive': await dismiss(a.yesman); break;
+      case 'delete-workspace':
+        await deletion.ask(workspace, null, () => {
+          if (keyOf(agentById(a.id) ?? {}) === keyOf(a)) restoreSidebarFocus(row);
+          else ($('#yesmen .agent-row') ?? $('#yesmen button'))?.focus({ preventScroll: true });
+        });
+        break;
       case 'remove': await removeWorker(a); break;
       case 'hide-done':
       case 'show-done': setHideDone(a.yesman, action === 'hide-done'); break;
@@ -2537,8 +2543,16 @@ function renderBody() {
   if (state.view.kind !== 'settings' || state.view.page !== 'shortcuts') shortcutsPage.leave();
   if (state.view.kind !== 'settings' || state.view.page !== 'grant') grantsPage.leave();
   const body = $('#body');
+  const welcome = body.querySelector('#welcome-hire');
+  if (state.view.kind === 'none' && welcome?.lang === locale()) {
+    // Keep the form mounted while it owns the user's edit, including native
+    // composition, selection and the pending submission's handlers.
+    updateWelcome(welcome);
+    return;
+  }
   // A refresh while typing, say in the search box, keeps the caret there.
   const active = body.contains(document.activeElement) ? document.activeElement : null;
+  const restoreStored = deletion.storageFocus(active);
   const held = requestFocus($('#dock'));
   const composing = $('#dock .composer textarea');
   const composingReply = active?.matches('#dock [data-reply-field][data-composing]');
@@ -2554,6 +2568,7 @@ function renderBody() {
   body.replaceChildren();
   if (state.view.kind === 'settings') {
     renderSettings(body);
+    if (restoreStored && document.activeElement === document.body) restoreStored();
     const again = active?.id && document.getElementById(active.id);
     if (again) {
       again.focus();
@@ -2991,22 +3006,27 @@ function renderWelcome(body) {
   const error = h('p', { class: 'welcome-hint', id: 'welcome-hire-error', role: 'alert', hidden: true });
   const form = h('form', null, input, h('button', { class: 'mds-button mds-button--primary', type: 'submit' }, t('Hire')));
   bindHireForm(form, error);
-  const hint = h('p', { class: 'welcome-hint' });
+  const welcome = h('div', { class: 'welcome', id: 'welcome-hire', lang: locale() },
+    h('h1', { class: 'mds-title' }, t('Hire a yesman')),
+    h('p', null, t('A yesman takes on a project. It gets a workspace of its own, checks out the repositories it needs from the shared pool, remembers what it learns, and starts workers when the job splits up.')),
+    form,
+    h('p', { class: 'welcome-hint', id: 'welcome-name-hint' }, t('A display name. Uppercase letters, spaces and Chinese characters are welcome.')),
+    error, h('p', { class: 'welcome-hint', id: 'welcome-model' }));
+  body.append(h('div', { class: 'page' }, welcome));
+  updateWelcome(welcome);
+  input.focus();
+}
+
+function updateWelcome(welcome) {
+  const warning = welcome.querySelector('.mds-notice');
+  const message = state.snap.piError;
+  if (!message) warning?.remove();
+  else if (warning) warning.querySelector('p').textContent = message;
+  else welcome.querySelector('form').before(h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' },
+    h('div', null, h('strong', null, t('pi was not found')), h('p', null, message))));
+  const hint = welcome.querySelector('#welcome-model');
   crewPage.describe(hint);
   crewPage.load().then(() => { if (hint.isConnected) crewPage.describe(hint); });
-  body.append(
-    h('div', { class: 'page' },
-      h('div', { class: 'welcome' },
-        h('h1', { class: 'mds-title' }, t('Hire a yesman')),
-        h('p', null, t('A yesman takes on a project. It gets a workspace of its own, checks out the repositories it needs from the shared pool, remembers what it learns, and starts workers when the job splits up.')),
-        state.snap.piError ? h('div', { class: 'mds-notice', role: 'alert', 'data-tone': 'error' }, h('div', null, h('strong', null, t('pi was not found')), h('p', null, state.snap.piError))) : null,
-        form,
-        h('p', { class: 'welcome-hint', id: 'welcome-name-hint' }, t('A display name. Uppercase letters, spaces and Chinese characters are welcome.')),
-        error,
-        hint,
-      )),
-  );
-  input.focus();
 }
 
 // ---------- Settings ----------
@@ -3301,6 +3321,7 @@ function renderStorage(inner) {
   inner.append(
     settingsSection(t('Data folder'), t('Choose where yesman keeps its data.'), ...storageRows(v)),
     storageUsageSection(),
+    deletion.storedSection(),
     settingsSection(t('Locations'), t('What yesman keeps, and where. Hover over a row for its full path.'),
       ...[
         ['Repositories', 'The shared pool of bare Git repositories.', v.pool],
@@ -4161,11 +4182,11 @@ const files = createFiles({
   selectWorkspace: (name) => { if (agentById(`${name}/lead`)) selectAgent(`${name}/lead`); },
   setOpen: (on) => setPane(on ? 'files' : state.pane === 'files' ? null : state.pane),
   checkout: (y) => openCheckout(y),
-  dismiss: (name) => dismiss(name),
+  deleteWorkspace: (y) => deletion.ask(y),
   confirm: (title, body, ok) => confirmAction(title, body, ok),
   shown: () => info.render(),
   worktrees: (y) => info.worktrees(y),
-  keys: () => ({ 'files.find': shortcuts.primary('files.find'), 'files.tree': shortcuts.primary('files.tree') }),
+  keys: () => ({ 'files.find': shortcuts.primary('files.find'), 'files.tree': shortcuts.primary('files.tree'), 'yesman.delete': shortcuts.primary('yesman.delete') }),
 });
 
 // ---------- Info panel ----------
@@ -4588,22 +4609,14 @@ async function confirmAction(title, body, ok) {
   return (await openModal(dialog)) === 'ok';
 }
 
-async function dismiss(name) {
-  if (!(await confirmAction(t('Dismiss {name}?', { name: yesmanLabel(name) }), t('Its agents stop and its workspace moves to the archive. Branches stay in the repo pool.'), t('Dismiss')))) return;
-  try {
-    const dest = await call('Dismiss', name);
-    toast(t('Archived to {path}', { path: dest }));
-    // A view of its agents falls back to the first yesman once they are gone.
-    await refreshState();
-  } catch (err) {
-    fail(err);
-  }
-}
+const deletion = workspaceDeletion({ call, errorText, onLiveDeleted, toast, section: settingsSection, row: preferenceRow });
 
 async function removeWorker(a) {
+  const workspace = yesmanOf(a.id);
+  if (!workspace) return;
   if (!(await confirmAction(t('Remove {name}?', { name: a.name }), t('It stops and leaves this yesman. Its worktrees and session log stay in the workspace.'), t('Remove')))) return;
   try {
-    await call('RemoveWorker', a.id);
+    await call('RemoveWorkerOf', a.id, workspace.hiredAt ?? null, a.since ?? null);
     // selectAgent loads the lead's conversation if this window has not yet.
     if (state.view.kind === 'agent' && state.view.id === a.id) selectAgent(`${a.yesman}/lead`);
     else render();
@@ -4674,7 +4687,7 @@ const actionHost = {
   openCheckout,
   renameYesman,
   removeWorker,
-  dismiss,
+  deleteWorkspace: deletion.ask,
   addRepos() {
     showSettings('repositories');
     openAddRepos();
@@ -4720,13 +4733,37 @@ function refreshSoon() {
   refreshTimer = setTimeout(refreshState, 150);
 }
 
+let refreshSequence = 0;
 async function refreshState() {
+  const sequence = ++refreshSequence;
   try {
-    [state.snap, state.repos, state.clones] = await Promise.all([call('State'), call('Repos'), call('Clones')]);
+    const snapshot = await Promise.all([call('State'), call('Repos'), call('Clones')]);
+    if (sequence !== refreshSequence) return;
+    [state.snap, state.repos, state.clones] = snapshot;
   } catch (err) {
-    fail(err);
+    if (sequence === refreshSequence) fail(err);
     return;
   }
+  renderSnapshot();
+}
+
+function onLiveDeleted(workspace) {
+  // The bridge has committed this hire's deletion. Select a usable conversation
+  // now, even if a later State or Storage read takes time or fails.
+  ++refreshSequence;
+  const current = state.snap.yesmen.find(y => y.name === workspace.name);
+  if (current && current.hiredAt === workspace.hiredAt) {
+    state.snap.yesmen = state.snap.yesmen.filter(y => y !== current);
+    state.snap.agents = state.snap.agents.filter(a => a.yesman !== workspace.name);
+    renderSnapshot();
+  }
+  if (document.activeElement === document.body) {
+    ($('#dock textarea') ?? $('#settings-nav [aria-current="page"]') ?? $('#yesmen button'))?.focus({ preventScroll: true });
+  }
+  refreshSoon();
+}
+
+function renderSnapshot() {
   for (const y of state.snap.yesmen) files.reconcileWorktrees(y, y.worktrees ?? [], false);
   pruneNeedsYouDrafts();
   pruneCaches();

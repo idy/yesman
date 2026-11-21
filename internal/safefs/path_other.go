@@ -1,6 +1,6 @@
 //go:build !windows
 
-package pool
+package safefs
 
 import "path/filepath"
 

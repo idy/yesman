@@ -148,8 +148,8 @@ func (s *service) Dismiss(name string) (string, error) {
 			return err
 		}
 		for _, r := range records {
-			if r.Archive != nil && (r.Archive.Phase == "archiving" || r.Archive.Phase == "restoring") {
-				return errors.New("finish the pending worktree move before dismissing this workspace")
+			if r.ReservedForArchive() {
+				return errors.New("finish or restore the archived worktree before dismissing this workspace")
 			}
 		}
 		// No scheduled run starts for it from now; one on its way finds the
@@ -469,6 +469,15 @@ func (s *service) RemoveWorker(id string) error {
 		return err
 	}
 	return s.app.agents.RemoveWorker(y, name)
+}
+
+// RemoveWorkerOf binds the confirmation shown in the window to its worker.
+func (s *service) RemoveWorkerOf(id string, hiredAt, since time.Time) error {
+	name, worker, err := agent.SplitID(id)
+	if err != nil {
+		return err
+	}
+	return s.app.agents.RemoveWorkerOf(name, worker, hiredAt, since)
 }
 
 // TakeFocus returns the agent a notification click asked to show, once.

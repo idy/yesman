@@ -96,9 +96,9 @@ func TestStartWorkerAs(t *testing.T) {
 }
 
 func TestRoutedWorkerSkipsRefusedSlot(t *testing.T) {
-	m, _ := newTestManager(t, 0, "FAKE_PI_REFUSE_BETA=1", "FAKE_PI_ASK_WORKERS=1")
+	m, store := newTestManager(t, 0, "FAKE_PI_REFUSE_BETA=1", "FAKE_PI_ASK_WORKERS=1")
 	var reads int
-	choose := func(live []Model) (Choice, error) {
+	choose := func(_ context.Context, live []Model) (Choice, error) {
 		reads++
 		for _, model := range live {
 			if model.Provider == "beta" && slices.Contains(model.Levels, "off") {
@@ -108,17 +108,22 @@ func TestRoutedWorkerSkipsRefusedSlot(t *testing.T) {
 		return Choice{Provider: "alpha", Model: "shared", Effort: "high"}, nil
 	}
 	ctx := context.Background()
-	info, err := m.StartWorkerRouted(ctx, "alice", "w1", "Build", "a task", choose, nil)
+	y, err := store.Get("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lead, token := workerTestLead(t, ctx, m, y)
+	info, err := m.StartWorkerBy(ctx, token, lead, y, "w1", "Build", "a task", choose)
 	if err != nil || reads != 2 || info.Provider != "alpha" || info.Effort != "high" {
 		t.Fatalf("refused slot: %+v, %v (%d reads)", info, err, reads)
 	}
 	waitStatus(t, m, info.ID, Waiting)
 	// Reusing the name and rolling back a previous start must both leave this
 	// active worker and its selected tuple alone.
-	if _, err = m.StartWorkerRouted(ctx, "alice", "w1", "Other", "other work", choose, nil); err == nil || reads != 2 {
+	if _, err = m.StartWorkerBy(ctx, token, lead, y, "w1", "Other", "other work", choose); err == nil || reads != 2 {
 		t.Fatalf("duplicate start: %v (%d reads)", err, reads)
 	}
-	if err = m.removeWorker("alice", "w1", info.Since.Add(-1)); err == nil {
+	if err = m.RemoveWorkerOf(y.Name, "w1", y.HiredAt, info.Since.Add(-1)); err == nil {
 		t.Fatal("stale rollback removed worker")
 	}
 	after, err := m.Get(info.ID)
