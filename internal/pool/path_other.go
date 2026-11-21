@@ -4,6 +4,7 @@ package pool
 
 import "path/filepath"
 
-func resolveExistingPath(path string) (string, error) {
+// PhysicalPath resolves an existing storage path using the filesystem's identity.
+func PhysicalPath(path string) (string, error) {
 	return filepath.EvalSymlinks(path)
 }

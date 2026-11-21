@@ -179,10 +179,10 @@ func readRegular(root *os.Root, name string, limit int64, lock sync.Locker) ([]b
 
 // readRegularFile is readRegular, also returning the file read as opened.
 func readRegularFile(root *os.Root, name string, limit int64, lock sync.Locker) ([]byte, os.FileInfo, error) {
-	return readRegularLinks(root, name, limit, lock, false)
+	return readRegularEntry(root, name, limit, lock, false)
 }
 
-func readRegularLinks(root *os.Root, name string, limit int64, lock sync.Locker, singleLink bool) ([]byte, os.FileInfo, error) {
+func readRegularEntry(root *os.Root, name string, limit int64, lock sync.Locker, singleLink bool) ([]byte, os.FileInfo, error) {
 	fi, err := root.Lstat(name)
 	if err != nil {
 		return nil, nil, err
@@ -198,8 +198,10 @@ func readRegularLinks(root *os.Root, name string, limit int64, lock sync.Locker,
 			return nil, nil, err
 		}
 	}
-	lock.Lock()
-	defer lock.Unlock()
+	if lock != nil {
+		lock.Lock()
+		defer lock.Unlock()
+	}
 	file, err := root.OpenFile(name, os.O_RDONLY|openNoBlock, 0)
 	if err != nil {
 		return nil, nil, err
@@ -214,7 +216,7 @@ func readRegularLinks(root *os.Root, name string, limit int64, lock sync.Locker,
 	}
 	if singleLink {
 		if n, err := linkCount(file, opened); err != nil || n != 1 {
-			return nil, nil, fmt.Errorf("%s must have one file link", name)
+			return nil, nil, errors.New("cannot verify an unaliased metadata file")
 		}
 	}
 	data, err := io.ReadAll(io.LimitReader(file, limit+1))

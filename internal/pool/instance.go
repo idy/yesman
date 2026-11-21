@@ -139,35 +139,48 @@ func newWorktreeInstance(repo, path string) (string, error) {
 // zero one (ambiguous with none), gives no identity, and no write grant
 // follows from it.
 func rootIdentity(repo, path, id string) (*safefs.Identity, error) {
-	wt, err := openWorktree(path)
+	wt, ident, err := openInstanceRoot(repo, path, id)
 	if err != nil {
 		return nil, err
 	}
 	defer wt.Close()
-	data, err := safefs.ReadSmall(wt, ".git", maxGitFile)
-	if err != nil {
-		return nil, err
-	}
-	pd, _, err := openPrivateFrom(repo, path, data)
-	if err != nil {
-		return nil, err
-	}
-	got, err := readInstanceMarker(pd)
-	pd.Close()
-	if err != nil {
-		return nil, err
-	}
-	if got != id {
-		return nil, errors.New("checkout instance changed during creation")
-	}
-	ident, err := wt.Identity()
-	if err != nil {
-		return nil, err
-	}
 	if !ident.Usable() {
 		return nil, errors.New("the file system reports no usable creation time for the checkout's directory")
 	}
 	return &ident, nil
+}
+
+// openInstanceRoot verifies the nonce and both Git pointers through the same
+// directory handle whose identity it returns. The caller owns that handle.
+func openInstanceRoot(repo, path, id string) (*safefs.Dir, safefs.Identity, error) {
+	wt, err := openWorktree(path)
+	if err != nil {
+		return nil, safefs.Identity{}, err
+	}
+	ident, err := func() (safefs.Identity, error) {
+		data, err := safefs.ReadSmall(wt, ".git", maxGitFile)
+		if err != nil {
+			return safefs.Identity{}, err
+		}
+		pd, _, err := openPrivateFrom(repo, path, data)
+		if err != nil {
+			return safefs.Identity{}, err
+		}
+		defer pd.Close()
+		got, err := readInstanceMarker(pd)
+		if err != nil {
+			return safefs.Identity{}, err
+		}
+		if got != id {
+			return safefs.Identity{}, errors.New("checkout instance changed")
+		}
+		return wt.Identity()
+	}()
+	if err != nil {
+		wt.Close()
+		return nil, safefs.Identity{}, err
+	}
+	return wt, ident, nil
 }
 
 // InstanceOf returns the private instance ID of the worktree at path of the
@@ -184,13 +197,59 @@ func (p *Pool) InstanceOf(name, path string, dotGit []byte) (string, error) {
 	return readInstanceMarker(pd)
 }
 
+// SameCheckout checks a cached pool inventory entry without rescanning all Git
+// repositories. It verifies the private marker and both registration pointers.
+func (p *Pool) SameCheckout(w Worktree) bool {
+	id, err := readWorktreeInstance(p.dir(w.Repo), w.Path)
+	return err == nil && id == w.CleanupID
+}
+
+// WithCheckoutFiles gives a desktop file request a root at its exact checkout.
+// Compare both opened handles so a directory replaced between opens is refused.
+// Holding the shared worktree lease also orders a pending save with removal.
+func (p *Pool) WithCheckoutFiles(workspace, repo, dir, id string, fn func(*os.Root) error) error {
+	if !filepath.IsLocal(dir) || filepath.Base(dir) != dir || dir == "." || !cleanupIDRE.MatchString(id) {
+		return errors.New("invalid checkout identity")
+	}
+	for segment := range strings.SplitSeq(repo, "/") {
+		if !validSegment(segment) {
+			return errors.New("invalid checkout repository")
+		}
+	}
+	path := filepath.Join(workspace, dir)
+	return p.WithWorktree(path, func() error {
+		wt, _, err := openInstanceRoot(p.dir(repo), path, id)
+		if err != nil {
+			return err
+		}
+		defer wt.Close()
+		info, err := wt.Stat()
+		if err != nil {
+			return err
+		}
+		root, err := os.OpenRoot(path)
+		if err != nil {
+			return err
+		}
+		defer root.Close()
+		opened, err := root.Stat(".")
+		if err != nil || !os.SameFile(info, opened) {
+			return errors.New("checkout directory changed")
+		}
+		return fn(root)
+	})
+}
+
 // WithWorktree runs fn while no checkout or removal by the pool can create,
 // replace or remove the worktree at path. Several fn may run at once; the
 // pool's own operations on path wait for them, and fn waits for those.
 // Lock order: a caller may hold the workspace's lease and an agent's change
 // lease; the pool takes the repository lock before this one, never after.
 func (p *Pool) WithWorktree(path string, fn func() error) error {
-	l := p.treeLock(path)
+	l, err := p.treeLock(path)
+	if err != nil {
+		return err
+	}
 	l.RLock()
 	defer l.RUnlock()
 	return fn()
@@ -198,8 +257,25 @@ func (p *Pool) WithWorktree(path string, fn func() error) error {
 
 // treeLock is the lock of the worktree directory at path. The pool takes
 // it, after the repository's lock, while it adds or removes that directory.
-func (p *Pool) treeLock(path string) *sync.RWMutex {
-	key := filepath.Clean(path)
+func (p *Pool) treeLock(path string) (*sync.RWMutex, error) {
+	// Git reports the physical path. Configuration may reach it through
+	// a symlink, junction, different case or short Windows path. Identify
+	// the parent and its directory entry, including before checkout creates
+	// the child. Failure to identify the parent cannot grant a second lock.
+	resolved := realPath(path)
+	parent, err := safefs.Open(filepath.Dir(resolved))
+	if err != nil {
+		return nil, err
+	}
+	id, err := parent.Identity()
+	parent.Close()
+	if err != nil {
+		return nil, err
+	}
+	if id.Ino == 0 {
+		return nil, errors.New("cannot identify the worktree's parent directory")
+	}
+	key := fmt.Sprintf("%d/%d/%s", id.Dev, id.Ino, strings.ToLower(filepath.Base(resolved)))
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.trees == nil {
@@ -210,7 +286,7 @@ func (p *Pool) treeLock(path string) *sync.RWMutex {
 		l = &sync.RWMutex{}
 		p.trees[key] = l
 	}
-	return l
+	return l, nil
 }
 
 func readWorktreeInstance(repo, path string) (string, error) {

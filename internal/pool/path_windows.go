@@ -7,9 +7,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// EvalSymlinks leaves directory junctions in the path on current Go versions.
-// Ask Windows for the normalized name of the object reached through the path.
-func resolveExistingPath(path string) (string, error) {
+// PhysicalPath resolves the object reached through a path, including Windows
+// directory junctions that EvalSymlinks can leave in the name.
+func PhysicalPath(path string) (string, error) {
 	name, err := windows.UTF16PtrFromString(filepath.Clean(path))
 	if err != nil {
 		return "", err

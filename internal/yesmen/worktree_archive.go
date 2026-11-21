@@ -5,86 +5,52 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"github.com/idy/yesman/internal/safefs"
 	"os"
 	"path/filepath"
+
+	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/safefs"
 )
 
-// UseWorktreeMove fences workspace dismissal, UI checkout, board changes and
-// agent admission for this workspace only. The caller first drains admitted
-// agent worktree operations on the server's worktree lock.
+// Archive uses the same workspace and task-decision leases as final removal.
 func (s *Store) UseWorktreeMove(name string, fn func(Yesman) error) error {
-	if err := ValidName(name); err != nil {
-		return err
-	}
-	l := s.lockFor(name)
-	l.Lock()
-	defer l.Unlock()
 	y, err := s.Get(name)
 	if err != nil {
 		return err
 	}
-	return fn(y)
+	return s.TryWorktreeCommit(y, func() error { return fn(y) })
 }
 
-// WorktreeMoveActors reads the board and worker generations used to authorize
-// a move. The exclusive workspace lease fences managed writers. Linked or
-// non-regular state files must never supply authorization.
+// WorktreeMoveActors returns the same Board and worker generations used to fence cleanup.
 func (s *Store) WorktreeMoveActors(y Yesman) (Board, []Worker, error) {
-	ws, meta, err := openMeta(s.root, y, &s.metaMu)
-	if ws != nil {
-		defer ws.Close()
-	}
-	if meta != nil {
-		defer meta.Close()
-	}
-	var board Board
-	var workers []Worker
-	if err != nil {
-		return board, nil, err
-	}
-	for _, file := range []struct {
-		name string
-		dest any
-	}{{"board.json", &board}, {"workers.json", &workers}} {
-		data, _, err := readRegularLinks(meta, file.name, 32<<20, &s.metaMu, true)
-		if err != nil {
-			return board, nil, err
-		}
-		if err := json.Unmarshal(data, file.dest); err != nil {
-			return board, nil, err
-		}
-	}
-	return board, workers, nil
+	_, board, workers, err := s.WorktreeState(y)
+	return board, workers, err
 }
 
 func (s *Store) WorktreeArchiveDir() string { return s.archive }
 
-// WorktreeMoveFile reads the original lifecycle evidence through this hire's
-// verified metadata directory. Publish patches only the selected archive field
-// and checks the bytes read, preserving all historical and unknown fields.
+// WorktreeMoveFile patches only this instance's archive journal. Registry
+// access shares the store's per-workspace lock with checkout and retirement.
+// The caller holds the workspace commit lease across the Git operation. Each
+// publication compares the last observed registry before replacing it.
 func (s *Store) WorktreeMoveFile(y Yesman, fn func([]WorktreeRecord, func(int, WorktreeArchive) error) error) error {
-	ws, meta, err := openMeta(s.root, y, &s.metaMu)
-	if ws != nil {
-		defer ws.Close()
-	}
-	if meta != nil {
-		defer meta.Close()
-	}
-	if err != nil {
-		return err
-	}
 	const name = "worktrees.json"
-	read := func() ([]byte, error) {
-		data, _, err := readRegularLinks(meta, name, 32<<20, &s.metaMu, true)
-		return data, err
-	}
-	data, err := read()
-	if err != nil {
-		return err
-	}
+	var data []byte
 	var records []WorktreeRecord
-	if err := json.Unmarshal(data, &records); err != nil {
+	err := s.withWorktreeMeta(y, func(meta *os.Root) error {
+		var err error
+		data, _, err = readRegularEntry(meta, name, maxWorktreeState, nil, true)
+		if err != nil {
+			return err
+		}
+		if !json.Valid(data) {
+			return errors.New("invalid worktree registry")
+		}
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		return dec.Decode(&records)
+	})
+	if err != nil {
 		return err
 	}
 	publish := func(i int, move WorktreeArchive) error {
@@ -102,40 +68,40 @@ func (s *Store) WorktreeMoveFile(y Yesman, fn func([]WorktreeRecord, func(int, W
 			return err
 		}
 		next = append(next, '\n')
-		if len(next) > 32<<20 {
+		if len(next) > maxWorktreeState {
 			return errors.New("worktree records exceed the archive journal limit")
 		}
-		tmp := ".worktree-move-" + rand.Text()
-		out, err := meta.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
-			return err
-		}
-		defer meta.Remove(tmp)
-		_, err = out.Write(next)
-		if err == nil {
-			err = out.Sync()
-		}
-		if err = errors.Join(err, out.Close()); err != nil {
-			return err
-		}
-		current, err := read()
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(data, current) {
-			return errors.New("worktree records changed during confirmation")
-		}
-		replace := s.ReplaceWorktreeJournal
-		if replace == nil {
-			replace = safefs.ReplaceSynced
-		}
-		s.metaMu.Lock()
-		err = replace(meta, tmp, name)
-		s.metaMu.Unlock()
-		if err == nil {
+		return s.withWorktreeMeta(y, func(meta *os.Root) error {
+			tmp := ".worktree-move-" + rand.Text()
+			out, err := meta.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+			if err != nil {
+				return err
+			}
+			defer meta.Remove(tmp)
+			_, err = out.Write(next)
+			if err == nil {
+				err = out.Sync()
+			}
+			if err = errors.Join(err, out.Close()); err != nil {
+				return err
+			}
+			current, _, err := readRegularEntry(meta, name, maxWorktreeState, nil, true)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(data, current) {
+				return errors.New("worktree records changed during confirmation")
+			}
+			replace := s.ReplaceWorktreeJournal
+			if replace == nil {
+				replace = safefs.ReplaceSynced
+			}
+			if err := replace(meta, tmp, name); err != nil {
+				return err
+			}
 			data = next
-		}
-		return err
+			return nil
+		})
 	}
 	return fn(records, publish)
 }
@@ -146,11 +112,11 @@ func (s *Store) WorktreePaths(y Yesman, dir, id string) (string, string, error) 
 	if !filepath.IsLocal(dir) || filepath.Base(dir) != dir || !filepath.IsLocal(id) || filepath.Base(id) != id {
 		return "", "", errors.New("invalid worktree directory or instance")
 	}
-	wsParent, err := filepath.EvalSymlinks(s.root)
+	wsParent, err := pool.PhysicalPath(s.root)
 	if err != nil {
 		return "", "", err
 	}
-	archiveParent, err := filepath.EvalSymlinks(filepath.Dir(s.archive))
+	archiveParent, err := pool.PhysicalPath(filepath.Dir(s.archive))
 	if err != nil {
 		return "", "", err
 	}

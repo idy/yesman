@@ -49,7 +49,7 @@ const (
 // opening a folder of a diff, does not run git or walk the disk each time.
 type infoCache struct {
 	mu      sync.Mutex
-	changes map[string]*changesEntry // by worktree path
+	changes map[string]*changesEntry // by worktree path, each entry bound to its checkout
 	pulls   map[string]pullEntry     // by repository and branch
 	usage   map[string]*usageEntry   // by the folder measured: a workspace, or the yesman folder
 	found   map[string]foundEntry    // by yesman and worktree directory
@@ -62,10 +62,11 @@ type foundEntry struct {
 }
 
 type changesEntry struct {
-	at   time.Time
-	done chan struct{} // closed once measured
-	c    *pool.Changes
-	err  error
+	checkout string
+	at       time.Time
+	done     chan struct{} // closed once measured
+	c        *pool.Changes
+	err      error
 }
 
 type pullEntry struct {
@@ -110,11 +111,12 @@ type WorktreeInfo struct {
 // YesmanInfo is what the info panel shows of a yesman, but for the pull
 // requests and storage, which take longer and arrive by themselves.
 type YesmanInfo struct {
-	Knowledge    KnowledgeInfo      `json:"knowledge"`
-	Topics       yesmen.TopicCounts `json:"topics"`
-	Worktrees    []WorktreeInfo     `json:"worktrees"`
-	ArchiveMoves []archiveRow       `json:"archiveMoves,omitempty"`
-	ArchiveError string             `json:"archiveError,omitempty"`
+	Knowledge      KnowledgeInfo      `json:"knowledge"`
+	Topics         yesmen.TopicCounts `json:"topics"`
+	Worktrees      []WorktreeInfo     `json:"worktrees"`
+	WorktreesError string             `json:"worktreesError,omitempty"`
+	ArchiveMoves   []archiveRow       `json:"archiveMoves,omitempty"`
+	ArchiveError   string             `json:"archiveError,omitempty"`
 }
 
 type archiveRow struct {
@@ -131,8 +133,11 @@ func (s *service) Info(ctx context.Context, name string) (YesmanInfo, error) {
 	}
 	info := YesmanInfo{Knowledge: knowledgeInfo(y), Topics: s.app.yesmen.TopicCounts(name), Worktrees: []WorktreeInfo{}}
 	snapshot, err := s.app.pool.Snapshot(ctx)
-	if err != nil && len(snapshot.Repos) == 0 {
-		return info, err
+	if err != nil {
+		if len(snapshot.Repos) == 0 {
+			return info, err
+		}
+		info.WorktreesError = err.Error()
 	}
 	defaults := map[string]string{}
 	for _, r := range snapshot.Repos {
@@ -214,6 +219,9 @@ func (s *service) changes(ctx context.Context, wt pool.Worktree, defaultBranch s
 	cache := s.app.infoCache()
 	cache.mu.Lock()
 	e := cache.changes[wt.Path]
+	if e != nil && e.checkout != wt.CleanupID {
+		e = nil
+	}
 	if e != nil {
 		select {
 		case <-e.done:
@@ -226,7 +234,7 @@ func (s *service) changes(ctx context.Context, wt pool.Worktree, defaultBranch s
 		}
 	}
 	if e == nil {
-		e = &changesEntry{done: make(chan struct{})}
+		e = &changesEntry{checkout: wt.CleanupID, done: make(chan struct{})}
 		cache.changes[wt.Path] = e
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -253,7 +261,7 @@ func (s *service) measured(wt pool.Worktree) *pool.Changes {
 	cache := s.app.infoCache()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if e := cache.changes[wt.Path]; e != nil {
+	if e := cache.changes[wt.Path]; e != nil && e.checkout == wt.CleanupID {
 		select {
 		case <-e.done:
 			return e.c
@@ -273,7 +281,7 @@ func (s *service) worktree(ctx context.Context, name, dir string) (pool.Worktree
 	f, ok := cache.found[key]
 	cache.mu.Unlock()
 	if ok && time.Since(f.at) < worktreeFresh {
-		if _, err := os.Stat(f.wt.Path); err == nil {
+		if f.wt.CleanupID != "" && s.app.pool.SameCheckout(f.wt) {
 			return f.wt, f.defaultBranch, nil
 		}
 	}

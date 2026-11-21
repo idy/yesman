@@ -100,7 +100,7 @@ jobs:
       - name: Managed write and link refusal (verbose)
         env:
           YESMAN_REQUIRE_LINK_TESTS: "1"
-        run: go test -count=1 -v -run 'TestSafeFS|TestWorktreeRegistration|TestWorktreeInstance|TestManagedFiles|TestManagedWriteAndEdit|TestManagedEdit|TestManagedWorktree|TestWorktreeMoveGitPathThroughStorageAlias|TestWorktreeMoveRefusesOverlappingAliasRegistrations|TestWorktreeCancelPendingMoveAtSource' ./internal/safefs ./internal/pool ./internal/server
+        run: go test -count=1 -v -run 'TestSafeFS|TestWorktreeRegistration|TestWorktreeInstance|TestWorktreeLeaseThroughConfiguredAlias|TestManagedFiles|TestManagedWriteAndEdit|TestManagedEdit|TestManagedWorktree|TestWorktreeMoveGitPathThroughStorageAlias|TestWorktreeMoveRefusesOverlappingAliasRegistrations|TestWorktreeCancelPendingMoveAtSource' ./internal/safefs ./internal/pool ./internal/server
 
       # The race detector needs cgo, which Windows runners lack a setup for.
       - name: Test

@@ -12,6 +12,7 @@ import { $, h, icon } from './dom.js';
 import { counts, formatSize } from './diff.js';
 import { t, tn, formatNumber } from './i18n.js';
 import { isTaskLog } from './task-log.js';
+import { createWorktreeMenu, worktreeEntry } from './worktree-cleanup.js';
 
 // How long each part is kept before the panel asks again by itself.
 const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
@@ -21,7 +22,7 @@ const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
 //   yesman()               the yesman whose agent is shown, or null
 //   isOpen()               whether the panel shows
 //   files()                what the files pane shows (files.shown())
-//   openKnowledge(), openTaskLog(), openWorktree(dir, show), checkout(y)
+//   openKnowledge(), openTaskLog(), openWorktree(worktree, show), checkout(y)
 //   openTasks(), tasksOpen(), tasksSummary(y)   the Tasks pane and its summary
 //   needsYou(y)            what waits on the user from y: { count, error,
 //                          refused, open (the Needs you pane shows) }
@@ -34,8 +35,9 @@ export function createInfo(host) {
 
   function stateOf(name) {
     let d = data.get(name);
-    if (!d) {
-      d = { info: null, pulls: null, usage: null, at: {}, busy: {}, error: {} };
+    const hire = host.yesman()?.name === name ? host.yesman().hiredAt : undefined;
+    if (!d || (hire && d.hire !== hire)) {
+      d = { hire, info: null, pulls: null, usage: null, at: {}, busy: {}, error: {} };
       data.set(name, d);
     }
     return d;
@@ -48,7 +50,13 @@ export function createInfo(host) {
     d.busy[part] = true;
     if (part !== 'info') render();
     try {
-      if (part === 'info') d.info = await host.call('Info', name);
+      if (part === 'info') {
+        d.info = await host.call('Info', name);
+        const y = host.yesman();
+        if (data.get(name) === d && y?.name === name && y.hiredAt === d.hire && Array.isArray(d.info.worktrees)) {
+          host.reconcile?.(y, d.info.worktrees, !d.info.worktreesError && !d.info.archiveError, d.info.archiveMoves);
+        }
+      }
       else if (part === 'pulls') d.pulls = Object.fromEntries((await host.call('Pulls', name, refresh)).map((p) => [p.dir, p]));
       else d.usage = await host.call('Usage', name, refresh);
       d.error[part] = null;
@@ -260,7 +268,7 @@ export function createInfo(host) {
     render();
     const current = () => shows(y.name) && host.yesman()?.hiredAt === y.hiredAt;
     const checkEditor = () => {
-      if (host.hasUnsavedWorktree(y, dir)) throw Error(t('Save or discard the edits in this worktree before moving it.'));
+      if (host.unsaved(y).includes(dir)) throw Error(t('Save or discard the edits in this worktree before moving it.'));
     };
     try {
       checkEditor();
@@ -283,6 +291,22 @@ export function createInfo(host) {
     finally { moving.delete(id); load(y.name, 'info'); render(); }
   }
 
+  const menu = createWorktreeMenu({ ...host, updated(y, removed) {
+    const d = data.get(y.name);
+    if (!d || d.hire !== y.hiredAt) { host.removed(y, removed); return; }
+    const keep = w => !removed.some(r => r.dir === w.dir && r.cleanupId === w.cleanupId);
+    if (d.info) d.info.worktrees = d.info.worktrees.filter(keep);
+    const live = host.yesman();
+    if (live?.name === y.name && live.hiredAt === y.hiredAt) {
+      live.worktrees = (live.worktrees ?? []).filter(keep);
+    }
+    host.removed(y, removed);
+    // Reads already in flight still own d. They cannot publish a pre-removal
+    // list into the new state, even when rereading the current list fails.
+    data.set(y.name, { ...d, at: {}, busy: {}, error: {} });
+    render();
+  } });
+
   function worktrees(y, d) {
     const list = d.info?.worktrees;
     const busy = d.busy.info || d.busy.pulls;
@@ -290,7 +314,7 @@ export function createInfo(host) {
     let body;
     if (!d.info) {
       body = d.error.info ? h('p', { class: 'info-note danger' }, d.error.info) : h('p', { class: 'info-note' }, t('Loading…'));
-    } else if (!list.length) {
+    } else if (!list.length && !d.info.worktreesError) {
       body = h('div', { class: 'info-note' },
         h('span', null, t('No worktrees yet. The agents check out the repositories they need.')),
         h('button', { class: 'mds-link-button info-note-action', type: 'button', onclick: () => host.checkout(y) }, t('Check out a repository…')));
@@ -306,9 +330,15 @@ export function createInfo(host) {
         merged.length ? mergedFold(y, d, merged) : null,
       ];
     }
-    return section(t('Worktrees'), refresh, body,
+    const heading = h('button', { class: 'worktree-heading', type: 'button', 'aria-haspopup': 'menu',
+      'data-info-entry': worktreeEntry(null), onclick: e => menu(e, y), title: t('Worktree actions') }, t('Worktrees'));
+    const card = section(heading, refresh, body,
       d.info?.archiveError ? h('p', { class: 'info-note danger' }, d.info.archiveError) : null,
       archiveGroup(y, d));
+    card.querySelector('.info-heading').oncontextmenu = e => menu(e, y);
+    const error = d.error.info || d.info?.worktreesError;
+    if (d.info && error) card.append(h('p', { class: 'info-note danger', role: 'status' }, t('Could not refresh Worktrees.'), ' ', error));
+    return card;
   }
 
   function archiveGroup(y, d) {
@@ -353,14 +383,16 @@ export function createInfo(host) {
     const pull = d.pulls?.[w.dir]?.pull;
     const shown = host.files();
     const current = shown?.yesman === y.name && shown.kind === 'worktree' && shown.dir === w.dir;
-    const open = () => host.openWorktree(w.dir, 'changes');
-    const filesButton = h('button', { class: 'mds-icon-button mds-icon-button--compact info-row-action', type: 'button', title: t('Show its files'), 'aria-label': t('Show the files of {name}', { name: w.dir }), onclick: () => host.openWorktree(w.dir, 'files') }, icon('folder'));
     const archiveButton = w.canArchive ? h('button', { class: 'mds-icon-button mds-icon-button--compact info-row-action', type: 'button', 'data-info-entry': `move-${w.cleanupId}`, title: t('Archive worktree'), 'aria-label': t('Archive {name}', { name: w.dir }), disabled: moving.has(w.cleanupId), onclick: () => moveTree(y, w.dir, w.cleanupId, 'archive') }, icon('archive')) : null;
+    const open = () => host.openWorktree(w, 'changes');
+    const row = { class: 'info-row', 'data-current': current ? 'true' : null, oncontextmenu: e => menu(e, y, w) };
+    const main = { class: 'info-row-main', type: 'button', 'data-info-entry': worktreeEntry(w), 'aria-haspopup': 'menu', onclick: open };
+    const filesButton = h('button', { class: 'mds-icon-button mds-icon-button--compact info-row-action', type: 'button', title: t('Show its files'), 'aria-label': t('Show the files of {name}', { name: w.dir }), onclick: () => host.openWorktree(w, 'files') }, icon('folder'));
     if (pull) {
       const checks = pull.checks;
       const tone = pull.state === 'merged' ? 'merged' : pull.state === 'closed' ? 'closed' : pull.draft ? 'draft' : 'open';
-      return h('li', { class: 'info-row', 'data-current': current ? 'true' : null },
-        h('button', { class: 'info-row-main', type: 'button', onclick: open, title: `${pull.title}\n${pull.repo}#${pull.number} · ${w.dir}\n${t('Show its changes')}` },
+      return h('li', row,
+        h('button', { ...main, title: `${pull.title}\n${pull.repo}#${pull.number} · ${w.dir}\n${t('Show its changes')}` },
           h('span', { class: 'info-row-icon', 'data-pull': tone }, icon(pull.state === 'merged' ? 'merge' : 'pullRequest')),
           h('span', { class: 'info-row-title' }, pull.title),
           h('span', { class: 'info-row-meta' },
@@ -384,8 +416,8 @@ export function createInfo(host) {
       meta.push(h('span', { class: 'danger', title: w.error }, t('can’t compare')));
     }
     const repo = w.repo.split('/').slice(-2).join('/');
-    return h('li', { class: 'info-row', 'data-current': current ? 'true' : null },
-      h('button', { class: 'info-row-main', type: 'button', onclick: open, title: `${w.dir}\n${repo}${w.branch ? ` · ${w.branch}` : ''}${w.base ? `\n${t('Compared with {base}', { base: w.base })}` : ''}\n${t('Show its changes')}` },
+    return h('li', row,
+      h('button', { ...main, title: `${w.dir}\n${repo}${w.branch ? ` · ${w.branch}` : ''}${w.base ? `\n${t('Compared with {base}', { base: w.base })}` : ''}\n${t('Show its changes')}` },
         h('span', { class: 'info-row-icon' }, icon('branch')),
         h('span', { class: 'info-row-title' }, w.dir),
         h('span', { class: 'info-row-meta' }, meta)),

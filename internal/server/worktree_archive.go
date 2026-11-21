@@ -64,6 +64,8 @@ func (s *Server) consumeMove(token string) (moveConfirmation, error) {
 	return v, nil
 }
 
+const archiveReserved = "This checkout is reserved for archive or restore."
+
 func (s *Server) WorktreeMove(ctx context.Context, req WorktreeMove) (MovePreview, error) {
 	var out MovePreview
 	if !dirRE.MatchString(req.Dir) || req.ID == "" || req.Since.IsZero() || req.Action != "archive" && req.Action != "restore" && req.Action != "cancel" {
@@ -158,6 +160,11 @@ func (s *Server) WorktreeMove(ctx context.Context, req WorktreeMove) (MovePrevie
 					}
 					out.Physical = actual.Physical
 					journal.Phase = "restored"
+					for _, receipt := range task.Returns {
+						if receipt.Checkout == r.ID {
+							journal.PreviousReturnID = receipt.ReturnID
+						}
+					}
 					if out.Physical == stored {
 						journal.Phase = "archived"
 					}

@@ -101,11 +101,24 @@ func (p *Pool) WithLinkedMove(ctx context.Context, req MoveRequest, fn func(*Lin
 	l := p.lock(req.Repo)
 	l.Lock()
 	defer l.Unlock()
-	active, stored := p.treeLock(req.Active), p.treeLock(req.Stored)
-	active.Lock()
-	defer active.Unlock()
-	stored.Lock()
-	defer stored.Unlock()
+	source, dest := m.endpoints()
+	first, err := p.treeLock(source)
+	if err != nil {
+		return err
+	}
+	first.Lock()
+	defer first.Unlock()
+	if !req.Cancel {
+		second, err := p.treeLock(dest)
+		if err != nil {
+			return err
+		}
+		if second == first {
+			return errors.New("archive and workspace resolve to the same directory entry")
+		}
+		second.Lock()
+		defer second.Unlock()
+	}
 	m.Common = common
 	if err := m.inspect(ctx); err != nil {
 		return err
@@ -113,7 +126,6 @@ func (p *Pool) WithLinkedMove(ctx context.Context, req MoveRequest, fn func(*Lin
 	if err := m.checkOperations(ctx); err != nil {
 		return err
 	}
-	source, _ := m.endpoints()
 	if req.Cancel {
 		if !req.Pending || m.Physical != source || m.Registered != source {
 			return errors.New("the directory has already moved. Choose Finish to complete its registration")
@@ -141,11 +153,19 @@ func (p *Pool) checkMoveRegistrations(ctx context.Context, m *LinkedMove) error 
 		protected[i] = physical
 	}
 	matches := 0
-	err := p.visitRepos(func(repo, dir string) error {
-		if found, err := exists(filepath.Join(dir, "worktrees")); err != nil || !found {
+	repos, err := p.repositoryPaths(ctx)
+	if err != nil {
+		return err
+	}
+	for _, repo := range repos {
+		found, err := exists(filepath.Join(repo.Path, "worktrees"))
+		if err != nil {
 			return err
 		}
-		list, err := git(ctx, dir, "worktree", "list", "--porcelain", "-z")
+		if !found {
+			continue
+		}
+		list, err := git(ctx, repo.Path, "worktree", "list", "--porcelain", "-z")
 		if err != nil {
 			return err
 		}
@@ -154,7 +174,7 @@ func (p *Pool) checkMoveRegistrations(ctx context.Context, m *LinkedMove) error 
 			if !ok {
 				continue
 			}
-			if repo == m.req.Repo && managedPathMatches(path, m.Registered, m.locationDepth(m.Registered)) {
+			if repo.Name == m.req.Repo && managedPathMatches(path, m.Registered, m.locationDepth(m.Registered)) {
 				matches++
 				continue
 			}
@@ -168,10 +188,6 @@ func (p *Pool) checkMoveRegistrations(ctx context.Context, m *LinkedMove) error 
 				}
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		return err
 	}
 	if matches != 1 {
 		return errors.New("expected exactly one matching pool Git registration")
@@ -187,7 +203,7 @@ func registrationPath(path string) (string, error) {
 	}
 	path = filepath.Clean(path)
 	for current := path; ; current = filepath.Dir(current) {
-		resolved, err := resolveExistingPath(current)
+		resolved, err := PhysicalPath(current)
 		if err == nil {
 			suffix, err := filepath.Rel(current, path)
 			if err != nil {

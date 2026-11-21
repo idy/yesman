@@ -261,7 +261,7 @@ func (s *service) Checkout(yesman string, req server.CheckoutRequest) (pool.Work
 
 // MoveWorktree previews a single checkout, or applies the state the user confirmed.
 func (s *service) MoveWorktree(ctx context.Context, req server.WorktreeMove) (server.MovePreview, error) {
-	out, err := s.app.worktreeServer.WorktreeMove(ctx, req)
+	out, err := s.app.desktopWorktrees.Server.WorktreeMove(ctx, req)
 	if req.Confirm != "" {
 		s.app.notifyChanged()
 	} // a pending intent is visible too

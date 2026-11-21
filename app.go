@@ -53,13 +53,12 @@ var (
 )
 
 type app struct {
-	home           home.Home
-	pool           *pool.Pool
-	clones         *clones
-	fetcher        *fetcher
-	yesmen         *yesmen.Store
-	agents         *agent.Manager
-	worktreeServer *server.Server // shares worktree admission with the agent API
+	home    home.Home
+	pool    *pool.Pool
+	clones  *clones
+	fetcher *fetcher
+	yesmen  *yesmen.Store
+	agents  *agent.Manager
 	// schedules runs the scheduled tasks (Tasks) while the app runs.
 	schedules *schedule.Service
 	pi        string
@@ -139,8 +138,9 @@ type app struct {
 	grantsOnce sync.Once
 	grants     *nativepermissions.Manager
 
-	infoOnce sync.Once
-	info     *infoCache // what the info panel measured
+	desktopWorktrees server.DesktopWorktrees
+	infoOnce         sync.Once
+	info             *infoCache // what the info panel measured
 }
 
 // titlebarHeight is the height of the titlebar the page draws.

@@ -66,6 +66,9 @@ try {
       await page.goto('http://127.0.0.1:' + server.address().port);
       const archive = page.getByRole('button', {name:'Archive room-finish',exact:true});
       const dlg = page.locator('#confirm-dialog');
+      const files = page.getByRole('button', {name:'Show the files of room-finish',exact:true});
+      const scope = page.locator('#files [role="tablist"][aria-label="room-finish"]');
+      await files.click(); await scope.waitFor();
       await archive.click();
       try { await dlg.waitFor({timeout:8000}); }
       catch (e) { throw Error(`${name}: ${e.message}\n${JSON.stringify(await page.evaluate(() => ({moves, body:document.body.innerText.slice(-2000)})))}\n${errors}`); }
@@ -83,6 +86,7 @@ try {
       assert.ok((await dlg.innerText()).includes('Destination: /data/yesmen/alice/room-finish'));
       await dlg.getByRole('button', {name:'Restore worktree'}).click();
       await archive.waitFor();
+      await files.click(); await scope.waitFor(); // same nonce after restore
       assert.deepEqual(await page.evaluate(()=>moves.filter(r=>r.confirm).map(r=>r.action)), ['archive','restore']);
       await page.evaluate(() => window.pendingArchive());
       const cancel = page.getByRole('button', {name:'Cancel the pending move of room-finish'});
