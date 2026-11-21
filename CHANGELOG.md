@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.59
+
+- Yes Man automatically retries cleanup of returned temporary worktrees as they become eligible, including after a restart.
+- In the Info panel, right-click **Worktrees** and choose **Clean up worktrees…** to preview a batch, or right-click a row and choose **Remove Worktree…** to review one checkout.
+- Cleanup keeps branches, tags, and recoverable Git history. It leaves worktrees in place when they are in use, have local changes or saved conflicts, or cannot be verified.
+
 ## 0.1.58
 
 - Configure worker model and effort pools in **Settings › yesman**. Set dispatch instructions for Operations & Research, Backend Development, Frontend & Design, and Default.
