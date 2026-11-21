@@ -9,7 +9,7 @@ import (
 )
 
 func TestExternalOperationRetirementFence(t *testing.T) {
-	for _, retirement := range []string{"archive", "remove-worker", "stop", "shutdown"} {
+	for _, retirement := range []string{"archive", "delete", "remove-worker", "stop", "shutdown"} {
 		t.Run(retirement, func(t *testing.T) {
 			m, store := newTestManager(t, 0)
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -44,6 +44,12 @@ func TestExternalOperationRetirementFence(t *testing.T) {
 				case "archive":
 					_, err := archiveManaged(ctx, m, store, "alice")
 					retired <- err
+				case "delete":
+					target, err := store.PrepareDeletion(y.Name, y.HiredAt)
+					if err == nil {
+						_, err = store.Delete(ctx, target, func(context.Context, string) error { return nil }, func(y yesmen.Yesman) error { return m.StopYesmanContext(ctx, y.Name) })
+					}
+					retired <- err
 				case "remove-worker":
 					retired <- m.RemoveWorker("alice", name)
 				case "stop":
@@ -72,7 +78,7 @@ func TestExternalOperationRetirementFence(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("retirement holds global manager lock")
 			}
-			if retirement == "archive" {
+			if retirement == "archive" || retirement == "delete" {
 				if _, err := store.Hire("bob"); err != nil {
 					t.Fatal(err)
 				}
@@ -95,7 +101,7 @@ func TestExternalOperationRetirementFence(t *testing.T) {
 			if retirement == "shutdown" {
 				return
 			}
-			if retirement == "archive" {
+			if retirement == "archive" || retirement == "delete" {
 				if _, err := store.Hire("alice"); err != nil {
 					t.Fatal(err)
 				}

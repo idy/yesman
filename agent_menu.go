@@ -34,7 +34,7 @@ func (s *service) AgentMenu(ctx context.Context, id string, x, y int, doneHidden
 	removeID, removeLabel := "remove", tr("Remove Worker…")
 	var done []*mygo.MenuItem
 	if info.Role == agent.RoleLead {
-		removeID, removeLabel = "archive", tr("Archive yesman…")
+		removeID, removeLabel = "delete-workspace", tr("Delete Yes Man…")
 		done = append(done, item("rename", tr("Rename…"), false), mygo.Separator())
 		finished := 0
 		for _, i := range s.app.agents.List() {

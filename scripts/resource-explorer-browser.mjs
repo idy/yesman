@@ -80,7 +80,7 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
  case 'WatchFiles':case 'Reveal':case 'OpenURL':return;
  case 'FilesMenu':return '';
  case 'ReadFile':{const [name,path]=args;await wait(name+':ReadFile:'+path);const text=filesFixture[name]?.[path];if(text===undefined)throw Error('no such file: '+path);return {path,kind:'text',text,size:text.length,hash:'h'+text.length,truncated:false};}
- case 'WriteFile':filesFixture[args[0]][args[1]]=args[2];return {path:args[1],kind:'text',text:args[2],hash:'saved'+args[2].length,size:args[2].length};
+ case 'SaveWorkspaceFile':filesFixture[args[0]][args[1]]=args[2];return {path:args[1],kind:'text',text:args[2],hash:'saved'+args[2].length,size:args[2].length};
  case 'ListFiles':{const [name,rel]=args;await wait(name+':ListFiles:'+rel);if(window.failList===name+':'+rel)throw Error('listing failed (fixture)');const dir=rel==='.'?'':rel+'/';const map=new Map();
    for(const p of Object.keys(filesFixture[name]??{}).filter(p=>p.startsWith(dir))){const rest=p.slice(dir.length),base=rest.split('/')[0];map.set(dir+base,{name:base,path:dir+base,dir:rest.includes('/')});}
    if(!map.size&&rel!=='.')throw Error('no such file or directory: '+rel);return [...map.values()];}
@@ -387,7 +387,7 @@ async function filesPart(page) {
   await page.locator('#files .cm-content').click();
   await page.keyboard.type('Edited here. ');
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+s' : 'Control+s');
-  await page.waitForFunction(() => calls.some((c) => c[0] === 'WriteFile' && c[1] === 'alice' && c[2] === 'notes.md' && c[3].includes('Edited here.')));
+  await page.waitForFunction(() => calls.some((c) => c[0] === 'SaveWorkspaceFile' && c[1] === 'alice' && c[2] === 'notes.md' && c[3].includes('Edited here.')));
   await leftOf(page.locator('#files-view'), page.locator('#files .files-tree'), 'files: content left of the tree');
 }
 

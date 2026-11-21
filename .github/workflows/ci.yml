@@ -41,6 +41,12 @@ jobs:
         with:
           node-version: '24.22.1'
 
+      - name: Verify primary relocation and recovery (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          git show -s --format='checkout=%H tree=%T parents=%P' HEAD
+          go test -count=1 -v -run '^(TestDelete(Archive|Live)KeepsRelocatedPrimary|TestRelocationReceiptMustBeDurableBeforeArchiveDeletion|TestWindowsRelocationDirectory)$' ./internal/pool ./internal/yesmen
+
       - name: Exercise native completion audio
         if: runner.os != 'macOS'
         run: |

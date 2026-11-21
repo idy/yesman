@@ -454,6 +454,15 @@ func (s *service) RemoveWorker(id string) error {
 	return s.app.agents.RemoveWorker(y, name)
 }
 
+// RemoveWorkerOf binds the confirmation shown in the window to its worker.
+func (s *service) RemoveWorkerOf(id string, hiredAt, since time.Time) error {
+	name, worker, err := agent.SplitID(id)
+	if err != nil {
+		return err
+	}
+	return s.app.agents.RemoveWorkerOf(name, worker, hiredAt, since)
+}
+
 // TakeFocus returns the agent a notification click asked to show, once.
 // A window opened by that click asks for it when its page is ready, since
 // the click's focus-agent event can arrive before the page listens.

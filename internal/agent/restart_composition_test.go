@@ -206,13 +206,24 @@ func TestRestartCompositionPauseAtPipeAdmission(t *testing.T) {
 }
 
 func TestRestartCompositionStaleGenerationLeavesReplacement(t *testing.T) {
-	for _, replacement := range []string{"workspace", "worker"} {
+	for _, replacement := range []string{"workspace", "deleted workspace", "worker"} {
 		t.Run(replacement, func(t *testing.T) {
 			store, tmp, y := restartStore(t)
 			w := addWorker(t, store, "worker")
 			r := restart.Agent{Yesman: y.Name, Name: w.Name, Role: RoleWorker, WorkspaceHiredAt: y.HiredAt, AgentSince: w.StartedAt, Reason: restart.ReasonReport, Report: &restart.Report{State: restart.ReportAccepted}}
-			if replacement == "workspace" {
-				if _, err := store.Archive(y.Name, nil); err != nil {
+			if replacement != "worker" {
+				if replacement == "deleted workspace" {
+					target, err := store.PrepareDeletion(y.Name, y.HiredAt)
+					if err != nil {
+						t.Fatal(err)
+					}
+					unused := New(Config{Yesmen: store})
+					defer unused.StopAll()
+					_, err = store.Delete(t.Context(), target, func(context.Context, string) error { return nil }, func(y yesmen.Yesman) error { return unused.StopYesman(y.Name) })
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else if _, err := store.Archive(y.Name, nil); err != nil {
 					t.Fatal(err)
 				}
 				var err error
