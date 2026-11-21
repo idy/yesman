@@ -112,7 +112,7 @@ func TestScorePatchGPT62Composition(t *testing.T) {
 		if v.Error != "" || v.Patch.Error != "" || v.Date != "2026-11-18" || len(v.Models) != 5 || len(v.Members) != 9 || v.Yesman != configBefore.Yesman {
 			t.Fatalf("view: %+v", v)
 		}
-		if !reflect.DeepEqual(v.Members, a.leadCrew(ctx)) || !reflect.DeepEqual(a.crewConfig(), configBefore) {
+		if !reflect.DeepEqual(v.Members, a.workerRouting(ctx, nil).Members) || !reflect.DeepEqual(a.crewConfig(), configBefore) {
 			t.Fatal("Models/Lead disagree or stored estimate/options/default changed")
 		}
 		for i, w := range want {
@@ -143,7 +143,7 @@ func TestScorePatchGPT62Composition(t *testing.T) {
 		if v.Members[7].Score != nil || !reflect.DeepEqual(v.Members[8], oldMembers[8]) || !v.Members[8].Score.IntelligenceMissing {
 			t.Fatal("unmeasured effort borrowed AA or patch-only row changed")
 		}
-		text := server.CrewContext(a.leadCrew(ctx), agent.Info{})
+		text := server.CrewContext(allInDefault(a.workerRouting(ctx, nil).Members), agent.Info{})
 		for _, fragment := range []string{"intelligence 0 (user CSV), speed 60.7 tok/s (inherited AA), coding 53.6% (inherited AA), cost 0 USD per task (user CSV), time 4.9 min per task (inherited AA)", "intelligence 54.9 (inherited AA), speed 123.5 tok/s (user CSV), coding 49.4% (inherited AA), cost 0.56 USD per task (inherited AA), time 0 min per task (user CSV)", "AA source effort: high", "AA source effort: xhigh", "intelligence unavailable, speed 37.12 tok/s (user CSV)"} {
 			if !strings.Contains(text, fragment) {
 				t.Fatalf("Lead lacks %q: %s", fragment, text)

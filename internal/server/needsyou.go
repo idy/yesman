@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,11 +21,12 @@ import (
 // NeedsYouChange is one change a lead makes to what waits on the user.
 type NeedsYouChange struct {
 	Add *struct {
-		Type   string `json:"type"`
-		Title  string `json:"title"`
-		Detail string `json:"detail"`
-		Task   string `json:"task"`
-		Worker string `json:"worker"`
+		Type     string                  `json:"type"`
+		Title    string                  `json:"title"`
+		Detail   string                  `json:"detail"`
+		Task     string                  `json:"task"`
+		Worker   string                  `json:"worker"`
+		Response *yesmen.HandoffResponse `json:"response,omitempty"`
 	} `json:"add,omitempty"`
 	// ToolCall is the lead's tool call ID, which locates an added handoff in
 	// its conversation and makes a repeated call idempotent.
@@ -53,7 +55,35 @@ type HandedOver struct {
 type NeedsYouView struct {
 	Handoffs   []yesmen.Handoff   `json:"handoffs"`
 	Questions  []HandedOver       `json:"questions"`
+	Recent     []recentHandoff    `json:"recent,omitempty"`
 	CallMemory *yesmen.CallMemory `json:"callMemory,omitempty"`
+}
+
+type recentHandoff struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	Task    string `json:"task,omitempty"`
+	Outcome string `json:"outcome"`
+}
+
+func recentHandoffs(hs yesmen.Handoffs) []recentHandoff {
+	closed := slices.Clone(hs.Items)
+	slices.SortStableFunc(closed, func(a, b yesmen.Handoff) int { return b.ClosedAt.Compare(a.ClosedAt) })
+	var recent []recentHandoff
+	for _, h := range closed {
+		if h.Open() || h.ClosedBy != "user" {
+			continue
+		}
+		outcome := h.Resolution
+		if h.Answer != nil {
+			outcome = "answered"
+		}
+		recent = append(recent, recentHandoff{h.ID, h.Title, h.Task, outcome})
+		if len(recent) == 8 {
+			break
+		}
+	}
+	return recent
 }
 
 // AddedHandoff is a handoff add returns, with the tool-call memory when it
@@ -88,11 +118,18 @@ func callMemoryLine(m *yesmen.CallMemory) string {
 }
 
 func (s *Server) needsYouView(c caller) (NeedsYouView, error) {
+	return s.readNeedsYouView(c, false)
+}
+
+func (s *Server) readNeedsYouView(c caller, includeRecent bool) (NeedsYouView, error) {
 	hs, err := s.Yesmen.Handoffs(c.yesman.Name)
 	if err != nil {
 		return NeedsYouView{}, err
 	}
 	view := NeedsYouView{Handoffs: hs.Open(), Questions: []HandedOver{}, CallMemory: callMemoryNotice(hs)}
+	if includeRecent {
+		view.Recent = recentHandoffs(hs)
+	}
 	if view.Handoffs == nil {
 		view.Handoffs = []yesmen.Handoff{}
 	}
@@ -114,18 +151,30 @@ func (s *Server) needsYou(_ context.Context, c caller, r *http.Request) (any, er
 	if c.agent.Role != agent.RoleLead {
 		return nil, errLeadOnly
 	}
-	if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
-		hs, err := s.Yesmen.Handoffs(c.yesman.Name)
-		if err != nil {
-			return nil, err
+	var out any
+	err := s.Yesmen.Use(c.yesman.Name, func(y yesmen.Yesman) error {
+		if !y.HiredAt.Equal(c.yesman.HiredAt) {
+			return agent.ErrRetired
 		}
-		h, ok := hs.Find(id)
-		if !ok {
-			return nil, fmt.Errorf("no handoff %s", id)
-		}
-		return h, nil
-	}
-	return s.needsYouView(c)
+		return s.Agents.CallerOperation(c.token, c.agent, func() error {
+			if id := strings.TrimSpace(r.URL.Query().Get("id")); id != "" {
+				hs, err := s.Yesmen.Handoffs(y.Name)
+				if err != nil {
+					return err
+				}
+				h, ok := hs.Find(id)
+				if !ok {
+					return fmt.Errorf("no handoff %s", id)
+				}
+				out = h
+				return nil
+			}
+			var err error
+			out, err = s.readNeedsYouView(c, true)
+			return err
+		})
+	})
+	return out, err
 }
 
 func (s *Server) changeNeedsYou(_ context.Context, c caller, r *http.Request) (any, error) {
@@ -183,7 +232,7 @@ func (s *Server) commitNeedsYou(y yesmen.Yesman, req NeedsYouChange) (any, *yesm
 		h, created, err := s.Yesmen.AddHandoff(y.Name, yesmen.Handoff{
 			Type: req.Add.Type, Title: req.Add.Title, Detail: req.Add.Detail,
 			Task: req.Add.Task, Worker: strings.TrimSpace(req.Add.Worker),
-			ToolCall: req.ToolCall,
+			ToolCall: req.ToolCall, Response: req.Add.Response,
 		})
 		if err != nil {
 			return nil, nil, err

@@ -84,7 +84,7 @@ func (c *workerCommand) info() (Info, error) {
 	return i, err
 }
 
-func (c *workerCommand) prompt(ctx context.Context, text, behavior, kind string) error {
+func (c *workerCommand) prompt(ctx context.Context, text, behavior, kind string, route WorkerRoute) error {
 	if kind == "message" {
 		// A lead's message reserves the worker's inbox as soon as it is on
 		// its way. A late report cannot close the worker during its startup.
@@ -104,16 +104,20 @@ func (c *workerCommand) prompt(ctx context.Context, text, behavior, kind string)
 		}
 		return nil
 	}}
-	return c.m.promptTracked(ctx, c.id, text, behavior, "", nil, &c.hire.HiredAt, Origin{Source: OriginLead, Kind: kind}, track)
+	var setup *workerSetup
+	if route != nil {
+		setup = &workerSetup{since: c.since, route: route}
+	}
+	return c.m.promptWithSetup(ctx, c.id, text, behavior, "", nil, &c.hire.HiredAt, Origin{Source: OriginLead, Kind: kind}, track, nil, setup)
 }
 
 func (c *workerCommand) runAs(ctx context.Context, as Choice) error {
 	a, p, err := c.ensure(ctx)
 	if err == nil {
-		_, err = c.m.configureProcess(ctx, a, p, map[string]any{"type": "set_model", "provider": as.Provider, "modelId": as.Model})
+		_, err = c.m.configureOn(ctx, a, p, map[string]any{"type": "set_model", "provider": as.Provider, "modelId": as.Model}, nil)
 	}
 	if err == nil && as.Effort != "" {
-		_, err = c.m.configureProcess(ctx, a, p, map[string]any{"type": "set_thinking_level", "level": as.Effort})
+		_, err = c.m.configureOn(ctx, a, p, map[string]any{"type": "set_thinking_level", "level": as.Effort}, nil)
 	}
 	if err != nil {
 		return fmt.Errorf("run as %s: %w", as, err)
@@ -125,14 +129,15 @@ func (c *workerCommand) remove() error {
 	return c.withHire(func(yesmen.Yesman) error { return c.m.removeWorkerIn(c) })
 }
 
-// StartWorkerBy admits a lead after the caller's crew lookup has completed.
-func (m *Manager) StartWorkerBy(ctx context.Context, token string, lead Info, hire yesmen.Yesman, name, title, task string, as Choice) (Info, error) {
+// StartWorkerBy binds routing, prompt admission and failure cleanup to the
+// requesting lead, the selected hire and the exact new worker.
+func (m *Manager) StartWorkerBy(ctx context.Context, token string, lead Info, hire yesmen.Yesman, name, title, task string, route WorkerRoute) (Info, error) {
 	ctx, finish, err := m.beginLeadCommand(ctx, token, lead, hire)
 	if err != nil {
 		return Info{}, err
 	}
 	defer finish()
-	return m.startWorkerRecord(ctx, hire, name, title, task, as, true)
+	return m.startWorkerRecord(ctx, hire, name, title, task, Choice{}, route, true)
 }
 
 func (m *Manager) beginLeadCommand(ctx context.Context, token string, lead Info, hire yesmen.Yesman) (context.Context, func(), error) {
@@ -161,7 +166,7 @@ func (m *Manager) manageWorkerBy(ctx context.Context, token string, lead Info, h
 }
 
 func (m *Manager) SendWorkerBy(ctx context.Context, token string, lead Info, hire yesmen.Yesman, worker Info, text string) error {
-	return m.manageWorkerBy(ctx, token, lead, hire, worker, func(ctx context.Context, c *workerCommand) error { return c.prompt(ctx, text, "steer", "message") })
+	return m.manageWorkerBy(ctx, token, lead, hire, worker, func(ctx context.Context, c *workerCommand) error { return c.prompt(ctx, text, "steer", "message", nil) })
 }
 func (m *Manager) RemoveWorkerBy(ctx context.Context, token string, lead Info, hire yesmen.Yesman, worker Info) error {
 	return m.manageWorkerBy(ctx, token, lead, hire, worker, func(_ context.Context, c *workerCommand) error { return c.remove() })

@@ -13,15 +13,23 @@ import (
 
 const relocationFolder = ".worktree-relocations"
 
-// Keep the archive record and its verified destination after deleting the
-// archive. A content-addressed, create-only receipt also makes a retry safe.
-func (s *Store) recordArchiveRelocation(parent *os.Root, entry, instance string, original json.RawMessage, destination string) error {
-	data, err := json.Marshal(struct {
-		Archive     string          `json:"archive"`
+// Keep the primary record and verified destination beside the selected
+// workspace. Preserve the archived receipt's encoding so cold retries reuse it.
+func (s *Store) recordPrimaryRelocation(parent *os.Root, target DeletionTarget, original json.RawMessage, destination string) error {
+	entry, _, _, _ := deletionEntry(target.Entry, target.Archived)
+	receipt := struct {
+		Archive     string          `json:"archive,omitempty"`
+		Workspace   string          `json:"workspace,omitempty"`
 		Instance    string          `json:"instance"`
 		Record      json.RawMessage `json:"record"`
 		Destination string          `json:"destination"`
-	}{entry, instance, original, destination})
+	}{Instance: target.Instance, Record: original, Destination: destination}
+	if target.Archived {
+		receipt.Archive = entry
+	} else {
+		receipt.Workspace = entry
+	}
+	data, err := json.Marshal(receipt)
 	if err != nil {
 		return err
 	}
@@ -38,11 +46,11 @@ func (s *Store) recordArchiveRelocation(parent *os.Root, entry, instance string,
 		return err
 	}
 	// The folder may have been created on an interrupted attempt. In either
-	// case persist its name in archive before relying on anything inside it.
+	// case persist its name in the parent before relying on anything inside it.
 	if err := s.syncRelocationDir(parent); err != nil {
 		return err
 	}
-	name := fmt.Sprintf("%s-%x.json", instance, sha256.Sum256(data))
+	name := fmt.Sprintf("%s-%x.json", target.Instance, sha256.Sum256(data))
 	prior, err := readRegular(dir, name, int64(len(data)), &s.metaMu)
 	if err == nil {
 		if !bytes.Equal(prior, data) {

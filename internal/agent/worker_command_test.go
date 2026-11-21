@@ -10,6 +10,21 @@ import (
 	"github.com/idy/yesman/internal/yesmen"
 )
 
+func workerTestLead(t *testing.T, ctx context.Context, m *Manager, y yesmen.Yesman) (Info, string) {
+	t.Helper()
+	id := ID(y.Name, yesmen.LeadName)
+	if _, err := m.Messages(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	lead, err := m.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return lead, m.agents[id].token
+}
+
 // Exercise the same three Manager operations the lead's tools use. The fake
 // pi keeps the actual process/credential lifecycle and workspace Store.
 func TestLeadWorkerManagement(t *testing.T) {
@@ -20,17 +35,11 @@ func TestLeadWorkerManagement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Messages(ctx, "alice/lead"); err != nil {
-		t.Fatal(err)
+	lead, token := workerTestLead(t, ctx, m, y)
+	selected := func(context.Context, []Model) (Choice, error) {
+		return Choice{Provider: "alpha", Model: "shared", Effort: "max"}, nil
 	}
-	lead, err := m.Get("alice/lead")
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.mu.Lock()
-	token := m.agents[lead.ID].token
-	m.mu.Unlock()
-	w, err := m.StartWorkerBy(ctx, token, lead, y, "builder", "Build", "test task", Choice{Provider: "alpha", Model: "shared", Effort: "max"})
+	w, err := m.StartWorkerBy(ctx, token, lead, y, "builder", "Build", "test task", selected)
 	if err != nil || w.Role != RoleWorker || w.Model != "shared" || w.Since.IsZero() {
 		t.Fatalf("start: %+v %v", w, err)
 	}
@@ -43,7 +52,8 @@ func TestLeadWorkerManagement(t *testing.T) {
 	if ws, err := store.Workers(y.Name); err != nil || len(ws) != 0 {
 		t.Fatal(ws, err)
 	}
-	if _, err := m.StartWorkerBy(ctx, token, lead, y, "builder", "Build", "test task", Choice{Provider: "missing", Model: "none"}); err == nil {
+	missing := func(context.Context, []Model) (Choice, error) { return Choice{Provider: "missing", Model: "none"}, nil }
+	if _, err := m.StartWorkerBy(ctx, token, lead, y, "builder", "Build", "test task", missing); err == nil {
 		t.Fatal("invalid model accepted")
 	}
 	if ws, err := store.Workers(y.Name); err != nil || len(ws) != 0 {
@@ -76,19 +86,10 @@ func TestLeadWorkerStartReleasesWorkspaceBeforeRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Messages(ctx, "alice/lead"); err != nil {
-		t.Fatal(err)
-	}
-	lead, err := m.Get("alice/lead")
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.mu.Lock()
-	token := m.agents[lead.ID].token
-	m.mu.Unlock()
+	lead, token := workerTestLead(t, ctx, m, y)
 	done := make(chan error, 1)
 	go func() {
-		_, err := m.StartWorkerBy(ctx, token, lead, y, "builder", "Build", "prepare", Choice{})
+		_, err := m.StartWorkerBy(ctx, token, lead, y, "builder", "Build", "prepare", nil)
 		done <- err
 	}()
 	select {

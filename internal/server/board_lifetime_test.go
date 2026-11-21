@@ -492,8 +492,8 @@ func TestEndedCredentialStartsNothingWhileAdmittedChangeDrains(t *testing.T) {
 	for _, mode := range []string{"stop-yesman", "natural-exit"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newBoardFixture(t)
-			f.srv.Crew = func(context.Context) []crew.Member {
-				return []crew.Member{{Key: "fixture/fixture", Provider: "fixture", Model: "fixture"}}
+			f.srv.Routing = func(context.Context, []agent.Model) crew.Routing {
+				return crew.Routing{}
 			}
 			f.hire("alice")
 			f.seed("alice")

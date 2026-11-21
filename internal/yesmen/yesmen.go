@@ -136,6 +136,8 @@ type Store struct {
 	mu                sync.Mutex
 	metaMu            sync.Mutex // serialize metadata reads with atomic replacement on Windows
 	syncRelocationDir func(*os.Root) error
+	worktreeLocks     map[string]*sync.Mutex // workspace-scoped lifecycle I/O and background discovery
+	returnLocks       map[string]*sync.Mutex // final retirement vs this workspace's board and worker writers
 
 	lmu    sync.Mutex
 	locks  map[string]*sync.RWMutex  // per yesman: Use reads, Archive writes
@@ -477,6 +479,7 @@ func (s *Store) WithWorker(hire Yesman, worker string, fn func(Worker) error) er
 
 // AddWorker records a new worker.
 func (s *Store) AddWorker(name string, w Worker) error {
+	defer s.lockReturnState(name)()
 	if err := ValidName(w.Name); err != nil {
 		return err
 	}
@@ -628,6 +631,7 @@ func (s *Store) FailWorker(name, worker string, since, at time.Time) error {
 // updateWorker changes a worker's record, writing it only when fn reports a
 // change. A worker no longer listed is left alone.
 func (s *Store) updateWorker(name, worker string, fn func(*Worker) bool) (bool, error) {
+	defer s.lockReturnState(name)()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	y, err := s.Get(name)
@@ -659,6 +663,7 @@ func (s *Store) RemoveWorkerOf(hire Yesman, worker string, since time.Time) erro
 }
 
 func (s *Store) removeWorker(name, worker string, hiredAt *time.Time, since time.Time) error {
+	defer s.lockReturnState(name)()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	y, err := s.Get(name)
@@ -672,14 +677,15 @@ func (s *Store) removeWorker(name, worker string, hiredAt *time.Time, since time
 	if err != nil {
 		return err
 	}
-	if hiredAt != nil && !slices.ContainsFunc(ws, func(w Worker) bool { return w.Name == worker && w.StartedAt.Equal(since) }) {
+	i := slices.IndexFunc(ws, func(w Worker) bool { return w.Name == worker })
+	if hiredAt != nil && (i < 0 || !ws[i].StartedAt.Equal(since)) {
 		return errors.New("the selected worker was removed or replaced")
 	}
 	s.noteStarts(y, ws)
 	// Its tasks stay its own: a worker of the same name hired later does
 	// not own them, whatever it works on. Bound first, under the same lock,
 	// so that no reader sees the name free with its tasks unbound.
-	if i := slices.IndexFunc(ws, func(x Worker) bool { return x.Name == worker }); i >= 0 {
+	if i >= 0 {
 		b, err := s.board(name)
 		if err != nil {
 			return err
@@ -687,7 +693,9 @@ func (s *Store) removeWorker(name, worker string, hiredAt *time.Time, since time
 		bound := false
 		for j := range b.Tasks {
 			if t := &b.Tasks[j]; t.Owner == worker && t.OwnerSince.IsZero() {
+				previous := *t
 				t.OwnerSince, bound = ws[i].StartedAt, true
+				t.recordWorktreeGeneration(previous)
 			}
 		}
 		if bound {

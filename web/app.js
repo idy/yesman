@@ -6,7 +6,7 @@
 
 import { orderWorkers } from './sidebar.js';
 import { CONVERSATION_MIN, TWO_COLUMNS, explorerBody, listView, narrowBack, resizer, scrollMemory } from './explorer.js';
-import { needsYouItems, requestsOf, closedHandoffs, summary as requestSummary, typeLabel } from './needsyou.js';
+import { needsYouItems, requestsOf, closedHandoffs, summary as requestSummary, typeLabel, responseKind, dialogKey } from './needsyou.js';
 import { messageActions, messageText, receiptText } from './message-actions.js';
 import { mayRecallInComposer, restoredImages, supportsRecall } from './recall.js';
 import { renderMarkdown } from './markdown.js';
@@ -1481,8 +1481,8 @@ const REQUEST_ICONS = {
   confirm: 'check', select: 'listChecks', input: 'pencil', editor: 'pencil',
   decision: 'listChecks', login: 'lock', install: 'package', manual: 'info',
 };
-const requestIcon = (item, cls = 'mds-icon') => icon(REQUEST_ICONS[item.type] ?? 'bell', cls);
-const RESOLUTIONS = { done: 'Marked done', 'not-needed': 'Marked not needed', resolved: 'Resolved by the lead' };
+const requestIcon = (item, cls = 'mds-icon') => icon(REQUEST_ICONS[item.handoff?.response?.kind === 'choice' ? 'select' : item.type] ?? 'bell', cls);
+const RESOLUTIONS = { done: 'Marked done', answered: 'Answered', 'not-needed': 'Marked not needed', resolved: 'Resolved by the lead' };
 
 // Where a request comes from: the yesman, and for a worker its number and
 // subject, by stable IDs.
@@ -1528,6 +1528,7 @@ let needsYouHistoryOpen = false;
 // In a narrow pane one column shows: the list ('nav') until a request is
 // chosen, then its detail ('content'), per yesman and hire.
 const needsYouChosen = new Map(); // needsYouScope() -> { key, at, focus }
+let needsYouNavigation = 0; // user navigation only, independent of State redraws
 const needsYouSizes = resizer('needs-you', { min: 360 });
 const needsYouPlaces = scrollMemory();
 // What is typed into a dialog's text answer in the pane, by request key,
@@ -1550,11 +1551,33 @@ function pruneNeedsYouDrafts() {
   const yesmen = new Map(state.snap.yesmen.map((y) => [y.name, y]));
   const open = new Map();
   for (const [k, d] of needsYouDrafts) {
+    if (state.resolving.has(k)) continue;
     const y = yesmen.get(d.yesman);
     if (!y) continue;
     if ((y.hiredAt ?? '') !== d.hiredAt) { needsYouDrafts.delete(k); continue; }
-    if (!open.has(y.name)) open.set(y.name, new Set(needsYouOf(y).map((item) => item.key)));
-    if (!open.get(y.name).has(k)) needsYouDrafts.delete(k);
+    if (!open.has(y.name)) {
+      const keys = new Set(needsYouOf(y).map((item) => item.key));
+      // An unhanded worker question can still be answered at its source.
+      for (const a of state.snap.agents) {
+        if (a.yesman === y.name && a.status === 'waiting' && a.dialog?.id) keys.add(dialogKey(a, y.hiredAt));
+      }
+      open.set(y.name, keys);
+    }
+    if (!open.get(y.name).has(k) && !(k.startsWith('h:') && y.handoffsError)) needsYouDrafts.delete(k);
+  }
+  // Promote the whole draft while its form is still displayed. Redrawing
+  // that form is unnecessary, including in the middle of composition.
+  const overflow = needsYouOverflow;
+  if (!overflow || needsYouDrafts.size >= NEEDS_YOU_DRAFTS) return;
+  const y = yesmen.get(overflow.yesman);
+  if (!y || (y.hiredAt ?? '') !== overflow.hiredAt || !responseNodes(overflow).length) return;
+  const pending = overflow.kind === 'dialog'
+    ? state.snap.agents.some(a => a.yesman === y.name && a.status === 'waiting' && dialogKey(a, y.hiredAt) === overflow.key)
+    : needsYouOf(y).some(item => item.key === overflow.key);
+  if (pending) {
+    needsYouDrafts.set(overflow.key, overflow);
+    needsYouOverflow = null;
+    for (const box of responseNodes(overflow)) box._updateResponse();
   }
 }
 
@@ -1571,6 +1594,7 @@ function showNeedsYou(focusKey = null) {
   // Coming back to the pane shows the list, with the request named chosen.
   if (scope) {
     const was = needsYouChosen.get(scope);
+    if (focusKey && focusKey !== was?.key) needsYouNavigation++;
     needsYouChosen.set(scope, { key: focusKey ?? was?.key ?? null, at: was?.at ?? 0, focus: 'nav' });
     renderNeedsYouPane();
   }
@@ -1582,6 +1606,7 @@ function showNeedsYou(focusKey = null) {
 function chooseRequest(item, at) {
   const scope = needsYouScope();
   if (!scope) return;
+  if (needsYouChosen.get(scope)?.key !== item.key) needsYouNavigation++;
   needsYouChosen.set(scope, { key: item.key, at, focus: 'content' });
   renderNeedsYouPane();
   const aside = $('#needs-you');
@@ -1597,7 +1622,7 @@ function chooseRequest(item, at) {
 function closeNeedsYou() {
   setPane(null);
   const row = $('#yesman-info [data-info-entry="needs-you"]');
-  (row?.getClientRects().length ? row : $('#dock textarea'))?.focus({ preventScroll: true });
+  (row?.getClientRects().length ? row : $('#dock .composer textarea'))?.focus({ preventScroll: true });
 }
 
 // Open a request where it was asked: its agent's conversation, with the
@@ -1619,8 +1644,8 @@ function renderNeedsYouPane() {
   aside.setAttribute('aria-label', t('Needs You'));
   document.documentElement.dataset.needsYou = shown ? 'open' : 'closed';
   if (!shown) {
-    needsYouOverflow = null;
     aside.replaceChildren();
+    forgetHiddenResponse();
     delete aside.dataset.scope;
     delete aside.dataset.shown;
     return;
@@ -1657,9 +1682,6 @@ function renderNeedsYouPane() {
   const narrowFocus = gone ? 'nav' : was?.focus ?? 'nav';
   if (chosen) needsYouChosen.set(scope, { key: chosen.key, at: items.indexOf(chosen), focus: narrowFocus });
   else needsYouChosen.delete(scope);
-  pruneNeedsYouDrafts();
-  if (needsYouOverflow && (needsYouOverflow.key !== chosen?.key || needsYouOverflow.yesman !== name || needsYouOverflow.hiredAt !== (y?.hiredAt ?? ''))) needsYouOverflow = null;
-
   const nav = h('div', { class: 'explorer-nav-scroll needs-you-body' });
   let content;
   if (!y) {
@@ -1689,7 +1711,7 @@ function renderNeedsYouPane() {
         h('ul', null, closed.map(({ handoff }) => h('li', null,
           h('span', { class: 'needs-you-history-title' }, handoff.title),
           h('span', { class: 'needs-you-history-meta' },
-            `${t(RESOLUTIONS[handoff.resolution] ?? 'Closed')} · ${t('{time} ago', { time: elapsed(handoff.closedAt) })}`)))));
+            `${t(RESOLUTIONS[handoff.answered ? 'answered' : handoff.resolution] ?? 'Closed')} · ${t('{time} ago', { time: elapsed(handoff.closedAt) })}`)))));
       history.addEventListener('toggle', () => { needsYouHistoryOpen = history.open; });
       nav.append(history);
     }
@@ -1701,15 +1723,27 @@ function renderNeedsYouPane() {
   const count = items.length ? tn(items.length, '{n} waiting', '{n} waiting') : '';
   // An unavailable workspace has no navigation; its error lives in content.
   const focus = !y ? 'content' : !chosen || narrowFocus === 'nav' ? 'nav' : 'content';
-  aside.replaceChildren(
-    h('div', { class: 'files-head drag' },
-      h('h2', { class: 'files-title needs-you-heading', tabindex: '-1' }, t('Needs You')),
-      count ? h('span', { class: 'board-count', 'data-tone': 'waiting' }, count) : null,
-      h('div', { class: 'files-head-actions' },
-        h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-pane-control': 'refresh', title: t('Check again'), 'aria-label': t('Check again'), onclick: () => refreshState().catch(fail) }, icon('reload')),
-        h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-pane-control': 'close', title: t('Close Needs You'), 'aria-label': t('Close Needs You'), onclick: closeNeedsYou }, icon('x')))),
-    explorerBody({ name: 'needs-you', content, nav, focus, handle: needsYouSizes.nav(aside), label: chosen ? requestWhat(chosen) : t('Needs You') }),
-    needsYouSizes.pane(aside));
+  const title = chosen ? requestWhat(chosen) : t('Needs You');
+  const heading = h('div', { class: 'files-head drag' },
+    h('h2', { class: 'files-title needs-you-heading', tabindex: '-1' }, t('Needs You')),
+    count ? h('span', { class: 'board-count', 'data-tone': 'waiting' }, count) : null,
+    h('div', { class: 'files-head-actions' },
+      h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-pane-control': 'refresh', title: t('Check again'), 'aria-label': t('Check again'), onclick: () => refreshState().catch(fail) }, icon('reload')),
+      h('button', { class: 'mds-icon-button mds-icon-button--compact', type: 'button', 'data-pane-control': 'close', title: t('Close Needs You'), 'aria-label': t('Close Needs You'), onclick: closeNeedsYou }, icon('x'))));
+  const existing = same && $('.explorer', aside);
+  const detail = existing && $('.explorer-content', existing);
+  if (existing && content._requestState && detail.firstElementChild?._requestState === content._requestState) {
+    // A poll may change the list while an input method is composing. Leave
+    // the actual editor and radio controls mounted and update around them.
+    $('.files-head', aside).replaceWith(heading);
+    $('.explorer-nav-scroll', existing).replaceWith(nav);
+    detail.setAttribute('aria-label', title);
+    existing.dataset.focus = focus;
+  } else {
+    aside.replaceChildren(heading,
+      explorerBody({ name: 'needs-you', content, nav, focus, handle: needsYouSizes.nav(aside), label: title }),
+      needsYouSizes.pane(aside));
+  }
   needsYouSizes.apply(aside);
   aside.dataset.scope = scope;
   const shownKey = `${scope}\u0001${chosen?.key ?? ''}`;
@@ -1717,7 +1751,8 @@ function renderNeedsYouPane() {
   aside.dataset.shown = shownKey;
   $('.explorer-nav-scroll', aside).scrollTop = navScroll;
   $('.explorer-content', aside).scrollTop = kept ? contentScroll : needsYouPlaces.get(shownKey);
-  if (!active) return;
+  forgetHiddenResponse();
+  if (!active || document.activeElement === active) return;
   let target = null;
   if (same && key) {
     const now = [...aside.querySelectorAll('.needs-you-open[data-request]')];
@@ -1756,6 +1791,7 @@ function needsYouPaneRow(item, chosen, at) {
 // through the same calls as where it was asked.
 function needsYouDetail(y, item) {
   const box = h('div', { class: 'needs-you-detail', 'data-detail': item.key });
+  box._requestState = JSON.stringify([item, requestFrom(item), t('Needs You')]);
   const scope = JSON.stringify([y.name, y.hiredAt ?? '']);
   // The default detail is editable beside the list even before its row is
   // chosen. Focusing its controls keeps that detail visible when narrowing,
@@ -1771,6 +1807,7 @@ function needsYouDetail(y, item) {
   });
   box.append(
     narrowBack(t('All requests'), () => {
+      needsYouNavigation++;
       const scope = needsYouScope();
       if (scope && needsYouChosen.has(scope)) needsYouChosen.get(scope).focus = 'nav';
       renderNeedsYouPane();
@@ -1786,18 +1823,12 @@ function needsYouDetail(y, item) {
     icon('topics'), t('Open in the conversation'));
   if (item.kind === 'handoff') {
     const ho = item.handoff;
-    const busy = state.resolving.has(item.key);
-    const facts = [ho.task && t('Task {id}', { id: ho.task }), ho.worker && t('Worker {name}', { name: ho.worker })].filter(Boolean).join(' · ');
-    const confirmedByUser = ['login', 'install', 'manual'].includes(ho.type);
+    const facts = handoffFacts(ho);
+    if (ho.detail) box.append(h('div', { class: 'md', html: renderMarkdown(ho.detail) }));
+    if (facts) box.append(h('p', { class: 'needs-you-detail-meta' }, facts));
     box.append(
-      ho.detail ? h('div', { class: 'md', html: renderMarkdown(ho.detail) }) : null,
-      facts ? h('p', { class: 'needs-you-detail-meta' }, facts) : null,
-      h('p', { class: 'ask-hint' }, confirmedByUser
-        ? t('Mark it done once you have done it yourself; {name} checks it before relying on it.', { name: yesmanLabel(y.name) })
-        : t('Answer in the conversation if it needs words, then mark it done.')),
+      handoffResponseEl(y, item),
       h('div', { class: 'needs-you-detail-actions' },
-        h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', 'data-detail-control': 'done', disabled: busy, onclick: () => resolveHandoff(y, item, 'done') }, t('Mark done')),
-        h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-detail-control': 'not-needed', disabled: busy, onclick: () => resolveHandoff(y, item, 'not-needed') }, t('Not needed')),
         ho.toolCall ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', 'data-detail-control': 'asked', onclick: () => {
           const lead = agentById(item.agent);
           if (!lead) { openRequest(item); return; }
@@ -1810,9 +1841,8 @@ function needsYouDetail(y, item) {
   // A dialog is answered here only while its agent, of the same start,
   // still asks this very dialog.
   const a = agentById(item.agent);
-  const id = item.key.slice(item.key.lastIndexOf(':') + 1);
-  if (a && a.status === 'waiting' && (a.since ?? '') === item.agentSince && a.dialog?.id === id) {
-    const ask = askEl(a);
+  if (a && a.status === 'waiting' && dialogKey(a, y.hiredAt) === item.key) {
+    const ask = askEl(a, true);
     ask.removeAttribute('role');
     ask.removeAttribute('data-request');
     // The dock's question stays the one .ask on the page; this copy is
@@ -1820,30 +1850,6 @@ function needsYouDetail(y, item) {
     ask.className = 'needs-you-ask';
     ask.querySelector(':scope > strong')?.remove(); // the title is the heading above
     for (const [i, b] of [...ask.querySelectorAll('.ask-actions button')].entries()) b.dataset.detailControl = `answer-${i}`;
-    const input = ask.querySelector('input, textarea');
-    if (input) {
-      input.dataset.detailControl = 'answer-text';
-      input.setAttribute('aria-label', requestWhat(item));
-      // Past the bound, no other answer is dropped to make room: this one
-      // is kept apart while its request shows, and the pane says so. Once
-      // room frees, it is remembered like the others.
-      const draft = { yesman: y.name, hiredAt: y.hiredAt ?? '' };
-      const over = needsYouOverflow?.key === item.key ? needsYouOverflow : null;
-      if (over && needsYouDrafts.size < NEEDS_YOU_DRAFTS) { needsYouDrafts.set(item.key, { ...draft, text: over.text }); needsYouOverflow = null; }
-      if (needsYouDrafts.has(item.key)) input.value = needsYouDrafts.get(item.key).text;
-      else if (needsYouOverflow) input.value = needsYouOverflow.text;
-      const full = h('p', { class: 'ask-hint', role: 'status', hidden: !needsYouOverflow },
-        t('Kept only while this request is shown: {n} other unsent answers are already kept.', { n: formatNumber(NEEDS_YOU_DRAFTS) }));
-      input.addEventListener('input', () => {
-        const keep = needsYouDrafts.has(item.key) || needsYouDrafts.size < NEEDS_YOU_DRAFTS;
-        if (keep) {
-          needsYouDrafts.set(item.key, { ...draft, text: input.value });
-          if (needsYouOverflow?.key === item.key) needsYouOverflow = null;
-        } else needsYouOverflow = { key: item.key, ...draft, text: input.value };
-        full.hidden = keep;
-      });
-      ask.append(full);
-    }
     box.append(ask);
   } else {
     box.append(h('p', { class: 'ask-hint', role: 'status' }, t('This request is no longer open: it was answered, cancelled or timed out.')));
@@ -1852,28 +1858,198 @@ function needsYouDetail(y, item) {
   return box;
 }
 
-// resolveHandoff closes a handoff of yesman y, for the hire it was read in,
-// as the user chose: done or not needed. A handoff closed meanwhile, or of a
-// yesman hired again, is refused by the app.
-async function resolveHandoff(y, item, resolution, after) {
-  if (state.resolving.has(item.key)) return false;
+const handoffFacts = (ho) => [ho.task && t('Task {id}', { id: ho.task }), ho.worker && t('Worker {name}', { name: ho.worker })].filter(Boolean).join(' · ');
+const MAX_REPLY = 2000; // Unicode code points, as on the server
+const confirmingHandoffs = new Set();
+let replyFieldID = 0;
+
+function requestDraft(item) {
+  return needsYouDrafts.get(item.key) ?? (needsYouOverflow?.key === item.key ? needsYouOverflow : null);
+}
+
+function rememberRequest(item, change) {
+  const draft = { kind: item.kind, yesman: item.yesman, hiredAt: item.hiredAt, ...requestDraft(item), ...change };
+  if (needsYouDrafts.has(item.key) || needsYouDrafts.size < NEEDS_YOU_DRAFTS) {
+    needsYouDrafts.set(item.key, draft);
+    if (needsYouOverflow?.key === item.key) needsYouOverflow = null;
+  } else {
+    needsYouOverflow = { key: item.key, ...draft };
+  }
+}
+
+const responseNodes = (item) => document.querySelectorAll(`[data-response-for="${CSS.escape(item.key)}"]`);
+
+function forgetHiddenResponse() {
+  if (needsYouOverflow && ![...responseNodes(needsYouOverflow)].some(el => el.getClientRects().length)) needsYouOverflow = null;
+}
+
+function bindReplyField(field, item, property, fallback = '') {
+  const apply = (input, value) => {
+    if (input.type === 'radio') input.checked = input.value === value;
+    else if (input.value !== value) input.value = value;
+  };
+  field.dataset.replyField = property;
+  apply(field, requestDraft(item)?.[property] ?? fallback);
+  field.addEventListener('compositionstart', () => field.dataset.composing = '');
+  const update = () => {
+    if (field.type === 'radio' && !field.checked) return;
+    rememberRequest(item, { [property]: field.value });
+    for (const box of responseNodes(item)) {
+      for (const mirror of box.querySelectorAll(`[data-reply-field="${property}"]`)) {
+        if (mirror !== field && !mirror.hasAttribute('data-composing')) apply(mirror, field.value);
+      }
+      box._updateResponse();
+    }
+  };
+  field.addEventListener('compositionend', () => { delete field.dataset.composing; update(); });
+  field.addEventListener('input', update);
+  return field;
+}
+
+function bindResponse(box, item) {
+  const error = h('p', { id: `response-error-${++replyFieldID}`, class: 'needs-you-response-error', role: 'alert' });
+  const status = h('p', { class: 'ask-hint', role: 'status' });
+  box.append(error, status);
+  box.dataset.responseFor = item.key;
+  box._updateResponse = () => {
+    const draft = requestDraft(item);
+    const busy = state.resolving.has(item.key);
+    const message = draft?.error || '';
+    if (error.textContent !== message) error.textContent = message;
+    for (const input of box.querySelectorAll('input, textarea, button')) {
+      if (input.matches('button')) input.setAttribute('aria-disabled', String(busy || !!draft?.accepted));
+      else {
+        input.toggleAttribute('disabled', busy || !!draft?.accepted);
+        if (message) input.setAttribute('aria-describedby', error.id);
+        else input.removeAttribute('aria-describedby');
+      }
+    }
+    const detail = busy ? t('Sending…') : draft?.accepted ? t(item.kind === 'dialog' ? 'Reply sent to Pi' : 'Response recorded')
+      : needsYouOverflow?.key === item.key ? t('Kept only while this request is shown: {n} other unsent answers are already kept.', { n: formatNumber(NEEDS_YOU_DRAFTS) }) : '';
+    if (status.textContent !== detail) status.textContent = detail;
+  };
+  box._updateResponse();
+  return box;
+}
+
+function responseError(item, message) {
+  rememberRequest(item, { error: message });
+  for (const box of responseNodes(item)) box._updateResponse();
+}
+
+async function sendNeedsYouReply(item, send) {
+  if (state.resolving.has(item.key) || requestDraft(item)?.accepted) return false;
   state.resolving.add(item.key);
-  renderDock();
-  renderNeedsYouPane();
-  let closed = false;
+  responseError(item, '');
+  let accepted = false;
   try {
-    await call('ResolveHandoff', y.name, y.hiredAt, item.handoff.id, resolution);
-    closed = true;
-    await refreshState();
-  } catch (err) {
-    fail(err);
+    await send();
+    accepted = true;
+    rememberRequest(item, { accepted });
+  } catch {
+    responseError(item, t('Could not submit this response. Your edits are kept here. Try again or check whether the request is still open.'));
   } finally {
     state.resolving.delete(item.key);
-    renderDock();
-    renderNeedsYouPane();
-    after?.(closed);
+    for (const box of responseNodes(item)) box._updateResponse();
   }
-  return closed;
+  // On a lost bridge response keep the draft and let the next poll reconcile
+  // a closure. An unchanged retry is safe even before the poll arrives.
+  if (accepted) await refreshState().catch(() => refreshSoon());
+  return accepted;
+}
+
+function handoffResponseEl(y, item, dock = false) {
+  const ho = item.handoff;
+  const kind = responseKind(ho);
+  const form = h('form', { class: 'needs-you-response', 'aria-label': t('Respond to {title}', { title: ho.title }) });
+  const workspace = () => {
+    const live = yesmanOf(item.agent);
+    return live && (live.hiredAt ?? '') === item.hiredAt && selectedAgent()?.yesman === y.name &&
+      live.handoffs?.some(h => h.id === ho.id && h.createdAt === ho.createdAt && !h.closedAt);
+  };
+  const current = () => form.isConnected && workspace();
+  const send = async (resolution, data) => {
+    const accepted = await sendNeedsYouReply(item, () => call('RespondHandoff', y.name, y.hiredAt ?? null, ho.id, resolution, data));
+    if (accepted && dock && selectedAgent()?.id === item.agent && document.activeElement === document.body) $('#dock .composer textarea')?.focus();
+  };
+  const textField = (property, label, rows) => {
+    const input = bindReplyField(h('textarea', { class: 'mds-textarea', rows, maxlength: MAX_REPLY * 2,
+      'data-detail-control': property }), item, property);
+    form.append(h('label', { class: 'needs-you-field' }, h('span', null, t(label)), input));
+    return input;
+  };
+  let text, note;
+  if (kind === 'action') {
+    form.append(h('p', { class: 'ask-hint' }, t('Mark it done once you have done it yourself; {name} checks it before relying on it.', { name: yesmanLabel(y.name) })));
+  } else if (kind === 'choice') {
+    const options = h('fieldset', { class: 'needs-you-options' }, h('legend', null, t('Choose one')));
+    for (const [i, label] of ho.response.options.entries()) {
+      const radio = bindReplyField(h('input', { type: 'radio', name: 'choice', value: label, 'data-detail-control': `choice-${i}` }), item, 'choice');
+      options.append(h('label', null, radio, h('span', null, label)));
+    }
+    form.append(options);
+    if (ho.response.allowNote) note = textField('note', 'Optional note', 2);
+  } else {
+    text = textField('text', 'Your reply', 3);
+  }
+  if (text || note) form.append(h('p', { class: 'ask-hint' }, t('For passwords, keys, tokens and codes, use Settings › Secrets.')));
+  const submit = h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'submit', 'data-detail-control': 'respond' },
+    t(kind === 'action' ? 'Mark done' : 'Send reply'));
+  const acknowledge = async (opener, legacy = false) => {
+    if (!current() || opener.getAttribute('aria-disabled') === 'true' || form.querySelector('[data-composing]') || confirmingHandoffs.has(item.key)) return;
+    // Record the navigation and the request, not the node that happened to
+    // open the confirmation. A State refresh can replace that node.
+    const view = state.view;
+    const generation = keyOf(selectedAgent());
+    const navigation = needsYouNavigation;
+    confirmingHandoffs.add(item.key);
+    let confirmed;
+    try {
+      const body = legacy ? t('Confirm that you already answered “{title}” in the conversation.', { title: ho.title })
+        : t('Confirm that you completed “{title}” yourself.', { title: ho.title });
+      confirmed = await confirmAction(t('Mark this request done?'), body, t('Mark done'));
+    } finally {
+      confirmingHandoffs.delete(item.key);
+    }
+    if (state.view !== view || needsYouNavigation !== navigation || keyOf(selectedAgent() ?? {}) !== generation || !workspace()) return;
+    const selector = dock ? '#dock' : '#needs-you';
+    const live = [...responseNodes(item)].find(el => el.closest(selector) && el.getClientRects().length);
+    if (!live) return;
+    const active = document.activeElement;
+    if (active === document.body || active?.closest('dialog:not([open])')) {
+      live.querySelector(`[data-detail-control="${opener.dataset.detailControl}"]`)?.focus({ preventScroll: true });
+    }
+    if (confirmed) await send('done', null);
+  };
+  if (text && !ho.response) form.append(h('p', { class: 'ask-hint' }, t('Already replied in the conversation? Mark this request done.')));
+  form.append(h('div', { class: 'ask-actions' }, submit,
+    text && !ho.response ? h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-detail-control': 'legacy-done',
+      onclick: (event) => acknowledge(event.currentTarget, true) }, t('Mark done')) : null,
+    h('button', { class: 'mds-button mds-button--small', type: 'button', 'data-detail-control': 'not-needed', onclick: () => {
+      if (current() && !confirmingHandoffs.has(item.key)) void send('not-needed', null);
+    } }, t('Not needed'))));
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    if (!current() || submit.getAttribute('aria-disabled') === 'true' || form.querySelector('[data-composing]')) return;
+    if (kind === 'action') {
+      await acknowledge(submit);
+      return;
+    }
+    const choice = form.querySelector('input:checked');
+    if (text && !text.value.trim()) {
+      responseError(item, t('Enter a reply.'));
+      text.focus();
+    } else if (kind === 'choice' && !choice) {
+      responseError(item, t('Choose one option.'));
+      form.querySelector('input')?.focus();
+    } else if ([...(text?.value ?? note?.value ?? '')].length > MAX_REPLY) {
+      responseError(item, t('Use up to {n} characters.', { n: formatNumber(MAX_REPLY) }));
+      (text ?? note).focus();
+    } else {
+      await send('done', text ? { text: text.value } : { choice: choice.value, note: note?.value ?? '' });
+    }
+  };
+  return bindResponse(form, item);
 }
 
 // What a yesman's memory of its lead's tool calls means for the user, when
@@ -1962,24 +2138,16 @@ function handoffEls(a) {
 
 function handoffEl(a, y, item) {
   const ho = item.handoff;
-  const busy = state.resolving.has(item.key);
-  const resolve = (resolution) => resolveHandoff(y, item, resolution, (closed) => {
-    if (closed && selectedAgent()?.id === a.id) $('#dock textarea')?.focus();
-  });
-  const confirmedByUser = ['login', 'install', 'manual'].includes(ho.type);
-  const facts = [ho.task && t('Task {id}', { id: ho.task }), ho.worker && t('Worker {name}', { name: ho.worker })].filter(Boolean).join(' · ');
-  return h('div', { class: 'ask handoff', role: 'group', 'aria-label': `${t(typeLabel(item))}: ${ho.title}`, 'data-request': item.key, 'data-type': ho.type },
+  const facts = handoffFacts(ho);
+  const box = h('div', { class: 'ask handoff', role: 'group', 'aria-label': `${t(typeLabel(item))}: ${ho.title}`, 'data-request': item.key, 'data-type': ho.type },
     h('span', { class: 'needs-you-type' }, requestIcon(item), t(typeLabel(item))),
     h('strong', null, ho.title),
     ho.detail ? h('div', { class: 'md handoff-detail', html: renderMarkdown(ho.detail) }) : null,
     facts ? h('p', { class: 'ask-hint' }, facts) : null,
-    h('p', { class: 'ask-hint' }, confirmedByUser
-      ? t('Mark it done once you have done it yourself; {name} checks it before relying on it.', { name: yesmanLabel(y.name) })
-      : t('Answer in the message box below if it needs words, then mark it done.')),
-    h('div', { class: 'ask-actions' },
-      h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', disabled: busy, onclick: () => resolve('done') }, t('Mark done')),
-      h('button', { class: 'mds-button mds-button--small', type: 'button', disabled: busy, onclick: () => resolve('not-needed') }, t('Not needed')),
-      ho.toolCall ? h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => showToolCall(a, ho.toolCall) }, t('Show where it was asked')) : null));
+    handoffResponseEl(y, item, true),
+    ho.toolCall ? h('button', { class: 'mds-button mds-button--subtle mds-button--small needs-you-ask-source', type: 'button', onclick: () => showToolCall(a, ho.toolCall) }, t('Show where it was asked')) : null);
+  box._dialogState = JSON.stringify([item, yesmanLabel(y.name), t('Needs You')]);
+  return box;
 }
 
 // locateRequest marks the request being opened in the dock and, once, moves
@@ -2387,7 +2555,8 @@ function renderBody() {
   const restoreStored = deletion.storageFocus(active);
   const held = requestFocus($('#dock'));
   const composing = $('#dock .composer textarea');
-  if (state.view.kind === 'agent' && composing?._composing && composing._agentKey === keyOf(selectedAgent() ?? {})) {
+  const composingReply = active?.matches('#dock [data-reply-field][data-composing]');
+  if (state.view.kind === 'agent' && composing?._agentKey === keyOf(selectedAgent() ?? {}) && (composing._composing || composingReply)) {
     renderDock({ held });
     renderThread();
     return;
@@ -2427,7 +2596,7 @@ function requestFocus(dock) {
   return {
     key: request.dataset.request,
     index: [...request.querySelectorAll('button, input, textarea')].indexOf(el),
-    value: request.querySelector('input, textarea')?.value,
+    caret: typeof el.selectionStart === 'number' ? [el.selectionStart, el.selectionEnd, el.selectionDirection] : null,
     at: [...dock.querySelectorAll('[data-request]')].indexOf(request),
   };
 }
@@ -2464,9 +2633,24 @@ function renderDockRequests(dock, a, form = null) {
     return node.isEqualNode(other);
   }) ?? node);
   for (const node of old) if (!next.includes(node)) node.remove();
-  next.forEach((node, index) => {
-    if (previous.children[index] !== node) previous.insertBefore(node, previous.children[index] ?? null);
-  });
+  // Moving an existing composing card with insertBefore would detach its
+  // editor. Arrange its siblings around it instead.
+  const editing = document.activeElement?.matches('[data-reply-field][data-composing]')
+    ? document.activeElement.closest('[data-request]') : null;
+  const pin = next.indexOf(editing);
+  let before = pin < 0 ? null : editing;
+  for (let i = pin < 0 ? next.length - 1 : pin - 1; i >= 0; i--) {
+    const node = next[i];
+    if (node.parentNode !== previous || node.nextSibling !== before) previous.insertBefore(node, before);
+    before = node;
+  }
+  if (pin >= 0) {
+    let after = editing;
+    for (const node of next.slice(pin + 1)) {
+      if (after.nextSibling !== node) previous.insertBefore(node, after.nextSibling);
+      after = node;
+    }
+  }
 }
 
 function composerAction(a, working) {
@@ -2623,11 +2807,13 @@ function finishDockRequests(dock, a, heldAt, textarea) {
   }
   if (heldAt) {
     const again = dock.querySelector(`[data-request="${CSS.escape(heldAt.key)}"]`);
-    const field = again?.querySelector('input, textarea');
-    if (field && heldAt.value !== undefined && field.value !== heldAt.value) field.value = heldAt.value;
     const control = again?.querySelectorAll('button, input, textarea')[heldAt.index];
-    if (control && !control.disabled) control.focus({ preventScroll: true });
-    else if (!again) {
+    if (control && !control.disabled) {
+      if (document.activeElement !== control) {
+        control.focus({ preventScroll: true });
+        if (heldAt.caret && typeof control.selectionStart === 'number') control.setSelectionRange(...heldAt.caret);
+      }
+    } else if (!again) {
       // It was answered or closed elsewhere: the request now in its place,
       // or the composer.
       const rest = dock.querySelectorAll('[data-request]');
@@ -2636,6 +2822,7 @@ function finishDockRequests(dock, a, heldAt, textarea) {
     }
   }
   locateRequest(dock, a);
+  forgetHiddenResponse();
 }
 
 // holdSent keeps what this window submitted, exactly as it was sent, to show
@@ -2762,10 +2949,21 @@ async function sendMessage(a, textarea, submitter = null) {
 }
 
 // A question an extension asked through pi's RPC dialogs.
-function askEl(a) {
+function askEl(a, handedOverOnly = false) {
   const d = a.dialog;
-  const answer = (payload) => call('Answer', a.id, d.id, payload).catch(fail);
-  const box = h('div', { class: 'ask', role: 'alert', 'data-request': `d:${a.id}@${a.since ?? ''}:${d.id ?? ''}` },
+  const y = yesmanOf(a.id);
+  const hiredAt = y?.hiredAt ?? '';
+  const item = { key: dialogKey(a, hiredAt), kind: 'dialog', yesman: a.yesman, hiredAt };
+  const scope = { hiredAt: y?.hiredAt ?? null, since: a.since ?? null, askedAt: a.dialogAt, handedOverOnly };
+  const answer = (payload) => {
+    const live = yesmanOf(a.id);
+    if (!box.isConnected || selectedAgent()?.yesman !== item.yesman || !live || (live.hiredAt ?? '') !== hiredAt || box.querySelector('[data-composing]')) return;
+    const current = agentById(a.id);
+    if (current?.status !== 'waiting' || dialogKey(current, hiredAt) !== item.key || (handedOverOnly && a.role === 'worker' && !current.handedOver)) return;
+    void sendNeedsYouReply(item, () => call('Answer', a.id, scope, { requestId: d.id, ...payload }));
+  };
+  let field;
+  const box = h('div', { class: 'ask', role: 'alert', 'data-request': item.key },
     h('strong', null, d.title || t('Question')), d.message ? h('p', null, d.message) : null,
     a.role === 'worker' ? h('p', { class: 'ask-hint' }, a.handedOver
       ? t('{name} handed this question to you.', { name: yesmanLabel(a.yesman) })
@@ -2783,18 +2981,24 @@ function askEl(a) {
     }
     actions.append(h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => answer({ cancelled: true }) }, t('Cancel')));
   } else {
-    const input = d.method === 'editor'
-      ? h('textarea', { class: 'mds-textarea', rows: 5 })
-      : h('input', { class: 'mds-input', placeholder: d.placeholder ?? '' });
-    input.value = d.prefill ?? '';
-    box.append(input);
+    field = bindReplyField(d.method === 'editor'
+      ? h('textarea', { class: 'mds-textarea', rows: 4 })
+      : h('input', { class: 'mds-input', placeholder: d.placeholder ?? '' }), item, 'text', d.prefill ?? '');
+    field.setAttribute('aria-label', d.title || t('Your reply'));
+    field.dataset.detailControl = 'answer-text';
+    field.addEventListener('keydown', (event) => {
+      if (d.method !== 'input' || event.key !== 'Enter' || event.repeat || event.isComposing || event.keyCode === 229 || field.hasAttribute('data-composing')) return;
+      event.preventDefault();
+      answer({ value: field.value });
+    });
+    box.append(field, h('p', { class: 'ask-hint' }, t('For passwords, keys, tokens and codes, use Settings › Secrets.')));
     actions.append(
-      h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', onclick: () => answer({ value: input.value }) }, t('Submit')),
+      h('button', { class: 'mds-button mds-button--primary mds-button--small', type: 'button', onclick: () => answer({ value: field.value }) }, t('Submit')),
       h('button', { class: 'mds-button mds-button--subtle mds-button--small', type: 'button', onclick: () => answer({ cancelled: true }) }, t('Cancel')),
     );
   }
   box.append(actions);
-  return box;
+  return bindResponse(box, item);
 }
 
 function renderWelcome(body) {
@@ -2873,6 +3077,7 @@ function renderSideFoot() {
 }
 
 function showSettings(page) {
+  if (selectedAgent()) state.settingsWorkspace = selectedAgent().yesman;
   state.settingsPage = page;
   state.view = { kind: 'settings', page };
   render();
@@ -2979,6 +3184,8 @@ const crewPage = createCrew({
   rerender: () => renderBody(),
   openPage: () => showSettings('yesman'),
   openUsage: () => showSettings('usage'),
+  leads: () => state.snap.agents.filter((a) => a.role === 'lead').map((a) => ({ ...a, label: yesmanLabel(a.yesman), selected: a.yesman === state.settingsWorkspace })),
+  acceptLead: acceptModelInfo,
   preferenceRow,
 });
 // Settings › Model usage: what agents actually used, in usage.js.
@@ -3994,6 +4201,10 @@ const info = createInfo({
     return a ? yesmanOf(a.id) : null;
   },
   isOpen: () => infoShown(),
+  toast,
+  unsaved: y => files.unsavedWorktrees(y),
+  removed: (y, rows) => files.removedWorktrees(y, rows),
+  reconcile: (y, rows, complete) => files.reconcileWorktrees(y, rows, complete),
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),
@@ -4014,7 +4225,7 @@ const info = createInfo({
   openNeedsYou: () => showNeedsYou(),
   pane: () => state.pane,
   openTopics: () => setPane('topics'),
-  openWorktree: (dir, show) => files.openWorktree(dir, show),
+  openWorktree: (w, show) => files.openWorktree(w, show),
   checkout: (y) => openCheckout(y),
   openURL: (url) => call('OpenURL', url).catch(fail),
 });
@@ -4243,7 +4454,11 @@ function setPane(pane) {
   const visible = had && had !== document.body && shown(had);
   const inPane = !!had?.closest?.('#board, #schedules, #needs-you, #topics, #files');
   const entry = had?.closest?.('#yesman-info [data-info-entry]')?.dataset.infoEntry;
-  if (state.pane !== pane) { infoKept = false; infoFocus = null; }
+  if (state.pane !== pane) {
+    needsYouNavigation++;
+    infoKept = false;
+    infoFocus = null;
+  }
   state.pane = pane;
   infoYielded = infoYields();
   renderInfo();
@@ -4266,7 +4481,7 @@ function setPane(pane) {
     const from = paneFocusFrom;
     paneFocusFrom = null;
     target = (from?.entry ? $(`#yesman-info [data-info-entry="${CSS.escape(from.entry)}"]`) : from) ?? null;
-    if (!shown(target)) target = $('#dock textarea');
+    if (!shown(target)) target = $('#dock .composer textarea');
   }
   if (shown(target)) target.focus({ preventScroll: true });
 }
@@ -4313,7 +4528,7 @@ async function openCheckout(y) {
 
 function selectAgent(id) {
   if (state.request?.agent !== id) state.request = null;
-  state.view = { kind: 'agent', id };
+  if (state.view.kind !== 'agent' || state.view.id !== id) state.view = { kind: 'agent', id };
   const a = agentById(id);
   if (!a) {
     render();
@@ -4443,7 +4658,7 @@ const actionHost = {
     if (next) selectAgent(next.id);
   },
   selectAgent,
-  composer: () => (state.view.kind === 'agent' ? $('#dock textarea') : null),
+  composer: () => (state.view.kind === 'agent' ? $('#dock .composer textarea') : null),
   canRecall: ({ event } = {}) => !(event?.isComposing || event?.keyCode === 229) && !!latestRecallCandidate(),
   recallLatest() {
     const candidate = latestRecallCandidate();
@@ -4486,8 +4701,8 @@ registerActions(shortcuts, actionHost);
 const composerKey = () => (state.view.kind === 'agent' ? keyOf(selectedAgent() ?? {}) : null);
 const palette = createPalette({
   shortcuts, items: () => paletteItems(actionHost), fail,
-  place: () => ({ agent: composerKey(), composer: !!document.activeElement?.matches?.('#dock textarea') }),
-  back: (where) => (where?.composer && where.agent && composerKey() === where.agent ? $('#dock textarea') : null),
+  place: () => ({ agent: composerKey(), composer: !!document.activeElement?.matches?.('#dock .composer textarea') }),
+  back: (where) => (where?.composer && where.agent && composerKey() === where.agent ? $('#dock .composer textarea') : null),
 });
 
 // Settings › Shortcuts, in shortcuts-page.js.
@@ -4548,6 +4763,8 @@ function onLiveDeleted(workspace) {
 }
 
 function renderSnapshot() {
+  for (const y of state.snap.yesmen) files.reconcileWorktrees(y, y.worktrees ?? [], false);
+  pruneNeedsYouDrafts();
   pruneCaches();
   if (state.view.kind === 'agent' && !agentById(state.view.id)) state.view = { kind: 'none' };
   if (state.view.kind === 'none' && state.snap.yesmen.length) {
@@ -4558,7 +4775,9 @@ function renderSnapshot() {
     return;
   }
   const sidebarFocus = $('#yesmen').contains(document.activeElement) ? document.activeElement : null;
+  const worktreeFocus = document.activeElement?.closest('#yesman-info [data-info-entry^="worktree"]')?.dataset.infoEntry;
   render();
+  if (worktreeFocus) ($(`#yesman-info [data-info-entry="${CSS.escape(worktreeFocus)}"]`) || $('#yesman-info .worktree-heading'))?.focus({ preventScroll: true });
   palette.refresh();
   // The rebuilt composer can take initial focus during a full state refresh.
   // Preserve the sidebar's stable agent + semantic entry after that rebuild.
@@ -4570,6 +4789,7 @@ function onAgents(agents) {
   const ids = state.snap.agents.map((a) => a.id).join();
   const requests = needsYouItems(state.snap).map((item) => item.key).join();
   state.snap.agents = agents;
+  pruneNeedsYouDrafts();
   pruneCaches();
   renderSidebar();
   palette.refresh();

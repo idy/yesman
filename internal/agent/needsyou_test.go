@@ -103,6 +103,7 @@ func TestDialogExpiresAtItsTimeout(t *testing.T) {
 	a, p := m.agents[id], m.agents[id].proc
 	m.mu.Unlock()
 	m.record(a, p, "extension_ui_request", json.RawMessage(`{"type":"extension_ui_request","id":"q4","method":"confirm","title":"Quick?","timeout":80}`))
+	fast, _ := m.Get(id)
 	if err := m.HandOver(id, "q4"); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestDialogExpiresAtItsTimeout(t *testing.T) {
 	}
 	// A timer for an answered or replaced dialog leaves the current one alone.
 	m.record(a, p, "extension_ui_request", json.RawMessage(`{"type":"extension_ui_request","id":"q5","method":"confirm","title":"Slow?","timeout":60000}`))
-	m.expireDialog(a, p, "q4")
+	m.expireDialog(a, p, "q4", fast.DialogAt)
 	if i, _ := m.Get(id); dialogID(i.Dialog) != "q5" || i.Status != Waiting {
 		t.Fatalf("a stale timer expired the current dialog: %+v", i)
 	}

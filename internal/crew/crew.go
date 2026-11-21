@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math"
 	"path"
 	"regexp"
@@ -358,17 +359,23 @@ type Config struct {
 	Options []Option `json:"options,omitempty"`
 	// Yesman is the key of the option a new yesman's lead runs as.
 	Yesman string `json:"yesman,omitempty"`
+	Pools  Pools  `json:"pools,omitempty"`
 }
 
 // Clone copies a Config, so a change to it leaves the original alone. The
 // options' scores are shared: replace one rather than change it.
 func (c Config) Clone() Config {
 	c.Options = slices.Clone(c.Options)
+	c.Pools = maps.Clone(c.Pools)
+	for id, p := range c.Pools {
+		p.Members = slices.Clone(p.Members)
+		c.Pools[id] = p
+	}
 	return c
 }
 
 // IsZero reports whether nothing is configured, so settings leave it out.
-func (c Config) IsZero() bool { return len(c.Options) == 0 && c.Yesman == "" }
+func (c Config) IsZero() bool { return len(c.Options) == 0 && c.Yesman == "" && len(c.Pools) == 0 }
 
 // Index is where the option with a key is, or -1.
 func (c Config) Index(key string) int {

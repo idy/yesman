@@ -5,13 +5,16 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/safefs/linktest"
 	"github.com/idy/yesman/internal/schedule"
+	"github.com/idy/yesman/internal/server"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -101,6 +104,54 @@ func TestDeleteWorkspaceAndReopen(t *testing.T) {
 	}
 	if got := mustReadFile(t, filepath.Join(bob.MetaDir(), "yesman.json")); string(got) != string(before) {
 		t.Fatal("other workspace changed")
+	}
+}
+
+func TestDeleteAfterDesktopWorktreeCleanup(t *testing.T) {
+	s, y, target := deletionFixture(t)
+	a := s.app
+	a.pool, _ = poolWith(t, "project")
+	a.desktopWorktrees.Server = &server.Server{Pool: a.pool, Yesmen: a.yesmen, Agents: a.agents}
+	repos, err := a.pool.List()
+	must(t, err)
+	if len(repos) != 1 {
+		t.Fatal(repos)
+	}
+	repo := repos[0]
+	w, err := a.pool.AddWorktree(t.Context(), repo, pool.WorktreeOptions{Dest: filepath.Join(y.Path, "review"), Ref: "origin/main"})
+	must(t, err)
+	title, owner, status := "Inspect project", yesmen.LeadName, yesmen.TaskDropped
+	board, err := a.yesmen.ChangeBoard(y.Name, yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: &title, Owner: &owner, Status: &status}}})
+	must(t, err)
+	rec := yesmen.WorktreeRecord{ID: w.CleanupID, Dir: w.Dir, Repo: w.Repo, Owner: owner, OwnerSince: y.HiredAt, Purpose: "review", Task: board.Tasks[0].ID, Head: w.Head}
+	must(t, a.yesmen.SaveWorktreeRecords(y.Name, []yesmen.WorktreeRecord{rec}))
+	if err := s.DeleteWorkspace(t.Context(), target); err == nil || !strings.Contains(err.Error(), w.Dir) {
+		t.Fatalf("expected checkout blocker: %v", err)
+	}
+	preview, err := s.PreviewWorktreeCleanup(t.Context(), y.Name, y.HiredAt, &w, nil)
+	must(t, err)
+	if preview.Token == "" || len(preview.Rows) != 1 || preview.Rows[0].Reason != "" {
+		t.Fatalf("cleanup preview: %+v", preview)
+	}
+	result, err := s.ConfirmWorktreeCleanup(t.Context(), y.Name, y.HiredAt, preview.Token, nil)
+	must(t, err)
+	if len(result) != 1 || !result[0].Removed || result[0].Reason != "" {
+		t.Fatalf("cleanup result: %+v", result)
+	}
+	target, err = s.PrepareWorkspaceDeletion(y.Name, y.HiredAt)
+	must(t, err)
+	must(t, s.DeleteWorkspace(t.Context(), target))
+	if _, err := os.Stat(y.Path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{"refs/remotes/origin/main", "refs/yesman/worktrees/" + w.CleanupID} {
+		got, err := exec.Command("git", "-C", repo.Path, "rev-parse", "--verify", ref).CombinedOutput()
+		if err != nil {
+			t.Fatalf("verify %s: %s: %v", ref, got, err)
+		}
+		if strings.TrimSpace(string(got)) != w.Head {
+			t.Fatalf("%s: %s", ref, got)
+		}
 	}
 }
 

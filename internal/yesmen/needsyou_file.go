@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -178,6 +179,10 @@ func readRegular(root *os.Root, name string, limit int64, lock sync.Locker) ([]b
 
 // readRegularFile is readRegular, also returning the file read as opened.
 func readRegularFile(root *os.Root, name string, limit int64, lock sync.Locker) ([]byte, os.FileInfo, error) {
+	return readRegularEntry(root, name, limit, lock, false)
+}
+
+func readRegularEntry(root *os.Root, name string, limit int64, lock sync.Locker, singleLink bool) ([]byte, os.FileInfo, error) {
 	fi, err := root.Lstat(name)
 	if err != nil {
 		return nil, nil, err
@@ -193,8 +198,10 @@ func readRegularFile(root *os.Root, name string, limit int64, lock sync.Locker) 
 			return nil, nil, err
 		}
 	}
-	lock.Lock()
-	defer lock.Unlock()
+	if lock != nil {
+		lock.Lock()
+		defer lock.Unlock()
+	}
 	file, err := root.OpenFile(name, os.O_RDONLY|openNoBlock, 0)
 	if err != nil {
 		return nil, nil, err
@@ -206,6 +213,11 @@ func readRegularFile(root *os.Root, name string, limit int64, lock sync.Locker) 
 	}
 	if !opened.Mode().IsRegular() || !os.SameFile(fi, opened) {
 		return nil, nil, errors.New("it changed while it was opened")
+	}
+	if singleLink {
+		if n, err := linkCount(file, opened); err != nil || n != 1 {
+			return nil, nil, errors.New("cannot verify an unaliased metadata file")
+		}
 	}
 	data, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {
@@ -478,6 +490,12 @@ func decodeHandoffs(data []byte) (Handoffs, error) {
 		}
 		seen[h.ID] = true
 		h.extra = unknownFields(obj, handoffKeys...)
+		if h.Response != nil {
+			h.responseRaw = obj["response"]
+		}
+		if h.Answer != nil {
+			h.answerRaw = obj["answer"]
+		}
 		hs.Items = append(hs.Items, h)
 	}
 	return hs, nil
@@ -551,6 +569,17 @@ func (h Handoff) valid() error {
 	case h.ClosedAt.IsZero() != (h.Resolution == "") || h.ClosedAt.IsZero() != (h.ClosedBy == ""):
 		return errors.New("closedAt, resolution and closedBy do not agree")
 	}
+	if h.Response != nil {
+		if err := h.Response.valid(h.Type); err != nil {
+			return err
+		}
+	}
+	if h.Answer != nil || h.Response != nil && h.Resolution == HandoffDone {
+		if h.Open() || h.ClosedBy != "user" {
+			return errors.New("only a user closure can have an answer")
+		}
+		return h.checkAnswer(h.Resolution, h.Answer)
+	}
 	return nil
 }
 
@@ -561,12 +590,23 @@ func encodeHandoffs(hs Handoffs) ([]byte, error) {
 		if i > 0 {
 			b.WriteByte(',')
 		}
+		fields := h.extra
+		if h.responseRaw != nil || h.answerRaw != nil {
+			fields = make(map[string]json.RawMessage, len(h.extra)+2)
+			maps.Copy(fields, h.extra)
+			if h.responseRaw != nil {
+				fields["response"], h.Response = h.responseRaw, nil
+			}
+			if h.answerRaw != nil {
+				fields["answer"], h.Answer = h.answerRaw, nil
+			}
+		}
 		known, err := json.Marshal(h)
 		if err != nil {
 			return nil, err
 		}
 		b.Write(known[:len(known)-1]) // without its closing brace
-		if err := writeFields(&b, h.extra); err != nil {
+		if err := writeFields(&b, fields); err != nil {
 			return nil, err
 		}
 		b.WriteByte('}')

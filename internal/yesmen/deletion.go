@@ -437,7 +437,7 @@ func (s *Store) checkWorktreeRecords(ctx context.Context, parent, ws *os.Root, t
 		return err
 	}
 	defer meta.Close()
-	raw, err := readRegular(meta, "worktrees.json", 16<<20, &s.metaMu)
+	raw, _, err := readRegularEntry(meta, "worktrees.json", maxWorktreeState, &s.metaMu, true)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -456,19 +456,18 @@ func (s *Store) checkWorktreeRecords(ctx context.Context, parent, ws *os.Root, t
 		if r.Removed {
 			continue
 		}
-		if target.Archived && r.Purpose == "primary" && len(relocated) == 1 && relocated[0] != nil {
+		if r.Purpose == "primary" && len(relocated) == 1 && relocated[0] != nil {
 			if !filepath.IsLocal(r.Dir) || filepath.Base(r.Dir) != r.Dir || r.Dir == "." {
-				return errors.New("invalid primary worktree directory in archive record")
+				return errors.New("invalid primary directory in the worktree record")
 			}
 			if _, err := ws.Lstat(r.Dir); !errors.Is(err, fs.ErrNotExist) {
-				return deletionIssue("Move the primary worktree %q out of this archive with Git before deleting it.", r.Dir)
+				return deletionIssue("Use Git to move the primary worktree %q outside %s before deleting it.", r.Dir, ws.Name())
 			}
 			moved, err := relocated[0](ctx, ws.Name(), r)
 			if err != nil {
 				return &DeletionIssue{Message: "Could not verify the new location of primary worktree %q. Move it with Git and keep its registration.", Args: []any{r.Dir}, Cause: err}
 			}
-			original, _, _, _ := deletionEntry(target.Entry, true)
-			if err := s.recordArchiveRelocation(parent, original, target.Instance, record, moved); err != nil {
+			if err := s.recordPrimaryRelocation(parent, target, record, moved); err != nil {
 				return &DeletionIssue{Message: "Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.", Args: []any{r.Dir, filepath.Join(parent.Name(), relocationFolder)}, Cause: err}
 			}
 			continue

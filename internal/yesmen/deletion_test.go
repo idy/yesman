@@ -3,6 +3,7 @@ package yesmen
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -161,6 +162,74 @@ func TestDeletionWaitsForMetadataTransaction(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A supported registry can exceed the old deletion reader's 16 MiB budget.
+// Check the whole registry, including an outstanding checkout at the end.
+func TestDeletionWithLargeWorktreeHistory(t *testing.T) {
+	for _, mode := range []string{"live", "archived"} {
+		t.Run(mode, func(t *testing.T) {
+			s := waitStore(t)
+			y, err := s.Get("alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			const head = "0123456789abcdef0123456789abcdef01234567"
+			evidence := strings.Repeat("See the saved report for the verified source and recovery instructions. ", 210)
+			rows := make([]WorktreeRecord, 1150)
+			for i := range rows {
+				rows[i] = WorktreeRecord{ID: fmt.Sprintf("%032x", i+1), Dir: "review", Repo: "github.com/example/project", Purpose: "review", Head: head,
+					Owner: "reviewer", OwnerSince: y.HiredAt, Removed: true, Completion: &WorktreeCompletion{Head: head, Ref: head, Evidence: evidence, Outcome: "pass", Unused: true}}
+			}
+			last := len(rows) - 1
+			rows[last].Dir = "last-review"
+			rows[last].Removed = mode == "archived"
+			if err := s.SaveWorktreeRecords(y.Name, rows); err != nil {
+				t.Fatal(err)
+			}
+			st, err := os.Stat(filepath.Join(y.MetaDir(), "worktrees.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Size() <= 16<<20 || st.Size() > maxWorktreeState {
+				t.Fatal(st.Size())
+			}
+			cold := New(s.root, s.archive)
+			check := func(context.Context, string) error { return nil }
+			stop := func(Yesman) error { return nil }
+			target, err := cold.PrepareDeletion(y.Name, y.HiredAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := y.Path
+			if mode == "live" {
+				if moved, err := cold.Delete(t.Context(), target, check, stop); moved || err == nil || !strings.Contains(err.Error(), rows[last].Dir) {
+					t.Fatalf("outstanding record at end of %d bytes: moved=%v err=%v", st.Size(), moved, err)
+				}
+				completed := rows[last]
+				completed.Removed = true
+				if err := cold.CommitWorktreeRecord(y, rows[last], completed); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				dir, err = cold.Archive(y.Name, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				stored, err := cold.StoredWorkspaces()
+				if err != nil || len(stored) != 1 {
+					t.Fatal(stored, err)
+				}
+				target = stored[0]
+			}
+			if _, err := cold.Delete(t.Context(), target, check, stop); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

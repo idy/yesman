@@ -733,7 +733,7 @@ func waitOver(t yesmen.Task, tasks map[string]yesmen.Task, handoffs yesmen.Hando
 		if len(closed) == 0 {
 			return "it waits for the user, but no Needs you request for it is open: register one, or go on", "unregistered", true
 		}
-		return fmt.Sprintf("it waits for the user, whose requests are closed (%s): check the result yourself; that does not unblock it", strings.Join(closed, ", ")),
+		return fmt.Sprintf("it waits for the user, whose requests are closed (%s): read the saved result with yesman_needs_you id and check what it means for the task; this does not unblock it", strings.Join(closed, ", ")),
 			hashOf("closed", strings.Join(closed, ",")), true
 	}
 	return "", "", false // external or paused: yesman cannot tell when it is over

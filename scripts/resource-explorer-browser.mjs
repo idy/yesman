@@ -91,8 +91,28 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
    if(patch.conclusions)x.conclusions=patch.conclusions.map((c,i)=>({id:c.id||id+'cn'+i,text:c.text}));if(patch.questions)x.questions=patch.questions.map((c,i)=>({id:c.id||id+'qn'+i,text:c.text}));
    x.revision++;x.updatedAt=new Date().toISOString();return {topic:structuredClone(x),sources:[]};}
  case 'SubmitTopic':{const [name,hired,id,mid,text]=args;const x=topicsFixture[name+'@'+hired].find(t=>t.id===id);x.sends.push({id:mid,at:new Date().toISOString(),preview:text,context:'[Topic '+id+': '+x.title+']',state:'accepted'});return {delivery:{id:mid,revision:1,state:'accepted',text}};}
- case 'ResolveHandoff':{const [name,hired,id,res]=args;const y=fixtureState.yesmen.find(v=>v.name===name);if(y.hiredAt!==hired)throw Error('stale hire');const ho=y.handoffs.find(x=>x.id===id);if(!ho||ho.closedAt)throw Error('This request is no longer open.');ho.closedAt=new Date().toISOString();ho.resolution=res;return;}
- case 'Answer':{const [agent,dialog]=args;const a=fixtureState.agents.find(x=>x.id===agent);if(a.dialog?.id!==dialog)throw Error('stale dialog');a.status='idle';delete a.dialog;delete a.dialogAt;return;}
+ case 'RespondHandoff': {
+   const [name, hired, id, resolution, answer] = args;
+   const y = fixtureState.yesmen.find(v => v.name === name);
+   if (!y || y.hiredAt !== hired) throw Error('stale hire');
+   const request = y.handoffs.find(h => h.id === id);
+   if (!request || request.closedAt) throw Error('This request is no longer open.');
+   if (!['done', 'not-needed'].includes(resolution) || answer !== null) throw Error('unexpected legacy response');
+   request.closedAt = new Date().toISOString();
+   request.resolution = resolution;
+   return;
+ }
+ case 'Answer': {
+   const [id, scope, reply] = args;
+   const a = fixtureState.agents.find(x => x.id === id);
+   const y = fixtureState.yesmen.find(v => v.name === a?.yesman);
+   if (!y || scope.hiredAt !== y.hiredAt || scope.since !== a.since || scope.askedAt !== a.dialogAt ||
+     (scope.handedOverOnly && a.role === 'worker' && !a.handedOver) || a.dialog?.id !== reply.requestId) throw Error('stale dialog');
+   a.status = 'idle';
+   delete a.dialog;
+   delete a.dialogAt;
+   return;
+ }
  default:unmocked.push(m);throw Error('Unmocked '+m);
  }}};
 window.setFixtureLocale=(locale)=>handlers['mygo:locale']({locale});
@@ -458,7 +478,7 @@ async function needsPart(page, engine) {
   await pane.locator('.needs-you-list').waitFor();
   await leftOf(pane.locator('.explorer-content'), pane.locator('.explorer-nav'), 'needs you: detail left of the list');
   assert.deepEqual(await pane.locator('.needs-you-open').evaluateAll((es) => es.map((e) => e.dataset.request)),
-    ['d:alice/lead@2026-03-01T08:00:00Z:q1', 'h:alice@2026-03-01T08:00:00Z:n1', 'h:alice@2026-03-01T08:00:00Z:n2']);
+    ['d:alice/lead@2026-03-01T08:00:00Z:2026-03-01T08:30:00Z:q1@2026-03-01T08:00:00Z', 'h:alice@2026-03-01T08:00:00Z:n1', 'h:alice@2026-03-01T08:00:00Z:n2']);
   assert.equal(await pane.locator('.needs-you-detail-title').innerText(), 'Which branch name?');
   await pane.locator('.needs-you-open').first().focus();
   await page.keyboard.press('ArrowDown');
@@ -467,8 +487,10 @@ async function needsPart(page, engine) {
   assert.equal(await pane.locator('.needs-you-detail .md li').count(), 2, 'the full Markdown detail');
   assert.equal(await page.evaluate(() => document.activeElement?.dataset.request), 'h:alice@2026-03-01T08:00:00Z:n1', 'focus stays in the list');
   await shot(page, `${engine}-needs-wide-en`);
-  await pane.locator('[data-detail-control="done"]').click();
-  await page.waitForFunction(() => calls.some((c) => c[0] === 'ResolveHandoff' && c.slice(1).join('|') === 'alice|2026-03-01T08:00:00Z|n1|done'));
+  await pane.locator('[data-detail-control="legacy-done"]').click();
+  await page.locator('#confirm-dialog[open] #confirm-ok').click();
+  await page.waitForFunction(() => calls.some(([method, name, hire, id, resolution, answer]) =>
+    method === 'RespondHandoff' && name === 'alice' && hire === '2026-03-01T08:00:00Z' && id === 'n1' && resolution === 'done' && answer === null));
   await pane.locator('.needs-you-detail-title', { hasText: 'Log in to the package registry' }).waitFor();
   await pane.locator('.needs-you-open').first().click();
   const input = pane.locator('[data-detail-control="answer-text"]');
@@ -480,10 +502,12 @@ async function needsPart(page, engine) {
   await page.evaluate(() => new Promise(requestAnimationFrame));
   assert.equal(await pane.locator('[data-detail-control="answer-text"]').inputValue(), 'feat/resource-explorer', 'a redraw keeps the typed answer');
   await pane.locator('.needs-you-ask [data-detail-control="answer-0"]').click();
-  await page.waitForFunction(() => calls.some((c) => c[0] === 'Answer' && c[1] === 'alice/lead' && c[2] === 'q1' && c[3]?.value === 'feat/resource-explorer'));
+  await page.waitForFunction(() => calls.some(([method, agent, scope, reply]) => method === 'Answer' && agent === 'alice/lead' &&
+    scope.hiredAt === '2026-03-01T08:00:00Z' && scope.since === scope.hiredAt && scope.askedAt === '2026-03-01T08:30:00Z' &&
+    scope.handedOverOnly === true && reply?.requestId === 'q1' && reply?.value === 'feat/resource-explorer'));
   await pane.locator('.needs-you-open[data-request$=":n2"]').click();
   await pane.locator('[data-detail-control="not-needed"]').click();
-  await page.waitForFunction(() => calls.some((c) => c[0] === 'ResolveHandoff' && c[3] === 'n2' && c[4] === 'not-needed'));
+  await page.waitForFunction(() => calls.some((c) => c[0] === 'RespondHandoff' && c[3] === 'n2' && c[4] === 'not-needed' && c[5] === null));
   await pane.locator('.needs-you-history').waitFor();
   await page.locator('[data-agent="bob/lead"]').first().click();
   await page.locator('[data-info-entry="needs-you"]').click();
@@ -784,6 +808,27 @@ async function capacityPart(page, engine) {
   await choose(keys[2]);
   await choose(last);
   assert.equal(await input.inputValue(), 'Unsent 64 again', 'remembered once room freed');
+  // A structured overflow draft moves as one unit when another slot opens.
+  await page.evaluate(() => {
+    fixtureState.yesmen[0].handoffs.push({ id: 'n3', type: 'decision', title: 'Room choice', createdAt: new Date().toISOString(),
+      response: { kind: 'choice', options: ['North', 'South'], allowNote: true } });
+  });
+  await redraw('changed');
+  const choiceKey = await pane.locator('.needs-you-open[data-request$=":n3"]').getAttribute('data-request');
+  await choose(choiceKey);
+  const south = pane.getByRole('radio', { name: 'South' });
+  const note = pane.locator('[data-detail-control="note"]');
+  const choiceWarning = pane.locator('.needs-you-response [role="status"]');
+  await south.check();
+  await note.fill('Bench note 中文');
+  assert.equal(await choiceWarning.isVisible(), true);
+  await page.evaluate(() => { const a = fixtureState.agents.find(x => x.id === 'alice/w1'); a.status = 'idle'; delete a.dialog; });
+  await redraw('changed');
+  assert.equal(await choiceWarning.isVisible(), false);
+  await choose(keys[3]);
+  await choose(choiceKey);
+  assert.equal(await south.isChecked(), true);
+  assert.equal(await note.inputValue(), 'Bench note 中文');
   // Another yesman never shows it; a new hire drops it.
   await page.locator('[data-agent="bob/lead"]').first().click();
   await page.locator('[data-info-entry="needs-you"]').click();
@@ -860,7 +905,7 @@ async function resizePart(page, engine) {
   assert.ok(f.inTopics && f.visible, `ordinary yield: visible focus in Topics ${JSON.stringify(f)}`);
   // Focus elsewhere stays where it is.
   await page.setViewportSize({ width: 1600, height: 900 });
-  await page.locator('#dock textarea').focus();
+  await page.locator('#dock .composer textarea').focus();
   await page.setViewportSize({ width: 1280, height: 800 });
   await frames(page);
   assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', 'focus outside Info stays');
@@ -928,7 +973,7 @@ async function tasksPart(page, engine) {
   assert.equal(await page.locator('#topics [data-key="compose-tp1"]').inputValue(), 'Topic draft through Tasks');
   await page.locator('[data-info-entry="needs-you"]').click();
   assert.equal(await page.locator('#needs-you [data-detail-control="answer-text"]').inputValue(), 'Answer draft through Tasks');
-  assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'ResolveHandoff', 'SubmitTopic', 'SaveSchedule', 'RunSchedule'].includes(c[0])).length), 0, 'navigation never performs an action');
+  assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'RespondHandoff', 'SubmitTopic', 'SaveSchedule', 'RunSchedule'].includes(c[0])).length), 0, 'navigation never performs an action');
 }
 
 // The default wide detail is already editable before its list row is
@@ -967,11 +1012,11 @@ async function answerPart(page, engine) {
   // A different request has its own detail and actions, not the old edit.
   await pane.locator('.needs-you-open[data-request$=":n1"]').click();
   assert.equal(await input.count(), 0);
-  await pane.locator('[data-detail-control="done"]').focus();
+  await pane.locator('[data-detail-control="legacy-done"]').focus();
   await size(1440);
   await size(1000);
-  assert.equal(await page.evaluate(() => document.activeElement?.dataset.detailControl), 'done');
-  assert.equal(await pane.locator('[data-detail-control="done"]').isVisible(), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.detailControl), 'legacy-done');
+  assert.equal(await pane.locator('[data-detail-control="legacy-done"]').isVisible(), true);
   await pane.locator('[data-key="list"]').click();
   await pane.locator('.needs-you-open').first().click();
   assert.equal(await input.inputValue(), text);
@@ -987,7 +1032,7 @@ async function answerPart(page, engine) {
   assert.equal(await page.evaluate(() => document.activeElement?.dataset.agent), 'alice/lead');
   // Neither the main composer nor a real dialog yields focus to this edit.
   await size(1440);
-  const composer = page.locator('#dock textarea');
+  const composer = page.locator('#dock .composer textarea');
   await composer.fill('Main draft stays here');
   await composer.evaluate((e) => e.setSelectionRange(2, 6));
   await size(1000);
@@ -1000,7 +1045,7 @@ async function answerPart(page, engine) {
   await size(1000);
   assert.deepEqual(await dialog.evaluate((e) => [document.activeElement === e, e.value, e.selectionStart, e.selectionEnd]), [true, 'Dialog draft', 1, 4]);
   await page.locator('#hire-cancel').click();
-  assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'ResolveHandoff', 'HireNamed'].includes(c[0])).length), 0, 'focus and navigation perform no action');
+  assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'RespondHandoff', 'HireNamed'].includes(c[0])).length), 0, 'focus and navigation perform no action');
 }
 
 // An unavailable workspace must show its error rather than an empty narrow
@@ -1020,7 +1065,7 @@ async function unavailablePart(page, engine) {
     fixtureState.workspaceErrors = [{ name: 'alice', path: '/synthetic/alice/.yesman/yesman.json', size: 1048577, limit: 1048576 }];
   });
   await refresh();
-  const alert = pane.locator('[role="alert"]');
+  const alert = pane.locator('.mds-notice[role="alert"]');
   assert.equal(await alert.isVisible(), true, 'wide workspace error');
   assert.match(await alert.innerText(), /cannot be read/);
   await page.setViewportSize({ width: 1000, height: 780 });
@@ -1031,7 +1076,7 @@ async function unavailablePart(page, engine) {
   await shot(page, `${engine}-unavailable-back-focused`);
   await page.keyboard.press('Enter');
   assert.equal(await pane.isVisible(), false, 'Back closes the unavailable pane');
-  assert.equal(await page.locator('#dock textarea').evaluate((e) => e === document.activeElement), true, 'Back returns focus to the conversation');
+  assert.equal(await page.locator('#dock .composer textarea').evaluate((e) => e === document.activeElement), true, 'Back returns focus to the conversation');
   // A fresh healthy State restores the real rows and the original draft.
   await page.evaluate(() => { fixtureState.yesmen.unshift(window.unavailableAlice); fixtureState.workspaceErrors = []; });
   await refresh();
@@ -1052,7 +1097,7 @@ async function unavailablePart(page, engine) {
   await frames(page);
   assert.equal(await pane.locator('.needs-you-empty').isVisible(), true, 'healthy empty list stays in navigation');
   assert.equal(await alert.count(), 0);
-  assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'ResolveHandoff'].includes(c[0])).length), 0);
+  assert.equal(await page.evaluate(() => calls.filter((c) => ['Answer', 'RespondHandoff'].includes(c[0])).length), 0);
 }
 
 const PARTS = { log: logPart, knowledge: knowledgePart, tables: tablesPart, files: filesPart, topics: topicsPart, needs: needsPart, visual: visualPart, layout: layoutPart, keys: keysPart, capacity: capacityPart, resize: resizePart, tasks: tasksPart, answer: answerPart, unavailable: unavailablePart };

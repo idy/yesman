@@ -12,7 +12,11 @@ import (
 	"github.com/idy/yesman/internal/yesmen"
 )
 
-func TestDeleteArchiveKeepsRelocatedPrimary(t *testing.T) {
+func TestDeleteArchiveKeepsRelocatedPrimary(t *testing.T) { testDeleteRelocatedPrimary(t, true) }
+func TestDeleteLiveKeepsRelocatedPrimary(t *testing.T)    { testDeleteRelocatedPrimary(t, false) }
+
+func testDeleteRelocatedPrimary(t *testing.T, archived bool) {
+	t.Helper()
 	p, repo, wt, _ := newTestCheckout(t)
 	base := t.TempDir()
 	live, archives := filepath.Join(base, "yesmen"), filepath.Join(base, "archive")
@@ -21,30 +25,66 @@ func TestDeleteArchiveKeepsRelocatedPrimary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var sibling string
+	if !archived {
+		// The old archive and this same-name live hire are separate targets.
+		sibling, err = store.Archive(y.Name, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		y, err = store.Hire(y.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	tree := filepath.Join(y.Path, wt.Dir)
 	run(t, repo.Path, "worktree", "move", wt.Path, tree)
 	if err := os.WriteFile(filepath.Join(tree, "unfinished.txt"), []byte("keep my draft"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	record := yesmen.WorktreeRecord{ID: wt.CleanupID, Dir: wt.Dir, Repo: repo.Name, Owner: "lead", OwnerSince: y.HiredAt, Purpose: "primary", Head: wt.Head, Branch: wt.Branch, Root: &yesmen.WorktreeRoot{Ino: wt.Root.Ino, Birth: wt.Root.Birth}}
+	if !archived {
+		record.Owner = "original-worker"
+		if err := store.AddWorker(y.Name, yesmen.Worker{Name: record.Owner, StartedAt: record.OwnerSince}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := store.SaveWorktreeRecords(y.Name, []yesmen.WorktreeRecord{record}); err != nil {
 		t.Fatal(err)
 	}
-	archive, err := store.Archive(y.Name, nil)
-	if err != nil {
+	selected, parent := y.Path, live
+	if archived {
+		selected, err = store.Archive(y.Name, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Repair(t.Context(), []string{filepath.Join(selected, record.Dir)}); err != nil {
+			t.Fatal(err)
+		}
+		parent = archives
+	} else if err := store.RemoveWorker(y.Name, record.Owner); err != nil {
 		t.Fatal(err)
 	}
-	old := filepath.Join(archive, record.Dir)
-	if err := p.Repair(t.Context(), []string{old}); err != nil {
-		t.Fatal(err)
+	old := filepath.Join(selected, record.Dir)
+	readTarget := func() yesmen.DeletionTarget {
+		t.Helper()
+		if archived {
+			list, err := store.StoredWorkspaces()
+			if err != nil || len(list) != 1 {
+				t.Fatal(list, err)
+			}
+			return list[0]
+		}
+		target, err := store.PrepareDeletion(y.Name, y.HiredAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return target
 	}
 	store = yesmen.New(live, archives)
-	list, err := store.StoredWorkspaces()
-	if err != nil || len(list) != 1 {
-		t.Fatal(list, err)
-	}
+	target := readTarget()
 	remove := func() error {
-		_, err := store.Delete(t.Context(), list[0], p.CheckWorkspaceDeletion, nil, p.RelocatedPrimary)
+		_, err := store.Delete(t.Context(), target, p.CheckWorkspaceDeletion, func(yesmen.Yesman) error { return nil }, p.RelocatedPrimary)
 		return err
 	}
 	if err := remove(); err == nil {
@@ -79,14 +119,14 @@ func TestDeleteArchiveKeepsRelocatedPrimary(t *testing.T) {
 	wrong := *record.Root
 	wrong.Ino++
 	bad.Root = &wrong
-	if _, err := p.RelocatedPrimary(t.Context(), archive, bad); err == nil {
+	if _, err := p.RelocatedPrimary(t.Context(), selected, bad); err == nil {
 		t.Fatal("different checkout root was accepted")
 	}
 	before := run(t, repo.Path, "for-each-ref", "--format=%(refname) %(objectname)")
 	// An occupied receipt folder fails on every platform, after the real Git
-	// relocation and before deletion. Reopen the Store to retry the same archive.
-	receipts := filepath.Join(archives, ".worktree-relocations")
-	metadata := filepath.Join(archive, ".yesman", "worktrees.json")
+	// relocation and before deletion. Reopen the Store to retry the same target.
+	receipts := filepath.Join(parent, ".worktree-relocations")
+	metadata := filepath.Join(selected, ".yesman", "worktrees.json")
 	original, err := os.ReadFile(metadata)
 	if err != nil {
 		t.Fatal(err)
@@ -104,9 +144,8 @@ func TestDeleteArchiveKeepsRelocatedPrimary(t *testing.T) {
 		t.Fatal(err)
 	}
 	store = yesmen.New(live, archives)
-	fresh, err := store.StoredWorkspaces()
-	if err != nil || len(fresh) != 1 || fresh[0] != list[0] {
-		t.Fatal("archive identity changed on reopen", fresh, err)
+	if fresh := readTarget(); fresh != target {
+		t.Fatal("deletion target changed on reopen", fresh, target)
 	}
 	if err := remove(); err != nil {
 		t.Fatal(err)
@@ -120,8 +159,18 @@ func TestDeleteArchiveKeepsRelocatedPrimary(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(kept, "unfinished.txt")); err != nil || string(b) != "keep my draft" {
 		t.Fatal("dirty bytes", string(b), err)
 	}
-	if _, err := os.Stat(archive); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Stat(selected); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
+	}
+	if !archived {
+		fresh, err := store.Hire(y.Name)
+		if err != nil || fresh.HiredAt.Equal(y.HiredAt) || remove() == nil {
+			t.Fatal("same-name replacement or stale deletion", err)
+		}
+		list, err := store.StoredWorkspaces()
+		if err != nil || len(list) != 1 || list[0].Entry != filepath.Base(sibling) {
+			t.Fatal("other archive changed", list, err)
+		}
 	}
 	files, err := os.ReadDir(receipts)
 	if err != nil || len(files) != 1 {
@@ -132,10 +181,13 @@ func TestDeleteArchiveKeepsRelocatedPrimary(t *testing.T) {
 		t.Fatal(err)
 	}
 	var evidence struct {
-		Archive, Instance, Destination string
-		Record                         yesmen.WorktreeRecord
+		Archive, Workspace, Instance, Destination string
+		Record                                    yesmen.WorktreeRecord
 	}
-	if err := json.Unmarshal(b, &evidence); err != nil || evidence.Archive != list[0].Entry || evidence.Instance != list[0].Instance || realPath(evidence.Destination) != realPath(kept) || evidence.Record.ID != wt.CleanupID || evidence.Record.Purpose != "primary" || !strings.Contains(string(b), record.Head) {
+	if err := json.Unmarshal(b, &evidence); err != nil || evidence.Instance != target.Instance || realPath(evidence.Destination) != realPath(kept) || evidence.Record.ID != wt.CleanupID || evidence.Record.Purpose != "primary" || !strings.Contains(string(b), record.Head) {
 		t.Fatal("relocation evidence", evidence, err)
+	}
+	if archived && (evidence.Archive != target.Entry || evidence.Workspace != "") || !archived && (evidence.Workspace != target.Entry || evidence.Archive != "") {
+		t.Fatal("receipt for wrong workspace", evidence)
 	}
 }

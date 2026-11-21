@@ -120,11 +120,12 @@ func TestOriginWithPiFixture(t *testing.T) {
 // extension, with isolated settings and sessions and a local pi-messages
 // backend: no model, key or user settings.
 type piFixture struct {
-	t     *testing.T
-	tmp   string
-	srv   *Server
-	m     *agent.Manager
-	store *yesmen.Store
+	t      *testing.T
+	tmp    string
+	srv    *Server
+	m      *agent.Manager
+	config agent.Config
+	store  *yesmen.Store
 
 	mu      sync.Mutex
 	bodies  []string
@@ -238,7 +239,7 @@ func startPiFixtureWith(t *testing.T, piPath string, command func(context.Contex
 	if err := f.srv.Start(); err != nil {
 		t.Fatal(err)
 	}
-	f.m = agent.New(agent.Config{
+	f.config = agent.Config{
 		Pi:        piPath,
 		Command:   command,
 		Extension: ext,
@@ -261,7 +262,8 @@ func startPiFixtureWith(t *testing.T, piPath string, command func(context.Contex
 				hook(e)
 			}
 		},
-	})
+	}
+	f.m = agent.New(f.config)
 	f.srv.Agents = f.m
 	t.Cleanup(f.m.StopAll)
 	return f

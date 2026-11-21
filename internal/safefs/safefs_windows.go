@@ -51,6 +51,18 @@ func Open(path string) (*Dir, error) {
 
 func (d *Dir) Close() error { return windows.CloseHandle(d.h) }
 
+// ReadNames reads up to n names through this directory's handle. Use a fresh
+// directory handle for each inventory.
+func (d *Dir) ReadNames(n int) ([]string, error) {
+	dup, err := d.Dup()
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(dup.h), d.name)
+	defer f.Close()
+	return f.Readdirnames(n)
+}
+
 // Stat describes the directory d is open on.
 func (d *Dir) Stat() (fs.FileInfo, error) {
 	dup, err := d.Dup()

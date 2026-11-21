@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/idy/yesman/internal/crew"
+	"github.com/idy/yesman/internal/yesmen"
 )
 
 // Model is a choice from pi's authenticated catalog. Keep provider headers and
@@ -111,6 +112,101 @@ func applyChoice(ctx context.Context, p *proc, c Choice) error {
 	return err
 }
 
+// WorkerRoute resolves a preference against the new worker's verified catalog.
+// A slot refused by pi is omitted on the next resolution before any task is sent.
+type WorkerRoute func(context.Context, []Model) (Choice, error)
+
+type workerSetup struct {
+	since time.Time
+	route WorkerRoute
+}
+
+// prepareWorker runs under modelMu, immediately before the first prompt is
+// registered on p. It never configures a worker resumed by name later.
+func (m *Manager) prepareWorker(ctx context.Context, setup *workerSetup, a *agent, p *proc) error {
+	m.mu.Lock()
+	initial := Choice{Provider: a.info.Provider, Model: a.info.Model, Effort: a.info.Effort}
+	current := a.info.Since.Equal(setup.since) && a.proc == p && !a.retiring && !a.stopping
+	alreadyBusy := a.inbox != 0 || a.prompts != 0
+	m.mu.Unlock()
+	if !current {
+		return errStopped
+	}
+	if alreadyBusy {
+		return errWorkerClaimed
+	}
+	models := []Model{}
+	if r, err := p.call(ctx, map[string]any{"type": "get_available_models"}); err == nil {
+		if live, err := decodeCatalog(r.Data); err == nil {
+			models = live
+		}
+	}
+	// A provider can refuse a slot its catalog advertised. Remove just that
+	// tuple from this worker's snapshot and re-read the saved pools. Bound
+	// retries even if settings keep changing. No model turn has started yet.
+	var lastErr error
+	for range 2*crew.MaxPoolMembers + 1 {
+		as, err := setup.route(ctx, models)
+		if err != nil {
+			return err
+		}
+		if as.IsZero() {
+			if lastErr == nil || initial.IsZero() {
+				return lastErr
+			}
+			as = initial // undo any partial selection before inheriting pi's default
+		}
+		if err = applyChoice(ctx, p, as); err == nil {
+			info, err := m.syncModel(ctx, a, p)
+			if err != nil {
+				return err
+			}
+			if info.Provider == as.Provider && info.Model == as.Model && (as.Effort == "" || info.Effort == as.Effort) {
+				return nil
+			}
+			lastErr = fmt.Errorf("pi could not select %s", as)
+		} else {
+			lastErr = fmt.Errorf("run as %s: %w", as, err)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		i := slices.IndexFunc(models, func(m Model) bool {
+			return m.Provider == as.Provider && m.ID == as.Model && slices.Contains(m.Levels, as.Effort)
+		})
+		if i < 0 {
+			break
+		} // the final lead fallback could not run either
+		models[i].Levels = slices.DeleteFunc(models[i].Levels, func(level string) bool { return level == as.Effort })
+	}
+	return lastErr
+}
+
+var errWorkerClaimed = errors.New("the new worker already received another message")
+
+// CallerChoice reads the lead process's own model. Extensions can switch
+// models mid-turn, before the normal post-turn sync reaches the app.
+func (m *Manager) CallerChoice(ctx context.Context, token string) (Choice, error) {
+	m.mu.Lock()
+	a := m.agents[m.tokens[token]]
+	if a == nil || a.token != token || a.tokenProc == nil || a.proc != a.tokenProc || a.stopping || a.retiring {
+		m.mu.Unlock()
+		return Choice{}, ErrRetired
+	}
+	p := a.proc
+	m.mu.Unlock()
+	state, err := p.modelState(ctx)
+	if err != nil {
+		return Choice{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if a.token != token || a.proc != p || a.stopping || a.retiring {
+		return Choice{}, ErrRetired
+	}
+	return Choice{Provider: state.Model.Provider, Model: state.Model.ID, Effort: state.ThinkingLevel}, nil
+}
+
 // RunAs selects a model and, when given, an effort for an idle agent.
 func (m *Manager) RunAs(ctx context.Context, id string, c Choice) (Info, error) {
 	info, err := m.SetModel(ctx, id, c.Provider, c.Model)
@@ -196,6 +292,10 @@ func (m *Manager) Models(ctx context.Context, id string) (ModelOptions, error) {
 	if err != nil {
 		return ModelOptions{}, err
 	}
+	return m.modelsOn(ctx, a, p)
+}
+
+func (m *Manager) modelsOn(ctx context.Context, a *agent, p *proc) (ModelOptions, error) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	r, err := p.call(ctx, map[string]any{"type": "get_available_models"})
@@ -217,10 +317,10 @@ func (m *Manager) configure(ctx context.Context, id string, cmd map[string]any) 
 	if err != nil {
 		return Info{}, err
 	}
-	return m.configureProcess(ctx, a, p, cmd)
+	return m.configureOn(ctx, a, p, cmd, nil)
 }
 
-func (m *Manager) configureProcess(ctx context.Context, a *agent, p *proc, cmd map[string]any) (Info, error) {
+func (m *Manager) configureOn(ctx context.Context, a *agent, p *proc, cmd map[string]any, expected *Choice) (Info, error) {
 	if err := lockWithin(ctx, &a.modelMu); err != nil {
 		return Info{}, err
 	}
@@ -234,6 +334,9 @@ func (m *Manager) configureProcess(ctx context.Context, a *agent, p *proc, cmd m
 	}
 	if state.IsStreaming || state.IsCompacting {
 		return Info{}, errors.New("wait for the current run to finish before changing its model or effort")
+	}
+	if expected != nil && *expected != (Choice{Provider: state.Model.Provider, Model: state.Model.ID, Effort: state.ThinkingLevel}) {
+		return Info{}, errors.New("the lead’s selection changed. Reopen its model controls")
 	}
 	if cmd["type"] == "set_thinking_level" {
 		// pi clamps unsupported values; refuse them instead of silently selecting
@@ -250,6 +353,32 @@ func (m *Manager) configureProcess(ctx context.Context, a *agent, p *proc, cmd m
 		return Info{}, err
 	}
 	return m.syncModel(ctx, a, p)
+}
+
+// LeadModels uses the composer's configuration path, binding a Settings
+// opening to the exact workspace and the selection the user saw. An empty
+// change just reads; each edit changes one control.
+func (m *Manager) LeadModels(ctx context.Context, workspace string, since time.Time, expected, change Choice) (ModelOptions, error) {
+	if since.IsZero() {
+		return ModelOptions{}, ErrRetired
+	}
+	a, p, err := m.ensureScopedCtx(ctx, ID(workspace, yesmen.LeadName), nil, "", &since, false, false)
+	if err != nil {
+		return ModelOptions{}, err
+	}
+	var cmd map[string]any
+	switch {
+	case change == (Choice{}):
+		return m.modelsOn(ctx, a, p)
+	case change.Effort == "" && !change.IsZero():
+		cmd = map[string]any{"type": "set_model", "provider": change.Provider, "modelId": change.Model}
+	case change.Effort != "" && change.Provider == "" && change.Model == "":
+		cmd = map[string]any{"type": "set_thinking_level", "level": change.Effort}
+	default:
+		return ModelOptions{}, errors.New("choose one model or one effort")
+	}
+	info, err := m.configureOn(ctx, a, p, cmd, &expected)
+	return ModelOptions{Agent: info}, err
 }
 
 // SetModel selects a provider and model ID from pi's available catalog.

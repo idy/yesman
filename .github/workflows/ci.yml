@@ -41,11 +41,11 @@ jobs:
         with:
           node-version: '24.22.1'
 
-      - name: Verify archived primary relocation and recovery (Windows)
+      - name: Verify primary relocation and recovery (Windows)
         if: runner.os == 'Windows'
         run: |
           git show -s --format='checkout=%H tree=%T parents=%P' HEAD
-          go test -count=1 -v -run '^(TestDeleteArchiveKeepsRelocatedPrimary|TestRelocationReceiptMustBeDurableBeforeArchiveDeletion|TestWindowsRelocationDirectory)$' ./internal/pool ./internal/yesmen
+          go test -count=1 -v -run '^(TestDelete(Archive|Live)KeepsRelocatedPrimary|TestRelocationReceiptMustBeDurableBeforeArchiveDeletion|TestWindowsRelocationDirectory)$' ./internal/pool ./internal/yesmen
 
       - name: Exercise native completion audio
         if: runner.os != 'macOS'
@@ -116,7 +116,7 @@ jobs:
       - name: Managed write and link refusal (verbose)
         env:
           YESMAN_REQUIRE_LINK_TESTS: "1"
-        run: go test -count=1 -v -run 'TestSafeFS|TestWorktreeRegistration|TestWorktreeInstance|TestManagedFiles|TestManagedWriteAndEdit|TestManagedEdit|TestManagedWorktree' ./internal/safefs ./internal/pool ./internal/server
+        run: go test -count=1 -v -run 'TestSafeFS|TestWorktreeRegistration|TestWorktreeInstance|TestWorktreeLeaseThroughConfiguredAlias|TestManagedFiles|TestManagedWriteAndEdit|TestManagedEdit|TestManagedWorktree' ./internal/safefs ./internal/pool ./internal/server
 
       - name: Check the published naming-pair downloader offline
         if: runner.os == 'Linux'

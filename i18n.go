@@ -71,7 +71,7 @@ func inUseText(reason string) string {
 // zhHans translates the English messages Go shows to Simplified Chinese.
 // Each keeps the verbs of its English message, in their order.
 var zhHans = map[string]string{
-	"Move the primary worktree %q out of this archive with Git before deleting it.":                                            "请先用 Git 将主工作树 %q 移出这份归档，再删除归档。",
+	"Use Git to move the primary worktree %q outside %s before deleting it.":                                                   "请先用 Git 将主工作树 %q 移到 %s 以外，再删除工作区。",
 	"Could not verify the new location of primary worktree %q. Move it with Git and keep its registration.":                    "无法确认主工作树 %q 的新位置。请用 Git 移动工作树并保留登记。",
 	"Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.": "无法保存工作树 %q 的迁移记录。请确认对 %s 有写入权限，且文件系统支持同步，然后重试。",
 	"Grant write access to directory %s or move its contents to safety before deleting the workspace.":                         "请先为目录 %s 授予写权限，或将其中的文件移到安全位置，再删除工作区。",
@@ -106,12 +106,19 @@ var zhHans = map[string]string{
 	"Choose the model new yesmen run as in Settings › yesman.": "请先在 设置 › yesman 中选择新 yesman 使用的模型。",
 	"pi has no model %s":             "pi 没有模型 %s",
 	"%s does not take the %s effort": "%s 不支持 %s 推理强度",
-	"Artificial Analysis has no scores for %s at this effort: give your own": "Artificial Analysis 没有 %s 在这个推理强度下的评分：请填写你的估计",
-	"%s is in the crew already":                              "%s 已在列表中",
-	"%s is not in the crew":                                  "%s 不在列表中",
-	"the intelligence score must be above 0 and at most 100": "智力分必须大于 0，且不超过 100",
-	"scores cannot be below zero":                            "评分不能小于 0",
-	"coding is a percentage, at most 100":                    "编码是百分比，不能超过 100",
+	"These instructions and model keys exceed the pool’s 16 KiB budget.": "派工说明与模型标识超过候选池的 16 KiB 容量。",
+	"Unknown worker label.": "未知的助手标签。",
+	"Use at most 1,000 characters of plain text for dispatch instructions.":   "派工说明最多可填写 1,000 个纯文本字符。",
+	"Choose up to 16 model and effort combinations per pool.":                 "每个候选池最多可选择 16 个模型与推理强度组合。",
+	"Invalid model and effort key.":                                           "模型与推理强度组合无效。",
+	"This pool changed. Reopen it to edit the latest settings.":               "候选池已更改。请重新打开并编辑最新设置。",
+	"A selected model was removed. Reopen the pool to update your selection.": "所选模型已被移除。请重新打开候选池并更新选择。",
+	"A selected model or effort is unavailable. Read pi’s models again.":      "所选模型或推理强度不可用。请重新读取 pi 的模型。",
+	"%s is in the crew already":                                               "%s 已在列表中",
+	"%s is not in the crew":                                                   "%s 不在列表中",
+	"the intelligence score must be above 0 and at most 100":                  "智力分必须大于 0，且不超过 100",
+	"scores cannot be below zero":                                             "评分不能小于 0",
+	"coding is a percentage, at most 100":                                     "编码是百分比，不能超过 100",
 
 	// The tray
 	"Open Yes Man":    "打开 Yes Man",
@@ -150,6 +157,8 @@ var zhHans = map[string]string{
 	"Open Knowledge Notes":    "打开知识笔记",
 	"Open Working Logs":       "打开工作日志",
 	"Check Out a Repository…": "检出仓库…",
+	"Clean up worktrees…":     "清理工作树…",
+	"Remove Worktree…":        "移除工作树…",
 	"Reveal in Finder":        "在访达中显示",
 	"Show in Explorer":        "在资源管理器中显示",
 	"Show in Files":           "在文件管理器中显示",

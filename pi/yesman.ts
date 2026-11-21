@@ -651,6 +651,8 @@ export default function yesman(pi: ExtensionAPI) {
 				outcome: Type.String({ description: "pass, findings-handed-off, waiting-release, audit-complete; or done for a finished author/release task" }),
 				ref: Type.String({ description: "Reviewed PR/ref; author/release cleanup requires the merged https://github.com/owner/repo/pull/number URL" }),
 				evidence: Type.String({ description: "Saved conclusion/handoff and evidence outside this tree (board/session/Working log), including reconstruction details" }),
+				sourceBranch: Type.Optional(Type.String({ description: "Actual published PR head branch when different from the local checkout. Cite its push or PR provenance in the evidence." })),
+				publication: Type.Optional(Type.String({ description: "Published GitHub release URL; record verification evidence outside the tree" })),
 				unused: Type.Boolean({ description: "True after stopping tree processes and confirming no other agent/task uses it" }),
 			})),
 			handoff: Type.Optional(Type.String({ description: "Lead only: name of the cleanup worker to delegate this verified resource to; saves permission without removal" })),
@@ -696,6 +698,15 @@ export default function yesman(pi: ExtensionAPI) {
 			),
 		),
 	};
+	const worktreeReturns = Type.Optional(Type.Array(Type.Object({
+		checkout: Type.String({ description: "This checkout's cleanupId" }),
+		head: Type.String({ description: "Full source commit being returned" }),
+		ref: Type.String({ description: "Reviewed ref or, for a branch, its exact GitHub PR URL (may still be open)" }),
+		outcome: Type.String({ description: "done for author/release, or pass, findings-handed-off, waiting-release, audit-complete for a review" }),
+		unused: Type.Boolean({ description: "True confirms you stopped its processes and checked that no other task or person needs this directory" }),
+		sourceBranch: Type.Optional(Type.String({ description: "Published PR head ref if different from the local branch. Cite push provenance in the result note." })),
+		publication: Type.Optional(Type.String({ description: "For a release, its published GitHub release URL. Record verification evidence in the task note." })),
+	}), { description: "With a finished task's result note, return its unused temporary checkouts for automatic cleanup. Supply [] to retain them for further work." }));
 	pi.registerTool({
 		name: "yesman_board",
 		label: "yesman: board",
@@ -703,7 +714,7 @@ export default function yesman(pi: ExtensionAPI) {
 			"Read or change this yesman's board: its task list, which the user watches beside the conversation. Call it with no arguments to read it. One call can add, update, remove and order tasks, and is applied whole or not at all. Tasks have IDs such as t3, given by the board. Statuses: todo, doing, blocked, done, dropped.",
 		parameters: Type.Object({
 			add: Type.Optional(Type.Array(Type.Object({ ...taskFields, title: Type.String({ description: "One line, up to 200 characters" }) }), { description: "New tasks, added at the end; status defaults to todo" })),
-			update: Type.Optional(Type.Array(Type.Object({ id: Type.String({ description: "The task's ID, such as t3" }), ...taskFields }), { description: "Changes to tasks: only the fields given change" })),
+			update: Type.Optional(Type.Array(Type.Object({ id: Type.String({ description: "The task's ID, such as t3" }), ...taskFields, worktrees: worktreeReturns }), { description: "Changes to tasks: only the fields given change" })),
 			remove: Type.Optional(Type.Array(Type.String(), { description: "IDs of tasks to delete. Mark finished work done or dropped instead; remove only mistakes." })),
 			order: Type.Optional(Type.Array(Type.String(), { description: "Task IDs in the order to show them; tasks left out follow in their current order" })),
 			...(ROLE === "lead" ? { delivery: Type.Optional(Type.Object({
@@ -715,7 +726,7 @@ export default function yesman(pi: ExtensionAPI) {
 			const change = Object.fromEntries(Object.entries(params).filter(([key, v]) =>
 				key === "delivery" ? ROLE === "lead" && v !== undefined : Array.isArray(v) && v.length));
 			const board = Object.keys(change).length
-				? await call("POST", "/v1/board", change, signal)
+				? await call("POST", "/v1/board", { ...change, ...(params.update?.some(e => e.status?.trim().toLowerCase() === "done") ? {reportWorktrees: true} : {}) }, signal)
 				: await call("GET", "/v1/board", undefined, signal);
 			const view = publicBoard(board);
 			return result(boardText(view), view);
@@ -791,15 +802,13 @@ export default function yesman(pi: ExtensionAPI) {
 			name: Type.String({ description: "Short name: 1-32 lowercase letters, digits and dashes, such as fix-login" }),
 			title: Type.String({ description: "The subject of its work in a few words, up to 80 characters, as the user should see it: usually its board task's title, such as \"Fix the login timeout\". Not an instruction like \"Do task t5\"." }),
 			task: Type.String({ description: "The task, complete enough to work on without asking" }),
-			crew: Type.Optional(
-				Type.String({
-					description:
-						"The key of the crew member to run as, from the Crew section of your context: a model at a thinking level, such as provider/model:high. Leave it out to run the worker as your own model and effort.",
-				}),
-			),
+			label: Type.Optional(Type.Union([Type.Literal("operations"), Type.Literal("backend"), Type.Literal("frontend"), Type.Literal("default")], {
+				description: "Choose a label for each new task. Match the task’s primary deliverable using the Crew dispatch guidance. Use default for an unmatched task. Keep the matched label even if its pool is empty.",
+			})),
+			crew: Type.Optional(Type.String({ description: "Preferred model and effort key from the matched pool, or from Default if the matched pool is empty. If neither has candidates, omit crew to inherit your current model and effort." })),
 		}),
 		async execute(_id, params, signal) {
-			const info = await call("POST", "/v1/workers", params, signal);
+			const info = await call("POST", "/v1/workers", { ...params, label: params.label ?? "default" }, signal);
 			return result(`Started worker ${info.name}. It will report back when it finishes a run.`, info);
 		},
 	});
@@ -844,7 +853,7 @@ export default function yesman(pi: ExtensionAPI) {
 			"What waits on the user, under Needs you in their window. Call it with no arguments to list it in short, or with id for one handoff in full. " +
 			"add registers something only the user can do or decide: a decision, information, logging in, installing, or another manual step; link it to the board task that waits on it, which you mark blocked. " +
 			"handOver gives the user a worker's question you cannot answer yourself (its requestId from the [yesman] message); you can still answer it. " +
-			"resolve closes a handoff that was settled otherwise. When the user marks one done or not needed, you hear of it. " +
+			"resolve closes a handoff that was settled otherwise. The user can send a reply, confirm an action they performed, or mark the request not needed. Read a saved reply with id. " +
 			"Never ask for passwords, keys, tokens or codes this way or in chat: point the user to Settings › Secrets.",
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "A handoff's ID, such as n3, to read it in full" })),
@@ -852,7 +861,12 @@ export default function yesman(pi: ExtensionAPI) {
 				Type.Object({
 					type: Type.String({ description: "decision, input, login, install or manual" }),
 					title: Type.String({ description: "What the user needs to do, in one line, up to 200 characters" }),
-					detail: Type.Optional(Type.String({ description: "How, in Markdown: the options and your recommendation, where to log in, what to install" })),
+					detail: Type.Optional(Type.String({ description: "Context or instructions in Markdown. Do not include executable actions or ask for credentials." })),
+					response: Type.Optional(Type.Object({
+						kind: Type.Union([Type.Literal("text"), Type.Literal("choice"), Type.Literal("action")], { description: "Use text for a written reply, choice when the user must select one offered option, or action to acknowledge work they did. Login, install and manual use action." }),
+						options: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }), { minItems: 2, maxItems: 8, description: "Distinct, predefined choices, only for kind choice. Use the user's language." })),
+						allowNote: Type.Optional(Type.Boolean({ description: "Whether a choice can include an optional note" })),
+					}, { description: "Set this explicitly so the card has the right response controls. Do not hide choice options in detail." })),
 					task: Type.Optional(Type.String({ description: "The board task waiting on it, such as t5" })),
 					worker: Type.Optional(Type.String({ description: "The worker whose work it concerns" })),
 				}),
@@ -889,7 +903,9 @@ export default function yesman(pi: ExtensionAPI) {
 				...view.handoffs.map(handoffLine),
 				...view.questions.map((q: any) => `- worker ${q.worker}'s question ${JSON.stringify(q.requestId)}: ${q.title}, since ${q.since}`),
 			];
-			return result(memory + (lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user."), {});
+			const recent = (view.recent ?? []).map((h: any) => `- ${h.id} (${h.outcome}): ${h.title}${h.task ? `, task ${h.task}` : ""}`);
+			const handled = recent.length ? `\n\nRecently handled by the user. Read the outcome or reply with id:\n${recent.join("\n")}` : "";
+			return result(memory + (lines.length ? `Waiting on the user:\n${lines.join("\n")}` : "Nothing waits on the user.") + handled, {});
 		},
 	});
 
