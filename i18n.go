@@ -80,6 +80,7 @@ var zhHans = map[string]string{
 	"%s contains a Git checkout. Move it with Git or finish its managed cleanup first.":                                                     "%s 包含 Git 工作树。请先用 Git 移动它，或完成受管回收。",
 	"%s contains Git repository data. Move the repository out of the workspace first.":                                                      "%s 包含 Git 仓库数据。请先将仓库移出工作区。",
 	"%s has a registered worktree at %s. Finish its managed cleanup or move the checkout with Git first.":                                   "仓库 %s 在 %s 登记了工作树。请先完成受管回收，或用 Git 移动工作树。",
+	"Worktree %q has a saved archive or a pending move. Finish or restore it in Worktrees before deleting this workspace.":                  "工作树 %q 已归档或有待完成的移动。请先在「工作树」中完成移动或恢复它，再删除此工作区。",
 	"Worktree %q (%s, owner %q, task %q) is still recorded. Finish its managed cleanup or recover the checkout and its registration first.": "工作树 %q（%s，负责人 %q，任务 %q）仍有登记。请先完成受管回收，或恢复工作树及其登记。",
 	"Move the linked or special metadata entry %s out of the workspace first.":                                                              "请先将元数据中的链接或特殊文件 %s 移出工作区。",
 	"Move the linked metadata file %s out of the workspace first.":                                                                          "请先将有硬链接的元数据文件 %s 移出工作区。",

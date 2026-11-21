@@ -108,6 +108,11 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 	if err != nil {
 		return pool.Worktree{}, err
 	}
+	for _, r := range records {
+		if strings.EqualFold(r.Dir, req.Dir) && r.ReservedForArchive() {
+			return pool.Worktree{}, errors.New("directory reserved for worktree restoration")
+		}
+	}
 	if i := latestWorktree(records, req.Dir); i >= 0 && !records[i].Removed {
 		if err := s.retireMissingWorktree(ctx, c, y, records, i); err != nil {
 			return pool.Worktree{}, err
@@ -142,6 +147,9 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 // registration, and never treats a missing unfinished task as completed.
 func (s *Server) retireMissingWorktree(ctx context.Context, c caller, y yesmen.Yesman, records []yesmen.WorktreeRecord, i int) error {
 	rec := &records[i]
+	if rec.ReservedForArchive() {
+		return errors.New("worktree directory reserved for archive or restoration")
+	}
 	if rec.Owner != c.agent.Name || !rec.OwnerSince.Equal(c.agent.Since) {
 		return errors.New("recorded checkout belongs to another owner; retain it")
 	}
@@ -180,6 +188,8 @@ type cleanupResult struct {
 	Record  *yesmen.WorktreeRecord `json:"record,omitempty"`
 }
 
+var errRestoredReturn = errors.New("the restored checkout needs a fresh Board return before agent cleanup or handoff")
+
 func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, req removeWorktreeRequest, proof removalVerification, records []yesmen.WorktreeRecord, i int, board yesmen.Board, workers []yesmen.Worker) (cleanupResult, error) {
 	if err := ctx.Err(); err != nil {
 		return cleanupResult{}, err
@@ -187,6 +197,9 @@ func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 	rec := &records[i]
 	out := cleanupResult{Record: rec}
 	retain := func(reason string) (cleanupResult, error) { out.Reason = "retain: " + reason; return out, nil }
+	if rec.ReservedForArchive() {
+		return retain(archiveReserved)
+	}
 	owner := rec.Owner == c.agent.Name && rec.OwnerSince.Equal(c.agent.Since)
 	lead := c.agent.Role == agent.RoleLead
 	delegate := rec.CleanupOwner == c.agent.Name && rec.CleanupSince.Equal(c.agent.Since)
@@ -197,13 +210,19 @@ func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 		return retain("primary or unknown purpose")
 	}
 	recoveryOnly := proof.missing && rec.Completion != nil && req.Handoff == ""
-	if !rec.Removed && !recoveryOnly {
+	// Restore keeps the checkout ID and previous completion. Even an absent
+	// source with a checkpoint can belong to that earlier cleanup round.
+	if !rec.Removed && (!recoveryOnly || rec.Archive != nil) {
+		decision := WorktreeDecisionFor(board, *rec)
+		if !rec.AllowsCollection(decision.returned.ReturnID) {
+			return retain(errRestoredReturn.Error())
+		}
 		if err := CheckSavedWorktreeReturn(y, *rec, board, workers); err != nil {
 			return retain(err.Error())
 		}
 		// A first manual proposal has no saved certificate yet. The task can
 		// be reopened, closed again or explicitly kept during a remote check.
-		if proof.decision != WorktreeDecisionFor(board, *rec) {
+		if proof.decision != decision {
 			return retain("the associated task changed during verification. Check its current disposition before trying again")
 		}
 		if !rec.BoardRound.IsZero() && heldByUsers(*rec, board, workers) {
@@ -346,6 +365,9 @@ func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 // recordWorktreeRemoval is the single post-Git write under TryWorktreeCommit.
 // It reloads and compares the original record, preserving unrelated checkouts.
 func (s *Server) recordWorktreeRemoval(y yesmen.Yesman, before yesmen.WorktreeRecord, reason string) error {
+	if before.ReservedForArchive() {
+		return errors.New(archiveReserved)
+	}
 	after := before
 	after.Removed, after.RetiredReason = true, reason
 	return s.Yesmen.CommitWorktreeRecord(y, before, after)

@@ -315,6 +315,9 @@ func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records [
 	if rec.Removed || rec.Repo != w.Repo || rec.ID == "" || rec.ID != w.CleanupID {
 		return retain(unknownInstance, "")
 	}
+	if rec.ReservedForArchive() {
+		return retain(archiveReserved, "")
+	}
 	if rec.Purpose != "review" && rec.Purpose != "author" && rec.Purpose != "release" {
 		return retain("This checkout is primary or has no recorded temporary purpose.", rec.Purpose)
 	}
@@ -343,6 +346,9 @@ func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records [
 		c := rec.Completion
 		if c == nil {
 			return retain("No completion was saved for bulk cleanup. Review this worktree individually.", "")
+		}
+		if !rec.AllowsCollection(c.ReturnID) {
+			return retain("The restored checkout needs a fresh Board return for bulk cleanup.", rec.Task)
 		}
 		if c.SavedAt.IsZero() || c.Head != w.Head || completionProblem(rec, *c) != "" {
 			return retain("The saved completion does not cover this checkout and commit.", "")

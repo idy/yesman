@@ -62,7 +62,7 @@ func (s *Server) prepareReturns(c caller, change *yesmen.BoardChange, requireDis
 	byTask := map[string]map[string]yesmen.WorktreeRecord{}
 	seen := map[string]bool{}
 	for _, rec := range slices.Backward(records) {
-		if !seen[rec.Dir] && !rec.Removed && temporaryPurpose(rec.Purpose) && (c.agent.Role == agent.RoleLead || rec.Owner == c.agent.Name && rec.OwnerSince.Equal(c.agent.Since)) {
+		if !seen[rec.Dir] && !rec.Removed && !rec.ReservedForArchive() && temporaryPurpose(rec.Purpose) && (c.agent.Role == agent.RoleLead || rec.Owner == c.agent.Name && rec.OwnerSince.Equal(c.agent.Since)) {
 			if byTask[rec.Task] == nil {
 				byTask[rec.Task] = map[string]yesmen.WorktreeRecord{}
 			}
@@ -144,6 +144,9 @@ func (s *Server) recoverMissingReturn(ctx context.Context, y yesmen.Yesman, reco
 		return collectedOrIneligible, false
 	}
 	rec := records[i]
+	if rec.ReservedForArchive() {
+		return collectedOrIneligible, true
+	}
 	if rec.Removed || rec.Root == nil || rec.Completion == nil || !checkoutID.MatchString(id) || !dirRE.MatchString(rec.Dir) || !temporaryPurpose(rec.Purpose) || latestWorktree(records, rec.Dir) != i || completionProblem(rec, *rec.Completion) != "" {
 		return collectedOrIneligible, false
 	}
@@ -151,12 +154,15 @@ func (s *Server) recoverMissingReturn(ctx context.Context, y yesmen.Yesman, reco
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		return collectedOrIneligible, false
 	}
+	if !rec.AllowsCollection(rec.Completion.ReturnID) {
+		return collectedOrIneligible, true
+	}
 	l := s.worktreeLock(y.Name)
 	if !l.TryLock() {
 		return retryLater, true
 	}
 	err := s.Yesmen.TryWorktreeCommit(y, func() error {
-		fresh, err := s.Yesmen.WorktreeRecords(y.Name)
+		fresh, board, workers, err := s.Yesmen.WorktreeState(y)
 		if err != nil {
 			return err
 		}
@@ -164,12 +170,20 @@ func (s *Server) recoverMissingReturn(ctx context.Context, y yesmen.Yesman, reco
 		if j < 0 || !reflect.DeepEqual(fresh[j], rec) {
 			return errors.New("checkout changed during recovery")
 		}
+		// Agent retries also wake this path. After restore the saved return
+		// must still match the Board before recording a missing source.
+		if rec.Archive != nil && CheckSavedWorktreeReturn(y, rec, board, workers) != nil {
+			return errRestoredReturn
+		}
 		if err := s.checkMissingInstance(ctx, rec, path); err != nil {
 			return err
 		}
 		return s.recordWorktreeRemoval(y, rec, "recovered completed Git removal from its checkpoint")
 	})
 	l.Unlock()
+	if errors.Is(err, errRestoredReturn) {
+		return collectedOrIneligible, true
+	}
 	if err != nil {
 		return retryLater, true
 	}

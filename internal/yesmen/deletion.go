@@ -453,6 +453,9 @@ func (s *Store) checkWorktreeRecords(ctx context.Context, parent, ws *os.Root, t
 		if err := json.Unmarshal(record, &r); err != nil {
 			return fmt.Errorf("check .yesman/worktrees.json before deleting: %w", err)
 		}
+		if r.ReservedForArchive() {
+			return deletionIssue("Worktree %q has a saved archive or a pending move. Finish or restore it in Worktrees before deleting this workspace.", r.Dir)
+		}
 		if r.Removed {
 			continue
 		}

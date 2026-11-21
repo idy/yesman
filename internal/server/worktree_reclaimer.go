@@ -200,11 +200,11 @@ func (r *WorktreeReclaimer) scan(y yesmen.Yesman) error {
 	}
 	now := time.Now()
 	for _, rec := range records {
-		if rec.Removed || !temporaryPurpose(rec.Purpose) || !checkoutID.MatchString(rec.ID) || rec.Root == nil {
+		if rec.Removed || rec.ReservedForArchive() || !temporaryPurpose(rec.Purpose) || !checkoutID.MatchString(rec.ID) || rec.Root == nil {
 			continue
 		}
-		hasProof := rec.Completion != nil || slices.ContainsFunc(board.Tasks, func(t yesmen.Task) bool {
-			return t.ID == rec.Task && slices.ContainsFunc(t.Returns, func(v yesmen.WorktreeReturn) bool { return v.Checkout == rec.ID })
+		hasProof := rec.Completion != nil && rec.AllowsCollection(rec.Completion.ReturnID) || slices.ContainsFunc(board.Tasks, func(t yesmen.Task) bool {
+			return t.ID == rec.Task && slices.ContainsFunc(t.Returns, func(v yesmen.WorktreeReturn) bool { return v.Checkout == rec.ID && rec.AllowsCollection(v.ReturnID) })
 		})
 		key := checkoutKey{y.Name, y.HiredAt, rec.ID}
 		if !hasProof {
@@ -250,7 +250,7 @@ func candidate(y yesmen.Yesman, records []yesmen.WorktreeRecord, b yesmen.Board,
 		return none, false
 	}
 	rec := records[i]
-	if rec.Removed || !temporaryPurpose(rec.Purpose) || !dirRE.MatchString(rec.Dir) || rec.Root == nil || !strings.HasPrefix(rec.Repo, "github.com/") || latestWorktree(records, rec.Dir) != i {
+	if rec.Removed || rec.ReservedForArchive() || !temporaryPurpose(rec.Purpose) || !dirRE.MatchString(rec.Dir) || rec.Root == nil || !strings.HasPrefix(rec.Repo, "github.com/") || latestWorktree(records, rec.Dir) != i {
 		return none, false
 	}
 	t, ok := returnedTask(y, rec, b, workers)
@@ -259,11 +259,11 @@ func candidate(y yesmen.Yesman, records []yesmen.WorktreeRecord, b yesmen.Board,
 	}
 	if t.Returns != nil {
 		v := boardProof(y, rec, t)
-		if v == nil || rec.Completion != nil && !sameReturnedSource(*rec.Completion, *v) {
+		if v == nil || !rec.AllowsCollection(v.ReturnID) || rec.Completion != nil && !sameReturnedSource(*rec.Completion, *v) {
 			return none, false
 		}
 		rec.Completion = v
-	} else if rec.Completion == nil || !rec.BoardRound.IsZero() || rec.Completion.SavedAt.Before(t.DoneAt) {
+	} else if rec.Archive != nil || rec.Completion == nil || !rec.BoardRound.IsZero() || rec.Completion.SavedAt.Before(t.DoneAt) {
 		return none, false
 	}
 	if completionProblem(rec, *rec.Completion) != "" || rec.Purpose == "release" && strings.TrimSpace(rec.Completion.Publication) == "" {

@@ -98,6 +98,7 @@ type KnowledgeInfo struct {
 // WorktreeInfo is a worktree with what it changed.
 type WorktreeInfo struct {
 	pool.Worktree
+	CanArchive bool `json:"canArchive,omitempty"`
 	// RemoteBranch is the branch it pushes to, for finding its pull request.
 	RemoteBranch string            `json:"remoteBranch,omitempty"`
 	Base         string            `json:"base,omitempty"`
@@ -114,6 +115,14 @@ type YesmanInfo struct {
 	Topics         yesmen.TopicCounts `json:"topics"`
 	Worktrees      []WorktreeInfo     `json:"worktrees"`
 	WorktreesError string             `json:"worktreesError,omitempty"`
+	ArchiveMoves   []archiveRow       `json:"archiveMoves,omitempty"`
+	ArchiveError   string             `json:"archiveError,omitempty"`
+}
+
+type archiveRow struct {
+	Dir   string `json:"dir"`
+	ID    string `json:"id"`
+	Phase string `json:"phase"`
 }
 
 // Info reads a yesman's knowledge and its worktrees with their changes.
@@ -134,6 +143,21 @@ func (s *service) Info(ctx context.Context, name string) (YesmanInfo, error) {
 	for _, r := range snapshot.Repos {
 		defaults[r.Name] = r.DefaultBranch
 	}
+	archiveCandidates := map[string]string{}
+	records, archiveErr := s.app.yesmen.WorktreeRecords(name)
+	if archiveErr != nil {
+		info.ArchiveError = archiveErr.Error()
+	}
+	for _, r := range records {
+		if r.Removed || r.Purpose != "author" || r.Root == nil {
+			continue
+		}
+		if r.ReservedForArchive() {
+			info.ArchiveMoves = append(info.ArchiveMoves, archiveRow{r.Dir, r.ID, r.Archive.Phase})
+		} else {
+			archiveCandidates[r.Dir] = r.ID
+		}
+	}
 	wts := snapshot.Under(y.Path)
 	info.Worktrees = make([]WorktreeInfo, len(wts))
 	var wg sync.WaitGroup
@@ -145,6 +169,7 @@ func (s *service) Info(ctx context.Context, name string) (YesmanInfo, error) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			w := WorktreeInfo{Worktree: wt}
+			w.CanArchive = wt.CleanupID != "" && archiveCandidates[wt.Dir] == wt.CleanupID && wt.Branch != "" && wt.Branch != "main" && wt.Branch != "master" && wt.Branch != defaults[wt.Repo]
 			w.Dir = filepath.ToSlash(wt.Dir)
 			if !wt.Detached {
 				w.RemoteBranch = pool.UpstreamBranch(ctx, wt.Path)

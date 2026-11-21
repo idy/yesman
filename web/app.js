@@ -4195,6 +4195,7 @@ const files = createFiles({
 // the files pane.
 const info = createInfo({
   call,
+  confirm: confirmAction,
   fail,
   yesman: () => {
     const a = selectedAgent();
@@ -4204,7 +4205,7 @@ const info = createInfo({
   toast,
   unsaved: y => files.unsavedWorktrees(y),
   removed: (y, rows) => files.removedWorktrees(y, rows),
-  reconcile: (y, rows, complete) => files.reconcileWorktrees(y, rows, complete),
+  reconcile: (y, rows, complete, moves) => files.reconcileWorktrees(y, rows, complete, moves),
   files: () => files.shown(),
   openKnowledge: () => files.openKnowledge(),
   openTaskLog: () => files.openTaskLog(),

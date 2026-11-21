@@ -1507,9 +1507,11 @@ export function createFiles(host) {
 
   // Receipts and later inventories retire only the obsolete checkout's views,
   // including tabs opened from All files. A failed inventory proves no absence.
-  function removedWorktrees(y, rows) {
+  function removedWorktrees(y, rows, moves = []) {
     if (!rows.length) return;
-    for (const w of rows) if (w.cleanupId) retired.add(retiredKey(y, w));
+    // Archive preserves the nonce. Close its old views, but allow that exact
+    // instance to open again after a confirmed restore.
+    for (const w of rows) if (w.cleanupId && !moves.some(m => m.id === w.cleanupId)) retired.add(retiredKey(y, w));
     const removed = w => w && rows.some(r => r.dir === w.dir && r.cleanupId === w.cleanupId);
     const before = current();
     let redraw = false;
@@ -1546,7 +1548,7 @@ export function createFiles(host) {
     if (redraw) render();
   }
 
-  function reconcileWorktrees(y, rows, complete) {
+  function reconcileWorktrees(y, rows, complete, moves) {
     // The two inventories arrive independently. An answer containing a
     // known retired nonce cannot establish that a newer checkout is gone.
     if (rows.some(w => w.cleanupId && retired.has(retiredKey(y, w)))) return;
@@ -1558,7 +1560,7 @@ export function createFiles(host) {
         if (w?.cleanupId && (complete || byDir.has(w.dir)) && byDir.get(w.dir) !== w.cleanupId) gone.set(w.cleanupId, w);
       }
     }
-    removedWorktrees(y, [...gone.values()]);
+    removedWorktrees(y, [...gone.values()], moves);
   }
 
   return { render, open, openPath, openKnowledge, openTaskLog, openWorktree, unsavedWorktrees, removedWorktrees, reconcileWorktrees, shown, onChange, onKey, focusFind, toggleTree, current: () => !!current() };

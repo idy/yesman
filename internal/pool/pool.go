@@ -740,7 +740,16 @@ func (p *Pool) Repair(ctx context.Context, paths []string) error {
 			errs = append(errs, err)
 			continue
 		}
-		if _, err := git(ctx, repoDir, "worktree", "repair", path); err != nil {
+		rel, err := filepath.Rel(realPath(p.root), realPath(repoDir))
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		l := p.lock(filepath.ToSlash(strings.TrimSuffix(rel, ".git")))
+		l.Lock()
+		_, err = git(ctx, repoDir, "worktree", "repair", path)
+		l.Unlock()
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -755,7 +764,11 @@ func (p *Pool) Prune(ctx context.Context) error {
 	}
 	var errs []error
 	for _, r := range repos {
-		if _, err := git(ctx, r.Path, "worktree", "prune"); err != nil {
+		l := p.lock(r.Name)
+		l.Lock()
+		_, err := git(ctx, r.Path, "worktree", "prune")
+		l.Unlock()
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -812,10 +825,10 @@ func fileExists(path string) bool {
 // realPath returns the physical spelling used to compare Git registrations
 // with configured paths. A missing checkout can still have a registered path.
 func realPath(path string) string {
-	if r, err := resolveExistingPath(path); err == nil {
+	if r, err := safefs.PhysicalPath(path); err == nil {
 		return r
 	}
-	if r, err := resolveExistingPath(filepath.Dir(path)); err == nil {
+	if r, err := safefs.PhysicalPath(filepath.Dir(path)); err == nil {
 		return filepath.Join(r, filepath.Base(path))
 	}
 	return filepath.Clean(path)

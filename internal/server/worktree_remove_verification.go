@@ -88,6 +88,9 @@ func (s *Server) verifyRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 	rec := records[i]
 	proof.record = &records[i]
 	proof.decision = WorktreeDecisionFor(b, rec)
+	if !rec.AllowsCollection(proof.decision.returned.ReturnID) {
+		return proof, nil
+	}
 	_, err = os.Lstat(filepath.Join(y.Path, rec.Dir))
 	proof.missing = errors.Is(err, os.ErrNotExist)
 	if rec.Removed || rec.Purpose == "review" || !temporaryPurpose(rec.Purpose) || proof.missing && rec.Completion != nil || CheckSavedWorktreeReturn(y, rec, b, users) != nil {

@@ -145,7 +145,9 @@ type Store struct {
 	clocks map[string]*sync.Mutex    // per yesman: its continuation record, in turn
 	revs   map[string]*atomic.Uint64 // per yesman: changes to its board, workers and handoffs
 	// topicLocks serialize each workspace's topic file; guarded by lmu.
-	topicLocks map[string]chan struct{}
+	// ReplaceWorktreeJournal overrides durable publication in storage-fault tests.
+	ReplaceWorktreeJournal func(root *os.Root, staged, name string) error
+	topicLocks             map[string]chan struct{}
 }
 
 // Revision counts the changes to a yesman's board, workers and handoffs

@@ -34,6 +34,52 @@ type WorktreeRecord struct {
 	// without it (older ones, or a file system with no creation time) get
 	// no write/edit grant through the managed entry.
 	Root *WorktreeRoot `json:"root,omitempty"`
+	// Archive is the user's last move of this instance. Completion, owner,
+	// branch and HEAD above still describe the original lifecycle.
+	Archive *WorktreeArchive `json:"archive,omitempty"`
+}
+
+// LinkedLocation records the actual branch, full commit, physical locations
+// and linked Git directories observed for a single checkout.
+type LinkedLocation struct {
+	Active  string `json:"activePath"`
+	Stored  string `json:"archivePath"`
+	Common  string `json:"commonDir"`
+	Private string `json:"privateDir"`
+	Branch  string `json:"branch"`
+	Head    string `json:"head"`
+}
+
+// WorktreeArchive journals one human-confirmed transition. Keep the last
+// transition after restoration so a previous confirmation cannot be replayed.
+// Its paths are evidence, never accepted as destinations from the client.
+type WorktreeArchive struct {
+	LinkedLocation
+	Phase       string             `json:"phase"` // archiving, archived, restoring, restored
+	Transaction string             `json:"transaction"`
+	ConfirmedAt time.Time          `json:"confirmedAt"`
+	TaskOwner   string             `json:"taskOwner"`
+	Users       []WorktreeMoveUser `json:"users,omitempty"`
+	CanceledAt  time.Time          `json:"canceledAt,omitzero"`
+	// A restored checkout stays available until the Board returns it again.
+	PreviousReturnID string `json:"previousReturnId,omitempty"`
+}
+
+// WorktreeMoveUser retains a worker generation verified at move admission.
+// Its name continues to be reserved against live activity during recovery.
+type WorktreeMoveUser struct {
+	Name  string    `json:"name"`
+	Since time.Time `json:"since"`
+}
+
+func (r WorktreeRecord) ReservedForArchive() bool {
+	return r.Archive != nil && r.Archive.Phase != "restored"
+}
+
+// AllowsCollection keeps a restored checkout available until a new Board
+// certification explicitly returns that same instance again.
+func (r WorktreeRecord) AllowsCollection(returnID string) bool {
+	return r.Archive == nil || !r.ReservedForArchive() && returnID != "" && returnID != r.Archive.PreviousReturnID
 }
 
 type VerifiedWorktreeReturn struct {
