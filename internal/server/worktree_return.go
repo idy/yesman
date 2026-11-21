@@ -162,7 +162,7 @@ func (s *Server) recoverMissingReturn(ctx context.Context, y yesmen.Yesman, reco
 		return retryLater, true
 	}
 	err := s.Yesmen.TryWorktreeCommit(y, func() error {
-		fresh, err := s.Yesmen.WorktreeRecords(y.Name)
+		fresh, board, workers, err := s.Yesmen.WorktreeState(y)
 		if err != nil {
 			return err
 		}
@@ -170,12 +170,20 @@ func (s *Server) recoverMissingReturn(ctx context.Context, y yesmen.Yesman, reco
 		if j < 0 || !reflect.DeepEqual(fresh[j], rec) {
 			return errors.New("checkout changed during recovery")
 		}
+		// Agent retries also wake this path. After restore the saved return
+		// must still match the Board before recording a missing source.
+		if rec.Archive != nil && CheckSavedWorktreeReturn(y, rec, board, workers) != nil {
+			return errRestoredReturn
+		}
 		if err := s.checkMissingInstance(ctx, rec, path); err != nil {
 			return err
 		}
 		return s.recordWorktreeRemoval(y, rec, "recovered completed Git removal from its checkpoint")
 	})
 	l.Unlock()
+	if errors.Is(err, errRestoredReturn) {
+		return collectedOrIneligible, true
+	}
 	if err != nil {
 		return retryLater, true
 	}

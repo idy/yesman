@@ -2,12 +2,15 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/pool"
@@ -136,6 +139,172 @@ func TestWorktreeArchiveKeepsWorkspaceAndRestoreRecord(t *testing.T) {
 	}
 	req.Action = "restore"
 	completeMove(t, f, req)
+}
+
+func restoreForAgentCleanup(t *testing.T, x *worktreeFixture, w pool.Worktree) {
+	t.Helper()
+	if err := os.MkdirAll(x.f.store.WorktreeArchiveDir(), 0700); err != nil {
+		t.Fatal(err)
+	}
+	f := &cleanupFixture{s: x.f.srv, y: x.y}
+	req := WorktreeMove{Workspace: x.y.Name, Since: x.y.HiredAt, Dir: w.Dir, ID: w.CleanupID, Action: "archive"}
+	completeMove(t, f, req)
+	req.Action = "restore"
+	completeMove(t, f, req)
+}
+
+// A pre-archive certification and a saved delegate refer to the same checkout
+// ID after restore. Exercise the authenticated retries with a present tree and
+// with an absent source whose old checkpoint would otherwise permit retirement.
+func TestRestoredWorktreeRejectsSavedAgentCleanup(t *testing.T) {
+	for _, sourceState := range []string{"present", "missing"} {
+		t.Run(sourceState, func(t *testing.T) {
+			x, w, _, cert := retainedBoardReturn(t, "author")
+			const delegate = "cleanup"
+			if err := x.f.store.AddWorker(x.y.Name, yesmen.Worker{Name: delegate, StartedAt: time.Now().UTC()}); err != nil {
+				t.Fatal(err)
+			}
+			lead := x.f.start("alice/lead")
+			if out := savedRetry(t, x, lead, w, delegate); out.Removed || out.Record == nil || out.Record.CleanupOwner != delegate {
+				t.Fatalf("initial handoff: %+v", out)
+			}
+			restoreForAgentCleanup(t, x, w)
+			before := recordOf(t, x, w.Dir)
+			if before.Archive.PreviousReturnID != cert.Completion.ReturnID {
+				t.Fatal("wrong pre-restore return")
+			}
+			source := w.Path
+			if sourceState == "missing" {
+				cleanupGit(t, x.cf.repo.Path, "update-ref", "refs/yesman/worktrees/"+w.CleanupID, w.Head)
+				source = filepath.Join(t.TempDir(), "kept")
+				cleanupGit(t, x.cf.repo.Path, "worktree", "move", w.Path, source)
+			}
+			check := func(out cleanupResult) {
+				t.Helper()
+				if out.Removed || !strings.Contains(out.Reason, "fresh Board return") {
+					t.Fatalf("stale authority: %+v", out)
+				}
+				if !reflect.DeepEqual(before, recordOf(t, x, w.Dir)) {
+					t.Fatal("stale retry changed the lifecycle record")
+				}
+				if got := cleanupGit(t, source, "rev-parse", "HEAD"); got != w.Head {
+					t.Fatal(got)
+				}
+			}
+			check(savedRetry(t, x, lead, w, ""))
+			check(savedRetry(t, x, lead, w, x.me.agent.Name))
+			who := x.f.start(agent.ID(x.y.Name, delegate))
+			check(savedRetry(t, x, who, w, ""))
+			if sourceState == "present" {
+				x.f.m.Stop(agent.ID(x.y.Name, delegate))
+				desktop := &DesktopWorktrees{Server: x.f.srv}
+				preview := previewTree(t, desktop, x.y, &w, true)
+				confirmTree(t, desktop, x.y, preview.Token, true)
+			}
+		})
+	}
+}
+
+func TestRestoredWorktreeAgentUsesFreshBoardReturn(t *testing.T) {
+	x, w, v := returnFixture(t, "author", "")
+	submitReturn(t, x, v)
+	x.f.m.Stop(x.me.agent.ID)
+	restoreForAgentCleanup(t, x, w)
+	lead := x.f.start("alice/lead")
+	req := removeWorktreeRequest{Checkout: w.CleanupID, Dir: w.Dir, Completion: &v.WorktreeCompletion}
+	post := func() cleanupResult {
+		t.Helper()
+		res := managementPost(t, x, lead.Token, "/v1/worktrees/remove", req)
+		var out cleanupResult
+		if res.Code != 200 || json.Unmarshal(res.Body.Bytes(), &out) != nil {
+			t.Fatal(res.Body)
+		}
+		return out
+	}
+	if out := post(); out.Removed || out.Record == nil || out.Record.Completion != nil || !strings.Contains(out.Reason, "fresh Board return") {
+		t.Fatalf("first proposal used old Board disposition: %+v", out)
+	}
+	x.w = x.f.start(x.me.agent.ID)
+	submitReturn(t, x, v)
+	x.f.m.Stop(x.me.agent.ID)
+	req.Handoff = x.me.agent.Name
+	if out := post(); out.Removed || out.Record == nil || out.Record.CleanupOwner != req.Handoff || out.Record.Completion == nil || !out.Record.AllowsCollection(out.Record.Completion.ReturnID) {
+		t.Fatalf("fresh Board return did not authorize handoff: %+v", out)
+	}
+	if out := savedRetry(t, x, lead, w, ""); !out.Removed {
+		t.Fatal(out.Reason)
+	}
+	if err := x.f.srv.Pool.CheckWorktreeCheckpoint(t.Context(), w); err != nil {
+		t.Fatal(err)
+	}
+	// Git succeeded with the fresh return. A retry can recover a lost final
+	// registry write on the same post-restore certification.
+	records, err := x.f.store.WorktreeRecords(x.y.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records[0].Removed = false
+	if err := x.f.store.SaveWorktreeRecords(x.y.Name, records); err != nil {
+		t.Fatal(err)
+	}
+	if out := savedRetry(t, x, lead, w, ""); !out.Removed {
+		t.Fatal(out.Reason)
+	}
+}
+
+func TestRestoredWorktreeMissingRecoveryRechecksBoard(t *testing.T) {
+	x, w, v, _ := retainedBoardReturn(t, "author")
+	restoreForAgentCleanup(t, x, w)
+	s := x.f.srv
+
+	// Certify a fresh return while an ignored file keeps Git's directory in place.
+	x.w = x.f.start(x.me.agent.ID)
+	submitReturn(t, x, v)
+	x.f.m.Stop(x.me.agent.ID)
+	writeFixture(t, filepath.Join(w.Path, "ignored"), "local data")
+	if got := s.reconcileCheckout(t.Context(), x.y, w.CleanupID); got != retryLater {
+		t.Fatal(got)
+	}
+	before := recordOf(t, x, w.Dir)
+	if before.Completion == nil || !before.AllowsCollection(before.Completion.ReturnID) {
+		t.Fatal("expected a certified post-restore return")
+	}
+	cleanupGit(t, x.cf.repo.Path, "update-ref", "refs/yesman/worktrees/"+w.CleanupID, w.Head)
+	kept := filepath.Join(t.TempDir(), "kept")
+	cleanupGit(t, x.cf.repo.Path, "worktree", "move", w.Path, kept)
+
+	lead := x.f.start("alice/lead")
+	info, err := x.f.m.Authenticate(lead.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := caller{agent: info, yesman: x.y, token: lead.Token}
+	req := removeWorktreeRequest{Dir: w.Dir, Checkout: w.CleanupID}
+	proof, err := s.verifyRemoval(t.Context(), c, x.y, req)
+	if err != nil || !proof.missing || proof.decision.returned.ReturnID != before.Completion.ReturnID {
+		t.Fatal("missing-source verification", err)
+	}
+	// Withdraw permission between the two production phases. The registry,
+	// original HEAD checkpoint and absent source all still match.
+	if res := x.f.post(lead.Token, `{"update":[{"id":"t1","worktrees":[]}]}`); res.Code != 200 {
+		t.Fatal(res.Body)
+	}
+	out, err := s.commitRemoval(t.Context(), c, x.y, req, proof)
+	if err != nil || out.Removed || !strings.Contains(out.Reason, "fresh Board return") {
+		t.Fatalf("stale missing-source commit: %+v, %v", out, err)
+	}
+	if !reflect.DeepEqual(before, recordOf(t, x, w.Dir)) {
+		t.Fatal("withdrawing the return still retired the registry record")
+	}
+	// The remove handler schedules reconciliation when it retains a checkout
+	// with saved evidence. Follow that same missing-source path as well.
+	s.reconcileCheckout(t.Context(), x.y, w.CleanupID)
+	if !reflect.DeepEqual(before, recordOf(t, x, w.Dir)) {
+		t.Fatal("missing-source reconciliation retired the restored record after withdrawal")
+	}
+	if b, err := os.ReadFile(filepath.Join(kept, "ignored")); err != nil || string(b) != "local data" {
+		t.Fatal("fixture local data changed", err)
+	}
 }
 
 func TestWorktreeArchiveRestoreRequiresFreshBoardReturn(t *testing.T) {

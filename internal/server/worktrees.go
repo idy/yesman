@@ -188,6 +188,8 @@ type cleanupResult struct {
 	Record  *yesmen.WorktreeRecord `json:"record,omitempty"`
 }
 
+var errRestoredReturn = errors.New("the restored checkout needs a fresh Board return before agent cleanup or handoff")
+
 func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, req removeWorktreeRequest, proof removalVerification, records []yesmen.WorktreeRecord, i int, board yesmen.Board, workers []yesmen.Worker) (cleanupResult, error) {
 	if err := ctx.Err(); err != nil {
 		return cleanupResult{}, err
@@ -208,13 +210,19 @@ func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 		return retain("primary or unknown purpose")
 	}
 	recoveryOnly := proof.missing && rec.Completion != nil && req.Handoff == ""
-	if !rec.Removed && !recoveryOnly {
+	// Restore keeps the checkout ID and previous completion. Even an absent
+	// source with a checkpoint can belong to that earlier cleanup round.
+	if !rec.Removed && (!recoveryOnly || rec.Archive != nil) {
+		decision := WorktreeDecisionFor(board, *rec)
+		if !rec.AllowsCollection(decision.returned.ReturnID) {
+			return retain(errRestoredReturn.Error())
+		}
 		if err := CheckSavedWorktreeReturn(y, *rec, board, workers); err != nil {
 			return retain(err.Error())
 		}
 		// A first manual proposal has no saved certificate yet. The task can
 		// be reopened, closed again or explicitly kept during a remote check.
-		if proof.decision != WorktreeDecisionFor(board, *rec) {
+		if proof.decision != decision {
 			return retain("the associated task changed during verification. Check its current disposition before trying again")
 		}
 		if !rec.BoardRound.IsZero() && heldByUsers(*rec, board, workers) {
