@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.60
+
+- Yes Man uses the Board task that created a temporary worktree to decide when it can be cleaned up, even if the task was reassigned. When the task is marked **Done**, eligible checkouts can be reclaimed automatically or through **Clean up worktrees…**.
+- Cleanup keeps checkouts with open pull requests, active agents, or open writable Files editors. It also honors explicit keep choices. The cleanup preview shows why each checkout will stay and displays the Board status when known.
+- Removing a checkout preserves its branch, tags, and recoverable Git history.
+
 ## 0.1.59
 
 - Yes Man automatically retries cleanup of returned temporary worktrees as they become eligible, including after a restart.
