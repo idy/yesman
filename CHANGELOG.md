@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.62
+
+- Lead and Worker get a short project brief at the start of a new Pi run. The Lead gets relevant Topic and task context for linked submissions. Workers can pick up a focused brief from their dispatch.
+- Both roles can use read-only search across Knowledge, Working Logs, Topics, Board, and scheduled Tasks in the current workspace. Search returns short excerpts. Open the relevant section on demand or share its reference with another agent in the same workspace.
+- Pi continues to manage each agent’s conversation, session resumption, and automatic compaction. Chat History lookup is planned separately.
+
 ## 0.1.61
 
 - **Worktrees** now looks for local Git checkouts when you open workspace Info. It lists checkout paths, including nested checkouts, and tells you when the scan is incomplete.
