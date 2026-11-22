@@ -15,6 +15,7 @@ type ForceDeletion struct {
 	paths     map[string]checkoutObservation
 	top       map[string]os.FileInfo
 	remaining map[string]os.FileInfo // complete snapshot for a staged retry
+	stagedGit map[string]deletionGitRegistration
 }
 
 func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget, registrations func(context.Context, string) error, relocated RelocatedPrimary) (CheckoutScan, *ForceDeletion, error) {
@@ -38,6 +39,10 @@ func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget,
 	plan := &ForceDeletion{target: target, paths: make(map[string]checkoutObservation, len(scan.observed)), top: map[string]os.FileInfo{}}
 	if target.Pending {
 		plan.remaining = map[string]os.FileInfo{}
+		plan.stagedGit, err = readStagedGitReceipt(ws, target)
+		if err != nil {
+			return scan, nil, err
+		}
 	}
 	for _, o := range scan.observed {
 		if !o.directory.Usable() {
@@ -58,13 +63,13 @@ func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget,
 	if err := registrations(ctx, ws.Name()); err != nil {
 		return scan, nil, err
 	}
-	if err := walkDeletion(ctx, ws, inspectDeletion, plan, true); err != nil {
+	if err := walkDeletion(ctx, ws, inspectDeletion, plan, true, nil); err != nil {
 		return scan, nil, err
 	}
 	if err := s.checkWorktreeRecords(ctx, parent, ws, target, []RelocatedPrimary{relocated}, false); err != nil {
 		return scan, nil, err
 	}
-	if err := plan.checkGit(ctx, ws); err != nil {
+	if err := plan.checkGit(ctx, ws, nil); err != nil {
 		return scan, nil, err
 	}
 	if err := s.checkDeletionTarget(parent, target); err != nil {
@@ -114,7 +119,7 @@ func sameDeletionEntry(want, got fs.FileInfo) bool {
 		(!want.Mode().IsRegular() || want.Size() == got.Size() && want.ModTime().Equal(got.ModTime()))
 }
 
-func (f *ForceDeletion) checkGit(ctx context.Context, ws *os.Root) error {
+func (f *ForceDeletion) checkGit(ctx context.Context, ws *os.Root, verified *[]deletionGitRegistration) error {
 	volume, err := directoryIdentity(ws)
 	if err != nil {
 		return err
@@ -123,7 +128,7 @@ func (f *ForceDeletion) checkGit(ctx context.Context, ws *os.Root) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := checkCheckoutGit(ctx, ws, volume, rel, checkout); err != nil {
+		if err := f.checkCheckoutGit(ctx, ws, volume, rel, checkout, verified); err != nil {
 			return err
 		}
 	}

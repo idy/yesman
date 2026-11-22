@@ -334,6 +334,7 @@ func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, regist
 	if err := check(); err != nil {
 		return false, err
 	}
+	var registrationsToKeep []deletionGitRegistration
 	preflight := func(phase deletionWalk) error {
 		ws, err := openDeletionTarget(s, parent, want)
 		if err != nil {
@@ -352,7 +353,19 @@ func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, regist
 		if force != nil {
 			// Run after the full walk and after any worktree record I/O.
 			// On a live deletion this is re-read immediately before detach.
-			return force.checkGit(ctx, ws)
+			var verified *[]deletionGitRegistration
+			if phase == prepareDeletion {
+				verified = &registrationsToKeep
+			}
+			if err := force.checkGit(ctx, ws, verified); err != nil {
+				return err
+			}
+			if verified != nil && len(*verified) > 0 {
+				if _, err := ws.Lstat(stagedGitReceipt); !errors.Is(err, fs.ErrNotExist) {
+					return unresolvedGitDeletion(stagedGitReceipt)
+				}
+			}
+			return nil
 		}
 		return nil
 	}
@@ -401,14 +414,14 @@ func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, regist
 	}
 	// Reopen and verify the moved object before touching any bytes, including
 	// on retry after process restart. Never RemoveAll a reusable name.
-	err = s.purgeDetached(ctx, parent, entry, want.Archived, force)
+	err = s.purgeDetached(ctx, parent, entry, want.Archived, force, registrationsToKeep)
 	if err != nil {
 		return detached, &DeletionIssue{Message: "Deletion is incomplete at %s. Check the remaining files, then retry in Settings → Storage → Stored workspaces.", Args: []any{filepath.Join(parent.Name(), entry)}, Cause: err}
 	}
 	return detached, nil
 }
 
-func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string, archived bool, force *ForceDeletion) error {
+func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string, archived bool, force *ForceDeletion, verified []deletionGitRegistration) error {
 	ws, err := directDir(parent, entry)
 	if err != nil {
 		return err
@@ -428,7 +441,16 @@ func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string
 	if now, err := parent.Lstat(entry); err != nil || !os.SameFile(st, now) {
 		return errors.New("the detached directory changed")
 	}
-	if err := walkWorkspaceDeletion(ctx, ws, purgeDeletion, force); err != nil {
+	var receipt *deletionGitReceipt
+	if len(verified) > 0 {
+		// Publish before the first unlink so cold Storage can distinguish an
+		// interrupted internal removal from a live external dependency.
+		receipt = &deletionGitReceipt{entry, verified}
+		if err := writeStagedGitReceipt(ws, *receipt); err != nil {
+			return err
+		}
+	}
+	if err := walkDeletion(ctx, ws, purgeDeletion, force, false, receipt); err != nil {
 		return err
 	}
 	if now, err := parent.Lstat(entry); err != nil || !os.SameFile(st, now) {

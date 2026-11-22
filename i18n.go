@@ -80,6 +80,7 @@ var zhHans = map[string]string{
 	"Git data in this workspace is still used by a worktree at %s. Move the repository and its worktrees to safety, or remove the linked worktree with Git first.":         "此工作区中的 Git 数据仍被 %s 下的工作树使用。请先将仓库及其工作树移至安全位置，或使用 Git 移除关联工作树。",
 	"Cannot verify the Git worktree at %s. Repair or remove its registration with Git, or move the repository and its worktrees to safety before deleting this workspace.": "无法验证 %s 下的 Git 工作树。请先用 Git 修复或移除登记，或将仓库及其工作树移至安全位置。",
 
+	"Could not save the interrupted deletion record at %s.": "无法保存 %s 的中断删除记录。",
 	// Workspace deletion and its recovery instructions
 	"Move %q out of the workspace first. For a worktree, use Git or its managed cleanup.":                                                   "请先将 %q 移出工作区。如果是 Git 工作树，请用 Git 移动它，或完成受管回收。",
 	"%s contains a Git checkout. Move it with Git or finish its managed cleanup first.":                                                     "%s 包含 Git 工作树。请先用 Git 移动它，或完成受管回收。",
