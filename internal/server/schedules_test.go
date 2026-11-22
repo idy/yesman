@@ -83,7 +83,7 @@ func TestSchedulesAreTheLeadsAndDraftsStayOff(t *testing.T) {
 	}
 	board, _ := store.Board("alice")
 	text := BuildContext(ctx, s.Pool, m, y, lead.agent, board) + svc.LeadContext("alice")
-	for _, want := range []string{"- t1 [todo] Morning check (a run of scheduled task s1)", "## Scheduled tasks", "Never draft one on your own", `- s1 "Morning check": every day at 09:00 (Asia/Shanghai), off`} {
+	for _, want := range []string{`- t1 "Morning check"`, "Use yesman_schedules", "## Scheduled tasks", "Never draft one on your own", `- s1 "Morning check": every day at 09:00 (Asia/Shanghai), off`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the lead's context lacks %q:\n%s", want, text)
 		}

@@ -94,6 +94,7 @@ type Worker struct {
 	// Title is the subject of its work in a few words, as the user sees it.
 	Title     string    `json:"title,omitempty"`
 	Task      string    `json:"task"`
+	Dispatch  Dispatch  `json:"dispatch,omitzero"`
 	StartedAt time.Time `json:"startedAt"`
 	// FinishedAt is when its last run's report reached its lead, after
 	// which its process was closed; zero while it has work.
@@ -103,6 +104,16 @@ type Worker struct {
 	PausedAt time.Time `json:"pausedAt,omitzero"`
 	// FailedAt is when its process last ended unexpectedly.
 	FailedAt time.Time `json:"failedAt,omitzero"`
+}
+
+// Dispatch records the lead's explicit links and brief. Task remains the
+// original kickoff message, including for older callers and worker records.
+type Dispatch struct {
+	BoardTask    string   `json:"boardTask,omitempty"`
+	Goal         string   `json:"goal,omitempty"`
+	Constraints  string   `json:"constraints,omitempty"`
+	Deliverables string   `json:"deliverables,omitempty"`
+	Sources      []string `json:"sources,omitempty"`
 }
 
 // Subject names a worker's work for the user: its title, else the title of

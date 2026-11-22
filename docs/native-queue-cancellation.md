@@ -7,7 +7,7 @@ The v2 receipt file keeps private IDs and payload fingerprints. The same per-age
 The writer uses one reserved `.human-drafts-v1.stage` file in that agent's session directory. It publishes the complete snapshot by rename. On initialization, a stage with the expected file type, permissions and size is retired as unpublished. Other filenames are left alone. A corrupt or unreadable snapshot, a receipt mismatch, or an unexpected reserved stage blocks submission for that agent and leaves the files in place. The Manager keeps the load error for its lifetime. After reviewing the files and fixing the problem, restart Yes Man to try loading again.
 
 yesman's default supported runtime is **pi 1.5.2 with queue protocol patch 1**
-(`1.5.2-yesman.5`, queue capability 4). It provides actual per-occurrence pending
+(`1.5.2-yesman.6`, queue capability 4). It provides actual per-occurrence pending
 identity, atomic cancellation and same-occurrence append. Original upstream pi 1.5.2 lacks that API; external runtimes retain
 normal sending/Copy and only expose recall if they report the supported protocol.
 
