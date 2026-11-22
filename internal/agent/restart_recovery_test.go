@@ -91,9 +91,10 @@ func TestF48HistoryStartupAndIncomingWork(t *testing.T) {
 				store, tmp, y := restartStore(t)
 				r := repairEntry(t, store, y, role, restart.ReasonWorking)
 				m, got := restartInstance(t, store, tmp)
-				if role == RoleWorker && action == "input" {
-					// A normal completion report may start the lead; hold it while
-					// the assertion below counts this startup. StopAll drains it.
+				if role == RoleWorker && (action == "input" || action == "observe") {
+					// A worker can finish after either an incoming prompt or a
+					// recovery note. Hold report collection until StopAll so the
+					// startup count excludes the expected Lead launch.
 					m.cfg.Env = append(m.cfg.Env, "FAKE_PI_HOLD_REPORTS=1")
 				}
 				finish := m.HoldContinuations()
