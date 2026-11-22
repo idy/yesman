@@ -73,6 +73,7 @@ async function answer(m, args) {
   case 'RestartStatus': return {};
   case 'Update': return {enabled:false};
   case 'Models': return {models:[{provider:'p',id:'m1',name:'Model One'},{provider:'p',id:'m2',name:'Model Two'}],agent:agents.find(a=>a.id===args[0])};
+  case 'WorkspaceCheckouts': return {entries:[]};
   case 'Info': return {knowledge:[],worktrees:[]};
   case 'Board': return {tasks:[]};
   case 'Crew': return {members:[],yesman:''};
@@ -106,6 +107,8 @@ async function answer(m, args) {
   }
   case 'Abort': case 'Stop': case 'WatchFiles': case 'Reveal': case 'FetchAll': return;
   // Called only if a guard were skipped; recorded in calls either way.
+  case 'ReviewWorkspaceForceDeletion': return {entries:[]};
+  case 'CancelWorkspaceForceReview': return;
   case 'PrepareWorkspaceDeletion': return {entry:args[0],label:'Alice',instance:'fixture'};
   case 'DeleteWorkspace': case 'RemoveWorkerOf': case 'Rename': case 'HireNamed': return null;
   default: unmocked.push(m); return null;

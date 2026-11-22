@@ -57,6 +57,7 @@ const bridge = () => {
         return body.value;
       }
       switch (m) {
+        case 'WorkspaceCheckouts': return { entries: [] };
         case 'Repos': case 'Clones': case 'Pulls': return [];
         case 'Settings': return { appearance: 'system', autoFetch: 0 };
         case 'Fetches': return { fetching: [], errors: {} };

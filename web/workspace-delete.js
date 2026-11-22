@@ -33,17 +33,26 @@ export function workspaceDeletion({ call, errorText, onLiveDeleted, toast, secti
     const body = record?.pending ? t('This permanently removes the remaining files from the interrupted deletion.')
       : record?.archived ? t('This permanently deletes this archived workspace, including its conversations, tasks, Knowledge, Working Logs and files.')
         : t('Its agents stop. Its conversations, tasks, Knowledge, Working Logs and workspace files are permanently deleted.');
+    const retrying = !!record?.pending && !record.archived;
     const status = h('p', { class: 'deletion-status', role: 'status', tabindex: '-1' });
     const cancel = h('button', { type: 'button', class: 'mds-button', autofocus: true, onclick: () => dialog.close('cancel') }, t('Cancel'));
-    const ok = h('button', { type: 'button', class: 'mds-button delete-permanently', disabled: !record, onclick: commit }, t('Delete permanently'));
+    const ok = h('button', { type: 'button', class: 'mds-button delete-permanently', disabled: !record || retrying, onclick: () => commit(false) }, t('Delete permanently'));
+    const review = h('button', { type: 'button', class: 'mds-button force-delete-action', hidden: true, onclick: armForce }, t(retrying ? 'Review remaining files…' : 'Force Delete…'));
+    const force = h('button', { type: 'button', class: 'mds-button force-delete-action', hidden: true, onclick: () => commit(true) }, t(retrying ? 'Delete remaining files' : 'Force Delete'));
+    const refresh = h('button', { type: 'button', class: 'mds-button', hidden: true, onclick: () => checkForce(true) }, t('Check again'));
+    const warning = h('div', { id: 'deletion-checkouts', class: 'deletion-checkouts', role: 'status', hidden: true });
     const dialog = h('dialog', { id: 'delete-workspace-dialog', class: 'mds-dialog workspace-deletion', 'aria-labelledby': 'deletion-title', 'aria-describedby': 'deletion-body deletion-location' },
       h('h2', { class: 'mds-heading', id: 'deletion-title' }, title),
       h('p', { class: 'path', id: 'deletion-location' }, location),
       h('p', { id: 'deletion-body' }, body),
       h('p', { class: 'dialog-hint' }, t('The shared repo pool, its branches and tags, and other workspaces are kept.')),
-      status, h('div', { class: 'mds-dialog-actions' }, cancel, ok));
+      warning, status, h('div', { class: 'mds-dialog-actions' }, cancel, refresh, review, force, ok));
     let busy = false;
     let target = record;
+    let token = '';
+    let checked = 0;
+    let checking = '';
+    let armed = false;
     opening = dialog;
     document.body.append(dialog);
     dialog.oncancel = (e) => { if (busy) e.preventDefault(); };
@@ -57,13 +66,83 @@ export function workspaceDeletion({ call, errorText, onLiveDeleted, toast, secti
         target = result;
         status.textContent = '';
         ok.disabled = false;
+        void checkForce();
       }).catch(showError);
+    } else if (retrying) {
+      void checkForce();
     }
     return closed.finally(() => {
+      checked++;
+      if (checking) void call('CancelWorkspaceForceReview', checking).catch(() => {});
+      forgetToken(token);
       opening = null;
       dialog.remove();
       if (document.activeElement === document.body && !document.querySelector('dialog[open]')) restore?.();
     });
+
+    function forgetToken(value) {
+      if (value) void call('CancelWorkspaceForceDeletion', value).catch(() => {});
+    }
+
+    async function checkForce(retry = false) {
+      if (!dialog.open || !target || target.archived || checking) return;
+      const sequence = ++checked;
+      const request = [...crypto.getRandomValues(new Uint8Array(18))].map(b => b.toString(16).padStart(2, '0')).join('');
+      checking = request;
+      forgetToken(token);
+      token = '';
+      armed = false;
+      ok.hidden = false;
+      dialog.setAttribute('aria-describedby', 'deletion-body deletion-location');
+      force.hidden = review.hidden = refresh.hidden = true;
+      warning.hidden = false;
+      warning.textContent = t('Checking workspace files and Git checkouts…');
+      if (retry) {
+        status.textContent = '';
+        cancel.textContent = t('Cancel');
+        cancel.focus();
+      }
+      try {
+        const result = await call('ReviewWorkspaceForceDeletion', target, request);
+        if (!dialog.open || sequence !== checked) {
+          forgetToken(result.token);
+          return;
+        }
+        token = result.token || '';
+        const entries = result.entries ?? [];
+        const folders = (result.paths ?? []).filter(p => retrying || !entries.some(e => e.path === p));
+        const pathList = paths => h('ul', { class: 'deletion-checkout-paths' }, paths.map(p =>
+          h('li', { class: 'path' }, p === '.' ? location : `${location}/${p}`)));
+        warning.replaceChildren(...[
+          entries.length ? h('p', null, t('Git checkouts in this workspace')) : null,
+          entries.length ? pathList(entries.map(e => e.path)) : null,
+          folders.length ? h('p', null, t(retrying ? 'Remaining paths in the interrupted deletion' : 'Directories that will also be deleted')) : null,
+          folders.length ? pathList(folders) : null,
+          token ? h('p', { class: 'danger', id: 'force-deletion-risk' }, t(retrying ? 'This permanently removes the remaining files and local changes at the listed paths.' : 'Force Delete permanently removes these local checkouts and the rest of this workspace, including uncommitted changes and untracked files. Git data stored outside the workspace is kept.')) : null,
+          result.problem ? h('p', { class: 'danger' }, t(retrying ? 'Could not review the remaining files.' : 'Force Delete is unavailable.'), ' ', result.problem) : null,
+        ].filter(Boolean));
+        warning.hidden = !warning.hasChildNodes();
+        review.hidden = !token;
+        ok.disabled = !!token || entries.length > 0 || !!result.problem || (!retry && !!status.textContent);
+        refresh.hidden = !result.problem && !status.textContent;
+      } catch (err) {
+        if (!dialog.open || sequence !== checked) return;
+        warning.textContent = t('Could not check local Git checkouts.') + ' ' + errorText(err);
+        refresh.hidden = false;
+      } finally {
+        if (sequence === checked) checking = '';
+      }
+    }
+
+    function armForce() {
+      if (busy || !token || !dialog.open) return;
+      armed = true;
+      ok.hidden = review.hidden = true;
+      force.hidden = false;
+      dialog.setAttribute('aria-describedby', 'deletion-body deletion-location force-deletion-risk deletion-checkouts');
+      cancel.textContent = t('Cancel');
+      cancel.focus();
+    }
 
     function showError(err) {
       if (!dialog.open) return;
@@ -75,15 +154,28 @@ export function workspaceDeletion({ call, errorText, onLiveDeleted, toast, secti
       cancel.textContent = t('Close');
       cancel.focus();
     }
-    async function commit() {
-      if (!target || busy || ok.disabled || !dialog.open) return;
-      busy = cancel.disabled = ok.disabled = true;
+    async function commit(forced) {
+      if (!target || busy || !dialog.open || (forced ? !armed || !token : ok.disabled)) return;
+      const confirmation = token;
+      if (forced) token = '';
+      busy = cancel.disabled = ok.disabled = review.disabled = force.disabled = refresh.disabled = true;
       status.textContent = t('Deleting workspace…');
       status.focus();
       try {
-        await call('DeleteWorkspace', target);
+        if (forced) await call('ForceDeleteWorkspace', target, confirmation);
+        else await call('DeleteWorkspace', target);
       } catch (err) {
         showError(err);
+        review.disabled = force.disabled = refresh.disabled = false;
+        if (forced) {
+          armed = false;
+          force.hidden = true;
+          ok.hidden = false;
+          refresh.hidden = false;
+        } else if (!record?.archived && !token) {
+          refresh.hidden = false;
+          void checkForce();
+        }
         if (stored !== null) loadStored(true);
         return;
       }

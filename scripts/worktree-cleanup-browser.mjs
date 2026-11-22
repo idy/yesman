@@ -52,6 +52,7 @@ async function run(engine, name, language) {
           case 'WorktreeMenu': return window.choice ?? (args[0] ? 'remove' : 'cleanup');
           case 'Reveal': return;
           case 'Info': if (window.failInfo) throw Error('Fixture refresh unavailable'); return api(m,...args);
+          case 'WorkspaceCheckouts': return api(m, ...args);
           case 'ReadWorktreeFile': {
             const value = await api(m, ...args);
             if (args[1] === window.holdRead) {
@@ -107,6 +108,11 @@ async function run(engine, name, language) {
       if (output) await info.screenshot({path:join(output, `incumbent-${name}.png`)});
       console.log(`${name} ${language} incumbent sidebar and fallback menu verified`);
       return;
+    }
+    if (!baseline) {
+      await page.waitForFunction(() => calls.some(([m]) => m === 'WorkspaceCheckouts'));
+      await info.getByText(/Scanning for local Git checkouts|正在扫描本地 Git 工作树/).waitFor({state:'hidden'});
+      assert.equal(await info.locator('.info-local-checkout').count(), 0, 'registered paths must appear only once');
     }
     const dialog = page.locator('dialog.worktree-cleanup[open]');
     const button = dialog.locator('[data-confirm]');

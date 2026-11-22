@@ -1071,8 +1071,13 @@ body { margin: 0; background: var(--mds-canvas); color: var(--mds-ink); font-fam
 .mds-dialog h2 { margin: 0; }
 .workspace-deletion { width: min(460px, calc(100vw - 32px)); overflow-wrap: anywhere; }
 .workspace-deletion .path { margin: 4px 0 16px; color: var(--mds-muted); }
-.workspace-deletion .delete-permanently { border-color: var(--mds-error-line); color: var(--mds-error); }
-.workspace-deletion .delete-permanently:hover:not(:disabled) { background: var(--mds-error-hover); }
+.workspace-deletion :is(.delete-permanently, .force-delete-action) { border-color: var(--mds-error-line); color: var(--mds-error); }
+.workspace-deletion :is(.delete-permanently, .force-delete-action):hover:not(:disabled) { background: var(--mds-error-hover); }
+.workspace-deletion [hidden] { display: none; }
+.deletion-checkout-paths { max-height: 8rem; overflow: auto; padding-inline-start: 20px; }
+.deletion-checkout-paths .path { margin: 4px 0; white-space: pre-wrap; }
+.info-local-checkout { display: grid; gap: 4px; padding: 7px 12px; }
+.info-local-checkout-path { overflow-wrap: anywhere; white-space: pre-wrap; }
 .deletion-status:empty { display: none; }
 .deletion-status[data-tone="error"] { color: var(--mds-error); }
 #stored-workspaces .mds-row { grid-template-columns: minmax(0, 1fr) auto; overflow-wrap: anywhere; }

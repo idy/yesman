@@ -56,6 +56,9 @@ func TestReviewR5ResumePersistenceAndColdResponsibility(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	m.continueTasks("alice")
+	// The report can be acknowledged before the lead settles. Wait for
+	// the task notice while the old pause still remains on disk.
+	waitNoticeListing(t, prompts, "alice/lead", "t1")
 	reviewR5Drain(t, m)
 	t.Logf("during failure lead messages: %q", prompts("alice/lead"))
 	if noticesListing(prompts("alice/lead"), "t1") != 1 {
