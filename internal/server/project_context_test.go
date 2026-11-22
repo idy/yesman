@@ -306,6 +306,91 @@ func TestProjectContextLivePromptCoverage(t *testing.T) {
 	check(get(lead.Token), []string{"environment settings could not be read"}, []string{"No secrets or variables are set", "unreadable secret settings"})
 }
 
+func TestProjectContextScheduledHandoffPriority(t *testing.T) {
+	for _, dualLink := range []bool{false, true} {
+		label := "explicit-only"
+		if dualLink {
+			label = "both-links"
+		}
+		t.Run(label, func(t *testing.T) {
+			f := newBoardFixture(t)
+			y := f.hire("alice")
+			const plan, run = "s1", "s1-m-0123456789abcdef"
+			old, _, err := f.store.AddScheduledTask(y.Name, yesmen.TaskSchedule{Plan: plan, Run: "s1-m-0123456789abcdee"}, "Earlier run", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, _, err := f.store.AddScheduledTask(y.Name, yesmen.TaskSchedule{Plan: plan, Run: run}, "Focused run", "")
+			if err != nil || task.ID == old.ID {
+				t.Fatalf("current run task: %+v, %v", task, err)
+			}
+			add := func(title, taskID string) yesmen.Handoff {
+				t.Helper()
+				h, _, err := f.store.AddHandoff(y.Name, yesmen.Handoff{Type: "input", Title: title, Detail: "PRIVATE_REQUEST_BODY", Task: taskID})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return h
+			}
+			older := add("Another run of the same plan", old.ID)
+			unlinked := add("Unrelated request", "")
+			closed := add("Already answered", task.ID)
+			if _, err := f.store.CloseHandoff(y.Name, closed.ID, yesmen.HandoffDone, "user", "PRIVATE_CLOSED_NOTE"); err != nil {
+				t.Fatal(err)
+			}
+			reverse := add("Linked from request", task.ID)
+			explicitTaskID := ""
+			if dualLink {
+				explicitTaskID = task.ID
+			}
+			explicit := add("Named in Board wait", explicitTaskID)
+			if _, err := f.store.ChangeBoard(y.Name, yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: task.ID,
+				Wait: &yesmen.WaitEdit{Kind: yesmen.WaitUser, Handoff: explicit.ID, Reason: "Current blocker"},
+			}}}); err != nil {
+				t.Fatal(err)
+			}
+
+			id := agent.ID(y.Name, "lead")
+			lead := f.start(id)
+			input := fmt.Sprintf("%012x%s", time.Now().UnixMilli(), strings.Repeat("e1", 18))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			delivery, err := f.m.SubmitFollowUp(ctx, id, input, "Scheduled fixture", agent.Origin{Source: agent.OriginSchedule, Plan: plan, Run: run}, y.HiredAt)
+			if err != nil || delivery.Error != "" {
+				t.Fatalf("scheduled submission: %+v, %v", delivery, err)
+			}
+			check := func(input string, first, second yesmen.Handoff) string {
+				t.Helper()
+				r := httptest.NewRequest("GET", "/v1/context", nil)
+				r.Header.Set("Authorization", "Bearer "+lead.Token)
+				r.Header.Set("X-Yesman-Input", input)
+				w := httptest.NewRecorder()
+				f.srv.Handler().ServeHTTP(w, r)
+				if w.Code != 200 {
+					t.Fatalf("context status %d", w.Code)
+				}
+				text := w.Body.String()
+				_, brief, _ := strings.Cut(text, "## Needs you\n\n")
+				got, _, _ := strings.Cut(brief, "\n\n")
+				want := fmt.Sprintf("4 waiting on the user; see them with yesman_needs_you:\n- %s (input): %q\n- %s (input): %q\n… and 2 more.", first.ID, first.Title, second.ID, second.Title)
+				if got != want {
+					t.Errorf("Needs You excerpt = %q, want %q", got, want)
+				}
+				if strings.Contains(text, "PRIVATE_REQUEST_BODY") || strings.Contains(text, "PRIVATE_CLOSED_NOTE") {
+					t.Error("brief included private request data")
+				}
+				return brief
+			}
+			if generic := check("", older, unlinked); strings.Contains(generic, "Linked scheduled plan") {
+				t.Error("context without input inherited scheduled focus")
+			}
+			if focused := check(input, reverse, explicit); !strings.Contains(focused, `Linked scheduled plan "s1"`) || !strings.Contains(focused, "Current blocker") {
+				t.Error("trusted scheduled submission did not focus its Board run")
+			}
+		})
+	}
+}
+
 func TestProjectContextEscapedReferenceAndPage(t *testing.T) {
 	c, y := projectFixture(t)
 	ctx := context.Background()

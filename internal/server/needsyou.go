@@ -273,7 +273,7 @@ func (s *Server) commitNeedsYou(y yesmen.Yesman, req NeedsYouChange) (any, *yesm
 const needsYouContextLimit = 2
 
 // needsYouContext tells a lead, briefly, what it has left with the user.
-func (s *Server) needsYouContext(c caller, priority ...string) string {
+func (s *Server) needsYouContext(c caller, linkedTasks ...yesmen.Task) string {
 	hs, err := s.Yesmen.Handoffs(c.yesman.Name)
 	if err != nil {
 		return "Needs you unavailable. Use yesman_needs_you to verify what waits on the user.\n"
@@ -293,16 +293,20 @@ func (s *Server) needsYouContext(c caller, priority ...string) string {
 		b.WriteString("\n")
 	}
 	fmt.Fprintf(&b, "%d waiting on the user; see them with yesman_needs_you:\n", total)
-	if len(priority) != 0 {
-		slices.SortStableFunc(view.Handoffs, func(a, b yesmen.Handoff) int {
-			priorityOf := func(id string) int {
-				if i := slices.Index(priority, id); i >= 0 {
-					return i
+	if len(linkedTasks) != 0 {
+		// As in the continuation check, either saved link ties a request to
+		// the task. Rank each open handoff once, preserving order within tiers.
+		rank := func(h yesmen.Handoff) int {
+			for _, task := range linkedTasks {
+				taskLink := h.Task != "" && h.Task == task.ID
+				waitLink := task.Wait != nil && task.Wait.Handoff != "" && h.ID == task.Wait.Handoff
+				if taskLink || waitLink {
+					return 0
 				}
-				return len(priority)
 			}
-			return priorityOf(a.ID) - priorityOf(b.ID)
-		})
+			return 1
+		}
+		slices.SortStableFunc(view.Handoffs, func(a, b yesmen.Handoff) int { return rank(a) - rank(b) })
 	}
 	shown := 0
 	for _, h := range view.Handoffs {

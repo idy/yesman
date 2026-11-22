@@ -46,16 +46,11 @@ func (s *Server) projectPrompt(w http.ResponseWriter, r *http.Request) {
 		var err error
 		topics, err = s.Yesmen.Topics(y.Name, y.HiredAt)
 		status.topicsUnavailable = err != nil
-		var priority []string
-		for _, t := range linkedTopicTasks(board, topics, linkedTopic) {
-			if t.Wait != nil && t.Wait.Handoff != "" {
-				priority = append(priority, t.Wait.Handoff)
-			}
+		linkedTasks := linkedTopicTasks(board, topics, linkedTopic)
+		if task, ok := linkedScheduledTask(board, actor); ok {
+			linkedTasks = append(linkedTasks, task)
 		}
-		if t, ok := linkedScheduledTask(board, actor); ok && t.Wait != nil && t.Wait.Handoff != "" {
-			priority = append(priority, t.Wait.Handoff)
-		}
-		status.needsYou = s.needsYouContext(caller{agent: actor.Info, yesman: y, token: token}, priority...)
+		status.needsYou = s.needsYouContext(caller{agent: actor.Info, yesman: y, token: token}, linkedTasks...)
 		if s.Routing != nil {
 			r := s.Routing(r.Context(), nil)
 			routing = &r
