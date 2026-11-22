@@ -189,6 +189,13 @@ func TestProjectContextStablePagingAndCaps(t *testing.T) {
 	if c.read(ctx, projectRead{Ref: renameRef}).Status != "deleted" {
 		t.Fatal("the old filename should report a missing original")
 	}
+	boardPath := y.BoardFile()
+	projectWrite(t, boardPath, `{"next":3,"tasks":[{"id":"t1","title":"Tracked board marker","status":"doing"},{"id":"t2","title":"Other task","status":"done"}]}`)
+	boardHit := projectOne(t, c, projectQuery{Source: "board", Query: "Tracked board marker"})
+	projectWrite(t, boardPath, `{"next":4,"tasks":[{"id":"t3","title":"Append unrelated","status":"todo"},{"id":"t2","title":"Other task","status":"done"},{"id":"t1","title":"Tracked board marker","status":"doing"}]}`)
+	if r := c.read(ctx, projectRead{Ref: boardHit.Ref}); r.Status != "ok" {
+		t.Fatalf("Board reorder or unrelated append changed the reference: %s", r.Status)
+	}
 }
 
 func TestProjectContextBriefBoundsAndBinding(t *testing.T) {
@@ -291,7 +298,41 @@ func TestProjectContextPermissionAndCancellation(t *testing.T) {
 			t.Errorf("unsafe reference accepted: %s", r.Status)
 		}
 	}
+	// Restore a readable original before testing credential retirement.
+	if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	projectWrite(t, name, "# Visible\nmarker")
+	if r := call(ctx, worker.Token, "read", projectRead{Ref: hit.Ref}); r.Status != "ok" {
+		t.Fatalf("worker control before retirement: %+v", r)
+	}
+	// Park a read after authentication and retire the worker before letting
+	// the handler see the reference. The current actor check must win.
+	gate := &gateBody{Reader: strings.NewReader(string(contextJSON(projectRead{Ref: hit.Ref}))), entered: make(chan struct{}), release: make(chan struct{})}
+	request := httptest.NewRequest("POST", "/v1/context/read", gate)
+	request.Header.Set("Authorization", "Bearer "+worker.Token)
+	response, done := httptest.NewRecorder(), make(chan struct{})
+	go func() {
+		defer close(done)
+		f.srv.Handler().ServeHTTP(response, request)
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		close(gate.release)
+		t.Fatal("project read never reached its request body")
+	}
 	f.m.StopAll()
+	close(gate.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("project read did not return")
+	}
+	var retired projectResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &retired); err != nil || retired.Status != "denied" || retired.Item != nil {
+		t.Fatalf("held request from retired worker: %+v, %v", retired, err)
+	}
 	if r := call(ctx, worker.Token, "read", projectRead{Ref: hit.Ref}); r.Status != "denied" {
 		t.Fatalf("retired worker: %+v", r)
 	}

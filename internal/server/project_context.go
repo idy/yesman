@@ -289,7 +289,7 @@ func (c projectCatalog) search(ctx context.Context, q projectQuery) projectRespo
 	out := projectStatus("ok", "")
 	if len(incomplete) != 0 {
 		out.Status, out.Sources = "partial", incomplete
-		if covered == 0 {
+		if covered == 0 && len(hits) == 0 {
 			out.Status = "source_unavailable"
 		}
 	} else if len(hits) == 0 {
