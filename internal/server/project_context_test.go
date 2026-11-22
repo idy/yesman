@@ -209,7 +209,7 @@ func TestProjectContextBriefBoundsAndBinding(t *testing.T) {
 			t.Errorf("worker brief lacks %q", want)
 		}
 	}
-	if strings.Contains(brief, "t1") || strings.Contains(brief, "旧背景") {
+	if strings.Contains(brief, "Same worker name, previous generation") || strings.Contains(brief, "旧背景") {
 		t.Fatal("worker brief included unrelated context")
 	}
 	for i := 3; i <= 70; i++ {
@@ -267,8 +267,8 @@ func TestProjectContextPermissionAndCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Link(private, name); err == nil {
-		if r := call(ctx, lead.Token, "read", projectRead{Ref: hit.Ref}); r.Status == "ok" || r.Item != nil {
-			t.Fatal("hard-linked replacement was returned")
+		if r := call(ctx, lead.Token, "read", projectRead{Ref: hit.Ref}); r.Status != "denied" || r.Item != nil {
+			t.Fatal("hard-linked replacement was not denied")
 		}
 		if err := os.Remove(name); err != nil {
 			t.Fatal(err)

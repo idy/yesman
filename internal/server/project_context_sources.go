@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
