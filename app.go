@@ -92,6 +92,9 @@ type app struct {
 	githubSetup       GitHubAppSetup
 	githubSetupCancel context.CancelFunc
 
+	// Short-lived confirmations for the desktop's Force Delete flow.
+	forceDeletion workspaceForceConfirmations
+
 	wmu  sync.Mutex
 	win  *mygo.Window
 	tray *mygo.Tray

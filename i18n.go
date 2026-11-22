@@ -89,6 +89,12 @@ var zhHans = map[string]string{
 	"Deletion is incomplete at %s. Check the remaining files, then retry in Settings → Storage → Stored workspaces.":                        "%s 删除未完成。请检查剩余文件，然后在「设置 → 存储 → 已存储的工作区」中重试。",
 	"the workspace changed since confirmation. Reopen its menu":                                                                             "工作区在确认期间已更改，请重新打开菜单。",
 	"the workspace was replaced. Reopen its menu":                                                                                           "工作区已被替换，请重新打开菜单。",
+	"Cannot verify the Git checkout directory at %s.":                                                                                       "无法验证 %s 下的 Git 工作树目录。",
+	"The workspace Git scan reached its limit.":                                                                                             "工作区 Git 扫描已达到上限。",
+	"The Git checkout paths changed. Review a fresh deletion confirmation.":                                                                 "Git 工作树路径已更改。请重新检查并确认删除。",
+	"Force Delete is available only for live workspaces and their interrupted deletions.":                                                   "只有当前工作区及其中断的删除支持强制删除。",
+	"Too many deletion confirmations are open. Close one and try again.":                                                                    "打开的删除确认过多。请关闭一项后重试。",
+	"This Force Delete confirmation expired or was used. Check the workspace again.":                                                        "这次强制删除确认已过期或已使用。请重新检查工作区。",
 	"This workspace is no longer here. Reopen its menu.":                                                                                    "这份工作区已不存在，请重新打开菜单。",
 	"cannot verify the workspace directory identity on this filesystem":                                                                     "此文件系统无法确认工作区目录的身份。",
 	// Settings › pi: sources refused before pi sees them

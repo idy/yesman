@@ -15,7 +15,7 @@ import { isTaskLog } from './task-log.js';
 import { createWorktreeMenu, worktreeEntry } from './worktree-cleanup.js';
 
 // How long each part is kept before the panel asks again by itself.
-const FRESH = { info: 5000, pulls: 120000, usage: 60000 };
+const FRESH = { info: 5000, checkouts: 60000, pulls: 120000, usage: 60000 };
 
 // createInfo returns the panel. host:
 //   call(method, ...args), fail(err)
@@ -57,6 +57,7 @@ export function createInfo(host) {
           host.reconcile?.(y, d.info.worktrees, !d.info.worktreesError);
         }
       }
+      else if (part === 'checkouts') d.checkouts = await host.call('WorkspaceCheckouts', name, d.hire ?? null);
       else if (part === 'pulls') d.pulls = Object.fromEntries((await host.call('Pulls', name, refresh)).map((p) => [p.dir, p]));
       else d.usage = await host.call('Usage', name, refresh);
       d.error[part] = null;
@@ -72,7 +73,7 @@ export function createInfo(host) {
   // stale asks again for what is older than it should be.
   function stale(name) {
     const d = stateOf(name);
-    for (const part of ['info', 'pulls', 'usage']) {
+    for (const part of ['info', 'checkouts', 'pulls', 'usage']) {
       if (!d.busy[part] && !(Date.now() - (d.at[part] ?? 0) < FRESH[part])) load(name, part);
     }
   }
@@ -279,12 +280,19 @@ export function createInfo(host) {
 
   function worktrees(y, d) {
     const list = d.info?.worktrees;
-    const busy = d.busy.info || d.busy.pulls;
-    const refresh = refreshButton(t('Refresh the worktrees and their pull requests'), busy, () => { load(y.name, 'info'); load(y.name, 'pulls', true); });
+    const busy = d.busy.info || d.busy.pulls || d.busy.checkouts;
+    const refresh = refreshButton(t('Refresh the worktrees and their pull requests'), busy, () => {
+      load(y.name, 'info');
+      load(y.name, 'checkouts');
+      load(y.name, 'pulls', true);
+    });
+    const local = (d.checkouts?.entries ?? []).filter(e => !list?.some(w => w.dir === e.path));
+    const scanProblem = d.error.checkouts || d.checkouts?.problem;
+    const scanning = !scanProblem && (!d.checkouts || d.busy.checkouts);
     let body;
     if (!d.info) {
       body = d.error.info ? h('p', { class: 'info-note danger' }, d.error.info) : h('p', { class: 'info-note' }, t('Loading…'));
-    } else if (!list.length && !d.info.worktreesError) {
+    } else if (!list.length && !d.info.worktreesError && !d.error.info && !local.length && !scanProblem && !scanning) {
       body = h('div', { class: 'info-note' },
         h('span', null, t('No worktrees yet. The agents check out the repositories they need.')),
         h('button', { class: 'mds-link-button info-note-action', type: 'button', onclick: () => host.checkout(y) }, t('Check out a repository…')));
@@ -302,7 +310,13 @@ export function createInfo(host) {
     }
     const heading = h('button', { class: 'worktree-heading', type: 'button', 'aria-haspopup': 'menu',
       'data-info-entry': worktreeEntry(null), onclick: e => menu(e, y), title: t('Worktree actions') }, t('Worktrees'));
-    const card = section(heading, refresh, body);
+    const discovered = local.length ? h('ul', { class: 'info-list', role: 'list' }, local.map(e =>
+      h('li', { class: 'info-local-checkout' },
+        h('span', { class: 'info-local-checkout-path', title: e.path }, e.path === '.' ? t('Workspace root') : e.path),
+        h('span', { class: 'info-row-meta' }, t(e.bare ? 'Local Git repository data' : 'Local Git checkout'))))) : null;
+    const card = section(heading, refresh, body, discovered,
+      scanning ? h('p', { class: 'info-note', role: 'status' }, t('Scanning for local Git checkouts…')) : null,
+      scanProblem ? h('p', { class: 'info-note danger', role: 'status' }, t('Local Git checkout scan is incomplete.'), ' ', scanProblem) : null);
     card.querySelector('.info-heading').oncontextmenu = e => menu(e, y);
     const error = d.error.info || d.info?.worktreesError;
     if (d.info && error) card.append(h('p', { class: 'info-note danger', role: 'status' }, t('Could not refresh Worktrees.'), ' ', error));

@@ -11,6 +11,7 @@ const cwd = fileURLToPath(new URL('..', import.meta.url));
 const tmp = await mkdtemp(join(tmpdir(), 'delete-browser-'));
 const exe = join(tmp, `fixture${process.platform === 'win32' ? '.exe' : ''}`);
 const out = process.env.YESMAN_DELETE_SHOTS;
+const baseline = process.env.YESMAN_DELETE_BASELINE === '1';
 if (out) await mkdir(out, { recursive: true });
 
 async function run(engine, name, lang) {
@@ -43,6 +44,14 @@ async function run(engine, name, lang) {
         switch(m){
           case 'State': { const v=await rpc(m);agents=v.agents??=[];return v; }
           case 'PrepareWorkspaceDeletion': return rpc(m,{name:args[0],since:args[1]});
+          case 'WorkspaceCheckouts': {
+            const scan = await rpc(m, {name:args[0],since:args[1]});
+            if (window.holdScan) await new Promise(r => window.releaseScan = r);
+            return window.partialScan ? {...scan, problem:'Fixture scan incomplete'} : scan;
+          }
+          case 'CheckWorkspaceForceDeletion': return rpc(m,{target:args[0]});
+          case 'CancelWorkspaceForceDeletion': return rpc(m,{token:args[0]});
+          case 'ForceDeleteWorkspace': return rpc(m,{target:args[0],token:args[1]});
           case 'DeleteWorkspace': if (window.hold) await new Promise(r=>window.release=r); return rpc(m,{target:args[0]});
           case 'StoredWorkspaces': {
             const records = await rpc(m);
@@ -60,7 +69,7 @@ async function run(engine, name, lang) {
             if (window.holdHire) await new Promise((resolve, reject) => window.releaseHire = () => reject(Error('Fixture hire unavailable')));
             return rpc(m, {name:args[0]});
           case 'Models':return {models:[],agent:agents.find(a=>a.id===args[0])};
-          case 'Info':return {knowledge:[],worktrees:[]};
+          case 'Info': return rpc(m, {name:args[0]});
           case 'Schedules':return {plans:[]};
           case 'Board':return {tasks:[]};
           case 'RestartStatus':return {};
@@ -93,9 +102,72 @@ async function run(engine, name, lang) {
     const listReady = () => page.waitForFunction(() => document.querySelector('[data-storage-key="list"]')?.getAttribute('aria-disabled') === 'false');
     const count = m => page.evaluate(m=>calls.filter(c=>c[0]===m).length,m);
     const screenshot = async suffix => { if(out) await page.screenshot({path:join(out,`${name}-${suffix}.png`)}); };
+    const bazel = page.locator('[data-agent="bazel-builds/lead"][data-sidebar-entry="yesman"]');
+    const bazelPath = '.yesman/tmp/t12/display-fw/bazel-output/execroot/_main';
+    const worktrees = page.locator('#yesman-info .info-section').filter({has:page.locator('.worktree-heading')});
+    const openInfo = page.getByRole('button', {name: /^(Show the info|显示信息)/});
+    const hideInfo = page.getByRole('button', {name: /^(Hide the info|隐藏信息)/});
+    const reviewForce = dialog.getByRole('button', {name:/^(Force Delete…|强制删除…)$/});
+    const commitForce = dialog.getByRole('button', {name:/^(Force Delete|强制删除)$/});
+    await bazel.click();
+    if (!baseline) await page.evaluate(() => { window.holdScan = true; });
+    await openInfo.click();
+    if (baseline) {
+      await worktrees.getByText(/No worktrees yet|还没有工作树|尚无工作树/).waitFor();
+      await bazel.click({button:'right'});
+      await ok.click();
+      await dialog.getByRole('alert').getByText(bazelPath, {exact:false}).waitFor();
+      assert.equal(await reviewForce.count(),0);
+      await screenshot('baseline-missing-row-blocked');
+      console.log(`${name} ${lang}: v0.1.60 omitted ${bazelPath} and refused Delete`);
+      return;
+    }
+    await page.waitForFunction(() => !!window.releaseScan);
+    await worktrees.getByText(/Scanning for local Git checkouts|正在扫描本地 Git 工作树/).waitFor();
+    assert.equal(await worktrees.getByText(/No worktrees yet|还没有工作树|尚无工作树/).count(),0);
+    await page.evaluate(() => { window.partialScan = true; window.holdScan = false; releaseScan(); });
+    await worktrees.getByText('Fixture scan incomplete').waitFor();
+    const row = worktrees.getByText(bazelPath, {exact:true});
+    await row.waitFor();
+    assert.equal(await row.locator('..').getByRole('button').count(),0);
+    await page.evaluate(() => { window.partialScan = false; });
+    await worktrees.getByRole('button', {name:/Refresh the worktrees|刷新工作树/}).click();
+    await worktrees.getByText('Fixture scan incomplete').waitFor({state:'detached'});
+    await screenshot('local-checkout');
+    const openForce = async () => {
+      await bazel.click({button:'right'});
+      await reviewForce.waitFor();
+      assert(await ok.isDisabled());
+      await dialog.getByText(`yesmen/bazel-builds/${bazelPath}`, {exact:true}).waitFor();
+      assert(await cancel.evaluate(n => n === document.activeElement));
+    };
+    await openForce();
+    await page.keyboard.press('Enter');
+    await dialog.waitFor({state:'detached'});
+    await openForce(); await reviewForce.click(); await commitForce.waitFor();
+    assert(await cancel.evaluate(n => n === document.activeElement));
+    await page.keyboard.press('Escape'); await dialog.waitFor({state:'detached'});
+    await openForce(); await reviewForce.click(); await cancel.click(); await dialog.waitFor({state:'detached'});
+    assert.equal(await count('ForceDeleteWorkspace'),0);
+    assert.equal(await count('DeleteWorkspace'),0);
+    await openForce(); await reviewForce.click();
+    await page.evaluate(() => rpc('AddLateCheckout'));
+    await commitForce.click();
+    await dialog.getByRole('alert').getByText(/paths changed|路径已更改/).waitFor();
+    await dialog.getByRole('button', {name:/^(Check again|再次检查)$/}).click();
+    await reviewForce.waitFor();
+    await dialog.getByText('yesmen/bazel-builds/.yesman/tmp/second-checkout', {exact:true}).waitFor();
+    await reviewForce.click();
+    await dialog.getByText(/Git commits or branches stored only here|仅存于此的 Git 提交或分支/).waitFor();
+    await screenshot('force-confirmation');
+    await commitForce.click();
+    await dialog.waitFor({state:'detached'}); await bazel.waitFor({state:'detached'});
+    await hideInfo.click();
+    assert.equal(await count('ForceDeleteWorkspace'),2);
     await lead.waitFor(); await lead.focus();
+    const prepareCount = await count('PrepareWorkspaceDeletion');
     await page.keyboard.press('Meta+Shift+Y');
-    assert.equal(await count('PrepareWorkspaceDeletion'),0,'old binding must stay inert');
+    assert.equal(await count('PrepareWorkspaceDeletion'),prepareCount,'old binding must stay inert');
     await lead.click({button:'right'});
     await page.waitForFunction(()=>document.querySelector('.delete-permanently:enabled'));
     assert.equal(await dialog.getByRole('heading').innerText(),lang==='en'?'Delete “Paper Kites”?':'删除“Paper Kites”？');

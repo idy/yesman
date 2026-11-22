@@ -34,6 +34,9 @@ func TestDeletionBrowserBridge(t *testing.T) {
 	other, err := s.HireNamed(t.Context(), "Retained")
 	must(t, err)
 	must(t, os.Mkdir(filepath.Join(other.Path, "unfinished-checkout"), 0700))
+	bazel, err := s.HireNamed(t.Context(), "Bazel Builds")
+	must(t, err)
+	fixtureLocalCheckout(t, bazel, bazelCheckout)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /fixture", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -41,6 +44,7 @@ func TestDeletionBrowserBridge(t *testing.T) {
 			Name   string
 			Since  time.Time
 			Target yesmen.DeletionTarget
+			Token  string
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad fixture request", 400)
@@ -57,6 +61,18 @@ func TestDeletionBrowserBridge(t *testing.T) {
 			value, err = s.HireNamed(r.Context(), req.Name)
 		case "PrepareWorkspaceDeletion":
 			value, err = s.PrepareWorkspaceDeletion(req.Name, req.Since)
+		case "Info":
+			value, err = s.Info(r.Context(), req.Name)
+		case "WorkspaceCheckouts":
+			value, err = s.WorkspaceCheckouts(r.Context(), req.Name, req.Since)
+		case "CheckWorkspaceForceDeletion":
+			value, err = s.CheckWorkspaceForceDeletion(r.Context(), req.Target)
+		case "CancelWorkspaceForceDeletion":
+			s.CancelWorkspaceForceDeletion(req.Token)
+		case "ForceDeleteWorkspace":
+			err = s.ForceDeleteWorkspace(r.Context(), req.Target, req.Token)
+		case "AddLateCheckout":
+			fixtureLocalCheckout(t, bazel, ".yesman/tmp/second-checkout")
 		case "StoredWorkspaces":
 			value, err = s.StoredWorkspaces()
 		case "DeleteWorkspace":

@@ -22,6 +22,10 @@ func (s *service) StoredWorkspaces() ([]yesmen.DeletionTarget, error) {
 }
 
 func (s *service) DeleteWorkspace(ctx context.Context, target yesmen.DeletionTarget) error {
+	return s.deleteWorkspace(ctx, target, nil)
+}
+
+func (s *service) deleteWorkspace(ctx context.Context, target yesmen.DeletionTarget, force *yesmen.ForceDeletion) error {
 	a := s.app
 	if a.schedules != nil {
 		finish, err := a.schedules.BeginStorageChange()
@@ -30,7 +34,7 @@ func (s *service) DeleteWorkspace(ctx context.Context, target yesmen.DeletionTar
 		}
 		defer finish()
 	}
-	detached, err := a.yesmen.Delete(ctx, target, a.pool.CheckWorkspaceDeletion, func(y yesmen.Yesman) error {
+	stopAgents := func(y yesmen.Yesman) error {
 		stop, cancel := context.WithTimeout(ctx, time.Minute)
 		defer cancel()
 		if err := a.agents.StopYesmanContext(stop, y.Name); err != nil {
@@ -40,7 +44,14 @@ func (s *service) DeleteWorkspace(ctx context.Context, target yesmen.DeletionTar
 			a.schedules.RetireYesman(y.Name, y.HiredAt)
 		}
 		return nil
-	}, a.pool.RelocatedPrimary)
+	}
+	var detached bool
+	var err error
+	if force != nil {
+		detached, err = a.yesmen.DeleteWithCheckoutConfirmation(ctx, target, force, a.pool.CheckWorkspaceDeletion, stopAgents, a.pool.RelocatedPrimary)
+	} else {
+		detached, err = a.yesmen.Delete(ctx, target, a.pool.CheckWorkspaceDeletion, stopAgents, a.pool.RelocatedPrimary)
+	}
 	if detached {
 		a.agents.ForgetYesman(target.Entry, target.HiredAt)
 		a.countHandoffs(target.Entry)

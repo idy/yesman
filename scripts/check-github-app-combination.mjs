@@ -33,6 +33,7 @@ try{for(const [name,engine] of Object.entries({chromium,webkit})){
    window.mygo={locale:'en',platform:'darwin',on:(n,f)=>{window.events[n]=f;},call:async(full,...args)=>{
     const method=full.replace('Yesman.','');window.bridgeCalls.push({method,args});
     if(real.has(method)){const r=await fetch('/fixture/call',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({method,args})});if(!r.ok)throw Error('fixture HTTP '+r.status);const v=await r.json();if(v.error)throw Error(v.error);return v.value;}
+    if(method==='WorkspaceCheckouts')return{entries:[]};
     if(method==='Clones')return[];
     if(method==='Schedules')return{plans:[]}; // the info panel's Tasks row: no scheduled tasks
     if(method==='Fetches')return{fetching:[],errors:{}};

@@ -75,6 +75,7 @@ window.mygo={locale:'en',on:(name,fn)=>handlers[name]=fn,call:async(method,...ar
  case 'Fetches':return {fetching:[],errors:{}};
  case 'TakeFocus':return '';case 'Update':return {enabled:false};case 'RestartStatus':return {};
  case 'Messages':return {messages:[]};case 'Models':return {models:[],agent:fixtureState.agents.find(a=>a.id===args[0])};
+ case 'WorkspaceCheckouts':return {entries:[]};
  case 'Info':return {knowledge:{notes:2,index:true},worktrees:[]};case 'Board':return {tasks:[]};
  case 'Schedules':return {plans:[]};case 'Crew':return {members:[],yesman:''};
  case 'WatchFiles':case 'Reveal':case 'OpenURL':return;

@@ -196,7 +196,7 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			}
 			value, err = map[string]any{"trees": wts, "checkpoints": refs}, e
 		default:
-			if !slices.Contains([]string{"State", "Info", "Usage", "ListFiles", "ReadFile", "ReadWorktreeFile", "WriteWorktreeFile", "BeginWorktreeEdit", "EndWorktreeEdit", "PreviewWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
+			if !slices.Contains([]string{"State", "Info", "WorkspaceCheckouts", "Usage", "ListFiles", "ReadFile", "ReadWorktreeFile", "WriteWorktreeFile", "BeginWorktreeEdit", "EndWorktreeEdit", "PreviewWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
 				http.Error(w, "method", 400)
 				return
 			}

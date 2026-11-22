@@ -127,7 +127,8 @@ func directDir(parent *os.Root, name string) (*os.Root, error) {
 		return nil, err
 	}
 	opened, err := dir.Stat(".")
-	if err != nil || !os.SameFile(st, opened) {
+	current, currentErr := parent.Lstat(name)
+	if err != nil || currentErr != nil || current.Mode().Type() != fs.ModeDir || !os.SameFile(st, opened) || !os.SameFile(st, current) {
 		dir.Close()
 		return nil, fmt.Errorf("%s changed while opening it", name)
 	}
@@ -288,7 +289,11 @@ func (s *Store) StoredWorkspaces() ([]DeletionTarget, error) {
 // unlink. A new hire can reserve the old path from then on. Cleanup operates
 // solely on the staged instance. detached reports a committed live removal
 // even when the remaining bytes still need attention.
-func (s *Store) Delete(ctx context.Context, want DeletionTarget, registrations func(context.Context, string) error, stop func(Yesman) error, relocated ...RelocatedPrimary) (detached bool, err error) {
+func (s *Store) Delete(ctx context.Context, want DeletionTarget, registrations func(context.Context, string) error, stop func(Yesman) error, relocated ...RelocatedPrimary) (bool, error) {
+	return s.deleteWorkspace(ctx, want, registrations, stop, relocated, nil)
+}
+
+func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, registrations func(context.Context, string) error, stop func(Yesman) error, relocated []RelocatedPrimary, force *ForceDeletion) (detached bool, err error) {
 	original, name, staged, ok := deletionEntry(want.Entry, want.Archived)
 	if registrations == nil || (!want.Archived && staged == "" && stop == nil) {
 		return false, errors.New("workspace deletion requires worktree and agent lifecycle checks")
@@ -330,7 +335,7 @@ func (s *Store) Delete(ctx context.Context, want DeletionTarget, registrations f
 		return false, err
 	}
 	preflight := func(phase deletionWalk) error {
-		ws, err := directDir(parent, want.Entry)
+		ws, err := openDeletionTarget(s, parent, want)
 		if err != nil {
 			return err
 		}
@@ -338,10 +343,10 @@ func (s *Store) Delete(ctx context.Context, want DeletionTarget, registrations f
 		if err := registrations(ctx, ws.Name()); err != nil {
 			return err
 		}
-		if err := walkDeletion(ctx, ws, phase); err != nil {
+		if err := walkWorkspaceDeletion(ctx, ws, phase, force); err != nil {
 			return err
 		}
-		return s.checkWorktreeRecords(ctx, parent, ws, want, relocated)
+		return s.checkWorktreeRecords(ctx, parent, ws, want, relocated, true)
 	}
 	if err := preflight(inspectDeletion); err != nil {
 		return false, err
@@ -388,14 +393,14 @@ func (s *Store) Delete(ctx context.Context, want DeletionTarget, registrations f
 	}
 	// Reopen and verify the moved object before touching any bytes, including
 	// on retry after process restart. Never RemoveAll a reusable name.
-	err = s.purgeDetached(ctx, parent, entry, want.Archived)
+	err = s.purgeDetached(ctx, parent, entry, want.Archived, force)
 	if err != nil {
 		return detached, &DeletionIssue{Message: "Deletion is incomplete at %s. Check the remaining files, then retry in Settings → Storage → Stored workspaces.", Args: []any{filepath.Join(parent.Name(), entry)}, Cause: err}
 	}
 	return detached, nil
 }
 
-func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string, archived bool) error {
+func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string, archived bool, force *ForceDeletion) error {
 	ws, err := directDir(parent, entry)
 	if err != nil {
 		return err
@@ -415,7 +420,7 @@ func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string
 	if now, err := parent.Lstat(entry); err != nil || !os.SameFile(st, now) {
 		return errors.New("the detached directory changed")
 	}
-	if err := walkDeletion(ctx, ws, purgeDeletion); err != nil {
+	if err := walkWorkspaceDeletion(ctx, ws, purgeDeletion, force); err != nil {
 		return err
 	}
 	if now, err := parent.Lstat(entry); err != nil || !os.SameFile(st, now) {
@@ -428,7 +433,7 @@ func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string
 // archive. Callers without access to the pool keep the original refusal.
 type RelocatedPrimary func(context.Context, string, WorktreeRecord) (string, error)
 
-func (s *Store) checkWorktreeRecords(ctx context.Context, parent, ws *os.Root, target DeletionTarget, relocated []RelocatedPrimary) error {
+func (s *Store) checkWorktreeRecords(ctx context.Context, parent, ws *os.Root, target DeletionTarget, relocated []RelocatedPrimary, save bool) error {
 	meta, err := directDir(ws, ".yesman")
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -466,6 +471,9 @@ func (s *Store) checkWorktreeRecords(ctx context.Context, parent, ws *os.Root, t
 			moved, err := relocated[0](ctx, ws.Name(), r)
 			if err != nil {
 				return &DeletionIssue{Message: "Could not verify the new location of primary worktree %q. Move it with Git and keep its registration.", Args: []any{r.Dir}, Cause: err}
+			}
+			if !save {
+				continue
 			}
 			if err := s.recordPrimaryRelocation(parent, target, record, moved); err != nil {
 				return &DeletionIssue{Message: "Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.", Args: []any{r.Dir, filepath.Join(parent.Name(), relocationFolder)}, Cause: err}

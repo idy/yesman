@@ -19,13 +19,13 @@ const (
 )
 
 // Walk one verified directory handle at a time. A file or link is unlinked as
-// an entry; only an empty directory is ever removed. This deliberately avoids
-// recursive RemoveAll, which would also erase a nested checkout or mounted disk.
-func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk) error {
+// an entry. Only an empty directory is ever removed.
+func walkWorkspaceDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *ForceDeletion) error {
 	volume, err := directoryIdentity(ws)
 	if err != nil {
 		return err
 	}
+	seen := 0
 	var visit func(*os.Root, string) error
 	visit = func(dir *os.Root, rel string) error {
 		if err := ctx.Err(); err != nil {
@@ -42,19 +42,44 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk) error {
 		if err != nil {
 			return err
 		}
-		var head, objects bool
-		for _, e := range entries {
-			switch strings.ToLower(e.Name()) {
-			case ".git":
+		entry, markers := gitMarkers(rel, entries)
+		var verified map[string]fs.FileInfo
+		if len(markers) > 0 {
+			if force == nil {
+				if entry.Bare {
+					return deletionIssue("%s contains Git repository data. Move the repository out of the workspace first.", rel)
+				}
 				return deletionIssue("%s contains a Git checkout. Move it with Git or finish its managed cleanup first.", rel)
-			case "objects":
-				objects = true
-			case "head":
-				head = true
 			}
-		}
-		if head && objects {
-			return deletionIssue("%s contains Git repository data. Move the repository out of the workspace first.", rel)
+			current, err := observeCheckout(dir, entry, id, markers)
+			if err != nil {
+				return err
+			}
+			if !force.paths[rel].matches(current) {
+				return errCheckoutPreviewChanged
+			}
+			verified = current.markers
+			seen++
+			if phase == purgeDeletion {
+				// Keep the marker until the ordinary files have been removed.
+				// An interrupted purge can then show it again on retry.
+				other := make([]os.DirEntry, 0, len(entries))
+				for _, e := range entries {
+					if verified[e.Name()] == nil {
+						other = append(other, e)
+					}
+				}
+				for _, e := range entries {
+					if verified[e.Name()] != nil {
+						other = append(other, e)
+					}
+				}
+				entries = other
+			}
+		} else if force != nil {
+			if _, approved := force.paths[rel]; approved {
+				return errCheckoutPreviewChanged
+			}
 		}
 		if len(entries) > 0 {
 			if err := deletionDirectoryAccess(dir, rel, phase != inspectDeletion); err != nil {
@@ -71,9 +96,12 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk) error {
 			if err != nil {
 				return err
 			}
+			if expected := verified[name]; expected != nil && !os.SameFile(st, expected) {
+				return errCheckoutPreviewChanged
+			}
 			switch {
 			case st.Mode().Type() == fs.ModeDir:
-				if rel == "." && name != ".yesman" {
+				if rel == "." && name != ".yesman" && verified[name] == nil && !force.permitsTopLevel(name) {
 					return deletionIssue("Move %q out of the workspace first. For a worktree, use Git or its managed cleanup.", name)
 				}
 				d, err := directDir(dir, name)
@@ -116,7 +144,13 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk) error {
 		}
 		return nil
 	}
-	return visit(ws, ".")
+	if err := visit(ws, "."); err != nil {
+		return err
+	}
+	if force != nil && seen != len(force.paths) {
+		return errCheckoutPreviewChanged
+	}
+	return nil
 }
 
 func singleDeletionFile(dir *os.Root, name string, st fs.FileInfo) error {
