@@ -20,6 +20,7 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createBashToolDefinition, createEditToolDefinition, createPowerShellToolDefinition, createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import * as agentCore from "@earendil-works/pi-agent-core";
 
 const API = process.env.YESMAN_API;
 const TOKEN = process.env.YESMAN_TOKEN;
@@ -89,11 +90,12 @@ function sharedDocumentPath(path: unknown): boolean {
 	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
-async function call(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal): Promise<any> {
+async function call(method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal, input?: string): Promise<any> {
 	const res = await fetch(API + path, {
 		method,
 		headers: {
 			Authorization: `Bearer ${TOKEN}`,
+			...(input ? { "X-Yesman-Input": input } : {}),
 			...(body === undefined ? {} : { "Content-Type": "application/json" }),
 		},
 		body: body === undefined ? undefined : JSON.stringify(body),
@@ -455,6 +457,40 @@ export default function yesman(pi: ExtensionAPI) {
 	if (!API || !TOKEN || !AGENT) return; // not started by yesman
 
 	trackOrigins(pi);
+	remember([{ name: "YESMAN_TOKEN", value: TOKEN }]);
+
+	const projectTool = async (path: string, params: unknown, limit: number, signal?: AbortSignal) => {
+		const [value] = await Promise.all([call("POST", path, params, signal), refreshHidden(signal)]);
+		const text = JSON.stringify(hideJSON(value));
+		return result(Buffer.byteLength(text) <= limit ? text : JSON.stringify({ version: 1, status: "source_unavailable", message: "The result exceeds the page limit after redaction." }));
+	};
+	pi.registerTool({
+		name: "context_search",
+		label: "Search project context",
+		description: "Search this workspace's Knowledge, Working Logs, Topics, Board or scheduled Tasks. Returns up to five excerpts and refs per page. Use source history for an explicit Chat History availability check.",
+		annotations: { readOnlyHint: true, openWorldHint: false },
+		parameters: Type.Object({
+			query: Type.Optional(Type.String({ description: "Chinese or English keyword, phrase or ID", maxLength: 160 })),
+			id: Type.Optional(Type.String({ description: "Exact item ID. Use an exact Topic ID to include a resolved or archived Topic." })),
+			source: Type.Optional(Type.Union([Type.Literal("knowledge"), Type.Literal("working_logs"), Type.Literal("topics"), Type.Literal("board"), Type.Literal("tasks"), Type.Literal("history")])),
+			from: Type.Optional(Type.String({ description: "First date, inclusive (YYYY-MM-DD)" })),
+			to: Type.Optional(Type.String({ description: "Last date, inclusive (YYYY-MM-DD)" })),
+			cursor: Type.Optional(Type.String({ description: "Pass with the same filters to continue" })),
+		}),
+		execute: (_id, params, signal) => projectTool("/v1/context/search", params, 3500, signal),
+	});
+	pi.registerTool({
+		name: "context_read",
+		label: "Read project context",
+		description: "Read the original section or field near a project search hit. Use the returned cursor with the same ref to continue. Re-search if the source changed.",
+		annotations: { readOnlyHint: true, openWorldHint: false },
+		parameters: Type.Object({
+			ref: Type.String({ description: "Reference from project context" }),
+			cursor: Type.Optional(Type.String({ description: "Continue within the same field" })),
+			large: Type.Optional(Type.Boolean({ description: "Allow a larger page when needed" })),
+		}),
+		execute: (_id, params, signal) => projectTool("/v1/context/read", params, params.large ? 8000 : 4100, signal),
+	});
 
 	if (ROLE === "lead") {
 		// Narrow the lead's tools before every run, in case something
@@ -476,17 +512,21 @@ export default function yesman(pi: ExtensionAPI) {
 		});
 	}
 
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		let text: string;
 		try {
-			[text] = await Promise.all([call("GET", "/v1/context"), commandEnv()]);
+			// The managed Pi associates this hook with the triggering occurrence
+			// outside its public event fields. Older Pi has no such binding.
+			const native = agentCore as typeof agentCore & { triggerIdentity?: (event: object) => { submissionId?: string } };
+			const input = native.triggerIdentity?.(event)?.submissionId;
+			[text] = await Promise.all([call("GET", "/v1/context", undefined, ctx.signal, input), commandEnv()]);
 		} catch (err) {
 			text = `The yesman app did not answer (${(err as Error).message}), so yesman's tools may fail.`;
 		}
 		const options = event.systemPromptOptions as { sections?: Record<string, string | null> } | undefined;
 		if (options) {
 			options.sections ??= {};
-			options.sections.yesman = text;
+			options.sections.yesman = hide(text);
 		}
 	});
 
@@ -802,6 +842,13 @@ export default function yesman(pi: ExtensionAPI) {
 			name: Type.String({ description: "Short name: 1-32 lowercase letters, digits and dashes, such as fix-login" }),
 			title: Type.String({ description: "The subject of its work in a few words, up to 80 characters, as the user should see it: usually its board task's title, such as \"Fix the login timeout\". Not an instruction like \"Do task t5\"." }),
 			task: Type.String({ description: "The task, complete enough to work on without asking" }),
+			dispatch: Type.Optional(Type.Object({
+				boardTask: Type.Optional(Type.String({ description: "Exact Board task ID to focus" })),
+				goal: Type.Optional(Type.String()),
+				constraints: Type.Optional(Type.String()),
+				deliverables: Type.Optional(Type.String()),
+				sources: Type.Optional(Type.Array(Type.String(), { maxItems: 5, description: "Relevant context refs" })),
+			}, { description: "Short persistent worker brief. Put all essentials in task too." })),
 			label: Type.Optional(Type.Union([Type.Literal("operations"), Type.Literal("backend"), Type.Literal("frontend"), Type.Literal("default")], {
 				description: "Choose a label for each new task. Match the task’s primary deliverable using the Crew dispatch guidance. Use default for an unmatched task. Keep the matched label even if its pool is empty.",
 			})),

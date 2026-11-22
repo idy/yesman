@@ -288,8 +288,8 @@ func TestTopicsWithLocalPi(t *testing.T) {
 		t.Fatalf("sends A %+v B %+v", gotA.Sends, gotB.Sends)
 	}
 
-	// What reached the model: visible lines only, no internal fields, and the
-	// topic index without bodies in the lead's system prompt.
+	// Project context uses the managed runtime's exact pre-run occurrence.
+	// A Topic queued into that run does not replace the active brief.
 	data, err := os.ReadFile(audit)
 	must(t, err)
 	for _, leak := range []string{idA, idB, idMain, "yesmanDeliveryId", "agentSince", "fingerprint", "nextItem"} {
@@ -297,10 +297,11 @@ func TestTopicsWithLocalPi(t *testing.T) {
 			t.Fatalf("model request contains %q: …%s…", leak, string(data)[max(0, i-300):min(len(data), i+100)])
 		}
 	}
-	// The first request's system prompt was built before any tool call, so
-	// the original summary can only have reached the model through the context.
-	if strings.Contains(string(data), "SUMMARY-BODY-SECRET") {
-		t.Fatal("a topic's body was injected into the lead's context")
+	if got := strings.Contains(string(data), "SUMMARY-BODY-SECRET"); got != managed {
+		t.Fatalf("Topic brief content present=%v, expected managed provenance=%v", got, managed)
+	}
+	if strings.Contains(string(data), "Linked Topic tp2") {
+		t.Fatal("a Topic queued into the first run replaced the active brief")
 	}
 	for _, leak := range []string{idList, idRead, "LIST-ONLY-SUMMARY", "LIST-ONLY-QUESTION", "LIST-ONLY-CONCLUSION", `"sends"`} {
 		if i := strings.Index(string(data), leak); i >= 0 {
@@ -314,8 +315,8 @@ func TestTopicsWithLocalPi(t *testing.T) {
 			t.Fatalf("model requests lack %q", want)
 		}
 	}
-	if !strings.Contains(string(data), "## Topics") || !strings.Contains(string(data), "- tp1 Alpha storage") || !strings.Contains(string(data), "- tp2 Beta images") {
-		t.Fatal("the lead's context lacks the topic index")
+	if !strings.Contains(string(data), "## Current project brief") {
+		t.Fatal("the lead's context lacks the project brief")
 	}
 
 	// After a whole restart the native history still carries the same lines.

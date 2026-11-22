@@ -212,6 +212,7 @@ type agent struct {
 	reportRun                      uint64
 	handoff                        reportHandoff
 	info                           Info
+	contextWorker                  yesmen.Worker // current persisted dispatch, set by bindWorker
 	proc                           *proc
 	token                          string
 	operations                     map[*externalOperation]struct{}
@@ -1660,7 +1661,7 @@ func (m *Manager) StartWorkerAs(ctx context.Context, yesman, name, title, task s
 	return m.startWorkerRecord(ctx, y, name, title, task, as, nil, false)
 }
 
-func (m *Manager) startWorkerRecord(ctx context.Context, hire yesmen.Yesman, name, title, task string, as Choice, route WorkerRoute, admitted bool) (Info, error) {
+func (m *Manager) startWorkerRecord(ctx context.Context, hire yesmen.Yesman, name, title, task string, as Choice, route WorkerRoute, admitted bool, dispatch ...yesmen.Dispatch) (Info, error) {
 	if strings.TrimSpace(task) == "" {
 		return Info{}, errors.New("a worker needs a task")
 	}
@@ -1669,6 +1670,9 @@ func (m *Manager) startWorkerRecord(ctx context.Context, hire yesmen.Yesman, nam
 		return Info{}, fmt.Errorf("the title has %d characters: name the subject in at most %d, and put the rest in the task", n, titleLimit)
 	}
 	w := yesmen.Worker{Name: name, Title: title, Task: task, StartedAt: time.Now().UTC()}
+	if len(dispatch) != 0 {
+		w.Dispatch = dispatch[0]
+	}
 	var command *workerCommand
 	register := func(y yesmen.Yesman) error {
 		if !y.HiredAt.Equal(hire.HiredAt) {

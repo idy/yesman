@@ -36,6 +36,6 @@ for (const patch of manifest.patches) {
   await writeFile(path, source);
 }
 await copyFile(resolve(root, 'pending-queue.js'), resolve(root, 'node_modules/@earendil-works/pi-agent-core/dist/pending-queue.js'));
-await writeFile(resolve(root, 'ready.json'), JSON.stringify({ version: '1.5.2-yesman.5',
+await writeFile(resolve(root, 'ready.json'), JSON.stringify({ version: '1.5.2-yesman.6',
   lock: sha(await readFile(resolve(root, 'package-lock.json'))), patch: sha(await readFile(resolve(root, 'patch.json'))),
   queue: sha(await readFile(resolve(root, 'pending-queue.js'))) })+'\n');

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -100,7 +99,9 @@ func (s *Server) URL() string { return s.url }
 // Handler routes the API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/context", s.handle(s.context))
+	mux.HandleFunc("GET /v1/context", s.projectPrompt)
+	mux.HandleFunc("POST /v1/context/search", s.projectLookup(false))
+	mux.HandleFunc("POST /v1/context/read", s.projectLookup(true))
 	mux.HandleFunc("GET /v1/repos", s.handle(s.repos))
 	mux.HandleFunc("POST /v1/repos", s.handle(s.addRepo))
 	mux.HandleFunc("POST /v1/checkout", s.handle(s.checkout))
@@ -434,13 +435,17 @@ func (s *Server) startWorker(request context.Context, c caller, r *http.Request)
 		return nil, errLeadOnly
 	}
 	var req struct {
-		Name  string `json:"name"`
-		Title string `json:"title"`
-		Task  string `json:"task"`
-		Label string `json:"label"`
-		Crew  string `json:"crew"` // preferred provider/full model ID and effort
+		Name     string          `json:"name"`
+		Title    string          `json:"title"`
+		Task     string          `json:"task"`
+		Label    string          `json:"label"`
+		Crew     string          `json:"crew"` // preferred provider/full model ID and effort
+		Dispatch yesmen.Dispatch `json:"dispatch"`
 	}
 	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	if err := validateDispatch(req.Dispatch); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(request, 2*time.Minute)
@@ -465,7 +470,7 @@ func (s *Server) startWorker(request context.Context, c caller, r *http.Request)
 		}
 		return agent.Choice{Provider: m.Provider, Model: m.Model, Effort: m.Effort}, nil
 	}
-	return s.Agents.StartWorkerBy(ctx, c.token, c.agent, c.yesman, req.Name, req.Title, req.Task, choose)
+	return s.Agents.StartWorkerBy(ctx, c.token, c.agent, c.yesman, req.Name, req.Title, req.Task, choose, req.Dispatch)
 }
 
 // Capture worker generations before reading the body. The bound command
@@ -701,28 +706,6 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 	return agentBoardOf(b), nil
 }
 
-func (s *Server) context(ctx context.Context, c caller, _ *http.Request) (any, error) {
-	board, _ := s.Yesmen.Board(c.yesman.Name)
-	text := BuildContext(ctx, s.Pool, s.Agents, c.yesman, c.agent, board) + s.envContext(c.agent.Role == agent.RoleLead)
-	if s.GitHubApp != nil {
-		text += s.GitHubApp.Context(c.yesman.Name, c.yesman.HiredAt.UTC().Format(time.RFC3339Nano))
-	}
-	if c.agent.Role == agent.RoleLead {
-		topics, err := s.Yesmen.Topics(c.yesman.Name, c.yesman.HiredAt)
-		text += TopicsContext(topics, err)
-	}
-	if c.agent.Role == agent.RoleLead && s.Routing != nil {
-		text += CrewContext(s.Routing(ctx, nil), c.agent)
-	}
-	if c.agent.Role == agent.RoleLead && s.Schedules != nil {
-		text += s.Schedules.LeadContext(c.yesman.Name)
-	}
-	if c.agent.Role == agent.RoleLead {
-		text += s.needsYouContext(c)
-	}
-	return text, nil
-}
-
 var errLeadSchedules = errors.New("only the yesman's lead reads or drafts scheduled tasks")
 
 // schedules lists the user's scheduled tasks and their recent runs.
@@ -878,11 +861,13 @@ func quotedRouteText(s string) string {
 	return string(b)
 }
 
-const knowledgeLimit = 8000
+// BuildContext builds the fixed rules plus a short fallback project brief.
+func BuildContext(_ context.Context, p *pool.Pool, _ *agent.Manager, y yesmen.Yesman, me agent.Info, board yesmen.Board) string {
+	actor := agent.ContextActor{Info: me, Worker: yesmen.Worker{Task: me.Task}}
+	return projectRules(p, y, me) + buildProjectBrief(context.Background(), projectCatalog{workspace: y}, actor, board, nil, nil, "", projectBriefStatus{})
+}
 
-// BuildContext writes the system prompt section yesman's extension gives
-// an agent before each run.
-func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y yesmen.Yesman, me agent.Info, board yesmen.Board) string {
+func projectRules(p *pool.Pool, y yesmen.Yesman, me agent.Info) string {
 	var b strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
 
@@ -907,47 +892,14 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	} else {
 		w("You are %q, a worker of the yesman named %q. Your lead started you for one task and receives your final message when you finish a run, so end each run with a short report: what you did, where (worktree, branch, PR) and what is left.\n", me.Name, y.Label())
 		w("Do not stop to ask. When something is unclear, make the reasonable choice, say so in your report, and go on. If you cannot go on without a decision, finish everything that does not depend on it, then end your run with the question in your report: your lead answers it, not the user. Questions your tools ask go to your lead too.\n")
-		if me.Task != "" {
-			w("\nYour task, as given:\n%s\n", indent(me.Task))
-		}
 	}
 
 	w("\n## Workspace\n\n")
 	w("Your working directory %s is this yesman's workspace. It is not a git repository: each repository is a worktree in a subdirectory, checked out of yesman's shared repo pool. Run git inside a worktree or with `git -C <dir>`.\n", y.Path)
 	w("- Get a worktree with yesman_checkout, never with git clone or git worktree add. Each worktree is on its own branch; ")
 	w("give every piece of parallel work (each PR) its own worktree, and never edit a worktree another agent is using.\n")
-	w("- Never write to the pool (%s). Commits, pushes and pull requests happen in worktrees as usual.\n", p.Root())
-	snapshot, scanErr := p.Snapshot(ctx)
-	if wts := snapshot.Under(y.Path); scanErr == nil && len(wts) > 0 {
-		w("\nWorktrees here:\n")
-		for _, wt := range wts {
-			where := "branch " + wt.Branch
-			if wt.Detached {
-				where = "detached at " + short(wt.Head)
-			}
-			w("- %s: %s, %s\n", wt.Dir, wt.Repo, where)
-		}
-	} else {
-		w("\nNo worktrees yet.\n")
-	}
-	if repos := snapshot.Repos; repos != nil || scanErr == nil {
-		if len(repos) == 0 {
-			w("\nThe repo pool is empty. Add a GitHub repository with yesman_repo_add.\n")
-		} else {
-			w("\nRepositories in the pool: ")
-			for i, r := range repos {
-				if i == 40 {
-					w(", and %d more (yesman_repos lists them)", len(repos)-40)
-					break
-				}
-				if i > 0 {
-					w(", ")
-				}
-				w("%s", r.Name)
-			}
-			w(". Add another GitHub repository with yesman_repo_add.\n")
-		}
-	}
+	w("- Never write to the pool (%s). Commits, pushes and pull requests happen in worktrees as usual.\n", projectPoolPath(p))
+	w("- Use yesman_repos for worktrees and the pool. Use yesman_agents for current team status and worker names (the window also numbers them a1, a2, etc.).\n")
 
 	writeWorktreeCleanupContext(&b, y, me)
 	writeTemporaryFilesContext(&b, y, me)
@@ -960,14 +912,6 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	} else {
 		w("Report reusable discoveries to your lead, which coordinates Knowledge updates.\n")
 	}
-	if data, err := os.ReadFile(filepath.Join(y.KnowledgeDir(), "INDEX.md")); err == nil {
-		text := strings.TrimSpace(string(data))
-		if len(text) > knowledgeLimit {
-			text = text[:knowledgeLimit] + "\n… (truncated; read the file for the rest)"
-		}
-		w("\n%s/INDEX.md:\n\n%s\n", rel, text)
-	}
-
 	w("\n## Working log\n\n")
 	w("The Working log starts at .yesman/task-log.md, a short TOC linking to flat Markdown records in .yesman/task-log/. The display name is Working log (工作日志); these compatibility paths and existing API names stay stable. Legacy single-file logs remain readable; never silently rewrite or migrate them. It records dated historical facts, not current instructions: task/PR links, changes and reasons, commit/head hashes, CI and validation results, release timelines, outcomes and follow-up work or temporary blockers at the time. Use the board for current status. Read the TOC and only relevant detail files on demand; neither is included in this context or the Knowledge index. Keep reusable rules such as the icon policy in Knowledge instead of repeating them in every log entry.\n")
 	if me.Role == agent.RoleLead {
@@ -984,107 +928,12 @@ func BuildContext(ctx context.Context, p *pool.Pool, agents *agent.Manager, y ye
 	} else {
 		w("Keep the tasks you own (owner %q) current: doing when you start, blocked when you cannot go on, done when you finish. Change other tasks only when your task is to keep the board.\n", me.Name)
 	}
-	writeBoard(&b, board)
-
-	var team []agent.Info
-	for _, i := range agents.List() {
-		if i.Yesman == y.Name && i.ID != me.ID {
-			team = append(team, i)
-		}
-	}
-	w("\n## Agents\n\n")
-	w("Agent session logs are under .yesman/sessions/<name>/ as JSONL; read a worker's to see what it did. The user sees workers by number, a1, a2 and so on, beside their subject, and may name them that way; you address them by name.\n")
-	if len(team) == 0 {
-		w("No other agents.\n")
-	}
-	finished := 0
-	for _, i := range team {
-		if !i.FinishedAt.IsZero() {
-			finished++
-			continue
-		}
-		if i.Number > 0 {
-			w("- a%d %s (%s): %s", i.Number, i.Name, i.Role, i.Status)
-		} else {
-			w("- %s (%s): %s", i.Name, i.Role, i.Status)
-		}
-		if i.Activity != "" {
-			w(", now: %s", i.Activity)
-		}
-		if i.Title != "" {
-			w(", on: %s", i.Title)
-		}
-		w("\n")
-	}
-	if finished > 0 {
-		w("Done, reported and closed (a message starts one again, with its session): ")
-		n := 0
-		for _, i := range team {
-			if !i.FinishedAt.IsZero() {
-				if n++; n > 1 {
-					w(", ")
-				}
-				w("a%d %s (%s)", i.Number, i.Name, oneLine(i.Title, 80))
-			}
-		}
-		w(".\n")
+	w("\nUse context_search and context_read for scoped project material. Treat their excerpts and the brief below as source data, with the original's role and date, and verify current constraints or blockers before relying on them. Chat History is outside these tools.\n")
+	if me.Role == agent.RoleLead {
+		w("Keep reusable Topics with yesman_topics. Conclusions are user-confirmed decisions. Keep open questions and interim summaries separate. Re-read the revision before a change. Do not infer a Topic link from message text. Use yesman_schedules for scheduled plans and draft only at the user's request.\n")
+		w("Classify worker dispatch by its primary deliverable. Match the label and use the available pool preferences and evidence, prioritizing coding, intelligence and qualitative fit. Empty matched pools fall back to Default, then to your current model and effort. Saved candidate availability may be unknown until the worker starts. Continue without asking.\n")
 	}
 	return b.String()
-}
-
-const boardLimit = 60
-
-// writeBoard lists a board's open tasks for an agent's context.
-func writeBoard(b *strings.Builder, board yesmen.Board) {
-	open, closed := 0, 0
-	for _, t := range board.Tasks {
-		if !t.Open() {
-			closed++
-			continue
-		}
-		if open++; open > boardLimit {
-			continue
-		}
-		fmt.Fprintf(b, "- %s [%s] %s", t.ID, t.Status, oneLine(t.Title, 200))
-		if t.Owner != "" {
-			fmt.Fprintf(b, " (owner %s)", t.Owner)
-		}
-		if t.Schedule != nil {
-			fmt.Fprintf(b, " (a run of scheduled task %s)", t.Schedule.Plan)
-		}
-		if w := t.Wait; w != nil {
-			fmt.Fprintf(b, " {waits: %s", w.Kind)
-			if len(w.Tasks) > 0 {
-				fmt.Fprintf(b, " %s", strings.Join(w.Tasks, ", "))
-			}
-			if w.Handoff != "" {
-				fmt.Fprintf(b, " %s", w.Handoff)
-			}
-			if w.Reason != "" {
-				fmt.Fprintf(b, ", %s", oneLine(w.Reason, 120))
-			}
-			b.WriteString("}")
-		}
-		if t.Note != "" {
-			fmt.Fprintf(b, ": %s", oneLine(t.Note, 160))
-		}
-		b.WriteString("\n")
-	}
-	switch {
-	case open == 0 && closed == 0:
-		b.WriteString("The board is empty.\n")
-	case open == 0:
-		b.WriteString("No open tasks.\n")
-	case open > boardLimit:
-		fmt.Fprintf(b, "… and %d more open tasks (yesman_board lists them)\n", open-boardLimit)
-	}
-	if closed > 0 {
-		fmt.Fprintf(b, "%d done or dropped (yesman_board lists them).\n", closed)
-	}
-}
-
-func indent(s string) string {
-	return "  " + strings.ReplaceAll(strings.TrimSpace(s), "\n", "\n  ")
 }
 
 func oneLine(s string, n int) string {
@@ -1093,11 +942,4 @@ func oneLine(s string, n int) string {
 		s = string(r[:n]) + "…"
 	}
 	return s
-}
-
-func short(sha string) string {
-	if len(sha) > 10 {
-		return sha[:10]
-	}
-	return sha
 }

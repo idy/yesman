@@ -46,7 +46,8 @@ func TestPinnedManifest(t *testing.T) {
 		}
 		seen[p.Path] = true
 	}
-	if len(seen) != 12 || !seen["@earendil-works/pi-agent-core/dist/agent-loop.js"] || !seen["@earendil-works/pi-agent-core/dist/types.d.ts"] {
+	if len(seen) != 13 || !seen["@earendil-works/pi-agent-core/dist/agent-loop.js"] || !seen["@earendil-works/pi-agent-core/dist/types.d.ts"] ||
+		!seen["@earendil-works/pi-coding-agent/dist/core/extensions/runner.js"] {
 		t.Fatalf("review changed source-file scope: %d", len(seen))
 	}
 }

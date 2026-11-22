@@ -110,6 +110,12 @@ jobs:
             go test -race ./...
           fi
 
+      - name: Trial project context with managed Pi
+        if: runner.os == 'Linux'
+        env:
+          YESMAN_TEST_PROJECT_PI: "1"
+        run: go test -race -count=1 -v -run '^TestProjectContextWithManagedPi$' .
+
       # Each managed write/edit and link-refusal test, by name, with its own
       # PASS or SKIP. Links must be creatable here: a test that cannot make
       # its symbolic link or (Windows) junction fails instead of skipping.

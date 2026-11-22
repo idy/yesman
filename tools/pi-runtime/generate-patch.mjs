@@ -195,5 +195,15 @@ await identityPatch(patch, core, app);
 await idlePatch(patch, core, app);
 await appendPatch(patch, core, app);
 await humanSteerPatch(patch, core, app);
-await writeFile(dest, JSON.stringify({ upstream: '1.5.2', revision: 6, patches }, null, 2)+'\n');
+// Give the Yes Man extension just the triggering occurrence at its existing
+// before_agent_start hook. The association is a WeakMap entry, absent from
+// messages, normal event fields, provider hooks and the JSONL.
+await patch(app+'core/extensions/runner.js', (change) => {
+  change('import { getCurrentSystemMessage, } from "@earendil-works/pi-ai";', 'import { getCurrentSystemMessage, } from "@earendil-works/pi-ai";\nimport { bindInputTrigger, triggerIdentity } from "@earendil-works/pi-agent-core";');
+  change('                    const handlerResult = await handler(event, ctx);\n                    if (handlerResult) {', '                    const handlerResult = await handler(bindInputTrigger(event, { submissionId: triggerIdentity(trigger)?.submissionId }), ctx);\n                    if (handlerResult) {');
+});
+await patch(app+'core/agent-session.js', (change) => {
+  change('        const result = await this._extensionRunner.emitBeforeAgentStart(trigger, this._baseSystemPromptOptions);', '        const hookTrigger = queuedMessages ? bindInputTrigger({ ...trigger }, { submissionId: inputRefAt(queuedMessages, 0)?.submissionId }) : trigger;\n        const result = await this._extensionRunner.emitBeforeAgentStart(hookTrigger, this._baseSystemPromptOptions);');
+});
+await writeFile(dest, JSON.stringify({ upstream: '1.5.2', revision: 7, patches }, null, 2)+'\n');
 console.log(`${patches.length} source files recorded in ${dest}`);

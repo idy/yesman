@@ -1,6 +1,6 @@
 {
   "upstream": "1.5.2",
-  "revision": 6,
+  "revision": 7,
   "patches": [
     {
       "path": "@earendil-works/pi-coding-agent/dist/bundle/cli.js",
@@ -166,7 +166,7 @@
     {
       "path": "@earendil-works/pi-coding-agent/dist/core/agent-session.js",
       "before": "ee756f6f74afe9f8930ebf216c95334605d913a275a0eec2c9702f101baef3c3",
-      "after": "56acb2064cf318ec2aaa337994314463425bcec4acfe7845aa2386a5b065ec4f",
+      "after": "3aa5c60c678e146d0b95f1562a8c4243c0d492b69255a403e21ee097eafcd440",
       "edits": [
         {
           "before": "            followUp: [...this._followUpMessages],",
@@ -459,6 +459,10 @@
         {
           "before": "        if (appendTo) return this._appendQueued(\"steer\", message, { submissionId, hostOrigin }, appendTo);",
           "after": "        if (human) return this.agent.steerHuman(message, { submissionId, hostOrigin }, human, queued => {\n            if (queued.content.length > 1) this._queuedMessagesWithImages.add(queued);\n        });\n        if (appendTo) return this._appendQueued(\"steer\", message, { submissionId, hostOrigin }, appendTo);"
+        },
+        {
+          "before": "        const result = await this._extensionRunner.emitBeforeAgentStart(trigger, this._baseSystemPromptOptions);",
+          "after": "        const hookTrigger = queuedMessages ? bindInputTrigger({ ...trigger }, { submissionId: inputRefAt(queuedMessages, 0)?.submissionId }) : trigger;\n        const result = await this._extensionRunner.emitBeforeAgentStart(hookTrigger, this._baseSystemPromptOptions);"
         }
       ]
     },
@@ -803,6 +807,21 @@
         {
           "before": "    type: \"message_end\";\n    message: AgentMessage;",
           "after": "    type: \"message_end\";\n    /** Host-only occurrence envelope, never an AgentMessage field. */\n    inputIdentity?: import(\"./agent.js\").HostInputIdentity|null;\n    inputPosition?: number;\n    hostSession?: string;\n    message: AgentMessage;"
+        }
+      ]
+    },
+    {
+      "path": "@earendil-works/pi-coding-agent/dist/core/extensions/runner.js",
+      "before": "dc7fc776198ec315feecbc8fd5d471453271a3dbf4b1a6a41df342253759a191",
+      "after": "5ba8196ec987d84d9be1b29f2f9a4ee794e6b6e153e20a31060e1942c7970d16",
+      "edits": [
+        {
+          "before": "import { getCurrentSystemMessage, } from \"@earendil-works/pi-ai\";",
+          "after": "import { getCurrentSystemMessage, } from \"@earendil-works/pi-ai\";\nimport { bindInputTrigger, triggerIdentity } from \"@earendil-works/pi-agent-core\";"
+        },
+        {
+          "before": "                    const handlerResult = await handler(event, ctx);\n                    if (handlerResult) {",
+          "after": "                    const handlerResult = await handler(bindInputTrigger(event, { submissionId: triggerIdentity(trigger)?.submissionId }), ctx);\n                    if (handlerResult) {"
         }
       ]
     }

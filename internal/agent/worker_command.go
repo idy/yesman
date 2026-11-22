@@ -43,6 +43,9 @@ func (m *Manager) bindWorker(ctx context.Context, hire yesmen.Yesman, name strin
 		}
 		var err error
 		c.target, err = m.workspaceAgentLocked(hire, Info{ID: c.id, Yesman: hire.Name, Name: name, Role: RoleWorker, Since: c.since})
+		if err == nil {
+			c.target.contextWorker = w
+		}
 		return err
 	})
 	return c, err
@@ -131,13 +134,13 @@ func (c *workerCommand) remove() error {
 
 // StartWorkerBy binds routing, prompt admission and failure cleanup to the
 // requesting lead, the selected hire and the exact new worker.
-func (m *Manager) StartWorkerBy(ctx context.Context, token string, lead Info, hire yesmen.Yesman, name, title, task string, route WorkerRoute) (Info, error) {
+func (m *Manager) StartWorkerBy(ctx context.Context, token string, lead Info, hire yesmen.Yesman, name, title, task string, route WorkerRoute, dispatch ...yesmen.Dispatch) (Info, error) {
 	ctx, finish, err := m.beginLeadCommand(ctx, token, lead, hire)
 	if err != nil {
 		return Info{}, err
 	}
 	defer finish()
-	return m.startWorkerRecord(ctx, hire, name, title, task, Choice{}, route, true)
+	return m.startWorkerRecord(ctx, hire, name, title, task, Choice{}, route, true, dispatch...)
 }
 
 func (m *Manager) beginLeadCommand(ctx context.Context, token string, lead Info, hire yesmen.Yesman) (context.Context, func(), error) {

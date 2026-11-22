@@ -39,8 +39,7 @@ func TestContextBoardAndRoles(t *testing.T) {
 	for _, want := range []string{
 		"never do the work yourself",
 		"You have no shell",
-		"- t1 [blocked] Fix the login timeout (owner e2e): waiting for credentials\n",
-		"1 done or dropped",
+		`- t1 "Fix the login timeout"`,
 		"set its owner when you hand it to a worker",
 		"what you take on, you see through to the end",
 		"yesman_worker_answer",
@@ -62,7 +61,7 @@ func TestContextBoardAndRoles(t *testing.T) {
 	}
 
 	empty := BuildContext(ctx, p, m, y, agent.Info{ID: "alice/lead", Name: "lead", Role: agent.RoleLead}, yesmen.Board{})
-	if !strings.Contains(empty, "The board is empty.") {
+	if !strings.Contains(empty, "No open items in this brief.") {
 		t.Errorf("empty board:\n%s", empty)
 	}
 }
@@ -93,7 +92,7 @@ func TestContextSharedDocumentsAreReadOnDemand(t *testing.T) {
 			text := BuildContext(context.Background(), p, m, y, agent.Info{ID: "alice/" + role, Name: role, Role: role}, yesmen.Board{})
 			for _, want := range []string{
 				`named "Renamed project 工程"`,
-				".yesman/knowledge/", ".yesman/task-log.md", "Icon policy",
+				".yesman/knowledge/", ".yesman/task-log.md", "context_search",
 				"Phosphor icon helper and local font assets", "head abc123 passed CI",
 				"Finishing a task alone is not a reason to add Knowledge",
 				"historical facts, not current instructions", "only relevant detail files on demand", ".yesman/task-log/",
@@ -103,7 +102,7 @@ func TestContextSharedDocumentsAreReadOnDemand(t *testing.T) {
 					t.Errorf("%s context lacks %q", role, want)
 				}
 			}
-			for _, unwanted := range []string{"LOG_BODY_SENTINEL", "NOTE_BODY_SENTINEL", "the only files you may write are knowledge notes"} {
+			for _, unwanted := range []string{"LOG_BODY_SENTINEL", "NOTE_BODY_SENTINEL", "[Icon policy]", "the only files you may write are knowledge notes"} {
 				if strings.Contains(text, unwanted) {
 					t.Errorf("%s context contains %q", role, unwanted)
 				}
