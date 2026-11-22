@@ -356,7 +356,9 @@ export function createFiles(host) {
     const changed = tab.readOnly !== readOnly;
     if (changed) {
       tab.readOnly = readOnly;
-      editor.setReadOnly(k, readOnly);
+      // A previously truncated view must acquire its edit lease before it
+      // can accept the first change. renderView does this before showing it.
+      editor.setReadOnly(k, true);
     }
     if (current() === p && p.active === rel && (changed || languageOf(rel) === 'markdown')) renderView();
   }
@@ -1415,11 +1417,22 @@ export function createFiles(host) {
     const slot = h('div', { class: 'files-editor', id: 'files-editor' }, h('p', { class: 'files-note' }, t('Loading…')));
     section.replaceChildren(...[banner, notice, slot].filter(Boolean));
     renderBanner();
-    ensureEditor().then((ed) => {
+    Promise.all([ensureEditor(), protectEditor(p, tab, v.truncated || locked(p))]).then(([ed]) => {
       if (!slot.isConnected || current() !== p || p.active !== rel || tabOf(p, rel) !== tab) return;
       slot.replaceChildren(ed.dom);
-      ed.show(k, { text: v.text, lang, readOnly: Boolean(tab?.readOnly || v.truncated || locked(p)) });
-    }, (err) => slot.replaceChildren(h('p', { class: 'files-note' }, t('The editor did not load: {error}', { error: err?.message || err }))));
+      ed.show(k, { text: v.text, lang, readOnly: Boolean(tab.readOnly || v.truncated || locked(p)) });
+    }).catch(err => slot.replaceChildren(h('p', { class: 'files-note' }, t('The editor did not load: {error}', { error: err?.message || err }))));
+  }
+
+  function protectEditor(p, tab, readOnly) {
+    if (tab.readOnly || readOnly || !tab.path.includes('/') || tab.path.startsWith('.yesman/')) return null;
+    if (!tab.editorHold) {
+      tab.editorHold = host.call('BeginWorktreeEdit', p.name, tab.path, p.hiredAt, tab.checkout).catch(err => {
+        tab.editorHold = null;
+        throw err;
+      });
+    }
+    return tab.editorHold;
   }
 
   // renderBanner says when the file shown changed on disk under unsaved
@@ -1500,6 +1513,7 @@ export function createFiles(host) {
     clearTimeout(timers.get(tab.key));
     timers.delete(tab.key);
     editor?.forget(tab.key);
+    tab.editorHold?.then(token => token && host.call('EndWorktreeEdit', token)).catch(() => {});
     p.loads?.delete(tab.path);
     p.views.delete(tab.path);
     p.mode.delete(tab.path);

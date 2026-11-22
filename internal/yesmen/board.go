@@ -60,6 +60,9 @@ type Task struct {
 	// Returns holds the checkout-specific handoffs for this task's current
 	// result. Reopening or reassigning work withdraws them.
 	Returns []WorktreeReturn `json:"worktreeReturns,omitzero"`
+	// A revoked return cannot authorize cleanup, but its explicit keep
+	// choices survive a reopen or reassignment. Nil means no such choice.
+	KeepWorktreesExcept []string `json:"keepWorktreesExcept,omitzero"`
 	// OwnerSince is when the worker it was handed to started: a worker of
 	// the same name hired later is not its owner. Zero means whichever
 	// worker has that name now, as for a task handed to a worker before it
@@ -487,7 +490,7 @@ func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task
 		}
 		t.Schedule = b.Tasks[i].Schedule
 		if t.Status != TaskDone || t.Owner != b.Tasks[i].Owner {
-			t.Returns = nil
+			t.withdrawWorktreeReturns()
 		}
 		now := time.Now().UTC()
 		t.recordWorktreeGeneration(b.Tasks[i])
@@ -553,13 +556,14 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 		t.recordWorktreeGeneration(work.Tasks[i])
 		markDone(&t, wasDone, now)
 		if t.Status != TaskDone || oldOwner != t.Owner {
-			t.Returns = nil
+			t.withdrawWorktreeReturns()
 		}
 		if e.Worktrees != nil {
 			if t.Status != TaskDone || oldOwner != t.Owner || t.DoneOwner != t.Owner {
 				return fmt.Errorf("task %s: return worktrees with the result of their owner's finished task", t.ID)
 			}
 			t.Returns = slices.Clone(*e.Worktrees)
+			t.KeepWorktreesExcept = nil
 		}
 		owned(e, t.ID)
 		work.Tasks[i] = t
@@ -614,6 +618,17 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 	}
 	*b = work
 	return nil
+}
+
+func (t *Task) withdrawWorktreeReturns() {
+	if t.Returns == nil {
+		return
+	}
+	t.KeepWorktreesExcept = make([]string, 0, len(t.Returns))
+	for _, r := range t.Returns {
+		t.KeepWorktreesExcept = append(t.KeepWorktreesExcept, r.Checkout)
+	}
+	t.Returns = nil
 }
 
 // Keep the generation in the same Board write as the transition. Checking

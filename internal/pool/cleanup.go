@@ -209,19 +209,41 @@ func sameCleanupRoot(expected, actual safefs.Identity) bool {
 // InspectTemporaryWorktree leaves refs and the directory intact. The caller
 // closes the observation at confirmation, cancellation, replacement or expiry.
 func (p *Pool) InspectTemporaryWorktree(ctx context.Context, workspace string, expected Worktree) (*CheckoutObservation, error) {
+	return p.observeTemporaryWorktree(ctx, workspace, expected, true, false)
+}
+
+// ObserveReclaim binds the directory and tracking ref without waiting for a
+// repository or editor operation. An explicit return can be certified before
+// the removal attempt checks for dirty content, as in earlier versions.
+func (p *Pool) ObserveReclaim(ctx context.Context, workspace string, expected Worktree, checkContents bool) (*CheckoutObservation, error) {
+	return p.observeTemporaryWorktree(ctx, workspace, expected, checkContents, true)
+}
+
+func (p *Pool) observeTemporaryWorktree(ctx context.Context, workspace string, expected Worktree, checkContents, try bool) (*CheckoutObservation, error) {
 	r, err := p.RecordedRepo(ctx, expected.Repo)
 	if err != nil {
 		return nil, err
 	}
 	l := p.lock(r.Name)
-	l.Lock()
+	if !try {
+		l.Lock()
+	} else if !l.TryLock() {
+		return nil, fmt.Errorf("repository is in use")
+	}
 	defer l.Unlock()
 	tl, err := p.treeLock(filepath.Join(workspace, expected.Dir))
 	if err != nil {
 		return nil, err
 	}
-	tl.RLock()
+	if !try {
+		tl.RLock()
+	} else if !tl.TryRLock() {
+		return nil, fmt.Errorf("checkout is in use")
+	}
 	defer tl.RUnlock()
+	if err := p.checkWorktreeEditors(tl); err != nil {
+		return nil, err
+	}
 	path, err := p.checkTemporaryWorktree(ctx, r, workspace, expected, nil)
 	if err != nil {
 		return nil, err
@@ -235,9 +257,11 @@ func (p *Pool) InspectTemporaryWorktree(ctx context.Context, workspace string, e
 		o.Close()
 		return nil, &RemovalHold{"The checkout directory is missing or was replaced.", expected.Dir}
 	}
-	if err := checkRemovalContents(ctx, r, path, expected); err != nil {
-		o.Close()
-		return nil, err
+	if checkContents {
+		if err := checkRemovalContents(ctx, r, path, expected); err != nil {
+			o.Close()
+			return nil, err
+		}
 	}
 	if !expected.Detached {
 		o.Tracking, err = cleanupTrackingBranch(ctx, r, expected.Branch)
@@ -268,7 +292,7 @@ func (p *Pool) RemoveTemporaryWorktree(ctx context.Context, workspace string, ex
 // this workspace. certify saves the verified proof before any deletion.
 func (p *Pool) TryReclaimTemporary(ctx context.Context, workspace string, expected Worktree, certify func() error) error {
 	if certify == nil {
-		return fmt.Errorf("worktree reclamation needs a completion receipt")
+		return fmt.Errorf("worktree reclamation needs a commit check")
 	}
 	return p.removeTemporary(ctx, workspace, expected, certify)
 }
@@ -295,6 +319,9 @@ func (p *Pool) removeTemporary(ctx context.Context, workspace string, expected W
 		return fmt.Errorf("checkout is in use")
 	}
 	defer tl.Unlock()
+	if err := p.checkWorktreeEditors(tl); err != nil {
+		return err
+	}
 	path, err := p.checkTemporaryWorktree(ctx, r, workspace, expected, nil)
 	if err != nil {
 		return err

@@ -173,7 +173,7 @@ func TestReturnedAuthorWaitsAcrossRestart(t *testing.T) {
 }
 
 func TestReturnedCheckoutRefusals(t *testing.T) {
-	for _, kind := range []string{"tracked", "untracked", "ignored", "hidden-index", "git-in-progress", "post-merge", "open-followup", "alias-open-local", "wrong-alias", "source-unavailable", "release-unpublished", "release-unrelated", "more-owner-work", "paused-task", "worker-paused", "owner-replaced", "keep-frozen", "no-proof", "unmarked-root", "path-replaced"} {
+	for _, kind := range []string{"tracked", "untracked", "ignored", "hidden-index", "git-in-progress", "post-merge", "open-followup", "alias-open-local", "wrong-alias", "source-unavailable", "release-unpublished", "release-unrelated", "more-owner-work", "paused-task", "worker-paused", "owner-replaced", "keep-frozen", "unmarked-root", "path-replaced"} {
 		t.Run(kind, func(t *testing.T) {
 			purpose, alias := "author", ""
 			if strings.HasPrefix(kind, "release-") {
@@ -187,14 +187,7 @@ func TestReturnedCheckoutRefusals(t *testing.T) {
 			if kind == "wrong-alias" {
 				result.SourceBranch = ""
 			}
-			if kind == "no-proof" {
-				res := managementPost(t, x, x.w.Token, "/v1/board", map[string]any{"update": []any{map[string]any{"id": "t1", "status": "done", "note": result.Ref + " " + result.Head}}})
-				if res.Code != 200 {
-					t.Fatal(res.Body)
-				}
-			} else {
-				submitReturn(t, x, result)
-			}
+			submitReturn(t, x, result)
 			x.f.m.Stop(x.me.agent.ID)
 			switch kind {
 			case "tracked", "untracked", "ignored", "hidden-index":

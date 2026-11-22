@@ -67,6 +67,7 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 	if purpose == "" {
 		purpose = "work"
 	}
+	var admitted *yesmen.Task
 	switch purpose {
 	case "work", "primary":
 	case "review", "author", "release":
@@ -86,11 +87,14 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 		if err != nil {
 			return pool.Worktree{}, err
 		}
-		found := false
 		for _, t := range b.Tasks {
-			found = found || (t.ID == req.Task && t.Owner == c.agent.Name && t.Open())
+			if t.ID == req.Task && t.Owner == c.agent.Name && t.Open() && !t.Paused() && !t.CreatedAt.IsZero() &&
+				(t.OwnerSince.IsZero() || t.OwnerSince.Equal(c.agent.Since)) {
+				admitted = &t
+				break
+			}
 		}
-		if !found {
+		if admitted == nil {
 			return pool.Worktree{}, errors.New("temporary checkouts need an open board task owned by the caller")
 		}
 	default:
@@ -126,10 +130,13 @@ func (s *Server) checkoutOwned(ctx context.Context, c caller, y yesmen.Yesman, r
 		// and the owner's generation (files.go checkInstance).
 		rec.Root = &yesmen.WorktreeRoot{Ino: wt.Root.Ino, Birth: wt.Root.Birth}
 	}
+	if admitted != nil {
+		rec.CreatedFor = &yesmen.WorktreeCreation{Workspace: y.Name, HiredAt: y.HiredAt, TaskAt: admitted.CreatedAt}
+	}
 	// Once Git succeeds, record the checkout even if cancellation just arrived.
 	// The operation lease still protects this final local bookkeeping.
 	records = append(records, rec)
-	if err := s.Yesmen.SaveWorktreeRecords(y.Name, records); err != nil {
+	if err := s.Yesmen.SaveCheckout(y, records, admitted); err != nil {
 		// Do not delete the checkout on a failed metadata write. Unknown
 		// resources are protected and can be reported for manual recovery.
 		return wt, fmt.Errorf("checkout exists but lifecycle registration failed; retain it: %w", err)
@@ -156,6 +163,15 @@ func (s *Server) retireMissingWorktree(ctx context.Context, c caller, y yesmen.Y
 		}
 		if registered {
 			return errors.New("missing checkout still has a Git registration; retain it")
+		}
+		if checkoutID.MatchString(rec.ID) {
+			moved, err := s.Pool.HasWorktreeInstance(ctx, rec.Repo, rec.ID)
+			if err != nil {
+				return err
+			}
+			if moved {
+				return errors.New("checkout is still registered at another path")
+			}
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -365,11 +381,23 @@ func sameWorktreeCompletion(a, b yesmen.WorktreeCompletion) bool {
 }
 
 func expectedWorktree(rec yesmen.WorktreeRecord) pool.Worktree {
-	wt := pool.Worktree{Repo: rec.Repo, Dir: rec.Dir, Head: rec.Completion.Head, Branch: rec.Branch, Detached: rec.Purpose == "review", CleanupID: rec.ID}
-	if rec.Root != nil {
-		wt.Root = &safefs.Identity{Ino: rec.Root.Ino, Birth: rec.Root.Birth, HasBirth: true}
+	head := rec.Head
+	if rec.Completion != nil {
+		head = rec.Completion.Head
 	}
-	return wt
+	return pool.Worktree{Repo: rec.Repo, Dir: rec.Dir, Head: head, Branch: rec.Branch, Detached: rec.Purpose == "review", CleanupID: rec.ID, Root: recordedWorktreeRoot(rec)}
+}
+
+func recordedWorktreeRoot(rec yesmen.WorktreeRecord) *safefs.Identity {
+	if rec.Root != nil {
+		return &safefs.Identity{Ino: rec.Root.Ino, Birth: rec.Root.Birth, HasBirth: true}
+	}
+	return nil
+}
+
+func (s *Server) worktreeUsersPaused(y yesmen.Yesman, rec yesmen.WorktreeRecord) bool {
+	return s.Agents.WorktreeUserPaused(y, rec.Owner, rec.OwnerSince) ||
+		rec.CleanupOwner != "" && s.Agents.WorktreeUserPaused(y, rec.CleanupOwner, rec.CleanupSince)
 }
 
 func branchTaskFinished(b yesmen.Board, rec yesmen.WorktreeRecord) error {

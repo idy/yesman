@@ -1,6 +1,7 @@
 package yesmen
 
 import (
+	"errors"
 	"os"
 	"time"
 )
@@ -9,13 +10,18 @@ import (
 // worker sessions and board status. Removed records remain as recovery evidence.
 // UI/user checkouts and older worktrees without a record are never adopted.
 type WorktreeRecord struct {
-	ID            string              `json:"id"`
-	Dir           string              `json:"dir"`
-	Repo          string              `json:"repo"`
-	Owner         string              `json:"owner"`
-	OwnerSince    time.Time           `json:"ownerSince"`
-	Purpose       string              `json:"purpose"`
-	Task          string              `json:"task,omitempty"`
+	ID         string    `json:"id"`
+	Dir        string    `json:"dir"`
+	Repo       string    `json:"repo"`
+	Owner      string    `json:"owner"`
+	OwnerSince time.Time `json:"ownerSince"`
+	Purpose    string    `json:"purpose"`
+	Task       string    `json:"task,omitempty"`
+	// CreatedFor binds Task to its workspace hire and immutable Board identity.
+	CreatedFor *WorktreeCreation `json:"createdFor,omitempty"`
+	// CleanupHead is recorded under the removal lease for recovery if the
+	// post-Git registry write is interrupted. It grants no cleanup authority.
+	CleanupHead   string              `json:"cleanupHead,omitempty"`
 	Branch        string              `json:"branch,omitempty"`
 	Head          string              `json:"head"`
 	CleanupOwner  string              `json:"cleanupOwner,omitempty"`
@@ -34,6 +40,12 @@ type WorktreeRecord struct {
 	// without it (older ones, or a file system with no creation time) get
 	// no write/edit grant through the managed entry.
 	Root *WorktreeRoot `json:"root,omitempty"`
+}
+
+type WorktreeCreation struct {
+	Workspace string    `json:"workspace"`
+	HiredAt   time.Time `json:"hiredAt"`
+	TaskAt    time.Time `json:"taskCreatedAt"`
 }
 
 type VerifiedWorktreeReturn struct {
@@ -100,8 +112,38 @@ func (s *Store) WorktreeRecords(name string) ([]WorktreeRecord, error) {
 	return records, err
 }
 
-// SaveWorktreeRecords is used by the serialized checkout/remove API. It never
-// removes old evidence when a directory is reused for another checkout.
+// SaveCheckout binds the new instance to the Board task admitted before Git.
+// Board and worker writers share this lock. If the assignment changed while
+// Git was running, the directory stays protected as an unregistered checkout.
+// The caller holds the server's worktree lock and process operation lease.
+func (s *Store) SaveCheckout(y Yesman, records []WorktreeRecord, admitted *Task) error {
+	defer s.lockReturnState(y.Name)()
+	return s.withWorktreeMeta(y, func(meta *os.Root) error {
+		if admitted != nil {
+			var board Board
+			s.mu.Lock()
+			err := worktreeJSON(meta, "board.json", &board, false)
+			s.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			i := board.index(admitted.ID)
+			if i < 0 || !sameCheckoutAssignment(*admitted, board.Tasks[i]) {
+				return errors.New("the creating task changed during checkout")
+			}
+		}
+		return writeWorktreeRecords(meta, records)
+	})
+}
+
+func sameCheckoutAssignment(a, b Task) bool {
+	return a.ID == b.ID && !b.CreatedAt.IsZero() && a.CreatedAt.Equal(b.CreatedAt) &&
+		a.Owner == b.Owner && a.OwnerSince.Equal(b.OwnerSince) && b.Open() && !b.Paused() &&
+		a.WorktreeGeneration == b.WorktreeGeneration
+}
+
+// SaveWorktreeRecords writes the serialized lifecycle registry without
+// removing old evidence when a directory is reused for another checkout.
 func (s *Store) SaveWorktreeRecords(name string, records []WorktreeRecord) error {
 	y, err := s.Get(name)
 	if err != nil {

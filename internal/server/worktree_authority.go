@@ -60,6 +60,9 @@ func boardProof(y yesmen.Yesman, rec yesmen.WorktreeRecord, t *yesmen.Task) *yes
 // within TryWorktreeCommit, through removal or delegation. Standalone manual
 // completions use their own existing admission rules.
 func CheckSavedWorktreeReturn(y yesmen.Yesman, rec yesmen.WorktreeRecord, b yesmen.Board, workers []yesmen.Worker) error {
+	if rec.CreatedFor != nil && !slices.ContainsFunc(b.Tasks, func(t yesmen.Task) bool { return boundCreatingTask(y, rec, t) }) {
+		return errors.New("the creating task or workspace no longer matches this checkout")
+	}
 	if rec.BoardRound.IsZero() {
 		d := WorktreeDecisionFor(b, rec)
 		if d.KeepsCheckout() {

@@ -151,13 +151,13 @@ func TestCleanupContextBothRolesAndRecoveryIndex(t *testing.T) {
 	f.remove(t, f.owner, removeWorktreeRequest{Dir: wt.Dir, Completion: f.completion("waiting-release")})
 	for _, who := range []caller{f.owner, f.lead} {
 		text := BuildContext(context.Background(), f.s.Pool, f.s.Agents, f.y, who.agent, yesmen.Board{})
-		for _, want := range []string{"purpose (review, author or release)", "before your final report", "findings handed", "open PR", "squash", "publication and verification finish", "first check whether the old path exists", "exact HEAD", "never force", wt.CleanupID, f.head, "waiting-release", "refs/yesman/worktrees/"} {
+		for _, want := range []string{"purpose (review, author or release)", "Omit worktrees for ordinary completion", "findings handed", "Open PRs", "Keep release tasks open until delivery is verified", "first check whether the old path exists", "exact HEAD", "never force", wt.CleanupID, f.head, "waiting-release", "refs/yesman/worktrees/"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s lacks %q", who.agent.Role, want)
 			}
 		}
 		if who.agent.Role == agent.RoleLead {
-			for _, want := range []string{"normal yesman_board update", "handoff", "Resume unfinished reviews first", "Stopped, failed, FinishedAt"} {
+			for _, want := range []string{"normal yesman_board update", "handoff", "Resume unfinished reviews first", "leaves the Board task's status unchanged"} {
 				if !strings.Contains(text, want) {
 					t.Errorf("lead lacks %q", want)
 				}

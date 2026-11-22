@@ -90,7 +90,7 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 		if err := a.yesmen.AddWorker(y.Name, yesmen.Worker{Name: dir, StartedAt: since}); err != nil {
 			t.Fatal(err)
 		}
-		b, err := a.yesmen.ChangeBoard(y.Name, yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: str(dir), Owner: str(dir), Status: str(yesmen.TaskDropped)}}})
+		b, err := a.yesmen.ChangeBoard(y.Name, yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: str(dir), Owner: str(dir)}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -105,12 +105,18 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 		if dir == "legacy" {
 			continue
 		}
-		r := yesmen.WorktreeRecord{ID: w.CleanupID, Dir: w.Dir, Repo: w.Repo, Owner: dir, OwnerSince: since, Purpose: "review", Task: b.Tasks[len(b.Tasks)-1].ID, Branch: w.Branch, Head: w.Head}
-		if w.Detached {
-			r.Completion = &yesmen.WorktreeCompletion{Head: w.Head, Ref: w.Head, Outcome: "pass", Unused: true, Evidence: "Fixture review on board", SavedAt: since}
-		} else {
-			r.Purpose = "author"
-			gizmoTask = r.Task
+		task := b.Tasks[len(b.Tasks)-1]
+		r := yesmen.WorktreeRecord{ID: w.CleanupID, Dir: w.Dir, Repo: w.Repo, Owner: dir, OwnerSince: since, Purpose: "review", Task: task.ID, Branch: w.Branch, Head: w.Head}
+		status := yesmen.TaskDone
+		if w.Root != nil {
+			r.Root = &yesmen.WorktreeRoot{Ino: w.Root.Ino, Birth: w.Root.Birth}
+			r.CreatedFor = &yesmen.WorktreeCreation{Workspace: y.Name, HiredAt: y.HiredAt, TaskAt: task.CreatedAt}
+		}
+		if !w.Detached {
+			r.Purpose, gizmoTask, status = "author", r.Task, yesmen.TaskDropped
+		}
+		if _, err := a.yesmen.ChangeBoard(y.Name, yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: task.ID, Status: &status}}}); err != nil {
+			t.Fatal(err)
 		}
 		switch dir {
 		case "saved-conflict":
@@ -190,7 +196,7 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			}
 			value, err = map[string]any{"trees": wts, "checkpoints": refs}, e
 		default:
-			if !slices.Contains([]string{"State", "Info", "Usage", "ListFiles", "ReadFile", "ReadWorktreeFile", "WriteWorktreeFile", "PreviewWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
+			if !slices.Contains([]string{"State", "Info", "Usage", "ListFiles", "ReadFile", "ReadWorktreeFile", "WriteWorktreeFile", "BeginWorktreeEdit", "EndWorktreeEdit", "PreviewWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
 				http.Error(w, "method", 400)
 				return
 			}

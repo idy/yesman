@@ -69,7 +69,7 @@ export function createWorktreeMenu(host) {
         const ready = result.rows.filter(row => !row.reason);
         const kept = result.rows.filter(row => row.reason);
         if (ready.length) {
-          hint.textContent = t('Close any programs using these directories. Git saves each commit in the shared repository and keeps your branches and tags.');
+          hint.textContent = t('Git saves each commit in the shared repository and keeps your branches and tags.');
           listing.append(rowList(ready));
           if (selected && ready[0]?.keepWarning) {
             const warning = h('p', { id: 'worktree-cleanup-warning', class: 'cleanup-warning', role: 'status' }, t(ready[0].keepWarning));
@@ -131,9 +131,13 @@ export function createWorktreeMenu(host) {
 }
 
 function rowList(rows) {
-  return h('ul', { class: 'cleanup-rows', role: 'list' }, rows.map(row => h('li', null,
-    h('div', { class: 'cleanup-path', dir: 'auto' }, row.path.endsWith(row.dir) && row.dir
-      ? [h('span', { class: 'cleanup-parent' }, row.path.slice(0, -row.dir.length)), h('span', null, row.dir)] : row.path),
-    !row.reason ? h('div', { class: 'cleanup-source' }, row.branch ? `${row.branch} · ` : '', h('code', { title: row.head }, row.head)) : null,
-    row.reason ? h('div', { class: 'cleanup-reason' }, t(row.reason), row.detail ? ` ${row.detail}` : '') : null)));
+  return h('ul', { class: 'cleanup-rows', role: 'list' }, rows.map(row => {
+    const task = [row.task, row.taskStatus].filter(Boolean).join(' · ');
+    const detail = [...new Set([row.detail, task].filter(Boolean))].join(' · ');
+    return h('li', null,
+      h('div', { class: 'cleanup-path', dir: 'auto' }, row.path.endsWith(row.dir) && row.dir
+        ? [h('span', { class: 'cleanup-parent' }, row.path.slice(0, -row.dir.length)), h('span', null, row.dir)] : row.path),
+      !row.reason ? h('div', { class: 'cleanup-source' }, row.branch ? `${row.branch} · ` : '', h('code', { title: row.head }, row.head)) : null,
+      row.reason ? h('div', { class: 'cleanup-reason' }, t(row.reason), detail ? ` ${detail}` : '') : null);
+  }));
 }

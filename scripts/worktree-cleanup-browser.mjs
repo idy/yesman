@@ -68,7 +68,7 @@ async function run(engine, name, language) {
               try { return await api(m, ...args); } catch (err) { window.saveRefusal = err.message; throw err; }
             }
             return api(m, ...args);
-          case 'ListFiles': case 'ReadFile': return api(m,...args);
+          case 'ListFiles': case 'ReadFile': case 'BeginWorktreeEdit': case 'EndWorktreeEdit': return api(m,...args);
           case 'State': {
             const value = await api(m,...args);
             if (window.holdState) {
@@ -129,6 +129,8 @@ async function run(engine, name, language) {
     assert.equal(await dialog.locator('code[title]').count(), 2);
     assert.ok(await dialog.locator('code[title]').evaluateAll(nodes => nodes.every(el => el.textContent === el.title && /^[a-f0-9]{40}$/.test(el.textContent))));
     await dialog.locator('summary').click();
+    assert.match(await dialog.innerText(), zh ? /任务已取消/ : /creating task was dropped/);
+    assert.match(await dialog.innerText(), /t1 · dropped/);
     assert.match(await dialog.innerText(), zh ? /锁定/ : /Git has locked/);
     assert.match(await dialog.innerText(), zh ? /临时工作树/ : /temporary checkout record/);
     assert.match(await dialog.innerText(), zh ? /还原冲突的文件版本/ : /versions of a resolved conflict/);
@@ -162,6 +164,11 @@ async function run(engine, name, language) {
     const editor = files.locator('.cm-content');
     const editorText = () => editor.locator('.cm-line').allTextContents().then(lines => lines.join('\n'));
     const fileOf = (dir, name = 'README') => file(`${dir}/${name}`);
+    const closeReadme = async () => {
+      const completed = page.waitForResponse(r => r.url().endsWith('/fixture') && r.request().postDataJSON()?.method === 'EndWorktreeEdit');
+      await files.getByRole('button', {name:'Close README', exact:true}).click();
+      await completed;
+    };
     if (!zh) {
       await page.setViewportSize({width:1470,height:870});
       await openFiles('locked'); await fileOf('locked').click();
@@ -173,6 +180,11 @@ async function run(engine, name, language) {
         events.files({yesman:'studio',paths:[holdRead]});
       });
       await page.waitForFunction(() => !!window.releaseRead);
+      await giz.press('Shift+F10');
+      await dialog.getByText('A file editor is open in this worktree.').waitFor();
+      assert.equal(await button.isVisible(), false);
+      await cancel.click();
+      await closeReadme();
     }
     await giz.press('Shift+F10');
     await button.waitFor();
@@ -203,11 +215,13 @@ async function run(engine, name, language) {
       assert.equal(await files.locator('.files-tab').count(),0);
       await openFiles('review-a'); await fileOf('review-a').click();
       await page.waitForFunction(() => document.querySelector('.cm-content')?.textContent.includes('Fixture'));
+      await closeReadme();
       // Open the same file via All files as well. Both panes belong to A.
       await files.locator('.files-crumb--scope').click();
       await page.locator('.files-menu-item').filter({hasText:'All files'}).click();
       await file('review-a').click(); await fileOf('review-a').click();
       await page.waitForFunction(() => document.querySelector('.cm-content')?.textContent.includes('Fixture'));
+      await closeReadme();
     }
     await headingButton.click({button:'right'});
     await button.waitFor();
@@ -222,7 +236,10 @@ async function run(engine, name, language) {
     assert.equal(await row('review-b').count(),1);
     await page.keyboard.press('Escape');
     await dialog.waitFor({state:'detached'});
-    assert.ok(await focused(headingButton));
+    await headingButton.evaluate(el => new Promise(resolve => {
+      const poll = () => document.activeElement === el ? resolve() : requestAnimationFrame(poll);
+      poll();
+    }));
     await row('locked').click({button:'right'});
     await dialog.getByText(zh ? /Git 锁定/ : /unsaved edits/).waitFor();
     assert.equal(await button.isVisible(),false);
@@ -265,7 +282,7 @@ async function run(engine, name, language) {
       await editor.press('Meta+s');
       await page.waitForFunction(async () => (await api('ReadFile','studio','gizmoth-artifact-rows/replacement.txt')).text === 'Saved by the replacement');
       await openFiles('locked'); assert.equal(await editorText(),'Keep this other draft');
-      console.log(`${name} Files kept the unrelated draft, retired both worktree and All files tabs, ignored a late read and refused a delayed save across checkout replacement`);
+      console.log(`${name} Files kept the unrelated draft, held the open editor, ignored a late read and refused a delayed save across checkout replacement`);
     }
     await page.evaluate(() => api('FaultAfterGit'));
     await row('review-b').click({button:'right'});

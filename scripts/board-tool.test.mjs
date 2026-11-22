@@ -74,7 +74,7 @@ test('delivery confirmation accompanies a lead board update and is withheld from
     const { tool, requests } = boardTool(role, board);
     await tool.execute('call', params);
     assert.equal(requests[0].method, 'POST');
-    assert.deepEqual(requests[0].body, { ...(role === 'lead' ? params : { update: params.update }), reportWorktrees: true });
+    assert.deepEqual(requests[0].body, { ...(role === 'lead' ? params : { update: params.update }) });
   }
 });
 
@@ -85,7 +85,7 @@ test('a returned checkout travels with the normal task result in one call', asyn
     checkout: 'a'.repeat(32), head: 'b'.repeat(40), ref: 'https://github.com/acme/demo/pull/3', outcome: 'pass', unused: true,
   }] }];
   await tool.execute('call', { update });
-  assert.deepEqual(requests, [{ url: 'http://unused/v1/board', method: 'POST', body: { update, reportWorktrees: true } }]);
+  assert.deepEqual(requests, [{ url: 'http://unused/v1/board', method: 'POST', body: { update } }]);
 });
 
 test('a plan ID that is not one is dropped', async () => {
