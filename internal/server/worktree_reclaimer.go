@@ -95,9 +95,8 @@ func (r *WorktreeReclaimer) BoardResult(y yesmen.Yesman) {
 	r.signal()
 }
 
-// OwnerRetired wakes only jobs held by that owner or delegate. Token usage,
-// tool output, other workers, board reorders and general UI refreshes are
-// independent of cleanup and never trigger a search for merged PRs.
+// OwnerRetired wakes idle waits for a recorded owner, delegate or assignee.
+// Remote retries and jobs in other workspaces keep their deadline.
 func (r *WorktreeReclaimer) OwnerRetired(workspace, owner string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -210,10 +209,14 @@ func (r *WorktreeReclaimer) scan(y yesmen.Yesman) error {
 		r.mu.Lock()
 		job, queued := r.jobs[key]
 		if !queued {
-			r.jobs[key] = checkoutJob{y: y, owner: rec.Owner, delegate: rec.CleanupOwner, assignee: c.authority.decision.owner, due: now}
+			job = checkoutJob{y: y, due: now}
 		}
+		// A Board update can change who this existing job is waiting on.
+		// Refresh the retirement routing without changing its retry budget.
+		job.owner, job.delegate, job.assignee = rec.Owner, rec.CleanupOwner, c.authority.decision.owner
+		r.jobs[key] = job
 		r.mu.Unlock()
-		if queued && job.waitForIdle && job.due.After(now) && !heldByUsers(rec, board, workers) {
+		if queued && eligible && job.waitForIdle && job.due.After(now) && !heldByUsers(rec, board, workers) {
 			if err := r.s.withTaskWorktreeUsers(y, rec, c.authority.decision, func() error { return nil }); err == nil {
 				r.mu.Lock()
 				if waiting := r.jobs[key]; waiting.waitForIdle && waiting.due.After(now) {

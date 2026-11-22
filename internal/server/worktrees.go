@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -219,7 +220,7 @@ func (s *Server) finishRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 		}
 		// A first manual proposal has no saved certificate yet. The task can
 		// be reopened, closed again or explicitly kept during a remote check.
-		if proof.decision != WorktreeDecisionFor(board, *rec) {
+		if !reflect.DeepEqual(proof.decision, WorktreeDecisionFor(board, *rec)) {
 			return retain("the associated task changed during verification. Check its current disposition before trying again")
 		}
 		if !rec.BoardRound.IsZero() && heldByUsers(*rec, board, workers) {

@@ -67,7 +67,7 @@ func TestDesktopWorktreeCanceledTaskWithoutPR(t *testing.T) {
 	wt.Head = cleanupGit(t, wt.Path, "rev-parse", "HEAD")
 	refs := cleanupGit(t, f.repo.Path, "for-each-ref", "--format=%(refname) %(objectname)")
 	p := previewTree(t, d, f.y, nil, false)
-	if p.Rows[0].Reason != canceledTask || p.Rows[0].Detail != "t1 · dropped" {
+	if p.Rows[0].Reason != canceledTask || p.Rows[0].Task != "t1" || p.Rows[0].TaskStatus != yesmen.TaskDropped || p.Rows[0].Detail != "" {
 		t.Fatal(p)
 	}
 	p = previewTree(t, d, f.y, &wt, true)

@@ -2,6 +2,7 @@
 // eventual receipt all belong to the hire and row that opened them.
 import { $, h, openModal } from './dom.js';
 import { t, tn } from './i18n.js';
+import { taskStatusLabel } from './board.js';
 
 export function worktreeEntry(w) {
   return w ? `worktree:${w.dir}:${w.cleanupId || ''}` : 'worktrees';
@@ -132,8 +133,8 @@ export function createWorktreeMenu(host) {
 
 function rowList(rows) {
   return h('ul', { class: 'cleanup-rows', role: 'list' }, rows.map(row => {
-    const task = [row.task, row.taskStatus].filter(Boolean).join(' · ');
-    const detail = [...new Set([row.detail, task].filter(Boolean))].join(' · ');
+    const task = [row.task, taskStatusLabel(row.taskStatus)].filter(Boolean).join(' · ');
+    const detail = [row.detail !== row.task ? row.detail : '', task].filter(Boolean).join(' · ');
     return h('li', null,
       h('div', { class: 'cleanup-path', dir: 'auto' }, row.path.endsWith(row.dir) && row.dir
         ? [h('span', { class: 'cleanup-parent' }, row.path.slice(0, -row.dir.length)), h('span', null, row.dir)] : row.path),

@@ -35,6 +35,7 @@ type WorktreeTaskDecision struct {
 	created, ownerSince, round time.Time
 	paused, explicit, kept     bool
 	returned                   yesmen.WorktreeCompletion
+	sourceBranches             []string // protection hints only
 }
 
 // KeepsCheckout reports an explicit Board choice to retain this instance.
@@ -51,7 +52,8 @@ func WorktreeDecisionFor(b yesmen.Board, rec yesmen.WorktreeRecord) WorktreeTask
 		d := WorktreeTaskDecision{status: task.Status, owner: task.Owner, doneOwner: task.DoneOwner, generation: task.WorktreeGeneration,
 			created: task.CreatedAt, ownerSince: task.OwnerSince, round: task.DoneAt,
 			paused: task.Paused(), explicit: task.Returns != nil,
-			kept: task.KeepWorktreesExcept != nil && !slices.Contains(task.KeepWorktreesExcept, rec.ID)}
+			kept:           task.KeepWorktreesExcept != nil && !slices.Contains(task.KeepWorktreesExcept, rec.ID),
+			sourceBranches: task.WorktreeSourceBranches[rec.ID]}
 		for _, ret := range task.Returns {
 			if ret.Checkout == rec.ID {
 				d.returned = ret.WorktreeCompletion
@@ -122,8 +124,8 @@ func (s *Server) verifyRemoval(ctx context.Context, c caller, y yesmen.Yesman, r
 	if proof.branchErr == nil {
 		proof.branchErr = s.verifyMerged(ctx, rec)
 	}
-	if proof.branchErr == nil && (!rec.BoardRound.IsZero() || publishedBranch(rec) != rec.Branch) {
-		proof.branchErr = s.checkOpenPulls(ctx, rec)
+	if proof.branchErr == nil && (!rec.BoardRound.IsZero() || publishedBranch(rec) != rec.Branch || len(proof.decision.sourceBranches) != 0) {
+		proof.branchErr = s.checkOpenPulls(ctx, rec, proof.decision.sourceBranches...)
 	}
 	return proof, ctx.Err()
 }

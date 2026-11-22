@@ -128,6 +128,7 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 				rec := records[latestWorktree(records, w.Dir)]
 				c := desktopCandidate{row: len(out.Rows), worktree: row.Worktree, record: rec,
 					decision: WorktreeDecisionFor(board, rec), observation: row.observation}
+				c.authority.decision = c.decision
 				if plan.bulk {
 					c.authority, _ = bulkAuthority(y, rec, board, workers)
 				}
@@ -159,7 +160,7 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 	var eligible []desktopCandidate
 	if err == nil {
 		for _, c := range candidates {
-			if hold := s.verifyCleanupSource(ctx, c.record, c.authority, c.observation.Tracking, c.decision.returned.SourceBranch); hold != nil {
+			if hold := s.verifyCleanupSource(ctx, c.record, c.authority, c.observation.Tracking); hold != nil {
 				out.Rows[c.row].Reason, out.Rows[c.row].Detail, out.Rows[c.row].KeepWarning = hold.Reason, hold.Detail, ""
 				c.observation.Close()
 			} else {
@@ -187,7 +188,7 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 	return out, nil
 }
 
-func (s *Server) verifyCleanupSource(ctx context.Context, rec yesmen.WorktreeRecord, a checkoutAuthority, also ...string) *pool.RemovalHold {
+func (s *Server) verifyCleanupSource(ctx context.Context, rec yesmen.WorktreeRecord, a checkoutAuthority, tracking string) *pool.RemovalHold {
 	if rec.Purpose == "review" {
 		return nil
 	}
@@ -197,7 +198,8 @@ func (s *Server) verifyCleanupSource(ctx context.Context, rec yesmen.WorktreeRec
 			return &pool.RemovalHold{Reason: unverifiedMerge, Detail: err.Error()}
 		}
 	}
-	if err := s.checkOpenPulls(ctx, rec, also...); err != nil {
+	branches := append([]string{tracking, a.decision.returned.SourceBranch}, a.decision.sourceBranches...)
+	if err := s.checkOpenPulls(ctx, rec, branches...); err != nil {
 		var open *openWorktreePull
 		if errors.As(err, &open) {
 			return &pool.RemovalHold{Reason: "This branch has an open pull request.", Detail: open.target + " · " + open.branch}
@@ -252,7 +254,7 @@ func (d *DesktopWorktrees) Confirm(ctx context.Context, name string, since time.
 			results = append(results, row)
 			continue
 		}
-		if hold := s.verifyCleanupSource(ctx, c.record, c.authority, c.observation.Tracking, c.decision.returned.SourceBranch); hold != nil {
+		if hold := s.verifyCleanupSource(ctx, c.record, c.authority, c.observation.Tracking); hold != nil {
 			row.Reason, row.Detail = hold.Reason, hold.Detail
 			results = append(results, row)
 			continue
@@ -273,9 +275,9 @@ func (d *DesktopWorktrees) Confirm(ctx context.Context, name string, since time.
 				row.Reason = staleCheckout
 				return nil
 			}
-			if decision := WorktreeDecisionFor(board, records[i]); decision != c.decision {
+			if decision := WorktreeDecisionFor(board, records[i]); !reflect.DeepEqual(decision, c.decision) {
 				row.TaskStatus = decision.status
-				row.Reason, row.Detail = staleDecision, worktreeTaskDetail(decision, c.record.Task)
+				row.Reason = staleDecision
 				return nil
 			}
 			// A second registration may have appeared during confirmation. A
@@ -341,16 +343,15 @@ func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records [
 	}
 	decision := WorktreeDecisionFor(board, rec)
 	row.Task, row.TaskStatus = rec.Task, decision.status
-	taskDetail := worktreeTaskDetail(decision, rec.Task)
 	var authority checkoutAuthority
 	if bulk {
 		var reason string
 		authority, reason = bulkAuthority(y, rec, board, workers)
 		if reason != "" {
-			return retain(reason, taskDetail)
+			return retain(reason, "")
 		}
 		if c := authority.completion; c != nil && (c.SavedAt.IsZero() || c.Head != w.Head) {
-			return retain("The saved completion does not cover this checkout and commit.", taskDetail)
+			return retain("The saved completion does not cover this checkout and commit.", "")
 		}
 	}
 	if reason, detail := worktreeTaskHold(y, board, workers, rec); reason != "" {
@@ -428,7 +429,7 @@ func worktreeTaskHold(y yesmen.Yesman, board yesmen.Board, workers []yesmen.Work
 	matched := false
 	for _, task := range board.Tasks {
 		if task.ID == rec.Task {
-			detail := worktreeTaskDetail(WorktreeDecisionFor(board, rec), task.ID)
+			detail := task.ID
 			if rec.CreatedFor != nil {
 				if !boundCreatingTask(y, rec, task) {
 					return unprovenCreation, detail
@@ -445,7 +446,7 @@ func worktreeTaskHold(y yesmen.Yesman, board yesmen.Board, workers []yesmen.Work
 			matched = true
 		}
 		if _, owns := owners[task.Owner]; owns {
-			detail := task.ID + " · " + task.Status
+			detail := task.ID
 			if task.Paused() {
 				return "The owner has a paused task.", detail
 			}

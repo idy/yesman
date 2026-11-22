@@ -130,7 +130,10 @@ async function run(engine, name, language) {
     assert.ok(await dialog.locator('code[title]').evaluateAll(nodes => nodes.every(el => el.textContent === el.title && /^[a-f0-9]{40}$/.test(el.textContent))));
     await dialog.locator('summary').click();
     assert.match(await dialog.innerText(), zh ? /任务已取消/ : /creating task was dropped/);
-    assert.match(await dialog.innerText(), /t1 · dropped/);
+    const keptTask = dialog.locator('.cleanup-reason').filter({ hasText: 't1 ·' });
+    assert.equal(await keptTask.count(), 1);
+    assert.match(await keptTask.innerText(), zh ? /t1 · 已放弃$/ : /t1 · Dropped$/);
+    assert.equal(await keptTask.getByText(/t1 · dropped/).count(), 0);
     assert.match(await dialog.innerText(), zh ? /锁定/ : /Git has locked/);
     assert.match(await dialog.innerText(), zh ? /临时工作树/ : /temporary checkout record/);
     assert.match(await dialog.innerText(), zh ? /还原冲突的文件版本/ : /versions of a resolved conflict/);

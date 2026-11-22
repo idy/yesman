@@ -120,10 +120,3 @@ func (s *Server) withTaskWorktreeUsers(y yesmen.Yesman, rec yesmen.WorktreeRecor
 		return fn()
 	})
 }
-
-func worktreeTaskDetail(d WorktreeTaskDecision, task string) string {
-	if task != "" && d.status != "" {
-		return task + " · " + d.status
-	}
-	return task
-}
