@@ -128,7 +128,7 @@ func TestNeedsYouIsTheLeadsAndExplicit(t *testing.T) {
 		t.Errorf("announced %s", got)
 	}
 	text := s.needsYouContext(lead)
-	if !strings.Contains(text, "1 waiting on the user") || !strings.Contains(text, "n1 (login): Log in to the registry") || strings.Contains(text, "Run npm login") {
+	if !strings.Contains(text, "1 waiting on the user") || !strings.Contains(text, `n1 (login): "Log in to the registry"`) || strings.Contains(text, "Run npm login") {
 		t.Errorf("context:\n%s", text)
 	}
 

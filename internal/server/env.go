@@ -132,15 +132,21 @@ func (s *Server) describeEnv(context.Context, caller, *http.Request) (any, error
 // envContext is the context's part on environment variables. A lead has
 // no shell: its workers' commands get them.
 func (s *Server) envContext(lead bool) string {
-	vars, list, locked, _ := s.sources()
+	vars, list, locked, errs := s.sources()
 	var b strings.Builder
 	b.WriteString("\n## Environment\n\n")
+	if len(errs) > 0 {
+		b.WriteString("Some environment settings could not be read. Check yesman_env for current status.\n")
+	}
 	if len(vars)+len(list)+len(locked) == 0 {
-		whose := "your commands"
-		if lead {
-			whose = "your workers' commands"
+		if len(errs) > 0 {
+			return b.String()
 		}
-		b.WriteString("No secrets or variables are set. When a task needs a credential or a setting, ask the user to add it in yesman's Settings › Secrets (keys and tokens) or Settings › Variables; it then reaches " + whose + " as an environment variable.\n")
+		whose, action := "your commands", "ask your lead to arrange it"
+		if lead {
+			whose, action = "your workers' commands", "ask the user to configure it"
+		}
+		b.WriteString("No secrets or variables are set. If needed, " + action + " in Settings › Secrets or Variables for " + whose + ".\n")
 		return b.String()
 	}
 	if lead {
@@ -149,7 +155,11 @@ func (s *Server) envContext(lead bool) string {
 		b.WriteString("All secrets and variables are set as environment variables in bash commands. Call yesman_env to see what each one is.\n")
 	}
 	if len(locked) > 0 {
-		b.WriteString("The secrets are locked now, so commands get only the variables. If you need a secret, ask the user to unlock them in yesman's Settings › Secrets.\n")
+		if lead {
+			b.WriteString("The secrets are locked. Commands get only the variables. If needed, ask the user to unlock Secrets in Settings.\n")
+		} else {
+			b.WriteString("The secrets are locked. Commands get only the variables. If needed, report this blocker to your lead.\n")
+		}
 	} else if len(list) > 0 {
 		b.WriteString("A secret's value never reaches you: output shows it as [secret NAME].\n")
 	}

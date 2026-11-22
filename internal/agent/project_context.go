@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/idy/yesman/internal/yesmen"
@@ -31,6 +33,29 @@ func (m *Manager) ContextActor(token, submission string) (ContextActor, error) {
 		}
 	}
 	return out, nil
+}
+
+// ContextQuestions snapshots live handed-over worker dialogs for one hire.
+// It does not enumerate the workspace's worker records or load the Board.
+func (m *Manager) ContextQuestions(y yesmen.Yesman) []Info {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Info
+	for _, a := range m.agents {
+		i := a.info
+		if i.Yesman != y.Name || i.Role != RoleWorker || !a.workspaceSince.Equal(y.HiredAt) ||
+			a.proc == nil || a.retiring || a.removing || a.stopping || a.handedOver == "" || dialogID(i.Dialog) != a.handedOver {
+			continue
+		}
+		out = append(out, i)
+	}
+	slices.SortFunc(out, func(a, b Info) int {
+		if n := a.Since.Compare(b.Since); n != 0 {
+			return n
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return out
 }
 
 type ContextActor struct {

@@ -864,7 +864,7 @@ func quotedRouteText(s string) string {
 // BuildContext builds the fixed rules plus a short fallback project brief.
 func BuildContext(_ context.Context, p *pool.Pool, _ *agent.Manager, y yesmen.Yesman, me agent.Info, board yesmen.Board) string {
 	actor := agent.ContextActor{Info: me, Worker: yesmen.Worker{Task: me.Task}}
-	return projectRules(p, y, me) + buildProjectBrief(context.Background(), projectCatalog{workspace: y}, actor, board, nil, nil, "")
+	return projectRules(p, y, me) + buildProjectBrief(context.Background(), projectCatalog{workspace: y}, actor, board, nil, nil, "", projectBriefStatus{})
 }
 
 func projectRules(p *pool.Pool, y yesmen.Yesman, me agent.Info) string {

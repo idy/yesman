@@ -289,32 +289,87 @@ func declaredDate(s string) string {
 func markdownProjectItem(source, key, text string) projectItem {
 	i := projectItem{Source: source, Key: key, ID: key, Title: path.Base(key), Date: declaredDate(path.Base(key))}
 	name, date, start, offset := "Document", "", 0, 0
+	var fence byte
+	var fenceLen int
 	for line := range strings.SplitSeq(text, "\n") {
-		trim := strings.TrimSpace(line)
-		title := strings.TrimSpace(strings.TrimLeft(trim, "#"))
-		heading := strings.HasPrefix(trim, "#") && len(trim) > len(title) && title != ""
+		lineOffset := offset
+		offset += len(line) + 1
+		if marker, count, suffix := markdownFence(line); marker != 0 {
+			if fence == 0 && (marker != '`' || !strings.ContainsRune(suffix, '`')) {
+				fence, fenceLen = marker, count
+				continue
+			}
+			if fence == marker && count >= fenceLen && strings.TrimSpace(suffix) == "" {
+				fence = 0
+				continue
+			}
+		}
+		if fence != 0 {
+			continue
+		}
+		// Four spaces or leading tabs indent code. Keep it in the section,
+		// including lines that look like headings or dated log entries.
+		left := strings.TrimLeft(line, " ")
+		if len(line)-len(left) >= 4 || strings.HasPrefix(left, "\t") {
+			continue
+		}
+		trim := strings.TrimSpace(left)
+		title, level := markdownATX(left)
+		heading := level != 0
 		lineDate := ""
 		if heading || source == "working_logs" && (strings.HasPrefix(trim, "- ") || strings.HasPrefix(trim, "* ")) {
 			lineDate = declaredDate(trim)
 		}
-		if heading && i.Title == path.Base(key) && strings.HasPrefix(trim, "# ") {
+		if level == 1 && i.Title == path.Base(key) && title != "" {
 			i.Title = title
 		}
-		if (heading || lineDate != "") && offset > start {
-			i.Fields = append(i.Fields, projectField{name, text[start:offset], date})
-			start = offset
+		if heading && title == "" {
+			title = "Section"
+		}
+		if (heading || lineDate != "") && lineOffset > start {
+			i.Fields = append(i.Fields, projectField{name, text[start:lineOffset], date})
+			start = lineOffset
 		}
 		if heading {
 			name, date = title, lineDate
 		} else if lineDate != "" {
 			name, date = "Dated log entry", lineDate
 		}
-		offset += len(line) + 1
 	}
 	if start < len(text) || len(i.Fields) == 0 {
 		i.Fields = append(i.Fields, projectField{name, text[start:], date})
 	}
 	return i
+}
+
+func markdownATX(line string) (string, int) {
+	rest := strings.TrimLeft(line, "#")
+	level := len(line) - len(rest)
+	if level < 1 || level > 6 || rest != "" && !strings.ContainsRune(" \t\r", rune(rest[0])) {
+		return "", 0
+	}
+	rest = strings.TrimRight(rest, " \t\r")
+	if title := strings.TrimRight(rest, "#"); title != rest && (title == "" || strings.ContainsRune(" \t", rune(title[len(title)-1]))) {
+		rest = title
+	}
+	return strings.TrimSpace(rest), level
+}
+
+// markdownFence recognizes a top-level Markdown code fence and its suffix.
+func markdownFence(line string) (byte, int, string) {
+	s := strings.TrimLeft(line, " ")
+	if len(line)-len(s) > 3 || s == "" || s[0] != '`' && s[0] != '~' {
+		return 0, 0, ""
+	}
+	marker := s[0]
+	count := 1
+	for count < len(s) && s[count] == marker {
+		count++
+	}
+	if count < 3 {
+		return 0, 0, ""
+	}
+	return marker, count, s[count:]
 }
 
 func (c projectCatalog) visitDocuments(ctx context.Context, source, key string, visit func(projectItem)) string {

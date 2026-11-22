@@ -40,9 +40,21 @@ func TestProjectContextWithManagedPi(t *testing.T) {
 	store := yesmen.New(filepath.Join(tmp, "yesmen"), filepath.Join(tmp, "archive"))
 	y, err := store.Hire("alice")
 	must(t, err)
-	_, err = store.ChangeBoard(y.Name, yesmen.BoardChange{Add: []yesmen.TaskEdit{{Title: ptrTo("Verifiable board task"), Status: ptrTo("blocked"), Wait: &yesmen.WaitEdit{Kind: "external", Reason: "Synthetic blocker"}}}})
+	for _, title := range []string{"Other handoff A", "Other handoff B", "Relevant wait in Needs You"} {
+		_, _, err := store.AddHandoff(y.Name, yesmen.Handoff{Type: "input", Title: title, Detail: "OMIT HANDOFF BODY"})
+		must(t, err)
+	}
+	_, err = store.ChangeBoard(y.Name, yesmen.BoardChange{Add: []yesmen.TaskEdit{
+		{Title: ptrTo("Verifiable board task"), Status: ptrTo("blocked"), Wait: &yesmen.WaitEdit{Kind: "user", Handoff: "n3", Reason: "Synthetic blocker"}},
+		{Title: ptrTo("Earlier citation"), Status: ptrTo("done")},
+		{Title: ptrTo("Second open citation"), Status: ptrTo("doing")},
+	}})
 	must(t, err)
-	topic, err := store.CreateTopic(y.Name, y.HiredAt, yesmen.TopicByUser, yesmen.TopicInput{Title: "Trusted topic", Summary: "Interim data", Conclusions: []string{"Confirmed decision"}, Sources: []yesmen.TopicSource{{Kind: "task", Ref: "t1"}}})
+	topic, err := store.CreateTopic(y.Name, y.HiredAt, yesmen.TopicByUser, yesmen.TopicInput{
+		Title: "Trusted topic", Summary: "Interim data",
+		Conclusions: []string{"Older conclusion outside brief", "Confirmed decision", "Another agreement", "Current constraint"},
+		Sources:     []yesmen.TopicSource{{Kind: "task", Ref: "t2"}, {Kind: "task", Ref: "t3"}, {Kind: "task", Ref: "t1"}},
+	})
 	must(t, err)
 	must(t, os.WriteFile(filepath.Join(y.KnowledgeDir(), "fixture.md"), []byte("# Exact source\n\n## Target\nKNOWN FIELD 精确定位\n\n## Unrelated\nOMIT THIS SECTION\n"), 0600))
 	must(t, os.WriteFile(filepath.Join(y.KnowledgeDir(), "INDEX.md"), []byte("INDEX SHOULD NEVER BE INJECTED\n"), 0600))
@@ -112,9 +124,14 @@ func TestProjectContextWithManagedPi(t *testing.T) {
 	_, err = svc.SubmitTopic(ctx, y.Name, y.HiredAt, topic.ID, fmt.Sprintf("%012x%s", time.Now().UnixMilli(), strings.Repeat("a1", 18)), "PROJECT-KICKOFF", nil)
 	must(t, err)
 	launch := wait(func(o observation) bool { return strings.Contains(o.Last, "PROJECT-KICKOFF") }, "Topic request")
-	for _, want := range []string{"Linked Topic " + topic.ID, "Confirmed decision", "Interim data", "Linked Board task t1", "Synthetic blocker"} {
+	for _, want := range []string{"Linked Topic " + topic.ID, "Confirmed decision", "Current constraint", "Another agreement", "Interim summary", "Interim data", "Linked Board task t1", "Linked Board task t3", "Synthetic blocker", "Relevant wait in Needs You"} {
 		if !strings.Contains(launch.Prompt, want) {
 			t.Errorf("Lead prompt lacks %q", want)
+		}
+	}
+	for _, unwanted := range []string{"Older conclusion outside brief", "Earlier citation", "OMIT HANDOFF BODY"} {
+		if strings.Contains(launch.Prompt, unwanted) {
+			t.Errorf("Lead prompt included peripheral or private data %q", unwanted)
 		}
 	}
 	worker := wait(func(o observation) bool { return o.Role == "worker" && strings.Contains(o.Last, "PROJECT-WORKER") }, "worker kickoff")

@@ -126,6 +126,16 @@ func (s *Server) readNeedsYouView(c caller, includeRecent bool) (NeedsYouView, e
 	if err != nil {
 		return NeedsYouView{}, err
 	}
+	var questions []agent.Info
+	for _, i := range s.Agents.List() {
+		if i.Yesman == c.yesman.Name && i.HandedOver {
+			questions = append(questions, i)
+		}
+	}
+	return collectNeedsYouView(hs, questions, includeRecent), nil
+}
+
+func collectNeedsYouView(hs yesmen.Handoffs, questions []agent.Info, includeRecent bool) NeedsYouView {
 	view := NeedsYouView{Handoffs: hs.Open(), Questions: []HandedOver{}, CallMemory: callMemoryNotice(hs)}
 	if includeRecent {
 		view.Recent = recentHandoffs(hs)
@@ -133,10 +143,7 @@ func (s *Server) readNeedsYouView(c caller, includeRecent bool) (NeedsYouView, e
 	if view.Handoffs == nil {
 		view.Handoffs = []yesmen.Handoff{}
 	}
-	for _, i := range s.Agents.List() {
-		if i.Yesman != c.yesman.Name || !i.HandedOver {
-			continue
-		}
+	for _, i := range questions {
 		var d struct {
 			ID    string `json:"id"`
 			Title string `json:"title"`
@@ -144,7 +151,7 @@ func (s *Server) readNeedsYouView(c caller, includeRecent bool) (NeedsYouView, e
 		_ = json.Unmarshal(i.Dialog, &d)
 		view.Questions = append(view.Questions, HandedOver{Worker: i.Name, RequestID: d.ID, Title: d.Title, Since: i.DialogAt})
 	}
-	return view, nil
+	return view
 }
 
 func (s *Server) needsYou(_ context.Context, c caller, r *http.Request) (any, error) {
@@ -263,14 +270,15 @@ func (s *Server) commitNeedsYou(y yesmen.Yesman, req NeedsYouChange) (any, *yesm
 	}
 }
 
-const needsYouContextLimit = 5
+const needsYouContextLimit = 2
 
 // needsYouContext tells a lead, briefly, what it has left with the user.
-func (s *Server) needsYouContext(c caller) string {
-	view, err := s.needsYouView(c)
+func (s *Server) needsYouContext(c caller, priority ...string) string {
+	hs, err := s.Yesmen.Handoffs(c.yesman.Name)
 	if err != nil {
-		return fmt.Sprintf("\n## Needs you\n\nWhat waits on the user cannot be read: %v\n", err)
+		return "Needs you unavailable. Use yesman_needs_you to verify what waits on the user.\n"
 	}
+	view := collectNeedsYouView(hs, s.Agents.ContextQuestions(c.yesman), false)
 	total := len(view.Handoffs) + len(view.Questions)
 	if total == 0 && view.CallMemory == nil {
 		return ""
@@ -285,19 +293,30 @@ func (s *Server) needsYouContext(c caller) string {
 		b.WriteString("\n")
 	}
 	fmt.Fprintf(&b, "%d waiting on the user; see them with yesman_needs_you:\n", total)
+	if len(priority) != 0 {
+		slices.SortStableFunc(view.Handoffs, func(a, b yesmen.Handoff) int {
+			priorityOf := func(id string) int {
+				if i := slices.Index(priority, id); i >= 0 {
+					return i
+				}
+				return len(priority)
+			}
+			return priorityOf(a.ID) - priorityOf(b.ID)
+		})
+	}
 	shown := 0
 	for _, h := range view.Handoffs {
 		if shown == needsYouContextLimit {
 			break
 		}
-		fmt.Fprintf(&b, "- %s (%s): %s\n", h.ID, h.Type, h.Title)
+		fmt.Fprintf(&b, "- %s (%s): %s\n", h.ID, h.Type, briefQuote(h.Title, 100))
 		shown++
 	}
 	for _, q := range view.Questions {
 		if shown == needsYouContextLimit {
 			break
 		}
-		fmt.Fprintf(&b, "- worker %s's question %q: %s\n", q.Worker, q.RequestID, q.Title)
+		fmt.Fprintf(&b, "- worker %s's question %s: %s\n", q.Worker, briefQuote(q.RequestID, 65), briefQuote(q.Title, 100))
 		shown++
 	}
 	if total > shown {

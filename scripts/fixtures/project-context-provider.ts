@@ -4,6 +4,7 @@ import { createAssistantMessageEventStream, getCurrentSystemPrompt } from "@eare
 
 const text = (m) => typeof m?.content === "string" ? m.content : (m?.content ?? []).filter(b => b.type === "text").map(b => b.text).join("\n");
 const ref = (s) => s.match(/pc1\.[\w-]+/)?.[0];
+const dispatchRef = (prompt) => prompt.match(/^Source "(pc1\.[\w-]+)"/m)?.[1];
 
 export default function (pi) {
 	let session;
@@ -23,7 +24,7 @@ export default function (pi) {
 				if (role === "lead" && value.includes("PROJECT-KICKOFF")) {
 					call = ["context_search", { query: "精确定位", source: "knowledge" }];
 				} else if (role === "worker" && value.includes("PROJECT-WORKER")) {
-					call = ["context_read", { ref: ref(prompt) }];
+					call = ["context_read", { ref: dispatchRef(prompt) }];
 				} else if (role === "lead" && value.includes("WORKER-VERIFIED") && ref(value)) {
 					call = ["context_read", { ref: ref(value) }];
 				} else if (value.includes("PROJECT-RESUME")) {
@@ -33,7 +34,7 @@ export default function (pi) {
 				if (last.toolName === "context_search" && role === "lead" && ref(value)) {
 					call = ["yesman_worker_start", { name: "lookup", title: "Verify source", task: "PROJECT-WORKER", dispatch: { boardTask: "t1", goal: "Verify the source", constraints: "Keep the original", deliverables: "Return a source ref", sources: [ref(value)] } }];
 				} else if (last.toolName === "context_read" && value.includes("KNOWN FIELD 精确定位")) {
-					const source = ref(context.messages.map(text).reverse().find(s => ref(s)) ?? "") ?? ref(prompt);
+					const source = ref(context.messages.map(text).reverse().find(s => ref(s)) ?? "") ?? dispatchRef(prompt);
 					const resumed = text(context.messages.findLast(m => m.role === "user")).includes("PROJECT-RESUME");
 					outputText = resumed ? "RESUMED-VERIFIED" : role === "worker" ? `WORKER-VERIFIED ${source}` : "LEAD-VERIFIED";
 				}

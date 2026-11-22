@@ -15,6 +15,7 @@ import (
 	"github.com/idy/yesman/internal/agent"
 	"github.com/idy/yesman/internal/crew"
 	"github.com/idy/yesman/internal/schedule"
+	"github.com/idy/yesman/internal/secrets"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -126,8 +127,8 @@ func TestProjectContextStablePagingAndCaps(t *testing.T) {
 	}
 	q := projectQuery{Source: "knowledge", Query: "精确定位"}
 	r := c.search(ctx, q)
-	if len(r.Hits) == 0 || len(r.Hits) > 5 || len(contextJSON(r)) > searchPageBytes || r.Cursor == "" {
-		t.Fatalf("first page hits=%d cursor=%q bytes=%d", len(r.Hits), r.Cursor, len(contextJSON(r)))
+	if len(r.Hits) == 0 || len(r.Hits) > 5 || len(projectWireJSON(r)) > searchPageBytes || r.Cursor == "" {
+		t.Fatalf("first page hits=%d cursor=%q bytes=%d", len(r.Hits), r.Cursor, len(projectWireJSON(r)))
 	}
 	ref := r.Hits[0].Ref
 	excerpt := r.Hits[0].Excerpt
@@ -140,11 +141,11 @@ func TestProjectContextStablePagingAndCaps(t *testing.T) {
 			limit = maxReadBytes
 		}
 		rd := c.read(ctx, projectRead{Ref: ref, Large: large})
-		if rd.Status != "ok" || rd.Cursor == "" || len(contextJSON(rd)) > limit || !strings.Contains(rd.Item.Excerpt, "精确定位") || strings.Contains(rd.Item.Excerpt, "Unrelated") {
-			t.Fatalf("read status=%s continuation=%v bytes=%d", rd.Status, rd.Cursor != "", len(contextJSON(rd)))
+		if rd.Status != "ok" || rd.Cursor == "" || len(projectWireJSON(rd)) > limit || !strings.Contains(rd.Item.Excerpt, "精确定位") || strings.Contains(rd.Item.Excerpt, "Unrelated") {
+			t.Fatalf("read status=%s continuation=%v bytes=%d", rd.Status, rd.Cursor != "", len(projectWireJSON(rd)))
 		}
 		more := c.read(ctx, projectRead{Ref: ref, Cursor: rd.Cursor, Large: large})
-		if more.Status != "ok" || len(contextJSON(more)) > limit || strings.Contains(more.Item.Excerpt, "精确定位") {
+		if more.Status != "ok" || len(projectWireJSON(more)) > limit || strings.Contains(more.Item.Excerpt, "精确定位") {
 			t.Fatalf("read cursor did not move forward: %s", more.Status)
 		}
 		if denied := c.read(ctx, projectRead{Ref: ref, Cursor: rd.Cursor + "A"}); denied.Status != "denied" {
@@ -170,7 +171,7 @@ func TestProjectContextStablePagingAndCaps(t *testing.T) {
 		}
 		q.Cursor = r.Cursor
 		r = c.search(ctx, q)
-		if r.Status != "ok" || len(contextJSON(r)) > searchPageBytes {
+		if r.Status != "ok" || len(projectWireJSON(r)) > searchPageBytes {
 			t.Fatalf("stable continuation status=%s", r.Status)
 		}
 	}
@@ -210,7 +211,7 @@ func TestProjectContextBriefBoundsAndBinding(t *testing.T) {
 		{ID: "t1", Title: "Same worker name, previous generation", Status: "blocked", Owner: "w", OwnerSince: y.HiredAt.Add(-time.Hour)},
 		{ID: "t2", Title: "Current worker assignment", Status: "blocked", Owner: "w", OwnerSince: y.HiredAt, Wait: &yesmen.Wait{Kind: "external", Reason: "Current blocker"}},
 	}}
-	brief := buildProjectBrief(ctx, c, w, board, nil, nil, "")
+	brief := buildProjectBrief(ctx, c, w, board, nil, nil, "", projectBriefStatus{})
 	for _, want := range []string{"Keep goal", "Keep constraint", "Keep deliverable", "pc1.example", "Linked Board task t2", "Current blocker"} {
 		if !strings.Contains(brief, want) {
 			t.Errorf("worker brief lacks %q", want)
@@ -223,15 +224,129 @@ func TestProjectContextBriefBoundsAndBinding(t *testing.T) {
 		board.Tasks = append(board.Tasks, yesmen.Task{ID: fmt.Sprintf("t%d", i), Status: "todo", Title: strings.Repeat("界<\\\"", 100)})
 	}
 	lead := agent.ContextActor{Info: agent.Info{Role: agent.RoleLead, Name: "lead"}}
-	brief = buildProjectBrief(ctx, c, lead, board, nil, &crew.Routing{}, "")
+	brief = buildProjectBrief(ctx, c, lead, board, nil, &crew.Routing{}, "", projectBriefStatus{})
 	if strings.Count(brief, "\n- t") != 5 || len(brief) > projectBriefBytes || !utf8.ValidString(brief) {
 		t.Fatalf("Lead brief violated its budget (%d bytes)", len(brief))
 	}
 	w.Worker.Dispatch = yesmen.Dispatch{}
 	w.Worker.Task = strings.Repeat("界<\\\"", 12000)
-	brief = buildProjectBrief(ctx, c, w, board, nil, nil, "")
+	brief = buildProjectBrief(ctx, c, w, board, nil, nil, "", projectBriefStatus{})
 	if len(brief) > projectBriefBytes || !utf8.ValidString(brief) || !strings.Contains(brief, "Current blocker") || !strings.Contains(brief, "…") {
 		t.Fatalf("legacy dispatch or linked status not bounded (%d bytes)", len(brief))
+	}
+}
+
+func TestProjectContextLivePromptCoverage(t *testing.T) {
+	f := newBoardFixture(t)
+	y := f.hire("brief")
+	if _, _, err := f.store.AddHandoff(y.Name, yesmen.Handoff{Type: "input", Title: "Synthetic owner decision", Detail: "HIDDEN_REQUEST_BODY"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AddWorker(y.Name, yesmen.Worker{Name: "doer", Task: "test", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	lead := f.start(agent.ID(y.Name, "lead"))
+	worker := f.start(agent.ID(y.Name, "doer"))
+	get := func(token string) string {
+		t.Helper()
+		r := httptest.NewRequest("GET", "/v1/context", nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("context status %d", w.Code)
+		}
+		_, brief, _ := strings.Cut(w.Body.String(), "## Current project brief")
+		if len(brief) == 0 || len(brief) > projectBriefBytes {
+			t.Fatalf("unexpected context size %d", len(brief))
+		}
+		return brief
+	}
+	check := func(text string, present, absent []string) {
+		t.Helper()
+		for _, part := range present {
+			if !strings.Contains(text, part) {
+				t.Errorf("brief lacks %q", part)
+			}
+		}
+		for _, part := range absent {
+			if strings.Contains(text, part) {
+				t.Errorf("brief unexpectedly includes %q", part)
+			}
+		}
+	}
+	check(get(lead.Token), []string{"No open items in this brief", "No secrets or variables are set", "your workers' commands", `n1 (input): "Synthetic owner decision"`, "1 waiting on the user", "yesman_needs_you"}, []string{"HIDDEN_REQUEST_BODY"})
+	check(get(worker.Token), []string{"No secrets or variables are set", "ask your lead"}, []string{"Synthetic owner decision", "yesman_needs_you"})
+
+	projectWrite(t, y.TopicsFile(), "invalid JSON")
+	check(get(lead.Token), []string{"Topics unavailable", "yesman_topics"}, []string{"No open items in this brief", "invalid JSON"})
+	linked := buildProjectBrief(context.Background(), projectCatalog{workspace: y}, agent.ContextActor{Info: agent.Info{Role: agent.RoleLead}}, yesmen.Board{}, nil, nil, "tp1", projectBriefStatus{topicsUnavailable: true})
+	check(linked, []string{"Topics unavailable", "Linked Topic tp1 is unavailable"}, []string{"No open items in this brief"})
+	projectWrite(t, y.BoardFile(), `{"next":2,"tasks":[{"id":"t1","title":"Current task","status":"doing"}]}`)
+	check(get(lead.Token), []string{"Topics unavailable", `t1 "Current task"`}, []string{"No open items in this brief"})
+	projectWrite(t, y.BoardFile(), "invalid board")
+	check(get(lead.Token), []string{"Topics unavailable", "Board unavailable"}, []string{"No open items in this brief"})
+	check(get(worker.Token), []string{"Board unavailable"}, []string{"Topics unavailable"})
+
+	f.srv.Secrets = secrets.NewVault(filepath.Join(t.TempDir(), "secrets"))
+	f.srv.Secrets.WorkFactor = 10
+	if err := f.srv.Secrets.Create("fixture-passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.srv.Secrets.Save([]secrets.Entry{{Name: "PRIVATE_FIXTURE_NAME", Value: "PRIVATE_FIXTURE_VALUE"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{lead.Token, worker.Token} {
+		check(get(token), []string{"yesman_env", "A secret's value never reaches you"}, []string{"PRIVATE_FIXTURE_NAME", "PRIVATE_FIXTURE_VALUE"})
+	}
+	f.srv.Secrets.Lock()
+	check(get(lead.Token), []string{"secrets are locked", "ask the user to unlock"}, []string{"PRIVATE_FIXTURE_NAME", "PRIVATE_FIXTURE_VALUE"})
+	check(get(worker.Token), []string{"secrets are locked", "report this blocker to your lead"}, []string{"ask the user to unlock", "PRIVATE_FIXTURE_NAME", "PRIVATE_FIXTURE_VALUE"})
+	projectWrite(t, f.srv.Secrets.File(), "unreadable secret settings")
+	check(get(lead.Token), []string{"environment settings could not be read"}, []string{"No secrets or variables are set", "unreadable secret settings"})
+}
+
+func TestProjectContextEscapedReferenceAndPage(t *testing.T) {
+	c, y := projectFixture(t)
+	ctx := context.Background()
+	key := strings.Repeat("&", 145) + ".md"
+	body := strings.Repeat("&", 110) + " label marker " + strings.Repeat("&", 110)
+	projectWrite(t, filepath.Join(y.KnowledgeDir(), key), "# "+strings.Repeat("&", 90)+"\n\n## "+strings.Repeat("&", 55)+"\n"+body)
+	hit := projectOne(t, c, projectQuery{Source: "knowledge", Query: "label marker"})
+	if len(hit.Ref) > projectRefBytes || hit.ID != key || !strings.Contains(hit.Excerpt, "label marker") {
+		t.Fatalf("the search did not return an actionable match of the original (%d-byte reference)", len(hit.Ref))
+	}
+	if err := validateDispatch(yesmen.Dispatch{Sources: []string{hit.Ref}}); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.read(ctx, projectRead{Ref: hit.Ref}); r.Status != "ok" || !strings.Contains(r.Item.Excerpt, "label marker") || r.Item.Field == "" {
+		t.Fatalf("read of escaped file name: status %s", r.Status)
+	}
+}
+
+func TestProjectContextKeepsFencedCodeInSection(t *testing.T) {
+	c, y := projectFixture(t)
+	for _, mode := range []string{"backtick", "tilde"} {
+		fence := "````"
+		if mode == "tilde" {
+			fence = "~~~~"
+		}
+		document := "# Deployment notes\n\n## Verification ###\nUse the following local check.\n\n    # Indented code comment\n    - 2040-01-11 indented date\n#not-a-heading\n####### seven markers\n\n" + fence + "sh\n# Code comment\n- 2040-01-12 fenced date\n" + fence[:3] + "\n# Another comment\n" + fence + "\n\nSource guardian confirmed.\n\n## Distribution\nDifferent workflow.\n"
+		projectWrite(t, y.TaskLogPath(), document)
+		hit := projectOne(t, c, projectQuery{Source: "working_logs", Query: "following local check"})
+		r := c.read(context.Background(), projectRead{Ref: hit.Ref})
+		if r.Status != "ok" || r.Item.Field != "Verification" || !strings.Contains(r.Item.Excerpt, "Source guardian confirmed") || strings.Contains(r.Item.Excerpt, "Different workflow") {
+			t.Fatalf("%s fence split the section: %+v", mode, r.Item)
+		}
+		for _, date := range []string{"2040-01-11", "2040-01-12"} {
+			if r := c.search(context.Background(), projectQuery{Source: "working_logs", From: date, To: date}); r.Status != "no_match" {
+				t.Errorf("code-looking date became a dated entry: %s", date)
+			}
+		}
+		next := projectOne(t, c, projectQuery{Source: "working_logs", Query: "Different workflow"})
+		if next.Field != "Distribution" {
+			t.Errorf("next heading missing: %q", next.Field)
+		}
 	}
 }
 

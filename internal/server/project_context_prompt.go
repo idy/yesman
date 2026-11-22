@@ -15,10 +15,12 @@ import (
 	"github.com/idy/yesman/internal/yesmen"
 )
 
-const (
-	projectBriefBytes = 5400
-	boardUnavailable  = "Board unavailable. Use yesman_board to verify task status.\n"
-)
+const projectBriefBytes = 5400
+
+type projectBriefStatus struct {
+	boardUnavailable, topicsUnavailable bool
+	environment, needsYou               string
+}
 
 func projectPoolPath(p *pool.Pool) string {
 	if p == nil {
@@ -37,17 +39,29 @@ func (s *Server) projectPrompt(w http.ResponseWriter, r *http.Request) {
 	catalog := projectCatalog{server: s, workspace: y}
 	var topics []yesmen.Topic
 	var routing *crew.Routing
-	if actor.Info.Role == agent.RoleLead {
-		topics, _ = s.Yesmen.Topics(y.Name, y.HiredAt)
+	lead := actor.Info.Role == agent.RoleLead
+	status := projectBriefStatus{boardUnavailable: boardErr != nil, environment: s.envContext(lead)}
+	linkedTopic := topicFromInput(actor.InputContext)
+	if lead {
+		var err error
+		topics, err = s.Yesmen.Topics(y.Name, y.HiredAt)
+		status.topicsUnavailable = err != nil
+		var priority []string
+		for _, t := range linkedTopicTasks(board, topics, linkedTopic) {
+			if t.Wait != nil && t.Wait.Handoff != "" {
+				priority = append(priority, t.Wait.Handoff)
+			}
+		}
+		if t, ok := linkedScheduledTask(board, actor); ok && t.Wait != nil && t.Wait.Handoff != "" {
+			priority = append(priority, t.Wait.Handoff)
+		}
+		status.needsYou = s.needsYouContext(caller{agent: actor.Info, yesman: y, token: token}, priority...)
 		if s.Routing != nil {
 			r := s.Routing(r.Context(), nil)
 			routing = &r
 		}
 	}
-	brief := buildProjectBrief(r.Context(), catalog, actor, board, topics, routing, topicFromInput(actor.InputContext))
-	if boardErr != nil && len(brief)+len(boardUnavailable) <= projectBriefBytes {
-		brief += boardUnavailable
-	}
+	brief := buildProjectBrief(r.Context(), catalog, actor, board, topics, routing, linkedTopic, status)
 	text := projectRules(s.Pool, y, actor.Info) + brief
 	if s.GitHubApp != nil {
 		text += s.GitHubApp.Context(y.Name, y.HiredAt.UTC().Format(time.RFC3339Nano))
@@ -64,7 +78,7 @@ func topicFromInput(inputContext string) string {
 	return ""
 }
 
-func buildProjectBrief(ctx context.Context, c projectCatalog, actor agent.ContextActor, board yesmen.Board, topics []yesmen.Topic, routing *crew.Routing, linkedTopic string) string {
+func buildProjectBrief(ctx context.Context, c projectCatalog, actor agent.ContextActor, board yesmen.Board, topics []yesmen.Topic, routing *crew.Routing, linkedTopic string, status projectBriefStatus) string {
 	var b strings.Builder
 	b.WriteString("\n## Current project brief\n\n")
 	write := func(format string, args ...any) {
@@ -73,17 +87,26 @@ func buildProjectBrief(ctx context.Context, c projectCatalog, actor agent.Contex
 			b.WriteString(line)
 		}
 	}
+	if status.boardUnavailable {
+		write("Board unavailable. Use yesman_board to verify task status.\n")
+	}
+	if status.topicsUnavailable {
+		write("Topics unavailable. Use yesman_topics to verify the Topic list.\n")
+	}
+	write("%s%s\n", status.environment, status.needsYou)
 	ref := func(i projectItem) string { return contextToken("pc1.", i.locator(contextScope(c.workspace), 0, 0)) }
 	quote := func(s string, bytes int) string { return briefQuote(s, bytes) }
-	showTask := func(t yesmen.Task) {
-		write("Linked Board task %s [%s] %s\n", t.ID, quote(t.Status, 50), quote(t.Title, 240))
+	showTask := func(t yesmen.Task, primary bool) {
+		write("Linked Board task %s [%s] %s\n", t.ID, quote(t.Status, 50), quote(t.Title, 180))
 		if w := t.Wait; w != nil {
-			write("Wait %s, tasks %s, handoff %s, blocker %s\n", quote(w.Kind, 40), quote(strings.Join(w.Tasks, ", "), 160), quote(w.Handoff, 40), quote(w.Reason, 520))
+			write("Wait %s, tasks %s, handoff %s, blocker %s\n", quote(w.Kind, 40), quote(strings.Join(w.Tasks, ", "), 100), quote(w.Handoff, 40), quote(w.Reason, 380))
 		}
-		if t.Note != "" {
-			write("Current note %s\n", quote(t.Note, 330))
+		if primary {
+			if t.Note != "" {
+				write("Current note %s\n", quote(t.Note, 220))
+			}
+			write("Board ref %s\n", ref(boardProjectItem(t)))
 		}
-		write("Board ref %s\n", ref(boardProjectItem(t)))
 	}
 	if actor.Info.Role == agent.RoleWorker {
 		w := actor.Worker
@@ -97,14 +120,16 @@ func buildProjectBrief(ctx context.Context, c projectCatalog, actor agent.Contex
 					write("%s %s\n", f[0], contextJSON(f[1]))
 				}
 			}
+		}
+		if t, ok := workerBoardLink(actor, board); ok {
+			showTask(t, true)
+		} else if d.BoardTask != "" && !status.boardUnavailable {
+			write("Linked Board task %s is missing or its owner changed. Verify with yesman_board.\n", d.BoardTask)
+		}
+		if len(contextJSON(d)) <= dispatchBriefBytes {
 			for _, src := range d.Sources {
 				write("Source %s\n", contextJSON(src))
 			}
-		}
-		if t, ok := workerBoardLink(actor, board); ok {
-			showTask(t)
-		} else if d.BoardTask != "" {
-			write("Linked Board task %s is missing or its owner changed. Verify with yesman_board.\n", d.BoardTask)
 		}
 		if w.Task != "" && d.Goal == "" {
 			write("Lead's dispatch %s\n", quote(w.Task, min(3200, projectBriefBytes-b.Len()-180)))
@@ -119,24 +144,23 @@ func buildProjectBrief(ctx context.Context, c projectCatalog, actor agent.Contex
 		}
 		linked = true
 		write("Linked Topic %s [%s] %s (revision %d)\n", topic.ID, topic.Status, quote(topic.Title, 240), topic.Revision)
-		if len(topic.Conclusions) != 0 {
-			write("Confirmed conclusion %s\n", quote(topic.Conclusions[0].Text, 620))
+		item := topicProjectItem(topic)
+		field := max(0, len(topic.Conclusions)-1)
+		write("Topic ref %s. Use yesman_topics to verify the full set of conclusions and sources.\n", contextToken("pc1.", item.locator(contextScope(c.workspace), field, 0)))
+		for i, task := range linkedTopicTasks(board, topics, linkedTopic) {
+			showTask(task, i == 0)
+		}
+		// The item has no per-conclusion edit timestamps. Favor the last
+		// listed conclusions and provide the full Topic for the others.
+		for i := len(topic.Conclusions) - 1; i >= max(0, len(topic.Conclusions)-3); i-- {
+			conclusion := topic.Conclusions[i]
+			write("Confirmed conclusion %s %s\n", conclusion.ID, quote(conclusion.Text, 275))
 		}
 		if topic.Summary != "" {
-			write("Interim summary %s\n", quote(topic.Summary, 410))
+			write("Interim summary %s\n", quote(topic.Summary, 300))
 		}
 		if len(topic.Questions) != 0 {
-			write("Open question %s\n", quote(topic.Questions[0].Text, 270))
-		}
-		write("Topic ref %s. Use yesman_topics to read the full Topic.\n", ref(topicProjectItem(topic)))
-		for _, source := range topic.Sources {
-			if source.Kind != yesmen.SourceTask {
-				continue
-			}
-			if idx := slices.IndexFunc(board.Tasks, func(t yesmen.Task) bool { return t.ID == source.Ref }); idx >= 0 {
-				showTask(board.Tasks[idx])
-				break
-			}
+			write("Open question %s\n", quote(topic.Questions[0].Text, 190))
 		}
 		// Resolve one directly cited note only when needed. Paths are
 		// checked by the same source allowlist as context_read.
@@ -158,11 +182,8 @@ func buildProjectBrief(ctx context.Context, c projectCatalog, actor agent.Contex
 	if actor.Plan != "" {
 		linked = true
 		write("Linked scheduled plan %s\n", quote(actor.Plan, 40))
-		for _, task := range board.Tasks {
-			if task.Schedule != nil && task.Schedule.Plan == actor.Plan && task.Schedule.Run == actor.Run {
-				showTask(task)
-				break
-			}
+		if task, ok := linkedScheduledTask(board, actor); ok {
+			showTask(task, true)
 		}
 	}
 	if !linked {
@@ -180,7 +201,7 @@ func buildProjectBrief(ctx context.Context, c projectCatalog, actor agent.Contex
 				remaining--
 			}
 		}
-		if remaining == 5 {
+		if remaining == 5 && !status.boardUnavailable && !status.topicsUnavailable {
 			write("No open items in this brief.\n")
 		}
 	}
@@ -220,6 +241,62 @@ func buildProjectBrief(ctx context.Context, c projectCatalog, actor agent.Contex
 		}
 	}
 	return b.String()
+}
+
+func linkedTopicTasks(board yesmen.Board, topics []yesmen.Topic, topicID string) []yesmen.Task {
+	if topicID == "" {
+		return nil
+	}
+	index := slices.IndexFunc(topics, func(t yesmen.Topic) bool { return t.ID == topicID })
+	if index < 0 {
+		return nil
+	}
+	var cited []yesmen.Task
+	seen := make(map[string]bool)
+	for _, source := range topics[index].Sources {
+		if source.Kind != yesmen.SourceTask || seen[source.Ref] {
+			continue
+		}
+		seen[source.Ref] = true
+		if i := slices.IndexFunc(board.Tasks, func(t yesmen.Task) bool { return t.ID == source.Ref }); i >= 0 {
+			cited = append(cited, board.Tasks[i])
+		}
+	}
+	slices.SortStableFunc(cited, func(a, b yesmen.Task) int { return topicTaskPriority(a) - topicTaskPriority(b) })
+	if len(cited) == 0 {
+		return nil
+	}
+	if !cited[0].Open() {
+		return cited[:1]
+	}
+	if len(cited) == 1 || !cited[1].Open() {
+		return cited[:1]
+	}
+	return cited[:2]
+}
+
+func topicTaskPriority(t yesmen.Task) int {
+	switch t.Status {
+	case yesmen.TaskBlocked:
+		return 0
+	case yesmen.TaskDoing:
+		return 1
+	case yesmen.TaskTodo:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func linkedScheduledTask(board yesmen.Board, actor agent.ContextActor) (yesmen.Task, bool) {
+	if actor.Plan != "" {
+		for _, t := range board.Tasks {
+			if t.Schedule != nil && t.Schedule.Plan == actor.Plan && t.Schedule.Run == actor.Run {
+				return t, true
+			}
+		}
+	}
+	return yesmen.Task{}, false
 }
 
 func workerBoardLink(actor agent.ContextActor, b yesmen.Board) (yesmen.Task, bool) {

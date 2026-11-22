@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -24,6 +25,7 @@ const (
 	readPageBytes      = 4100
 	maxReadBytes       = 8000
 	dispatchBriefBytes = 3500
+	projectRefBytes    = 1000
 )
 
 var projectSources = []string{"knowledge", "working_logs", "topics", "board", "tasks"}
@@ -108,17 +110,35 @@ func contextScope(y yesmen.Yesman) string {
 	return contextDigest([]byte(y.Path + "\x00" + y.Name + "\x00" + y.HiredAt.UTC().Format(time.RFC3339Nano)))
 }
 
+// projectWireJSON matches the model-facing encoding. This is plain JSON,
+// never embedded in HTML. Keep escaping required by JSON itself in the cap.
+func projectWireJSON(v any) []byte {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
+	return bytes.TrimSuffix(b.Bytes(), []byte{'\n'})
+}
+
 func contextToken(prefix string, v any) string {
-	return prefix + base64.RawURLEncoding.EncodeToString(contextJSON(v))
+	data := contextJSON(v)
+	if len(prefix)+base64.RawURLEncoding.EncodedLen(len(data)) > projectRefBytes {
+		data = projectWireJSON(v)
+	}
+	return prefix + base64.RawURLEncoding.EncodeToString(data)
 }
 
 func parseContextToken(token, prefix string, dst any) bool {
 	b64, ok := strings.CutPrefix(token, prefix)
-	if !ok || len(token) > 1000 {
+	if !ok || len(token) > projectRefBytes {
 		return false
 	}
 	data, err := base64.RawURLEncoding.DecodeString(b64)
-	return err == nil && json.Unmarshal(data, dst) == nil && contextToken(prefix, dst) == token
+	if err != nil || json.Unmarshal(data, dst) != nil {
+		return false
+	}
+	// Keep resolving older, fully escaped encodings within the read limit.
+	return contextToken(prefix, dst) == token || prefix+base64.RawURLEncoding.EncodeToString(contextJSON(dst)) == token
 }
 
 func projectStatus(status, message string) projectResponse {
@@ -165,7 +185,7 @@ func (s *Server) projectLookup(read bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		respond := func(result projectResponse) {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(contextJSON(result))
+			_, _ = w.Write(projectWireJSON(result))
 		}
 		denied := projectStatus("denied", "This project context request is not authorized.")
 		token, actor, y, ok := s.projectActor(r)
@@ -193,7 +213,7 @@ func (s *Server) projectLookup(read bool) http.HandlerFunc {
 		if r.Context().Err() != nil {
 			return
 		}
-		if !s.deliverProject(w, r, token, actor, "application/json", contextJSON(result)) {
+		if !s.deliverProject(w, r, token, actor, "application/json", projectWireJSON(result)) {
 			respond(denied)
 		}
 	}
@@ -306,8 +326,17 @@ func (c projectCatalog) search(ctx context.Context, q projectQuery) projectRespo
 		} else {
 			next.Cursor = ""
 		}
-		if len(contextJSON(next)) > searchPageBytes {
-			break
+		if len(projectWireJSON(next)) > searchPageBytes {
+			if len(out.Hits) != 0 {
+				break
+			}
+			// For a heavy single hit, preserve its exact ID, locator and excerpt.
+			// Shorten only display fields before giving up on this page.
+			hit := &next.Hits[0]
+			hit.Title, hit.Field, hit.Status = oneLine(hit.Title, 27), oneLine(hit.Field, 20), oneLine(hit.Status, 20)
+			if len(projectWireJSON(next)) > searchPageBytes {
+				return projectStatus("partial", "A matching item exceeds the page limit. Refine the search.")
+			}
 		}
 		out = next
 	}
@@ -429,7 +458,7 @@ func markedText(text []rune, start, end int) string {
 
 func (i projectItem) hit(field, date, text string) projectHit {
 	return projectHit{Source: i.Source, ID: i.ID, Title: oneLine(i.Title, 90), Date: date,
-		Status: i.Status, Field: oneLine(field, 55), Excerpt: text}
+		Status: oneLine(i.Status, 40), Field: oneLine(field, 55), Excerpt: text}
 }
 
 type projectReadCursor struct {
@@ -504,7 +533,7 @@ func (c projectCatalog) read(ctx context.Context, in projectRead) projectRespons
 		} else {
 			next.Cursor = ""
 		}
-		if len(contextJSON(next)) <= maxBytes {
+		if len(projectWireJSON(next)) <= maxBytes {
 			out, low = next, mid+1
 		} else {
 			high = mid - 1
@@ -529,8 +558,8 @@ func validateDispatch(d yesmen.Dispatch) error {
 		return fmt.Errorf("at most five dispatch source references")
 	}
 	for _, ref := range d.Sources {
-		if len(ref) > 700 {
-			return fmt.Errorf("dispatch source reference exceeds 700 bytes")
+		if len(ref) > projectRefBytes {
+			return fmt.Errorf("dispatch source reference exceeds %d bytes", projectRefBytes)
 		}
 	}
 	return nil
