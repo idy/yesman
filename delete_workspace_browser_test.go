@@ -79,8 +79,10 @@ func TestDeletionBrowserBridge(t *testing.T) {
 			s.CancelWorkspaceForceDeletion(req.Token)
 		case "ForceDeleteWorkspace":
 			err = s.ForceDeleteWorkspace(r.Context(), req.Target, req.Token)
+		case "PreserveBazelGitData":
+			separateFixtureGitData(t, filepath.Join(bazel.Path, filepath.FromSlash(bazelCheckout)))
 		case "AddLateCheckout":
-			fixtureLocalCheckout(t, bazel, deepBuildPath()+"/second-checkout")
+			fixtureExternalGitfile(t, bazel, deepBuildPath()+"/second-checkout")
 		case "RootCheckout":
 			root, e := s.HireNamed(r.Context(), "Root Project")
 			must(t, e)
@@ -103,7 +105,7 @@ func TestDeletionBrowserBridge(t *testing.T) {
 			if fixtureGit(t, externalPath, "rev-parse", "HEAD") != externalHead {
 				t.Error("dependent HEAD changed")
 			}
-			initFixtureCheckout(t, root.Path)
+			must(t, os.WriteFile(filepath.Join(root.Path, ".git"), []byte("gitdir: "+filepath.Join(outsideRepo, ".git")+"\n"), 0600))
 		case "MakeInterruptedWorkspace":
 			pendingPath, freshPath = makeInterruptedBrowserWorkspace(t, s)
 		case "AddLateStagedFile":
@@ -172,7 +174,7 @@ func makeInterruptedBrowserWorkspace(t *testing.T, s *service) (string, string) 
 	t.Helper()
 	y, err := s.HireNamed(t.Context(), "Interrupted Build")
 	must(t, err)
-	fixtureLocalCheckout(t, y, "build-output/A-checkout")
+	fixtureExternalGitfile(t, y, "build-output/A-checkout")
 	cache := filepath.Join("build-output", "Z-cache")
 	must(t, os.WriteFile(filepath.Join(y.Path, cache), []byte("staged build bytes"), 0600))
 	target, err := s.PrepareWorkspaceDeletion(y.Name, y.HiredAt)

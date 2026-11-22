@@ -76,15 +76,13 @@ var zhHans = map[string]string{
 	"Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.": "无法保存工作树 %q 的迁移记录。请确认对 %s 有写入权限，且文件系统支持同步，然后重试。",
 	"Grant write access to directory %s or move its contents to safety before deleting the workspace.":                         "请先为目录 %s 授予写权限，或将其中的文件移到安全位置，再删除工作区。",
 
-	// Local repository dependencies checked before Force Delete.
-	"Git data in this workspace is still used by a worktree at %s. Move the repository and its worktrees to safety, or remove the linked worktree with Git first.":         "此工作区中的 Git 数据仍被 %s 下的工作树使用。请先将仓库及其工作树移至安全位置，或使用 Git 移除关联工作树。",
-	"Cannot verify the Git worktree at %s. Repair or remove its registration with Git, or move the repository and its worktrees to safety before deleting this workspace.": "无法验证 %s 下的 Git 工作树。请先用 Git 修复或移除登记，或将仓库及其工作树移至安全位置。",
-
-	"Could not save the interrupted deletion record at %s.": "无法保存 %s 的中断删除记录。",
+	// Local Git data is held unless it already lives outside the deletion scope.
+	"Git data at %s may be used by another checkout. Check its dependencies before removing it, or move the complete repository and its dependent worktrees to safety with Git. Then check again.": "位于 %s 的 Git 数据可能仍被其他工作树使用。请在移除前核实依赖，或使用 Git 将完整仓库及其关联工作树移至安全位置，然后再次检查。",
+	"Cannot verify the Git entry at %s. Check where it points and use Git or managed cleanup to move the checkout to safety. Then check again.":                                                    "无法验证 %s 的 Git 条目。请检查它的指向，使用 Git 或受管回收流程妥善处理该工作树，然后再次检查。",
+	"The interrupted deletion at %s still has a Git recovery record at %s. Preserve the remaining Git data and check its dependencies before retrying in Storage.":                                 "位于 %s 的中断删除仍有 Git 恢复记录 %s。请保留剩余 Git 数据并核实依赖，然后在「存储」中重试。",
 	// Workspace deletion and its recovery instructions
 	"Move %q out of the workspace first. For a worktree, use Git or its managed cleanup.":                                                   "请先将 %q 移出工作区。如果是 Git 工作树，请用 Git 移动它，或完成受管回收。",
 	"%s contains a Git checkout. Move it with Git or finish its managed cleanup first.":                                                     "%s 包含 Git 工作树。请先用 Git 移动它，或完成受管回收。",
-	"%s contains Git repository data. Move the repository out of the workspace first.":                                                      "%s 包含 Git 仓库数据。请先将仓库移出工作区。",
 	"%s has a registered worktree at %s. Finish its managed cleanup or move the checkout with Git first.":                                   "仓库 %s 在 %s 登记了工作树。请先完成受管回收，或用 Git 移动工作树。",
 	"Worktree %q (%s, owner %q, task %q) is still recorded. Finish its managed cleanup or recover the checkout and its registration first.": "工作树 %q（%s，负责人 %q，任务 %q）仍有登记。请先完成受管回收，或恢复工作树及其登记。",
 	"Move the linked or special metadata entry %s out of the workspace first.":                                                              "请先将元数据中的链接或特殊文件 %s 移出工作区。",

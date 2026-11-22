@@ -136,6 +136,17 @@ async function run(engine, name, lang) {
     await worktrees.getByText('Fixture scan incomplete').waitFor({state:'detached'});
     await worktrees.getByText(/Local Git checkout scan is incomplete|本地 Git 工作树扫描未完成/).waitFor();
     await screenshot('local-checkout');
+    await bazel.click({button:'right'});
+    await dialog.getByText(/may be used by another checkout|可能仍被其他工作树使用/).waitFor();
+    await dialog.getByText(new RegExp(`yesmen/bazel-builds/${bazelPath}/\\.git`)).waitFor();
+    assert(await ok.isDisabled());
+    assert.equal(await reviewForce.count(),0);
+    await screenshot('legacy-git-data-held');
+    await page.keyboard.press('Enter');
+    await dialog.waitFor({state:'detached'});
+    assert.equal(await count('ForceDeleteWorkspace'),0);
+    assert.equal(await count('DeleteWorkspace'),0);
+    await page.evaluate(() => rpc('PreserveBazelGitData'));
     const openForce = async () => {
       await bazel.click({button:'right'});
       await reviewForce.waitFor();
@@ -160,7 +171,7 @@ async function run(engine, name, lang) {
     await reviewForce.waitFor();
     await dialog.getByText(`yesmen/bazel-builds/${bazelPath}/build/${'d/'.repeat(105)}out/second-checkout`, {exact:true}).waitFor();
     await reviewForce.click();
-    await dialog.getByText(/Git commits or branches stored only here|仅存于此的 Git 提交或分支/).waitFor();
+    await dialog.getByText(/Git data stored outside the workspace is kept|存放在工作区外的 Git 数据会保留/).waitFor();
     await screenshot('force-confirmation');
     await commitForce.click();
     await dialog.waitFor({state:'detached'}); await bazel.waitFor({state:'detached'});
@@ -171,7 +182,8 @@ async function run(engine, name, lang) {
     await page.reload();
     const root = page.locator('[data-agent="root-project/lead"]');
     await root.click({button:'right'});
-    await dialog.getByText(/kept-linked/).waitFor();
+    await dialog.locator('#deletion-checkouts .danger').getByText(/root-project[/\\]\.git/).waitFor();
+    assert(await ok.isDisabled());
     assert.equal(await reviewForce.count(), 0);
     await screenshot('external-checkout-held');
     await cancel.click();

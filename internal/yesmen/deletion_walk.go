@@ -22,10 +22,10 @@ const (
 // Walk one verified directory handle at a time. A file or link is unlinked as
 // an entry. Only an empty directory is ever removed.
 func walkWorkspaceDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *ForceDeletion) error {
-	return walkDeletion(ctx, ws, phase, force, false, nil)
+	return walkDeletion(ctx, ws, phase, force, false)
 }
 
-func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *ForceDeletion, snapshot bool, receipt *deletionGitReceipt) error {
+func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *ForceDeletion, snapshot bool) error {
 	volume, err := directoryIdentity(ws)
 	if err != nil {
 		return err
@@ -52,15 +52,15 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 		entry, markers := gitMarkers(rel, entries)
 		var verified map[string]fs.FileInfo
 		if len(markers) > 0 {
-			if force == nil {
-				if entry.Bare {
-					return deletionIssue("%s contains Git repository data. Move the repository out of the workspace first.", rel)
-				}
-				return deletionIssue("%s contains a Git checkout. Move it with Git or finish its managed cleanup first.", rel)
-			}
 			current, err := observeCheckout(dir, entry, id, markers)
 			if err != nil {
 				return err
+			}
+			if err := checkCheckoutGit(ws, dir, current, rel); err != nil {
+				return err
+			}
+			if force == nil {
+				return deletionIssue("%s contains a Git checkout. Move it with Git or finish its managed cleanup first.", rel)
 			}
 			if !force.paths[rel].matches(current) {
 				return errCheckoutPreviewChanged
@@ -86,16 +86,6 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 		} else if force != nil {
 			if _, approved := force.paths[rel]; approved {
 				return errCheckoutPreviewChanged
-			}
-		}
-		if len(entries) > 0 && rel == "." && phase == purgeDeletion {
-			// The Git receipt remains available until the staged data is gone.
-			for i, e := range entries {
-				if e.Name() == stagedGitReceipt {
-					copy(entries[i:], entries[i+1:])
-					entries[len(entries)-1] = e
-					break
-				}
 			}
 		}
 		if len(entries) > 0 {
@@ -166,13 +156,8 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 				}
 			}
 			if phase == purgeDeletion {
-				if receipt != nil && verified[name] != nil && st.Mode().IsRegular() && name == ".git" {
-					if err := receipt.beginGitfileRemoval(ws, dir, child, st); err != nil {
-						return err
-					}
-				}
 				now, err := dir.Lstat(name)
-				if err != nil || !os.SameFile(st, now) {
+				if err != nil || !sameDeletionEntry(st, now) {
 					return fmt.Errorf("%s changed during deletion", child)
 				}
 				if err := dir.Remove(name); err != nil {

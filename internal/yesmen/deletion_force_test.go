@@ -5,12 +5,18 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func writeExternalTestGitfile(dir, gitDir string) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: "+gitDir+"\n"), 0600)
+}
 
 func TestForceWorkspaceRechecksAfterDrain(t *testing.T) {
 	s := waitStore(t)
@@ -22,8 +28,9 @@ func TestForceWorkspaceRechecksAfterDrain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	gitDir := t.TempDir()
 	makeMarker := func(name string) error {
-		return os.MkdirAll(filepath.Join(y.MetaDir(), "tmp", name, ".git"), 0700)
+		return writeExternalTestGitfile(filepath.Join(y.MetaDir(), "tmp", name), gitDir)
 	}
 	if err := makeMarker("first"); err != nil {
 		t.Fatal(err)
@@ -59,7 +66,7 @@ func TestForceWorkspaceInterruptedRetry(t *testing.T) {
 	// Earlier bytes disappear after staging, but this top-level checkout is
 	// intact when the walk is interrupted, so the retry must name it again.
 	checkout := filepath.Join(y.Path, "checkout")
-	if err := os.MkdirAll(filepath.Join(checkout, ".git"), 0700); err != nil {
+	if err := writeExternalTestGitfile(checkout, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(y.Path, "A-first"), nil, 0600); err != nil {
@@ -119,13 +126,8 @@ func TestForceWorkspaceResumesMarkerlessStageWithFreshScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkout := filepath.Join(y.Path, "build-output", "A-checkout")
-	if err := os.MkdirAll(checkout, 0700); err != nil {
+	if err := writeExternalTestGitfile(checkout, t.TempDir()); err != nil {
 		t.Fatal(err)
-	}
-	git := exec.Command("git", "-C", checkout, "init", "-q")
-	git.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
-	if out, err := git.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %q %v", out, err)
 	}
 	if err := os.WriteFile(filepath.Join(y.Path, "build-output", "Z-cache"), []byte("still here"), 0600); err != nil {
 		t.Fatal(err)

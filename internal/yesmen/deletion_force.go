@@ -15,7 +15,6 @@ type ForceDeletion struct {
 	paths     map[string]checkoutObservation
 	top       map[string]os.FileInfo
 	remaining map[string]os.FileInfo // complete snapshot for a staged retry
-	stagedGit map[string]deletionGitRegistration
 }
 
 func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget, registrations func(context.Context, string) error, relocated RelocatedPrimary) (CheckoutScan, *ForceDeletion, error) {
@@ -33,16 +32,18 @@ func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget,
 	}
 	defer ws.Close()
 	scan := scanCheckouts(ctx, ws, true)
-	if scan.Problem != "" || (!target.Pending && len(scan.Entries) == 0) {
+	if scan.Problem != "" {
+		return scan, nil, nil
+	}
+	if err := checkStagedGitHold(ws); err != nil {
+		return scan, nil, err
+	}
+	if !target.Pending && len(scan.Entries) == 0 {
 		return scan, nil, nil
 	}
 	plan := &ForceDeletion{target: target, paths: make(map[string]checkoutObservation, len(scan.observed)), top: map[string]os.FileInfo{}}
 	if target.Pending {
 		plan.remaining = map[string]os.FileInfo{}
-		plan.stagedGit, err = readStagedGitReceipt(ws, target)
-		if err != nil {
-			return scan, nil, err
-		}
 	}
 	for _, o := range scan.observed {
 		if !o.directory.Usable() {
@@ -63,13 +64,10 @@ func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget,
 	if err := registrations(ctx, ws.Name()); err != nil {
 		return scan, nil, err
 	}
-	if err := walkDeletion(ctx, ws, inspectDeletion, plan, true, nil); err != nil {
+	if err := walkDeletion(ctx, ws, inspectDeletion, plan, true); err != nil {
 		return scan, nil, err
 	}
 	if err := s.checkWorktreeRecords(ctx, parent, ws, target, []RelocatedPrimary{relocated}, false); err != nil {
-		return scan, nil, err
-	}
-	if err := plan.checkGit(ctx, ws, nil); err != nil {
 		return scan, nil, err
 	}
 	if err := s.checkDeletionTarget(parent, target); err != nil {
@@ -117,22 +115,6 @@ func (f *ForceDeletion) observeTop(ctx context.Context, ws *os.Root) error {
 func sameDeletionEntry(want, got fs.FileInfo) bool {
 	return want != nil && got != nil && want.Mode().Type() == got.Mode().Type() && os.SameFile(want, got) &&
 		(!want.Mode().IsRegular() || want.Size() == got.Size() && want.ModTime().Equal(got.ModTime()))
-}
-
-func (f *ForceDeletion) checkGit(ctx context.Context, ws *os.Root, verified *[]deletionGitRegistration) error {
-	volume, err := directoryIdentity(ws)
-	if err != nil {
-		return err
-	}
-	for rel, checkout := range f.paths {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := f.checkCheckoutGit(ctx, ws, volume, rel, checkout, verified); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (f *ForceDeletion) observeRemaining(rel string, st fs.FileInfo) error {

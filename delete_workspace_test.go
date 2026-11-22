@@ -210,10 +210,10 @@ func TestDeleteWorkspaceBlockers(t *testing.T) {
 		{"unknown directory", "private-folder", func(t *testing.T, _ *service, y yesmen.Yesman) {
 			must(t, os.Mkdir(filepath.Join(y.Path, "private-folder"), 0700))
 		}},
-		{"nested checkout", "Git checkout", func(t *testing.T, _ *service, y yesmen.Yesman) {
+		{"nested checkout", "Git data", func(t *testing.T, _ *service, y yesmen.Yesman) {
 			must(t, os.MkdirAll(filepath.Join(y.MetaDir(), "tmp", "nested", ".git"), 0700))
 		}},
-		{"bare Git data", "Git repository data", func(t *testing.T, _ *service, y yesmen.Yesman) {
+		{"bare Git data", "Git data", func(t *testing.T, _ *service, y yesmen.Yesman) {
 			p := filepath.Join(y.MetaDir(), "tmp", "bare")
 			must(t, os.MkdirAll(filepath.Join(p, "objects"), 0700))
 			must(t, os.WriteFile(filepath.Join(p, "HEAD"), nil, 0600))

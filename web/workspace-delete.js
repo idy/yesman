@@ -118,13 +118,12 @@ export function workspaceDeletion({ call, errorText, onLiveDeleted, toast, secti
           entries.length ? pathList(entries.map(e => e.path)) : null,
           folders.length ? h('p', null, t(retrying ? 'Remaining paths in the interrupted deletion' : 'Directories that will also be deleted')) : null,
           folders.length ? pathList(folders) : null,
-          token ? h('p', { class: 'danger', id: 'force-deletion-risk' }, t(retrying ? 'This permanently removes the remaining files at the listed paths. Any local-only Git data and changes there can be lost.' : 'Force Delete permanently removes these local checkouts and the rest of this workspace. Unsaved changes, untracked files, and Git commits or branches stored only here can be lost.')) : null,
+          token ? h('p', { class: 'danger', id: 'force-deletion-risk' }, t(retrying ? 'This permanently removes the remaining files and local changes at the listed paths.' : 'Force Delete permanently removes these local checkouts and the rest of this workspace, including uncommitted changes and untracked files. Git data stored outside the workspace is kept.')) : null,
           result.problem ? h('p', { class: 'danger' }, t(retrying ? 'Could not review the remaining files.' : 'Force Delete is unavailable.'), ' ', result.problem) : null,
         ].filter(Boolean));
         warning.hidden = !warning.hasChildNodes();
         review.hidden = !token;
-        if (token) ok.disabled = true;
-        else if ((retry || retrying) && !result.problem && !entries.length && !folders.length) ok.disabled = false;
+        ok.disabled = !!token || entries.length > 0 || !!result.problem || (!retry && !!status.textContent);
         refresh.hidden = !result.problem && !status.textContent;
       } catch (err) {
         if (!dialog.open || sequence !== checked) return;

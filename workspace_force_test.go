@@ -46,6 +46,18 @@ func initFixtureCheckout(t *testing.T, dir string) {
 	must(t, os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("dirty workspace content"), 0600))
 }
 
+func fixtureExternalGitfile(t *testing.T, y yesmen.Yesman, rel string) string {
+	t.Helper()
+	dir := fixtureLocalCheckout(t, y, rel)
+	separateFixtureGitData(t, dir)
+	return dir
+}
+
+func separateFixtureGitData(t *testing.T, dir string) {
+	t.Helper()
+	fixtureGit(t, dir, "init", "-q", "--separate-git-dir", filepath.Join(t.TempDir(), "kept-git-data"))
+}
+
 func TestWorkspaceForceDeleteBazelCheckout(t *testing.T) {
 	s, y, target := deletionFixture(t)
 	dir := fixtureLocalCheckout(t, y, bazelCheckout)
@@ -78,6 +90,16 @@ func TestWorkspaceForceDeleteBazelCheckout(t *testing.T) {
 	if err := s.DeleteWorkspace(t.Context(), target); err == nil || !strings.Contains(err.Error(), bazelCheckout) {
 		t.Fatalf("expected nested checkout blocker: %v", err)
 	}
+	held, err := s.CheckWorkspaceForceDeletion(t.Context(), target)
+	must(t, err)
+	if held.Token != "" || len(held.Entries) != 2 || !strings.Contains(held.Problem, filepath.Join(dir, ".git")) {
+		t.Fatalf("legacy Git data should hold at its live path: %+v", held)
+	}
+	// The test owns this repository and all its consumers. A user can make
+	// the same transition using Git after establishing those dependencies.
+	separateFixtureGitData(t, dir)
+	kept := fixtureGit(t, dir, "rev-parse", "--absolute-git-dir")
+	keptHead := mustReadFile(t, filepath.Join(kept, "HEAD"))
 	plan, err := s.CheckWorkspaceForceDeletion(t.Context(), target)
 	must(t, err)
 	if plan.Token == "" || plan.Problem != "" || len(plan.Entries) != 2 {
@@ -86,6 +108,9 @@ func TestWorkspaceForceDeleteBazelCheckout(t *testing.T) {
 	must(t, s.ForceDeleteWorkspace(t.Context(), target, plan.Token))
 	if _, err := os.Stat(y.Path); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("workspace remains: %v", err)
+	}
+	if got := mustReadFile(t, filepath.Join(kept, "HEAD")); string(got) != string(keptHead) {
+		t.Fatal("the former local checkout's relocated Git metadata changed")
 	}
 	if got := fixtureGit(t, outside, "show-ref"); got != refs || string(mustReadFile(t, filepath.Join(outside, ".git", "HEAD"))) != string(head) || string(mustReadFile(t, filepath.Join(outside, "untracked.txt"))) != "dirty workspace content" {
 		t.Fatal("another workspace's Git state or files changed")
@@ -121,7 +146,7 @@ func TestWorkspaceForceCannotBypassRegisteredWorktree(t *testing.T) {
 
 func TestWorkspaceForceDeletionScopeAndRefresh(t *testing.T) {
 	s, y, target := deletionFixture(t)
-	fixtureLocalCheckout(t, y, bazelCheckout)
+	fixtureExternalGitfile(t, y, bazelCheckout)
 	other, err := s.HireNamed(t.Context(), "Same scope test")
 	must(t, err)
 	otherTarget, err := s.PrepareWorkspaceDeletion(other.Name, other.HiredAt)
@@ -144,14 +169,14 @@ func TestWorkspaceForceDeletionScopeAndRefresh(t *testing.T) {
 		t.Fatal("accepted a canceled token")
 	}
 	stale := newPlan()
-	extra := fixtureLocalCheckout(t, y, ".yesman/tmp/new-checkout")
+	extra := fixtureExternalGitfile(t, y, ".yesman/tmp/new-checkout")
 	if err := s.ForceDeleteWorkspace(t.Context(), target, stale); err == nil || !strings.Contains(err.Error(), "paths changed") {
 		t.Fatalf("stale confirmation: %v", err)
 	}
 	mustReadFile(t, filepath.Join(extra, "untracked.txt"))
 	stale = newPlan()
 	must(t, os.Rename(extra, filepath.Join(t.TempDir(), "moved")))
-	fixtureLocalCheckout(t, y, ".yesman/tmp/new-checkout")
+	fixtureExternalGitfile(t, y, ".yesman/tmp/new-checkout")
 	if err := s.ForceDeleteWorkspace(t.Context(), target, stale); err == nil {
 		t.Fatal("accepted same-path replacement checkout")
 	}

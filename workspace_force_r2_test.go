@@ -9,12 +9,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/idy/yesman/internal/yesmen"
 )
 
 func TestWorkspaceForceKeepsDependentGitWorktree(t *testing.T) {
-	for _, mode := range []string{"external", "during-drain", "unresolved", "local", "external-core-worktree"} {
+	for _, mode := range []string{"external", "unresolved", "local", "external-core-worktree"} {
 		t.Run(mode, func(t *testing.T) {
 			s, y, target := deletionFixture(t)
 			repo := fixtureLocalCheckout(t, y, bazelCheckout)
@@ -22,11 +20,10 @@ func TestWorkspaceForceKeepsDependentGitWorktree(t *testing.T) {
 			must(t, err)
 			local := filepath.Join(y.MetaDir(), "tmp", "linked")
 			outside := filepath.Join(other.Path, "linked")
-			if mode != "external-core-worktree" && mode != "during-drain" {
+			if mode != "external-core-worktree" {
 				fixtureGit(t, repo, "worktree", "add", "-b", "linked", local)
 			}
 			head := fixtureGit(t, repo, "rev-parse", "HEAD")
-			checks := s.app.pool.CheckWorkspaceDeletion
 			move := func() { fixtureGit(t, repo, "worktree", "move", local, outside) }
 			switch mode {
 			case "external":
@@ -37,40 +34,12 @@ func TestWorkspaceForceKeepsDependentGitWorktree(t *testing.T) {
 				must(t, os.Mkdir(outside, 0700))
 				fixtureGit(t, repo, "config", "core.worktree", outside)
 			}
-			if mode == "external" || mode == "external-core-worktree" || mode == "unresolved" {
-				plan, err := s.CheckWorkspaceForceDeletion(t.Context(), target)
-				must(t, err)
-				want := "/linked"
-				if mode == "unresolved" {
-					want = ".yesman/tmp/linked/.git"
-				}
-				if plan.Token != "" || !strings.Contains(filepath.ToSlash(plan.Problem), want) || !strings.Contains(plan.Problem, "with Git") {
-					t.Fatalf("missing dependent hold: %+v", plan)
-				}
-			} else {
-				_, plan, err := s.app.yesmen.PrepareForceDeletion(t.Context(), target, checks, nil)
-				must(t, err)
-				if plan == nil {
-					t.Fatal("valid in-workspace registration should be reviewable")
-				}
-				detached, err := s.app.yesmen.DeleteWithCheckoutConfirmation(t.Context(), target, plan, checks, func(yesmen.Yesman) error {
-					if mode == "during-drain" {
-						fixtureGit(t, repo, "worktree", "add", "-b", "linked", outside)
-					}
-					return nil
-				}, nil)
-				if mode == "local" {
-					must(t, err)
-					if !detached {
-						t.Fatal("workspace was not detached")
-					}
-					return
-				}
-				if detached || err == nil || !strings.Contains(err.Error(), outside) {
-					t.Fatalf("accepted changed registration: %v", err)
-				}
+			plan, err := s.CheckWorkspaceForceDeletion(t.Context(), target)
+			must(t, err)
+			if plan.Token != "" || !strings.Contains(plan.Problem, filepath.Join(repo, ".git")) {
+				t.Fatalf("missing hold for local Git storage: %+v", plan)
 			}
-			if mode == "external" || mode == "during-drain" {
+			if mode == "external" {
 				if got := fixtureGit(t, outside, "rev-parse", "HEAD"); got != head {
 					t.Fatal(got)
 				}
@@ -114,7 +83,7 @@ func TestWorkspaceForceReviewsDeepBuildAndRoot(t *testing.T) {
 			s, y, target := deletionFixture(t)
 			deep := deepBuildPath()
 			if scope == "deep" {
-				fixtureLocalCheckout(t, y, bazelCheckout)
+				fixtureExternalGitfile(t, y, bazelCheckout)
 				must(t, os.MkdirAll(filepath.Join(y.Path, filepath.FromSlash(deep)), 0700))
 				sidebar, err := s.WorkspaceCheckouts(t.Context(), y.Name, y.HiredAt)
 				must(t, err)
@@ -122,7 +91,7 @@ func TestWorkspaceForceReviewsDeepBuildAndRoot(t *testing.T) {
 					t.Fatal(sidebar)
 				}
 			} else {
-				initFixtureCheckout(t, y.Path)
+				fixtureExternalGitfile(t, y, ".")
 				must(t, os.Mkdir(filepath.Join(y.Path, "src"), 0700))
 				must(t, os.WriteFile(filepath.Join(y.Path, "src", "main.txt"), []byte("source"), 0600))
 				fixtureGit(t, y.Path, "add", "src")
@@ -138,7 +107,7 @@ func TestWorkspaceForceReviewsDeepBuildAndRoot(t *testing.T) {
 				t.Fatal(plan.CheckoutScan)
 			}
 			if scope == "deep" {
-				fixtureLocalCheckout(t, y, deep+"/nested")
+				fixtureExternalGitfile(t, y, deep+"/nested")
 			} else {
 				if !slices.Contains(plan.Paths, "src") || plan.Entries[0].Path != "." {
 					t.Fatal(plan.CheckoutScan)

@@ -39,7 +39,7 @@ type CheckoutScan struct {
 
 func gitMarkers(rel string, entries []os.DirEntry) (CheckoutEntry, []string) {
 	var dotGit, bare []string
-	var head, objects, worktrees bool
+	var head, objects, worktrees, private bool
 	for _, entry := range entries {
 		name := entry.Name()
 		switch strings.ToLower(name) {
@@ -53,14 +53,18 @@ func gitMarkers(rel string, entries []os.DirEntry) (CheckoutEntry, []string) {
 			bare = append(bare, name)
 		case "worktrees":
 			worktrees = true
+		case "commondir", "gitdir":
+			private = true
+			bare = append(bare, name)
 		}
+	}
+	// Private Git data can be separated from its common directory. A .git
+	// directory is already covered by the enclosing checkout's marker.
+	if (objects && (head || worktrees) || head && private) && !strings.EqualFold(path.Base(rel), ".git") {
+		return CheckoutEntry{Path: rel, Bare: true}, append(bare, dotGit...)
 	}
 	if len(dotGit) > 0 {
 		return CheckoutEntry{Path: rel}, dotGit
-	}
-	// HEAD/objects immediately inside .git belong to the enclosing checkout.
-	if objects && (head || worktrees) && !strings.EqualFold(path.Base(rel), ".git") {
-		return CheckoutEntry{Path: rel, Bare: true}, bare
 	}
 	return CheckoutEntry{}, nil
 }

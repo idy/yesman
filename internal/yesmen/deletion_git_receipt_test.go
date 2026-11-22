@@ -1,101 +1,76 @@
 package yesmen
 
 import (
+	"bytes"
 	"context"
-	"errors"
-	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestForceWorkspaceGitReceiptRetainsUnresolvedRegistration(t *testing.T) {
-	for _, mode := range []string{"existing", "removed-before-intent", "new-external", "replaced-private"} {
+func TestForceWorkspaceHoldsStagedGitData(t *testing.T) {
+	for _, mode := range []string{"linked-common", "prior-git-receipt"} {
 		t.Run(mode, func(t *testing.T) {
 			s := waitStore(t)
 			y, err := s.Get("alice")
 			if err != nil {
 				t.Fatal(err)
 			}
-			git := func(dir string, args ...string) {
-				t.Helper()
-				cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-				cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
-				if out, err := cmd.CombinedOutput(); err != nil {
-					t.Fatalf("git %v: %s: %v", args, out, err)
-				}
-			}
-			must := func(err error) {
-				t.Helper()
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			repo := filepath.Join(y.MetaDir(), "tmp", "Z-repo")
-			linked := filepath.Join(y.MetaDir(), "tmp", "A-linked")
-			must(os.MkdirAll(repo, 0700))
-			git(repo, "init", "-b", "main")
-			git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "-c", "core.hooksPath="+os.DevNull, "commit", "--allow-empty", "-m", "fixture")
-			git(repo, "worktree", "add", "-b", "linked", linked)
 			want, err := s.PrepareDeletion(y.Name, y.HiredAt)
-			must(err)
-			regs := func(context.Context, string) error { return nil }
-			_, plan, err := s.PrepareForceDeletion(t.Context(), want, regs, nil)
-			must(err)
-			if plan == nil {
-				t.Fatal("initial preview held")
+			if err != nil {
+				t.Fatal(err)
 			}
-			stage := filepath.Join(s.root, deletingPrefix+want.Instance+"."+want.Entry)
-			stageGit := filepath.Join(stage, ".yesman", "tmp", "Z-repo", ".git")
-			stageGitfile := filepath.Join(stage, ".yesman", "tmp", "A-linked", ".git")
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			fault := interruptDeletion{ctx, func() {
-				if _, err := os.Stat(filepath.Join(stage, stagedGitReceipt)); err != nil {
-					return
-				}
-				_, err := os.Lstat(stageGitfile)
-				if mode == "existing" || mode == "removed-before-intent" || errors.Is(err, fs.ErrNotExist) {
-					cancel()
-				}
-			}}
-			if detached, err := s.DeleteWithCheckoutConfirmation(fault, want, plan, regs, func(Yesman) error { return nil }, nil); !detached || !errors.Is(err, context.Canceled) {
-				t.Fatalf("did not interrupt selected phase: %t %v", detached, err)
+			stage := deletingPrefix + want.Instance + "." + want.Entry
+			rel := filepath.Join(".yesman", "tmp", "Z-common", ".git", "worktrees", "A-linked", "gitdir")
+			contents := []byte(filepath.Join(y.MetaDir(), "tmp", "A-linked", ".git") + "\n")
+			diagnostic := filepath.Dir(filepath.Dir(filepath.Dir(rel)))
+			if mode == "prior-git-receipt" {
+				// A prior purge could already have removed every Git marker.
+				// The old record alone must preserve that stage for recovery.
+				rel = stagedGitReceipt
+				diagnostic = rel
+				contents = []byte(`{"stage":"` + stage + `","registrations":[]}`)
 			}
-			private := filepath.Join(stageGit, "worktrees", "A-linked")
-			var outside string
-			switch mode {
-			case "removed-before-intent":
-				must(os.Rename(filepath.Dir(stageGitfile), filepath.Join(t.TempDir(), "retained-checkout")))
-			case "new-external":
-				outside = filepath.Join(t.TempDir(), "external-linked")
-				git(stageGit, "--git-dir=.", "worktree", "add", "-b", "new-external", outside)
-				git(outside, "rev-parse", "HEAD")
-			case "replaced-private":
-				keep := filepath.Join(t.TempDir(), "old-private")
-				must(os.Rename(private, keep))
-				must(os.CopyFS(private, os.DirFS(keep)))
+			file := filepath.Join(y.Path, rel)
+			if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, contents, 0600); err != nil {
+				t.Fatal(err)
+			}
+			// Model a stage left by an older deletion implementation. R4
+			// would refuse to detach an active workspace in either case.
+			stagePath := filepath.Join(s.root, stage)
+			if err := os.Rename(y.Path, stagePath); err != nil {
+				t.Fatal(err)
 			}
 			cold := New(s.root, s.archive)
+			fresh, err := cold.Hire(y.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			freshFile := filepath.Join(fresh.Path, "keep.txt")
+			if err := os.WriteFile(freshFile, []byte("replacement workspace"), 0600); err != nil {
+				t.Fatal(err)
+			}
 			rows, err := cold.StoredWorkspaces()
-			must(err)
-			if len(rows) != 1 || !rows[0].Pending {
-				t.Fatal(rows)
+			if err != nil || len(rows) != 1 || !rows[0].Pending {
+				t.Fatal(rows, err)
 			}
-			if _, got, err := cold.PrepareForceDeletion(t.Context(), rows[0], regs, nil); got != nil || err == nil || !strings.Contains(err.Error(), "Git") {
-				t.Fatalf("admitted unsafe staged Git: %v %v", got, err)
+			check := func(context.Context, string) error { return nil }
+			if _, plan, err := cold.PrepareForceDeletion(t.Context(), rows[0], check, nil); plan != nil || err == nil || !strings.Contains(err.Error(), filepath.Join(stagePath, diagnostic)) {
+				t.Fatalf("cold Storage admitted unresolved Git data: %v %v", plan, err)
 			}
-			if mode == "existing" {
-				_, err := os.Lstat(stageGitfile)
-				must(err)
+			if detached, err := cold.Delete(t.Context(), rows[0], check, nil); detached || err == nil || !strings.Contains(err.Error(), filepath.Join(stagePath, diagnostic)) {
+				t.Fatalf("ordinary retry admitted unresolved Git data: %t %v", detached, err)
 			}
-			if outside != "" {
-				git(outside, "rev-parse", "HEAD")
+			if b, err := os.ReadFile(filepath.Join(stagePath, rel)); err != nil || !bytes.Equal(b, contents) {
+				t.Fatalf("Git recovery bytes changed: %q %v", b, err)
 			}
-			_, err = os.ReadFile(filepath.Join(private, "gitdir"))
-			must(err)
+			if b, err := os.ReadFile(freshFile); err != nil || string(b) != "replacement workspace" {
+				t.Fatalf("new hire changed: %q %v", b, err)
+			}
 		})
 	}
 }
