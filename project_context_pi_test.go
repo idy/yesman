@@ -65,6 +65,9 @@ func TestProjectContextWithManagedPi(t *testing.T) {
 			Command: func(context.Context) (string, []string, error) { return node, []string{cli}, nil },
 			Env:     []string{"YESMAN_API=" + srv.URL(), "PI_CODING_AGENT_DIR=" + profile, "PROJECT_AUDIT=" + audit},
 		})
+		// Keep automatic Board reminders held until this fixture's Manager stops.
+		// A reminder can start another run after waitIdle and turn the Topic input into steering.
+		m.HoldContinuations()
 		srv.Agents = m
 		t.Cleanup(m.StopAll)
 		return m
@@ -121,8 +124,11 @@ func TestProjectContextWithManagedPi(t *testing.T) {
 		t.Fatalf("agent %s did not settle", id)
 	}
 	waitIdle(lead)
-	_, err = svc.SubmitTopic(ctx, y.Name, y.HiredAt, topic.ID, fmt.Sprintf("%012x%s", time.Now().UnixMilli(), strings.Repeat("a1", 18)), "PROJECT-KICKOFF", nil)
+	submission, err := svc.SubmitTopic(ctx, y.Name, y.HiredAt, topic.ID, fmt.Sprintf("%012x%s", time.Now().UnixMilli(), strings.Repeat("a1", 18)), "PROJECT-KICKOFF", nil)
 	must(t, err)
+	if d := submission.Delivery; d.Ack != "accepted" || d.Error != "" {
+		t.Errorf("Topic must start a fresh run: state=%q ack=%q error=%q", d.State, d.Ack, d.Error)
+	}
 	launch := wait(func(o observation) bool { return strings.Contains(o.Last, "PROJECT-KICKOFF") }, "Topic request")
 	for _, want := range []string{"Linked Topic " + topic.ID, "Confirmed decision", "Current constraint", "Another agreement", "Interim summary", "Interim data", "Linked Board task t1", "Linked Board task t3", "Synthetic blocker", "Relevant wait in Needs You"} {
 		if !strings.Contains(launch.Prompt, want) {
