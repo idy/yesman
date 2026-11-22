@@ -2,6 +2,11 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.61
+
+- **Worktrees** now looks for local Git checkouts when you open workspace Info. It lists checkout paths, including nested checkouts, and tells you when the scan is incomplete.
+- **Delete Yes Man…** now shows the paths blocking deletion. When a local checkout points to Git data outside the workspace and the deletion review finds no other blockers, **Force Delete…** lists what will be removed and asks for a separate confirmation. It can delete uncommitted and untracked files in the workspace. The external Git store and shared repository pool are preserved. Git stores inside the workspace and registered worktrees that still occupy it must be handled separately.
+
 ## 0.1.60
 
 - Yes Man uses the Board task that created a temporary worktree to decide when it can be cleaned up, even if the task was reassigned. When the task is marked **Done**, eligible checkouts can be reclaimed automatically or through **Clean up worktrees…**.
