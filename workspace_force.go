@@ -15,6 +15,7 @@ import (
 type workspaceForceConfirmations struct {
 	mu      sync.Mutex
 	pending map[string]workspaceForceConfirmation
+	reviews map[string]context.CancelFunc
 }
 
 type workspaceForceConfirmation struct {
@@ -73,9 +74,43 @@ func (s *service) WorkspaceCheckouts(ctx context.Context, name string, hiredAt t
 
 // These methods are exposed exclusively by the desktop bridge, alongside
 // ordinary workspace deletion. No worker tool or loopback route uses them.
+func (s *service) ReviewWorkspaceForceDeletion(ctx context.Context, target yesmen.DeletionTarget, request string) (WorkspaceDeletionCheck, error) {
+	if len(request) != 36 {
+		return WorkspaceDeletionCheck{}, errors.New("invalid workspace deletion review request")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	c := &s.app.forceDeletion
+	c.mu.Lock()
+	if c.reviews[request] != nil || len(c.reviews) >= 4 {
+		c.mu.Unlock()
+		return WorkspaceDeletionCheck{}, errors.New(tr("Too many deletion confirmations are open. Close one and try again."))
+	}
+	if c.reviews == nil {
+		c.reviews = make(map[string]context.CancelFunc)
+	}
+	c.reviews[request] = cancel
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.reviews, request)
+		c.mu.Unlock()
+	}()
+	return s.CheckWorkspaceForceDeletion(ctx, target)
+}
+
+func (s *service) CancelWorkspaceForceReview(request string) {
+	c := &s.app.forceDeletion
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cancel := c.reviews[request]; cancel != nil {
+		cancel()
+	}
+}
+
 func (s *service) CheckWorkspaceForceDeletion(ctx context.Context, target yesmen.DeletionTarget) (WorkspaceDeletionCheck, error) {
 	a := s.app
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	scan, plan, err := a.yesmen.PrepareForceDeletion(ctx, target, a.pool.CheckWorkspaceDeletion, a.pool.RelocatedPrimary)
 	out := WorkspaceDeletionCheck{CheckoutScan: scan}

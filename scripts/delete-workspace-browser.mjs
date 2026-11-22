@@ -49,7 +49,8 @@ async function run(engine, name, lang) {
             if (window.holdScan) await new Promise(r => window.releaseScan = r);
             return window.partialScan ? {...scan, problem:'Fixture scan incomplete'} : scan;
           }
-          case 'CheckWorkspaceForceDeletion': return rpc(m,{target:args[0]});
+          case 'ReviewWorkspaceForceDeletion': return rpc(m,{target:args[0],review:args[1]});
+          case 'CancelWorkspaceForceReview': return rpc(m,{review:args[0]});
           case 'CancelWorkspaceForceDeletion': return rpc(m,{token:args[0]});
           case 'ForceDeleteWorkspace': return rpc(m,{target:args[0],token:args[1]});
           case 'DeleteWorkspace': if (window.hold) await new Promise(r=>window.release=r); return rpc(m,{target:args[0]});
@@ -133,6 +134,7 @@ async function run(engine, name, lang) {
     await page.evaluate(() => { window.partialScan = false; });
     await worktrees.getByRole('button', {name:/Refresh the worktrees|刷新工作树/}).click();
     await worktrees.getByText('Fixture scan incomplete').waitFor({state:'detached'});
+    await worktrees.getByText(/Local Git checkout scan is incomplete|本地 Git 工作树扫描未完成/).waitFor();
     await screenshot('local-checkout');
     const openForce = async () => {
       await bazel.click({button:'right'});
@@ -156,7 +158,7 @@ async function run(engine, name, lang) {
     await dialog.getByRole('alert').getByText(/paths changed|路径已更改/).waitFor();
     await dialog.getByRole('button', {name:/^(Check again|再次检查)$/}).click();
     await reviewForce.waitFor();
-    await dialog.getByText('yesmen/bazel-builds/.yesman/tmp/second-checkout', {exact:true}).waitFor();
+    await dialog.getByText(`yesmen/bazel-builds/${bazelPath}/build/${'d/'.repeat(105)}out/second-checkout`, {exact:true}).waitFor();
     await reviewForce.click();
     await dialog.getByText(/Git commits or branches stored only here|仅存于此的 Git 提交或分支/).waitFor();
     await screenshot('force-confirmation');
@@ -164,6 +166,48 @@ async function run(engine, name, lang) {
     await dialog.waitFor({state:'detached'}); await bazel.waitFor({state:'detached'});
     await hideInfo.click();
     assert.equal(await count('ForceDeleteWorkspace'),2);
+
+    await page.evaluate(() => rpc('RootCheckout'));
+    await page.reload();
+    const root = page.locator('[data-agent="root-project/lead"]');
+    await root.click({button:'right'});
+    await dialog.getByText(/kept-linked/).waitFor();
+    assert.equal(await reviewForce.count(), 0);
+    await screenshot('external-checkout-held');
+    await cancel.click();
+    await page.evaluate(() => rpc('PreserveLinked'));
+    await root.click({button:'right'});
+    await reviewForce.click();
+    await dialog.getByText('yesmen/root-project/src', {exact:true}).waitFor();
+    await screenshot('root-checkout-confirmation');
+    await commitForce.click();
+    await root.waitFor({state:'detached'});
+
+    await page.evaluate(() => rpc('MakeInterruptedWorkspace'));
+    await page.reload();
+    await openStorage(); await list.click();
+    const interrupted = stored.getByRole('button', {name:/\.deleting-[0-9a-f]+\.interrupted-build/});
+    const reviewRemaining = dialog.getByRole('button', {name:/^(Review remaining files…|检查剩余文件…)$/});
+    const deleteRemaining = dialog.getByRole('button', {name:/^(Delete remaining files|删除剩余文件)$/});
+    await interrupted.click();
+    await reviewRemaining.click();
+    await dialog.getByText(/\.interrupted-build\/build-output/).waitFor();
+    assert(await cancel.evaluate(n => n === document.activeElement));
+    await screenshot('storage-retry');
+    await page.evaluate(() => rpc('AddLateStagedFile'));
+    await deleteRemaining.click();
+    await dialog.getByRole('alert').getByText(/paths changed|路径已更改/).waitFor();
+    await page.evaluate(() => rpc('RemoveLateStagedFile'));
+    await dialog.getByRole('button', {name:/^(Check again|再次检查)$/}).click();
+    await reviewRemaining.click();
+    await deleteRemaining.click();
+    await interrupted.waitFor({state:'detached'});
+    await page.evaluate(() => rpc('VerifyRecovery'));
+    await page.locator('[data-agent="interrupted-build/lead"]').click({button:'right'});
+    await ok.click();
+    await dialog.waitFor({state:'detached'});
+    await page.reload();
+
     await lead.waitFor(); await lead.focus();
     const prepareCount = await count('PrepareWorkspaceDeletion');
     await page.keyboard.press('Meta+Shift+Y');

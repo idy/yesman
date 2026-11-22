@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -31,13 +32,14 @@ type checkoutObservation struct {
 // scan with an unchanged target can be used to prepare force deletion.
 type CheckoutScan struct {
 	Entries  []CheckoutEntry `json:"entries"`
+	Paths    []string        `json:"paths,omitempty"`
 	Problem  string          `json:"problem,omitempty"`
 	observed []checkoutObservation
 }
 
 func gitMarkers(rel string, entries []os.DirEntry) (CheckoutEntry, []string) {
 	var dotGit, bare []string
-	var head, objects bool
+	var head, objects, worktrees bool
 	for _, entry := range entries {
 		name := entry.Name()
 		switch strings.ToLower(name) {
@@ -49,13 +51,15 @@ func gitMarkers(rel string, entries []os.DirEntry) (CheckoutEntry, []string) {
 		case "objects":
 			objects = true
 			bare = append(bare, name)
+		case "worktrees":
+			worktrees = true
 		}
 	}
 	if len(dotGit) > 0 {
 		return CheckoutEntry{Path: rel}, dotGit
 	}
 	// HEAD/objects immediately inside .git belong to the enclosing checkout.
-	if head && objects && !strings.EqualFold(path.Base(rel), ".git") {
+	if objects && (head || worktrees) && !strings.EqualFold(path.Base(rel), ".git") {
 		return CheckoutEntry{Path: rel, Bare: true}, bare
 	}
 	return CheckoutEntry{}, nil
@@ -97,10 +101,10 @@ func matchDeletionTarget(want, now DeletionTarget) bool {
 		want.Problem == "" && now.Problem == "" && want.HiredAt.Equal(now.HiredAt)
 }
 
-var errCheckoutPreviewChanged = deletionIssue("The Git checkout paths changed. Review a fresh deletion confirmation.")
+var errCheckoutPreviewChanged = deletionIssue("Workspace files or Git checkout paths changed. Review a fresh deletion confirmation.")
 
-// InspectCheckouts is invoked only by the visible Worktrees panel and delete
-// confirmation. It does not run Git or open the metadata a marker points to.
+// InspectCheckouts is invoked only by the visible Worktrees panel. It does
+// not run Git or open the metadata a marker points to.
 func (s *Store) InspectCheckouts(ctx context.Context, target DeletionTarget) (CheckoutScan, error) {
 	parent, err := s.deletionParent(target.Archived)
 	if err != nil {
@@ -112,7 +116,7 @@ func (s *Store) InspectCheckouts(ctx context.Context, target DeletionTarget) (Ch
 		return CheckoutScan{}, err
 	}
 	defer ws.Close()
-	scan := scanCheckouts(ctx, ws)
+	scan := scanCheckouts(ctx, ws, false)
 	if err := s.checkDeletionTarget(parent, target); err != nil {
 		return CheckoutScan{}, err
 	}
@@ -153,11 +157,17 @@ const (
 	checkoutResultLimit = 256
 )
 
-// The scan has independent entry, depth, result and deadline limits. When a
-// subtree is unreadable, keep what was found in the rest of the workspace.
-func scanCheckouts(ctx context.Context, ws *os.Root) CheckoutScan {
-	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
-	defer cancel()
+// Only sidebar discovery has the short deadline and depth/entry budget.
+// Deletion review must account for the entire tree, including nested working
+// directories below an already-discovered checkout. It is cancellable.
+func scanCheckouts(ctx context.Context, ws *os.Root, review bool) CheckoutScan {
+	remaining := -1
+	if !review {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+		remaining = checkoutEntryLimit
+	}
 	scan := CheckoutScan{Entries: []CheckoutEntry{}}
 	problem := func(err error) {
 		if scan.Problem == "" {
@@ -169,10 +179,13 @@ func scanCheckouts(ctx context.Context, ws *os.Root) CheckoutScan {
 		problem(err)
 		return scan
 	}
-	remaining := checkoutEntryLimit
-	var visit func(*os.Root, string, int)
-	visit = func(dir *os.Root, rel string, depth int) {
-		if ctx.Err() != nil || remaining <= 0 || depth > checkoutDepthLimit || len(scan.Entries) >= checkoutResultLimit {
+	var visit func(*os.Root, string, int, bool)
+	visit = func(dir *os.Root, rel string, depth int, gitDir bool) {
+		if err := ctx.Err(); err != nil {
+			problem(err)
+			return
+		}
+		if remaining == 0 || (!review && depth > checkoutDepthLimit) || len(scan.Entries) >= checkoutResultLimit {
 			problem(deletionIssue("The workspace Git scan reached its limit."))
 			return
 		}
@@ -185,30 +198,12 @@ func scanCheckouts(ctx context.Context, ws *os.Root) CheckoutScan {
 			problem(deletionIssue("Unmount %s before deleting this workspace.", rel))
 			return
 		}
-		f, err := dir.Open(".")
+		entries, err := readDeletionEntries(ctx, dir, &remaining)
 		if err != nil {
 			problem(err)
-			return
 		}
-		// Check the budget between batches, even for one huge directory.
-		var entries []os.DirEntry
-		for {
-			if ctx.Err() != nil || remaining <= 0 {
-				problem(deletionIssue("The workspace Git scan reached its limit."))
-				break
-			}
-			batch, err := f.ReadDir(min(remaining, 256))
-			entries = append(entries, batch...)
-			remaining -= len(batch)
-			if err != nil {
-				if !errors.Is(err, io.EOF) {
-					problem(err)
-				}
-				break
-			}
-		}
-		f.Close()
 		entry, markers := gitMarkers(rel, entries)
+		objects := !review && (entry.Bare || gitDir) && gitObjectStore(ctx, dir, volume)
 		if len(markers) > 0 {
 			scan.Entries = append(scan.Entries, entry)
 			o, err := observeCheckout(dir, entry, id, markers)
@@ -219,23 +214,107 @@ func scanCheckouts(ctx context.Context, ws *os.Root) CheckoutScan {
 			}
 		}
 		for _, entry := range entries {
-			if ctx.Err() != nil || remaining <= 0 || len(scan.Entries) >= checkoutResultLimit {
+			if err := ctx.Err(); err != nil {
+				problem(err)
+				return
+			}
+			if remaining == 0 || len(scan.Entries) >= checkoutResultLimit {
 				problem(deletionIssue("The workspace Git scan reached its limit."))
 				return
 			}
-			if !entry.IsDir() {
+			name := entry.Name()
+			if !entry.IsDir() || (objects && name == "objects") {
 				continue
 			}
-			child, err := directDir(dir, entry.Name())
+			child, err := directDir(dir, name)
 			if err != nil {
 				problem(err)
 				continue
 			}
-			visit(child, path.Join(rel, entry.Name()), depth+1)
+			visit(child, path.Join(rel, name), depth+1, slices.Contains(markers, name) && strings.EqualFold(name, ".git"))
 			child.Close()
 		}
 	}
-	visit(ws, ".", 0)
+	visit(ws, ".", 0, false)
 	slices.SortFunc(scan.Entries, func(a, b CheckoutEntry) int { return strings.Compare(a.Path, b.Path) })
 	return scan
+}
+
+func readDeletionEntries(ctx context.Context, dir *os.Root, remaining *int) ([]os.DirEntry, error) {
+	file, err := dir.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var entries []os.DirEntry
+	for {
+		if err := ctx.Err(); err != nil {
+			return entries, err
+		}
+		if *remaining == 0 {
+			return entries, deletionIssue("The workspace Git scan reached its limit.")
+		}
+		size := 256
+		if *remaining > 0 {
+			size = min(size, *remaining)
+		}
+		batch, err := file.ReadDir(size)
+		entries = append(entries, batch...)
+		if *remaining > 0 {
+			*remaining -= len(batch)
+		}
+		if errors.Is(err, io.EOF) {
+			return entries, nil
+		}
+		if err != nil {
+			return entries, err
+		}
+	}
+}
+
+// Git's object fanout is not a checkout. Skip it for discovery only after
+// checking the directory and its layout. Deletion review and purge still walk
+// its contents, so a nonstandard nested checkout cannot go unreviewed.
+func gitObjectStore(ctx context.Context, dir *os.Root, volume safefs.Identity) bool {
+	head, err := dir.Lstat("HEAD")
+	if err != nil || !head.Mode().IsRegular() {
+		return false
+	}
+	objects, err := directDir(dir, "objects")
+	if err != nil {
+		return false
+	}
+	defer objects.Close()
+	id, err := directoryIdentity(objects)
+	if err != nil || !sameMount(id, volume) {
+		return false
+	}
+	limit := 260 // 256 loose-object buckets, pack and info
+	entries, err := readDeletionEntries(ctx, objects, &limit)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || (name != "pack" && name != "info" && (len(name) != 2 || strings.Trim(name, "0123456789abcdef") != "")) {
+			return false
+		}
+	}
+	return true
+}
+
+// Open each workspace-relative component without following a directory link.
+func openDeletionChild(root *os.Root, rel string) (*os.Root, error) {
+	dir := root
+	for name := range strings.SplitSeq(filepath.ToSlash(rel), "/") {
+		next, err := directDir(dir, name)
+		if dir != root {
+			dir.Close()
+		}
+		if err != nil {
+			return nil, err
+		}
+		dir = next
+	}
+	return dir, nil
 }

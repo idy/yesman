@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -21,11 +22,15 @@ const (
 // Walk one verified directory handle at a time. A file or link is unlinked as
 // an entry. Only an empty directory is ever removed.
 func walkWorkspaceDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *ForceDeletion) error {
+	return walkDeletion(ctx, ws, phase, force, false)
+}
+
+func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *ForceDeletion, snapshot bool) error {
 	volume, err := directoryIdentity(ws)
 	if err != nil {
 		return err
 	}
-	seen := 0
+	seen, seenTop, seenRemaining := 0, 0, 0
 	var visit func(*os.Root, string) error
 	visit = func(dir *os.Root, rel string) error {
 		if err := ctx.Err(); err != nil {
@@ -38,10 +43,12 @@ func walkWorkspaceDeletion(ctx context.Context, ws *os.Root, phase deletionWalk,
 		if !sameMount(id, volume) {
 			return deletionIssue("Unmount %s before deleting this workspace.", rel)
 		}
-		entries, err := fs.ReadDir(dir.FS(), ".")
+		limit := -1
+		entries, err := readDeletionEntries(ctx, dir, &limit)
 		if err != nil {
 			return err
 		}
+		slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 		entry, markers := gitMarkers(rel, entries)
 		var verified map[string]fs.FileInfo
 		if len(markers) > 0 {
@@ -96,12 +103,28 @@ func walkWorkspaceDeletion(ctx context.Context, ws *os.Root, phase deletionWalk,
 			if err != nil {
 				return err
 			}
-			if expected := verified[name]; expected != nil && !os.SameFile(st, expected) {
+			if expected := verified[name]; expected != nil && !sameDeletionEntry(expected, st) {
 				return errCheckoutPreviewChanged
+			}
+			if force != nil && rel == "." && force.top[name] != nil {
+				if !sameDeletionEntry(force.top[name], st) {
+					return errCheckoutPreviewChanged
+				}
+				seenTop++
+			}
+			if force != nil && force.remaining != nil {
+				if snapshot {
+					if err := force.observeRemaining(child, st); err != nil {
+						return err
+					}
+				} else if !sameDeletionEntry(force.remaining[child], st) {
+					return errCheckoutPreviewChanged
+				}
+				seenRemaining++
 			}
 			switch {
 			case st.Mode().Type() == fs.ModeDir:
-				if rel == "." && name != ".yesman" && verified[name] == nil && !force.permitsTopLevel(name) {
+				if rel == "." && name != ".yesman" && (force == nil || force.top[name] == nil) {
 					return deletionIssue("Move %q out of the workspace first. For a worktree, use Git or its managed cleanup.", name)
 				}
 				d, err := directDir(dir, name)
@@ -147,7 +170,7 @@ func walkWorkspaceDeletion(ctx context.Context, ws *os.Root, phase deletionWalk,
 	if err := visit(ws, "."); err != nil {
 		return err
 	}
-	if force != nil && seen != len(force.paths) {
+	if force != nil && (seen != len(force.paths) || seenTop != len(force.top) || seenRemaining != len(force.remaining)) {
 		return errCheckoutPreviewChanged
 	}
 	return nil

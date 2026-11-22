@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -20,6 +21,9 @@ func fixtureGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	if runtime.GOOS == "windows" {
+		cmd.Env = append(cmd.Env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.longpaths", "GIT_CONFIG_VALUE_0=true")
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %s: %v", args, out, err)
@@ -30,11 +34,16 @@ func fixtureGit(t *testing.T, dir string, args ...string) string {
 func fixtureLocalCheckout(t *testing.T, y yesmen.Yesman, rel string) string {
 	t.Helper()
 	dir := filepath.Join(y.Path, filepath.FromSlash(rel))
+	initFixtureCheckout(t, dir)
+	return dir
+}
+
+func initFixtureCheckout(t *testing.T, dir string) {
+	t.Helper()
 	must(t, os.MkdirAll(dir, 0700))
 	fixtureGit(t, dir, "init", "-q", "-b", "local-only")
 	fixtureGit(t, dir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "--allow-empty", "-m", "private commit")
 	must(t, os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("dirty workspace content"), 0600))
-	return dir
 }
 
 func TestWorkspaceForceDeleteBazelCheckout(t *testing.T) {

@@ -2,15 +2,19 @@ package yesmen
 
 import (
 	"context"
+	"io/fs"
+	"os"
+	"slices"
 	"strings"
 )
 
-// ForceDeletion is an in-memory observation issued to the desktop, bound to
-// the exact workspace and Git marker instances the confirmation showed.
-// It cannot clear a pool registration or a saved lifecycle record.
+// ForceDeletion binds the desktop confirmation to one workspace and the
+// observed checkout and directory instances. A cold retry uses a fresh plan.
 type ForceDeletion struct {
-	target DeletionTarget
-	paths  map[string]checkoutObservation
+	target    DeletionTarget
+	paths     map[string]checkoutObservation
+	top       map[string]os.FileInfo
+	remaining map[string]os.FileInfo // complete snapshot for a staged retry
 }
 
 func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget, registrations func(context.Context, string) error, relocated RelocatedPrimary) (CheckoutScan, *ForceDeletion, error) {
@@ -27,45 +31,115 @@ func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget,
 		return CheckoutScan{}, nil, err
 	}
 	defer ws.Close()
-	scan := scanCheckouts(ctx, ws)
-	if err := s.checkDeletionTarget(parent, target); err != nil {
-		return CheckoutScan{}, nil, err
-	}
-	if scan.Problem != "" || len(scan.Entries) == 0 {
+	scan := scanCheckouts(ctx, ws, true)
+	if scan.Problem != "" || (!target.Pending && len(scan.Entries) == 0) {
 		return scan, nil, nil
 	}
-	plan := &ForceDeletion{target: target, paths: make(map[string]checkoutObservation, len(scan.observed))}
+	plan := &ForceDeletion{target: target, paths: make(map[string]checkoutObservation, len(scan.observed)), top: map[string]os.FileInfo{}}
+	if target.Pending {
+		plan.remaining = map[string]os.FileInfo{}
+	}
 	for _, o := range scan.observed {
 		if !o.directory.Usable() {
 			return scan, nil, deletionIssue("Cannot verify the Git checkout directory at %s.", o.Path)
 		}
 		plan.paths[o.Path] = o
 	}
+	if err := plan.observeTop(ctx, ws); err != nil {
+		return scan, nil, err
+	}
+	if target.Pending && len(plan.top) == 0 {
+		return scan, nil, nil // the existing empty-stage finish works
+	}
+	for name := range plan.top {
+		scan.Paths = append(scan.Paths, name)
+	}
+	slices.Sort(scan.Paths)
 	if err := registrations(ctx, ws.Name()); err != nil {
 		return scan, nil, err
 	}
-	if err := walkWorkspaceDeletion(ctx, ws, inspectDeletion, plan); err != nil {
+	if err := walkDeletion(ctx, ws, inspectDeletion, plan, true); err != nil {
 		return scan, nil, err
 	}
 	if err := s.checkWorktreeRecords(ctx, parent, ws, target, []RelocatedPrimary{relocated}, false); err != nil {
 		return scan, nil, err
 	}
+	if err := plan.checkGit(ctx, ws); err != nil {
+		return scan, nil, err
+	}
+	if err := s.checkDeletionTarget(parent, target); err != nil {
+		return scan, nil, err
+	}
 	return scan, plan, nil
 }
 
-func (f *ForceDeletion) permitsTopLevel(dir string) bool {
-	if f != nil {
-		for rel := range f.paths {
-			if rel == dir || strings.HasPrefix(rel, dir+"/") {
-				return true
+// For a root checkout list its direct directories. A retry explicitly lists
+// every remaining direct entry. Otherwise only checkout ancestors can relax
+// the ordinary top-level directory guard.
+func (f *ForceDeletion) observeTop(ctx context.Context, ws *os.Root) error {
+	_, rootCheckout := f.paths["."]
+	limit := -1
+	entries, err := readDeletionEntries(ctx, ws, &limit)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		covered := f.target.Pending || rootCheckout && e.IsDir() && name != ".yesman"
+		if !covered && name != ".yesman" && e.IsDir() {
+			for check := range f.paths {
+				if check == name || strings.HasPrefix(check, name+"/") {
+					covered = true
+					break
+				}
 			}
 		}
+		if !covered {
+			continue
+		}
+		st, err := ws.Lstat(name)
+		if err != nil || e.IsDir() != st.IsDir() {
+			return errCheckoutPreviewChanged
+		}
+		f.top[name] = st
+		if len(f.top) > checkoutResultLimit {
+			return deletionIssue("Too many paths to show in a deletion confirmation. Move some files or directories out before trying again.")
+		}
 	}
-	return false
+	return nil
+}
+
+func sameDeletionEntry(want, got fs.FileInfo) bool {
+	return want != nil && got != nil && want.Mode().Type() == got.Mode().Type() && os.SameFile(want, got) &&
+		(!want.Mode().IsRegular() || want.Size() == got.Size() && want.ModTime().Equal(got.ModTime()))
+}
+
+func (f *ForceDeletion) checkGit(ctx context.Context, ws *os.Root) error {
+	volume, err := directoryIdentity(ws)
+	if err != nil {
+		return err
+	}
+	for rel, checkout := range f.paths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := checkCheckoutGit(ctx, ws, volume, rel, checkout); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *ForceDeletion) observeRemaining(rel string, st fs.FileInfo) error {
+	if len(f.remaining) >= checkoutEntryLimit {
+		return deletionIssue("The workspace Git scan reached its limit.")
+	}
+	f.remaining[rel] = st
+	return nil
 }
 
 func (s *Store) DeleteWithCheckoutConfirmation(ctx context.Context, target DeletionTarget, force *ForceDeletion, registrations func(context.Context, string) error, stop func(Yesman) error, relocated RelocatedPrimary) (bool, error) {
-	if force == nil || !matchDeletionTarget(force.target, target) || target.Archived || len(force.paths) == 0 {
+	if force == nil || !matchDeletionTarget(force.target, target) || target.Archived || (!target.Pending && len(force.paths) == 0) {
 		return false, errCheckoutPreviewChanged
 	}
 	return s.deleteWorkspace(ctx, target, registrations, stop, []RelocatedPrimary{relocated}, force)

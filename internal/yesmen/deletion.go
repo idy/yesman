@@ -346,7 +346,15 @@ func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, regist
 		if err := walkWorkspaceDeletion(ctx, ws, phase, force); err != nil {
 			return err
 		}
-		return s.checkWorktreeRecords(ctx, parent, ws, want, relocated, true)
+		if err := s.checkWorktreeRecords(ctx, parent, ws, want, relocated, true); err != nil {
+			return err
+		}
+		if force != nil {
+			// Run after the full walk and after any worktree record I/O.
+			// On a live deletion this is re-read immediately before detach.
+			return force.checkGit(ctx, ws)
+		}
+		return nil
 	}
 	if err := preflight(inspectDeletion); err != nil {
 		return false, err

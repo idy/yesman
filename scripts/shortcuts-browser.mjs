@@ -107,7 +107,8 @@ async function answer(m, args) {
   }
   case 'Abort': case 'Stop': case 'WatchFiles': case 'Reveal': case 'FetchAll': return;
   // Called only if a guard were skipped; recorded in calls either way.
-  case 'CheckWorkspaceForceDeletion': return {entries:[]};
+  case 'ReviewWorkspaceForceDeletion': return {entries:[]};
+  case 'CancelWorkspaceForceReview': return;
   case 'PrepareWorkspaceDeletion': return {entry:args[0],label:'Alice',instance:'fixture'};
   case 'DeleteWorkspace': case 'RemoveWorkerOf': case 'Rename': case 'HireNamed': return null;
   default: unmocked.push(m); return null;
