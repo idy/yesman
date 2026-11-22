@@ -19,7 +19,7 @@ import (
 func TestReturnIsPartOfAuthenticatedTaskCommit(t *testing.T) {
 	x, wt, proof := returnFixture(t, "release", "")
 	before := string(x.f.boardBytes(x.y.Name))
-	for _, invalid := range []string{"forgot", "missing-unused", "incomplete-release", "wrong-instance", "foreign-certifier", "duplicate"} {
+	for _, invalid := range []string{"missing-unused", "incomplete-release", "wrong-instance", "foreign-certifier", "duplicate"} {
 		p := proof
 		token := x.w.Token
 		e := map[string]any{"id": "t1", "note": "Handoff saved", "status": "done"}
@@ -36,9 +36,7 @@ func TestReturnIsPartOfAuthenticatedTaskCommit(t *testing.T) {
 			}
 			token = x.f.start("alice/other").Token
 		}
-		if invalid != "forgot" {
-			e["worktrees"] = []yesmen.WorktreeReturn{p}
-		}
+		e["worktrees"] = []yesmen.WorktreeReturn{p}
 		if invalid == "duplicate" {
 			e["worktrees"] = []yesmen.WorktreeReturn{p, p}
 		}

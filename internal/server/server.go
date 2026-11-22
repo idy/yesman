@@ -627,22 +627,15 @@ func agentBoardOf(b yesmen.Board) agentBoard {
 // workspace's Use and the caller's process's admission (agent.BeginChange),
 // so that it lands before that process finishes stopping, or not at all.
 func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any, error) {
-	var in struct {
-		yesmen.BoardChange
-		ReportWorktrees bool `json:"reportWorktrees"`
-	}
-	if err := decode(r, &in); err != nil {
+	var change yesmen.BoardChange
+	if err := decode(r, &change); err != nil {
 		return nil, err
 	}
-	change := in.BoardChange
 	if change.Empty() {
 		return s.board(context.Background(), c, r)
 	}
 	returns := slices.ContainsFunc(change.Update, func(e yesmen.TaskEdit) bool { return e.Worktrees != nil })
-	closing := slices.ContainsFunc(change.Update, func(e yesmen.TaskEdit) bool {
-		return e.Status != nil && strings.EqualFold(strings.TrimSpace(*e.Status), yesmen.TaskDone)
-	})
-	if returns || in.ReportWorktrees && closing {
+	if returns {
 		l := s.worktreeLock(c.yesman.Name)
 		l.Lock()
 		defer l.Unlock()
@@ -657,8 +650,8 @@ func (s *Server) changeBoard(_ context.Context, c caller, r *http.Request) (any,
 			return err
 		}
 		defer release()
-		if returns || in.ReportWorktrees && closing {
-			if err := s.prepareReturns(c, &change, in.ReportWorktrees); err != nil {
+		if returns {
+			if err := s.prepareReturns(c, &change); err != nil {
 				return err
 			}
 		}

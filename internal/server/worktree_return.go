@@ -47,7 +47,7 @@ func publishedBranch(rec yesmen.WorktreeRecord) string {
 // Called with the workspace worktree lock before the Board commit. The task
 // update and its named checkout returns are one durable write. Taking the
 // evidence from this update's own note keeps later note edits independent.
-func (s *Server) prepareReturns(c caller, change *yesmen.BoardChange, requireDisposition bool) error {
+func (s *Server) prepareReturns(c caller, change *yesmen.BoardChange) error {
 	records, board, _, err := s.Yesmen.WorktreeState(c.yesman)
 	if err != nil {
 		// A metadata read error cannot authorize a return. It need not
@@ -82,13 +82,6 @@ func (s *Server) prepareReturns(c caller, change *yesmen.BoardChange, requireDis
 		t := board.Tasks[i]
 		owned := byTask[id]
 		if e.Worktrees == nil {
-			if requireDisposition && t.Open() && e.Status != nil && strings.EqualFold(strings.TrimSpace(*e.Status), yesmen.TaskDone) {
-				for _, rec := range owned {
-					if rec.Owner == t.Owner && rec.Completion == nil && rec.Root != nil {
-						return fmt.Errorf("task %s has temporary checkout %s (%s). Include its worktrees result with this update, or worktrees: [] to keep it", id, rec.Dir, rec.ID)
-					}
-				}
-			}
 			continue
 		}
 		if len(*e.Worktrees) > 32 || (c.agent.Role != agent.RoleLead && c.agent.Name != t.Owner) {
@@ -98,7 +91,8 @@ func (s *Server) prepareReturns(c caller, change *yesmen.BoardChange, requireDis
 		for j := range *e.Worktrees {
 			v := &(*e.Worktrees)[j]
 			rec, ok := owned[v.Checkout]
-			if !ok || used[v.Checkout] || rec.Owner != t.Owner || !t.OwnerSince.IsZero() && !rec.OwnerSince.Equal(t.OwnerSince) {
+			if !ok || used[v.Checkout] || rec.Owner != t.Owner || !t.OwnerSince.IsZero() && !rec.OwnerSince.Equal(t.OwnerSince) ||
+				rec.CreatedFor != nil && !boundCreatingTask(c.yesman, rec, t) {
 				return fmt.Errorf("task %s: checkout or owner generation changed", id)
 			}
 			used[v.Checkout] = true
@@ -126,6 +120,58 @@ func (s *Server) prepareReturns(c caller, change *yesmen.BoardChange, requireDis
 	return nil
 }
 
+func (s *Server) observeReclaim(ctx context.Context, y yesmen.Yesman, c checkoutCandidate) (pool.Worktree, *pool.CheckoutObservation, error) {
+	rec := c.record
+	wts, err := s.Pool.Worktrees(ctx, y.Path)
+	if err != nil {
+		return pool.Worktree{}, nil, err
+	}
+	var w pool.Worktree
+	for _, actual := range wts {
+		if actual.Dir == rec.Dir {
+			if w.Dir != "" {
+				return pool.Worktree{}, nil, errors.New("multiple Git registrations point to the checkout")
+			}
+			w = actual
+		}
+	}
+	if w.Repo != rec.Repo || w.CleanupID != rec.ID || w.Branch != rec.Branch || w.Detached != (rec.Purpose == "review") ||
+		!exactHeadRE.MatchString(w.Head) || w.Detached && w.Head != rec.Head || c.authority.completion != nil && w.Head != c.authority.completion.Head {
+		return pool.Worktree{}, nil, errors.New("the checkout or its registered source changed")
+	}
+	w.Root = recordedWorktreeRoot(rec)
+	observed, err := s.Pool.ObserveReclaim(ctx, y.Path, w, c.authority.completion == nil)
+	if err != nil {
+		return pool.Worktree{}, nil, err
+	}
+	return observed.Bind(w), observed, nil
+}
+
+// Save the source for recovery immediately before Git's cleanup steps, under
+// the same Board, checkout and owner leases. A receipt does not authorize
+// a retry that would remove a live directory.
+func (s *Server) saveCleanupReceipt(ctx context.Context, y yesmen.Yesman, rec *yesmen.WorktreeRecord, a checkoutAuthority, head string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	after := *rec
+	after.CleanupHead = head
+	if a.fromBoard && (rec.Completion == nil || !rec.BoardRound.Equal(a.decision.round) || !sameCertifiedReturn(*rec.Completion, *a.completion)) {
+		after.Completion, after.BoardRound = a.completion, a.decision.round
+		if rec.Completion != nil {
+			after.PriorReturns = append(slices.Clone(rec.PriorReturns), yesmen.VerifiedWorktreeReturn{Round: rec.BoardRound, Completion: *rec.Completion})
+		}
+	}
+	if reflect.DeepEqual(*rec, after) {
+		return nil
+	}
+	if err := s.Yesmen.CommitWorktreeRecord(y, *rec, after); err != nil {
+		return err
+	}
+	*rec = after
+	return nil
+}
+
 func (s *Server) removeCompletedInstance(ctx context.Context, y yesmen.Yesman, rec yesmen.WorktreeRecord) error {
 	path := filepath.Join(y.Path, rec.Dir)
 	wt := expectedWorktree(rec)
@@ -144,7 +190,10 @@ func (s *Server) recoverMissingReturn(ctx context.Context, y yesmen.Yesman, reco
 		return collectedOrIneligible, false
 	}
 	rec := records[i]
-	if rec.Removed || rec.Root == nil || rec.Completion == nil || !checkoutID.MatchString(id) || !dirRE.MatchString(rec.Dir) || !temporaryPurpose(rec.Purpose) || latestWorktree(records, rec.Dir) != i || completionProblem(rec, *rec.Completion) != "" {
+	if rec.Removed || !checkoutID.MatchString(id) || !dirRE.MatchString(rec.Dir) || !temporaryPurpose(rec.Purpose) || latestWorktree(records, rec.Dir) != i {
+		return collectedOrIneligible, false
+	}
+	if !exactHeadRE.MatchString(rec.CleanupHead) && (rec.Root == nil || rec.Completion == nil || completionProblem(rec, *rec.Completion) != "") {
 		return collectedOrIneligible, false
 	}
 	path := filepath.Join(y.Path, rec.Dir)
@@ -185,7 +234,18 @@ func (s *Server) checkMissingInstance(ctx context.Context, rec yesmen.WorktreeRe
 	if registered {
 		return errors.New("missing path is still registered; retain for recovery")
 	}
-	if err := s.Pool.CheckWorktreeCheckpoint(ctx, expectedWorktree(rec)); err != nil {
+	moved, err := s.Pool.HasWorktreeInstance(ctx, rec.Repo, rec.ID)
+	if err != nil {
+		return err
+	}
+	if moved {
+		return errors.New("checkout is still registered at another path")
+	}
+	wt := expectedWorktree(rec)
+	if exactHeadRE.MatchString(rec.CleanupHead) {
+		wt.Head = rec.CleanupHead
+	}
+	if err := s.Pool.CheckWorktreeCheckpoint(ctx, wt); err != nil {
 		return err
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {

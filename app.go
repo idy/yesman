@@ -139,6 +139,8 @@ type app struct {
 	grants     *nativepermissions.Manager
 
 	desktopWorktrees server.DesktopWorktrees
+	editorEpoch      uint64            // protected by wmu
+	editorHolds      map[string]func() // protected by wmu
 	infoOnce         sync.Once
 	info             *infoCache // what the info panel measured
 }
@@ -188,9 +190,12 @@ func (a *app) showWindow() {
 		// Speech and Services on macOS.
 		e.PreventDefault()
 	})
+	w.Page().OnDOMReady(func() { a.resetWorktreeEditors(w) })
+	w.Page().OnRenderProcessGone(func(string) { a.resetWorktreeEditors(w) })
 	w.OnClosed(func() {
 		a.wmu.Lock()
 		if a.win == w {
+			a.clearWorktreeEditorsLocked()
 			a.win = nil
 		}
 		a.wmu.Unlock()

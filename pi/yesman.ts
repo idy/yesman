@@ -706,7 +706,7 @@ export default function yesman(pi: ExtensionAPI) {
 		unused: Type.Boolean({ description: "True confirms you stopped its processes and checked that no other task or person needs this directory" }),
 		sourceBranch: Type.Optional(Type.String({ description: "Published PR head ref if different from the local branch. Cite push provenance in the result note." })),
 		publication: Type.Optional(Type.String({ description: "For a release, its published GitHub release URL. Record verification evidence in the task note." })),
-	}), { description: "With a finished task's result note, return its unused temporary checkouts for automatic cleanup. Supply [] to retain them for further work." }));
+	}), { description: "Optional explicit return with the finished task’s note. Ordinary done tasks need no return. Supply [] to keep all checkouts for this task." }));
 	pi.registerTool({
 		name: "yesman_board",
 		label: "yesman: board",
@@ -726,7 +726,7 @@ export default function yesman(pi: ExtensionAPI) {
 			const change = Object.fromEntries(Object.entries(params).filter(([key, v]) =>
 				key === "delivery" ? ROLE === "lead" && v !== undefined : Array.isArray(v) && v.length));
 			const board = Object.keys(change).length
-				? await call("POST", "/v1/board", { ...change, ...(params.update?.some(e => e.status?.trim().toLowerCase() === "done") ? {reportWorktrees: true} : {}) }, signal)
+				? await call("POST", "/v1/board", change, signal)
 				: await call("GET", "/v1/board", undefined, signal);
 			const view = publicBoard(board);
 			return result(boardText(view), view);

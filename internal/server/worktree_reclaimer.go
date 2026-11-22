@@ -14,9 +14,8 @@ import (
 	"github.com/idy/yesman/internal/yesmen"
 )
 
-// WorktreeReclaimer consumes task results. Its only work items are identities
-// from the workspace registry with positive completion evidence. Discovery is
-// local. Only a returned branch can cause a bounded GitHub verification.
+// WorktreeReclaimer consumes current task results for registered instances.
+// Discovery is local. Branch candidates can require bounded GitHub checks.
 type WorktreeReclaimer struct {
 	s        *Server
 	mu       sync.Mutex
@@ -35,11 +34,11 @@ type checkoutKey struct {
 }
 
 type checkoutJob struct {
-	y               yesmen.Yesman
-	due             time.Time
-	delay           time.Duration
-	owner, delegate string
-	waitForIdle     bool
+	y                         yesmen.Yesman
+	due                       time.Time
+	delay                     time.Duration
+	owner, delegate, assignee string
+	waitForIdle               bool
 }
 
 func NewWorktreeReclaimer(s *Server) *WorktreeReclaimer {
@@ -96,9 +95,8 @@ func (r *WorktreeReclaimer) BoardResult(y yesmen.Yesman) {
 	r.signal()
 }
 
-// OwnerRetired wakes only jobs held by that owner or delegate. Token usage,
-// tool output, other workers, board reorders and general UI refreshes are
-// independent of cleanup and never trigger a search for merged PRs.
+// OwnerRetired wakes idle waits for a recorded owner, delegate or assignee.
+// Remote retries and jobs in other workspaces keep their deadline.
 func (r *WorktreeReclaimer) OwnerRetired(workspace, owner string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -106,7 +104,7 @@ func (r *WorktreeReclaimer) OwnerRetired(workspace, owner string) {
 		return
 	}
 	for key, job := range r.jobs {
-		if job.waitForIdle && key.workspace == workspace && (job.owner == owner || job.delegate == owner) && job.due.After(time.Now()) {
+		if job.waitForIdle && key.workspace == workspace && (job.owner == owner || job.delegate == owner || job.assignee == owner) && job.due.After(time.Now()) {
 			job.due = time.Now()
 			r.jobs[key] = job
 			r.signal()
@@ -200,24 +198,26 @@ func (r *WorktreeReclaimer) scan(y yesmen.Yesman) error {
 	}
 	now := time.Now()
 	for _, rec := range records {
-		if rec.Removed || !temporaryPurpose(rec.Purpose) || !checkoutID.MatchString(rec.ID) || rec.Root == nil {
+		if rec.Removed || !temporaryPurpose(rec.Purpose) || !checkoutID.MatchString(rec.ID) || rec.Root == nil && rec.CleanupHead == "" {
 			continue
 		}
-		hasProof := rec.Completion != nil || slices.ContainsFunc(board.Tasks, func(t yesmen.Task) bool {
-			return t.ID == rec.Task && slices.ContainsFunc(t.Returns, func(v yesmen.WorktreeReturn) bool { return v.Checkout == rec.ID })
-		})
+		c, eligible := candidate(y, records, board, workers, rec.ID)
 		key := checkoutKey{y.Name, y.HiredAt, rec.ID}
-		if !hasProof {
+		if !eligible && rec.CleanupHead == "" && rec.Completion == nil {
 			continue
 		}
 		r.mu.Lock()
 		job, queued := r.jobs[key]
 		if !queued {
-			r.jobs[key] = checkoutJob{y: y, owner: rec.Owner, delegate: rec.CleanupOwner, due: now}
+			job = checkoutJob{y: y, due: now}
 		}
+		// A Board update can change who this existing job is waiting on.
+		// Refresh the retirement routing without changing its retry budget.
+		job.owner, job.delegate, job.assignee = rec.Owner, rec.CleanupOwner, c.authority.decision.owner
+		r.jobs[key] = job
 		r.mu.Unlock()
-		if queued && job.waitForIdle && job.due.After(now) && !heldByUsers(rec, board, workers) {
-			if err := r.s.withWorktreeUsers(y.Name, rec, "", func() error { return nil }); err == nil {
+		if queued && eligible && job.waitForIdle && job.due.After(now) && !heldByUsers(rec, board, workers) {
+			if err := r.s.withTaskWorktreeUsers(y, rec, c.authority.decision, func() error { return nil }); err == nil {
 				r.mu.Lock()
 				if waiting := r.jobs[key]; waiting.waitForIdle && waiting.due.After(now) {
 					waiting.due = now
@@ -233,16 +233,12 @@ func (r *WorktreeReclaimer) scan(y yesmen.Yesman) error {
 var checkoutID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 type checkoutCandidate struct {
-	record         yesmen.WorktreeRecord
-	round          time.Time
-	taskGeneration string
-	fromBoard      bool
+	record    yesmen.WorktreeRecord
+	authority checkoutAuthority
 }
 
-// All authority comes from one exact registered instance and either an
-// authenticated Board return or a previously certified completion. Rejected
-// proposals are audit history. A new worker with the same name cannot stand
-// in for the owner, including on cold start when no pi process exists.
+// Rejected proposals are audit history. A new worker with the same name
+// cannot stand in for the original owner, including on cold start.
 func candidate(y yesmen.Yesman, records []yesmen.WorktreeRecord, b yesmen.Board, workers []yesmen.Worker, id string) (checkoutCandidate, bool) {
 	var none checkoutCandidate
 	i := slices.IndexFunc(records, func(r yesmen.WorktreeRecord) bool { return r.ID == id })
@@ -253,23 +249,8 @@ func candidate(y yesmen.Yesman, records []yesmen.WorktreeRecord, b yesmen.Board,
 	if rec.Removed || !temporaryPurpose(rec.Purpose) || !dirRE.MatchString(rec.Dir) || rec.Root == nil || !strings.HasPrefix(rec.Repo, "github.com/") || latestWorktree(records, rec.Dir) != i {
 		return none, false
 	}
-	t, ok := returnedTask(y, rec, b, workers)
-	if !ok {
-		return none, false
-	}
-	if t.Returns != nil {
-		v := boardProof(y, rec, t)
-		if v == nil || rec.Completion != nil && !sameReturnedSource(*rec.Completion, *v) {
-			return none, false
-		}
-		rec.Completion = v
-	} else if rec.Completion == nil || !rec.BoardRound.IsZero() || rec.Completion.SavedAt.Before(t.DoneAt) {
-		return none, false
-	}
-	if completionProblem(rec, *rec.Completion) != "" || rec.Purpose == "release" && strings.TrimSpace(rec.Completion.Publication) == "" {
-		return none, false
-	}
-	return checkoutCandidate{record: rec, round: t.DoneAt, taskGeneration: t.WorktreeGeneration, fromBoard: t.Returns != nil}, true
+	a, reason := bulkAuthority(y, rec, b, workers)
+	return checkoutCandidate{record: rec, authority: a}, reason == ""
 }
 
 type reclaimWait int
@@ -304,21 +285,21 @@ func (s *Server) reconcileCheckout(ctx context.Context, y yesmen.Yesman, id stri
 		return collectedOrIneligible
 	}
 	rec := first.record
-	if heldByUsers(rec, b, workers) {
+	if heldByUsers(rec, b, workers) || s.worktreeUsersPaused(y, rec) {
 		return waitForOwner
 	}
 	// Do not spend remote requests on a running/retiring worker. Release the
 	// preflight reservation immediately. The final reservation is authoritative.
-	if err := s.withWorktreeUsers(y.Name, rec, "", func() error { return nil }); err != nil {
+	if err := s.withTaskWorktreeUsers(y, rec, first.authority.decision, func() error { return nil }); err != nil {
 		return waitForOwner
 	}
-	if rec.Purpose != "review" {
-		if err := s.verifyMerged(ctx, rec); err != nil {
-			return retryLater
-		}
-		if err := s.checkOpenPulls(ctx, rec); err != nil {
-			return retryLater
-		}
+	w, observation, err := s.observeReclaim(ctx, y, first)
+	if err != nil {
+		return retryLater
+	}
+	defer observation.Close()
+	if hold := s.verifyCleanupSource(ctx, rec, first.authority, observation.Tracking); hold != nil {
+		return retryLater
 	}
 	lock := s.worktreeLock(y.Name)
 	if !lock.TryLock() {
@@ -335,35 +316,16 @@ func (s *Server) reconcileCheckout(ctx context.Context, y yesmen.Yesman, id stri
 			return errors.New("task or proof changed during verification")
 		}
 		i := latestWorktree(records, rec.Dir)
-		return s.withWorktreeUsers(y.Name, current.record, "", func() error {
-			if err := ctx.Err(); err != nil {
-				return err
+		return s.withTaskWorktreeUsers(y, current.record, current.authority.decision, func() error {
+			if s.worktreeUsersPaused(y, rec) {
+				return errors.New("a recorded owner is paused")
 			}
-			if err := s.Pool.TryReclaimTemporary(ctx, y.Path, expectedWorktree(current.record), func() error {
-				before := records[i]
-				if !current.fromBoard {
-					return CheckSavedWorktreeReturn(y, before, b, workers)
-				}
-				after := before
-				after.Completion, after.BoardRound = current.record.Completion, current.round
-				if err := CheckSavedWorktreeReturn(y, after, b, workers); err != nil {
-					return err
-				}
-				if before.BoardRound.Equal(after.BoardRound) && before.Completion != nil && sameCertifiedReturn(*before.Completion, *after.Completion) {
-					return nil
-				}
-				if before.Completion != nil {
-					after.PriorReturns = append(slices.Clone(before.PriorReturns), yesmen.VerifiedWorktreeReturn{Round: before.BoardRound, Completion: *before.Completion})
-				}
-				if err := s.Yesmen.CommitWorktreeRecord(y, before, after); err != nil {
-					return err
-				}
-				records[i] = after
-				return nil
+			if err := s.Pool.TryReclaimTemporary(ctx, y.Path, w, func() error {
+				return s.saveCleanupReceipt(ctx, y, &records[i], current.authority, w.Head)
 			}); err != nil {
 				return err
 			}
-			if err := s.recordWorktreeRemoval(y, records[i], "automatically reclaimed after verified completion"); err != nil {
+			if err := s.recordWorktreeRemoval(y, records[i], "automatically reclaimed from task "+rec.Task); err != nil {
 				return err
 			}
 			retired = true

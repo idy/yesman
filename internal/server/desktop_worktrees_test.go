@@ -67,7 +67,7 @@ func TestDesktopWorktreeCanceledTaskWithoutPR(t *testing.T) {
 	wt.Head = cleanupGit(t, wt.Path, "rev-parse", "HEAD")
 	refs := cleanupGit(t, f.repo.Path, "for-each-ref", "--format=%(refname) %(objectname)")
 	p := previewTree(t, d, f.y, nil, false)
-	if !strings.Contains(p.Rows[0].Reason, "No completion") {
+	if p.Rows[0].Reason != canceledTask || p.Rows[0].Task != "t1" || p.Rows[0].TaskStatus != yesmen.TaskDropped || p.Rows[0].Detail != "" {
 		t.Fatal(p)
 	}
 	p = previewTree(t, d, f.y, &wt, true)
@@ -284,14 +284,13 @@ func TestDesktopWorktreeBulkAndAlternateSourceBranch(t *testing.T) {
 				p = previewTree(t, d, f.y, nil, true)
 				confirmTree(t, d, f.y, p.Token, true)
 			} else {
-				// Same merged SHA, different integration branch. Preserve the
-				// rejected proposal. Only a separately confirmed single can act.
+				// A rejected merge proposal cannot become a certificate. The
+				// creating task still authorizes independent bulk cleanup.
 				res := f.remove(t, f.owner, removeWorktreeRequest{Dir: wt.Dir, Completion: proof})
 				if res.Removed || len(res.Record.Attempts) != 1 {
 					t.Fatal(res)
 				}
-				previewTree(t, d, f.y, nil, false)
-				p := previewTree(t, d, f.y, &wt, true)
+				p := previewTree(t, d, f.y, nil, true)
 				confirmTree(t, d, f.y, p.Token, true)
 			}
 			if got := cleanupGit(t, f.repo.Path, "rev-parse", "refs/heads/"+branch); got != wt.Head {
@@ -338,7 +337,7 @@ func TestDesktopWorktreeActiveOwnerAndAgentAuthority(t *testing.T) {
 	}
 	d := &DesktopWorktrees{Server: x.f.srv}
 	p := previewTree(t, d, x.y, &wt, false)
-	if !strings.Contains(p.Rows[0].Reason, "active") {
+	if !strings.Contains(p.Rows[0].Detail, "is active") {
 		t.Fatal(p)
 	}
 	for _, path := range []string{"preview", "confirm"} {

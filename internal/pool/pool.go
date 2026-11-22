@@ -39,6 +39,7 @@ type Pool struct {
 	mu      sync.Mutex
 	locks   map[string]*sync.Mutex
 	trees   map[string]*sync.RWMutex // treeLock
+	edits   map[*sync.RWMutex]int    // editor leases, under mu and treeLock
 	fetched map[string]time.Time
 }
 

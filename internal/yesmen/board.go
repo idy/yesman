@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -60,6 +61,12 @@ type Task struct {
 	// Returns holds the checkout-specific handoffs for this task's current
 	// result. Reopening or reassigning work withdraws them.
 	Returns []WorktreeReturn `json:"worktreeReturns,omitzero"`
+	// A revoked return cannot authorize cleanup, but its explicit keep
+	// choices survive a reopen or reassignment. Nil means no such choice.
+	KeepWorktreesExcept []string `json:"keepWorktreesExcept,omitzero"`
+	// WorktreeSourceBranches remembers published aliases from superseded
+	// returns by checkout ID. They are used only to check for open PRs.
+	WorktreeSourceBranches map[string][]string `json:"worktreeSourceBranches,omitempty"`
 	// OwnerSince is when the worker it was handed to started: a worker of
 	// the same name hired later is not its owner. Zero means whichever
 	// worker has that name now, as for a task handed to a worker before it
@@ -487,7 +494,7 @@ func (s *Store) UpdateScheduledTask(name, run string, fn func(*Task) bool) (task
 		}
 		t.Schedule = b.Tasks[i].Schedule
 		if t.Status != TaskDone || t.Owner != b.Tasks[i].Owner {
-			t.Returns = nil
+			t.withdrawWorktreeReturns()
 		}
 		now := time.Now().UTC()
 		t.recordWorktreeGeneration(b.Tasks[i])
@@ -553,13 +560,15 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 		t.recordWorktreeGeneration(work.Tasks[i])
 		markDone(&t, wasDone, now)
 		if t.Status != TaskDone || oldOwner != t.Owner {
-			t.Returns = nil
+			t.withdrawWorktreeReturns()
 		}
 		if e.Worktrees != nil {
 			if t.Status != TaskDone || oldOwner != t.Owner || t.DoneOwner != t.Owner {
 				return fmt.Errorf("task %s: return worktrees with the result of their owner's finished task", t.ID)
 			}
+			t.rememberWorktreeSources()
 			t.Returns = slices.Clone(*e.Worktrees)
+			t.KeepWorktreesExcept = nil
 		}
 		owned(e, t.ID)
 		work.Tasks[i] = t
@@ -614,6 +623,43 @@ func (b *Board) apply(c BoardChange, now time.Time) error {
 	}
 	*b = work
 	return nil
+}
+
+func (t *Task) withdrawWorktreeReturns() {
+	if t.Returns == nil {
+		return
+	}
+	t.rememberWorktreeSources()
+	t.KeepWorktreesExcept = make([]string, 0, len(t.Returns))
+	for _, r := range t.Returns {
+		t.KeepWorktreesExcept = append(t.KeepWorktreesExcept, r.Checkout)
+	}
+	t.Returns = nil
+}
+
+// Preserve the alias in the same Board write that revokes its return. Older
+// Boards may have authenticated returns that are still current at upgrade.
+func (t *Task) rememberWorktreeSources() {
+	var next map[string][]string
+	for _, r := range t.Returns {
+		if r.SourceBranch == "" || r.ReturnID == "" || r.CertifiedBy == "" || r.CertifiedSince.IsZero() || r.SavedAt.IsZero() {
+			continue
+		}
+		branches := t.WorktreeSourceBranches[r.Checkout]
+		if slices.Contains(branches, r.SourceBranch) {
+			continue
+		}
+		if next == nil {
+			next = maps.Clone(t.WorktreeSourceBranches)
+			if next == nil {
+				next = make(map[string][]string)
+			}
+		}
+		next[r.Checkout] = append(slices.Clone(branches), r.SourceBranch)
+	}
+	if next != nil {
+		t.WorktreeSourceBranches = next
+	}
 }
 
 // Keep the generation in the same Board write as the transition. Checking

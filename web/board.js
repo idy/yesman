@@ -11,6 +11,10 @@ import { t, formatNumber } from './i18n.js';
 const LABEL = { todo: 'To do', doing: 'In progress', blocked: 'Blocked', done: 'Done', dropped: 'Dropped' };
 const isOpen = (t) => t.status !== 'done' && t.status !== 'dropped';
 
+export function taskStatusLabel(status) {
+  return Object.hasOwn(LABEL, status) ? t(LABEL[status]) : '';
+}
+
 function mark(status) {
   switch (status) {
     case 'done': return icon('check', 'mds-icon board-mark');
@@ -126,7 +130,7 @@ export function createBoard(host) {
   function row(y, task) {
     const key = `${y.name}/${task.id}`;
     const isExpanded = expanded.has(key);
-    const status = LABEL[task.status] ? t(LABEL[task.status]) : task.status;
+    const status = taskStatusLabel(task.status) || task.status;
     const owner = task.owner ? host.agent(`${y.name}/${task.owner}`) : null;
     const ownerEl = !task.owner ? null
       : owner
