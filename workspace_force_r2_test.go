@@ -82,9 +82,13 @@ func TestWorkspaceForceReviewsDeepBuildAndRoot(t *testing.T) {
 		t.Run(scope, func(t *testing.T) {
 			s, y, target := deletionFixture(t)
 			deep := deepBuildPath()
+			deepGitfile := filepath.Join(y.Path, filepath.FromSlash(deep), ".git")
+			var deepPointer []byte
 			if scope == "deep" {
-				fixtureExternalGitfile(t, y, bazelCheckout)
-				must(t, os.MkdirAll(filepath.Join(y.Path, filepath.FromSlash(deep)), 0700))
+				checkout := fixtureExternalGitfile(t, y, bazelCheckout)
+				gitDir := fixtureGit(t, checkout, "rev-parse", "--absolute-git-dir")
+				deepPointer = []byte("gitdir: " + gitDir + "\n")
+				must(t, os.MkdirAll(filepath.Dir(deepGitfile), 0700))
 				sidebar, err := s.WorkspaceCheckouts(t.Context(), y.Name, y.HiredAt)
 				must(t, err)
 				if sidebar.Problem == "" || len(sidebar.Entries) != 1 || sidebar.Entries[0].Path != bazelCheckout {
@@ -107,7 +111,9 @@ func TestWorkspaceForceReviewsDeepBuildAndRoot(t *testing.T) {
 				t.Fatal(plan.CheckoutScan)
 			}
 			if scope == "deep" {
-				fixtureExternalGitfile(t, y, deep+"/nested")
+				// Place the late gitfile at the bottom of the existing tree.
+				// Git for Windows cannot chdir to this depth during fixture setup.
+				must(t, os.WriteFile(deepGitfile, deepPointer, 0600))
 			} else {
 				if !slices.Contains(plan.Paths, "src") || plan.Entries[0].Path != "." {
 					t.Fatal(plan.CheckoutScan)
@@ -117,17 +123,19 @@ func TestWorkspaceForceReviewsDeepBuildAndRoot(t *testing.T) {
 				must(t, os.Mkdir(src, 0700))
 				must(t, os.WriteFile(filepath.Join(src, "fresh.txt"), []byte("fresh"), 0600))
 			}
-			if err := s.ForceDeleteWorkspace(t.Context(), target, plan.Token); err == nil {
-				t.Fatal("accepted stale preview")
+			if err := s.ForceDeleteWorkspace(t.Context(), target, plan.Token); err == nil || !strings.Contains(err.Error(), "paths changed") {
+				t.Fatalf("expected stale preview refusal, got %v", err)
 			}
 			if scope == "deep" {
-				fixtureGit(t, filepath.Join(y.Path, filepath.FromSlash(deep), "nested"), "rev-parse", "HEAD")
+				if got := mustReadFile(t, deepGitfile); string(got) != string(deepPointer) {
+					t.Fatalf("stale confirmation changed the late gitfile: %q", got)
+				}
 			} else {
 				mustReadFile(t, filepath.Join(y.Path, "src", "fresh.txt"))
 			}
 			plan, err = s.CheckWorkspaceForceDeletion(t.Context(), target)
 			must(t, err)
-			if plan.Token == "" || scope == "deep" && len(plan.Entries) != 2 {
+			if plan.Token == "" || scope == "deep" && (len(plan.Entries) != 2 || plan.Entries[1].Path != deep) {
 				t.Fatal(plan.CheckoutScan)
 			}
 			must(t, s.ForceDeleteWorkspace(t.Context(), target, plan.Token))

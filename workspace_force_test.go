@@ -87,12 +87,13 @@ func TestWorkspaceForceDeleteBazelCheckout(t *testing.T) {
 	if local.Problem != "" || len(local.Entries) != 2 || local.Entries[0].Path != bazelCheckout || local.Entries[1].Path != ".yesman/tmp/z-external-pointer" {
 		t.Fatalf("local inventory: %+v", local)
 	}
-	if err := s.DeleteWorkspace(t.Context(), target); err == nil || !strings.Contains(err.Error(), bazelCheckout) {
-		t.Fatalf("expected nested checkout blocker: %v", err)
+	gitDataHold := "Git data at " + filepath.Join(dir, ".git") + " may be used by another checkout."
+	if err := s.DeleteWorkspace(t.Context(), target); err == nil || !strings.Contains(err.Error(), gitDataHold) {
+		t.Fatalf("expected nested Git data hold %q, got %v", gitDataHold, err)
 	}
 	held, err := s.CheckWorkspaceForceDeletion(t.Context(), target)
 	must(t, err)
-	if held.Token != "" || len(held.Entries) != 2 || !strings.Contains(held.Problem, filepath.Join(dir, ".git")) {
+	if held.Token != "" || len(held.Entries) != 2 || !strings.Contains(held.Problem, gitDataHold) {
 		t.Fatalf("legacy Git data should hold at its live path: %+v", held)
 	}
 	// The test owns this repository and all its consumers. A user can make
