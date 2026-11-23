@@ -52,8 +52,11 @@ func checkDesktopWorktreeUse(ctx context.Context, path string, preview bool) err
 	var held bool
 	err := visitDesktopOpenFiles(ctx, func(name string) bool {
 		name = strings.TrimSuffix(name, " (deleted)")
-		held = filepath.IsAbs(name) && (name == root || within(name, root))
-		return held
+		if filepath.IsAbs(name) && (name == root || within(name, root)) {
+			held = true
+			return true
+		}
+		return false
 	})
 	if held {
 		return inUse

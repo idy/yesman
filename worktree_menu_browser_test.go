@@ -279,7 +279,11 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			}
 			value, err = map[string]any{"trees": wts, "checkpoints": refs, "present": present}, e
 		default:
-			if !slices.Contains([]string{"State", "Info", "WorkspaceCheckouts", "Usage", "ListFiles", "ReadFile", "ReadWorktreeFile", "WriteWorktreeFile", "BeginWorktreeEdit", "EndWorktreeEdit", "PreviewWorktreeCleanup", "CheckWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
+			busy := req.Method == "CheckBusyWorkspace"
+			if busy {
+				req.Method = "CheckWorktreeCleanup"
+			}
+			if !slices.Contains([]string{"State", "Info", "WorkspaceCheckouts", "Usage", "ListFiles", "ReadFile", "ReadWorktreeFile", "WriteWorktreeFile", "BeginWorktreeEdit", "EndWorktreeEdit", "PrepareWorktreeCleanup", "CheckWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
 				http.Error(w, "method", 400)
 				return
 			}
@@ -300,12 +304,20 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 				}
 				in = append(in, v.Elem())
 			}
-			if performance && (req.Method == "PreviewWorktreeCleanup" || req.Method == "CheckWorktreeCleanup") {
+			if performance && req.Method == "CheckWorktreeCleanup" {
 				timing.Lock()
 				timing.started, timing.first, timing.reads, timing.peak = time.Now(), 0, 0, 0
 				timing.Unlock()
 			}
-			out := m.Call(in)
+			var out []reflect.Value
+			if busy {
+				err = a.yesmen.TryWorktreeCommit(y, func() error {
+					out = m.Call(in)
+					return nil
+				})
+			} else {
+				out = m.Call(in)
+			}
 			if len(out) > 0 {
 				value = out[0].Interface()
 			}

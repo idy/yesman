@@ -82,8 +82,7 @@ export function createWorktreeMenu(host) {
       heading.textContent = selected ? t('Remove worktree?') : t('Clean up worktrees');
       hint.textContent = t('Checking worktrees…');
       close.focus({ preventScroll: true });
-      const id = [...crypto.getRandomValues(new Uint8Array(18))].map(b => b.toString(16).padStart(2, '0')).join('');
-      const attempt = {id};
+      const attempt = {};
       check = attempt;
       attempt.timer = setTimeout(() => {
         if (check !== attempt || !dialog.open) return;
@@ -92,6 +91,12 @@ export function createWorktreeMenu(host) {
         retry.hidden = false;
       }, previewDeadline);
       try {
+        attempt.id = await host.call('PrepareWorktreeCleanup', y.name, y.hiredAt, selected);
+        if (check !== attempt || !dialog.open || !current(y)) {
+          cancelToken(attempt.id);
+          if (check === attempt && dialog.open) dialog.close();
+          return;
+        }
         const result = await host.call('CheckWorktreeCleanup', y.name, y.hiredAt, selected, host.unsaved(y), attempt.id);
         if (check !== attempt || !dialog.open || !current(y)) {
           cancelToken(result.token);

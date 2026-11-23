@@ -3,11 +3,15 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -19,9 +23,11 @@ import (
 // DesktopWorktrees belongs to the desktop service. Its single-use confirmation
 // is never registered in the HTTP agent API or accepted by cleanupWorktree.
 type DesktopWorktrees struct {
-	Server  *Server
-	mu      sync.Mutex
-	pending *desktopPreview
+	Server   *Server
+	mu       sync.Mutex
+	pending  *desktopPreview
+	checks   map[string]worktreeCheck
+	sequence uint64
 }
 
 type WorktreeCleanupRow struct {
@@ -49,6 +55,8 @@ const (
 	worktreeLocalBudget   = 8 * time.Second // leave time for the remote checks
 	worktreeSourceBudget  = 4 * time.Second
 	worktreeSourceWorkers = 4
+	worktreeCheckLease    = 30 * time.Second
+	maxWorktreeChecks     = 16
 )
 
 type desktopPreview struct {
@@ -87,7 +95,6 @@ const (
 	noRegistration     = "Git has no current registration for this recorded directory."
 	unsavedFiles       = "The Files pane has unsaved edits in this worktree."
 	unverified         = "Yes Man could not verify this checkout."
-	previewBusy        = "The workspace is busy. Try again."
 	previewTimedOut    = "This worktree could not be checked within the time limit."
 	inventoryTimedOut  = "The worktree list could not be checked within the time limit. Try again."
 	previewRemoteError = "Open pull requests could not be checked. Try again when GitHub is available."
@@ -97,14 +104,67 @@ func sameCheckout(a, b pool.Worktree) bool {
 	return a.Dir == b.Dir && a.Path == b.Path && a.Repo == b.Repo && a.CleanupID == b.CleanupID && a.Head == b.Head && a.Branch == b.Branch && a.Detached == b.Detached
 }
 
-// Preview binds a single request to the row the user actually opened. Bulk
-// starts with all registrations under this hire and includes retained records
-// whose former Git registration vanished. No filesystem sweep supplies targets.
-func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.Time, selected *pool.Worktree, keep []string) (WorktreeCleanupPreview, error) {
-	return d.PreviewRequest(ctx, name, since, selected, keep, "")
+// A ticket is issued before the frontend sends a potentially delayed Check.
+// Revocation deletes the ticket, so even arbitrarily late calls are inert.
+// Only an admitted Check can replace the active plan.
+type worktreeCheck struct {
+	scope    [sha256.Size]byte
+	sequence uint64
+	expires  time.Time
 }
 
+func worktreeCheckScope(name string, since time.Time, selected *pool.Worktree) ([sha256.Size]byte, error) {
+	data, err := json.Marshal(struct {
+		Workspace string
+		HiredAt   time.Time
+		Selected  *pool.Worktree
+	}{name, since.UTC(), selected})
+	return sha256.Sum256(data), err
+}
+
+var errPreviewExpired = errors.New("This preview expired or was already used. Open a new preview.")
+
+func (d *DesktopWorktrees) Prepare(name string, since time.Time, selected *pool.Worktree) (string, error) {
+	if err := yesmen.ValidName(name); err != nil {
+		return "", err
+	}
+	scope, err := worktreeCheckScope(name, since, selected)
+	if err != nil {
+		return "", err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	now := time.Now()
+	maps.DeleteFunc(d.checks, func(_ string, c worktreeCheck) bool { return !now.Before(c.expires) })
+	if len(d.checks) >= maxWorktreeChecks {
+		return "", yesmen.ErrWorkspaceBusy
+	}
+	if d.checks == nil {
+		d.checks = make(map[string]worktreeCheck)
+	}
+	d.sequence++
+	id := "check-" + strconv.FormatUint(d.sequence, 10) + "-" + rand.Text()
+	d.checks[id] = worktreeCheck{scope: scope, sequence: d.sequence, expires: now.Add(worktreeCheckLease)}
+	return id, nil
+}
+
+// Preview is the in-process entry point. The desktop bridge reserves the
+// ticket separately so it can cancel even before the check starts.
+func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.Time, selected *pool.Worktree, keep []string) (WorktreeCleanupPreview, error) {
+	request, err := d.Prepare(name, since, selected)
+	if err != nil {
+		return WorktreeCleanupPreview{}, err
+	}
+	return d.PreviewRequest(ctx, name, since, selected, keep, request)
+}
+
+// PreviewRequest binds the plan to the selected row and workspace hire. Bulk
+// starts with all registrations and eligible retained registry records.
 func (d *DesktopWorktrees) PreviewRequest(parent context.Context, name string, since time.Time, selected *pool.Worktree, keep []string, request string) (WorktreeCleanupPreview, error) {
+	scope, err := worktreeCheckScope(name, since, selected)
+	if err != nil {
+		return WorktreeCleanupPreview{}, err
+	}
 	s := d.Server
 	ctx, cancel := context.WithTimeout(parent, worktreePreviewBudget)
 	defer cancel()
@@ -113,6 +173,12 @@ func (d *DesktopWorktrees) PreviewRequest(parent context.Context, name string, s
 	plan := &desktopPreview{bulk: selected == nil, token: rand.Text(), request: request, cancel: cancel}
 	out := WorktreeCleanupPreview{Rows: []WorktreeCleanupRow{}}
 	d.mu.Lock()
+	admission, ok := d.checks[request]
+	if !ok || admission.scope != scope || !time.Now().Before(admission.expires) || parent.Err() != nil {
+		d.mu.Unlock()
+		return out, errPreviewExpired
+	}
+	maps.DeleteFunc(d.checks, func(_ string, c worktreeCheck) bool { return c.sequence <= admission.sequence })
 	d.pending.close()
 	d.pending = plan
 	d.mu.Unlock()
@@ -120,9 +186,8 @@ func (d *DesktopWorktrees) PreviewRequest(parent context.Context, name string, s
 	var candidates []desktopCandidate
 	var workspace yesmen.Yesman
 	inventoryReady := false
-	var err error
 	if !l.TryLock() {
-		err = errors.New(previewBusy)
+		err = yesmen.ErrWorkspaceBusy
 	} else {
 		err = s.Yesmen.TryUse(name, func(y yesmen.Yesman) error {
 			if since.IsZero() || !y.HiredAt.Equal(since) {
@@ -249,7 +314,7 @@ func (d *DesktopWorktrees) PreviewRequest(parent context.Context, name string, s
 			c.observation.Close()
 		}
 		if d.pending != plan {
-			return out, errors.New("This preview expired or was already used. Open a new preview.")
+			return out, errPreviewExpired
 		}
 		d.pending = nil
 		return out, err
@@ -329,10 +394,11 @@ func (p *desktopPreview) close() {
 	}
 }
 
-func (d *DesktopWorktrees) Cancel(token string) {
+func (d *DesktopWorktrees) Cancel(id string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.pending != nil && token != "" && (d.pending.token == token || d.pending.request == token) {
+	delete(d.checks, id)
+	if d.pending != nil && id != "" && (d.pending.token == id || d.pending.request == id) {
 		d.pending.close()
 		d.pending = nil
 	}
