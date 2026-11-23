@@ -48,10 +48,17 @@ func (p *Pool) DesktopDiscard(ctx context.Context, workspace string, w Worktree,
 		return fail(&RemovalHold{Reason: "The primary branch is protected.", Detail: w.Branch})
 	}
 	l := p.lock(r.Name)
-	if !l.TryLock() {
-		return fail(errors.New("repository is in use"))
+	if !remove && ctx.Value(discardPreviewKey{}) != nil {
+		if !l.TryRLock() {
+			return fail(errors.New("repository is in use"))
+		}
+		defer l.RUnlock()
+	} else {
+		if !l.TryLock() {
+			return fail(errors.New("repository is in use"))
+		}
+		defer l.Unlock()
 	}
-	defer l.Unlock()
 	tl, err := p.treeLock(path)
 	if err != nil {
 		return fail(err)

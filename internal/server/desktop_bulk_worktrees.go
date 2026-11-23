@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 
 	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/yesmen"
@@ -48,6 +49,72 @@ func desktopBulkHold(y yesmen.Yesman, board yesmen.Board, workers []yesmen.Worke
 		return missingTask, rec.Task
 	}
 	return "", ""
+}
+
+// inspectBulkRows runs local read-only checks concurrently and joins them
+// before source verification. A row always writes to its inventory slot.
+func (s *Server) inspectBulkRows(ctx context.Context, y yesmen.Yesman, records []yesmen.WorktreeRecord, board yesmen.Board, workers []yesmen.Worker, rows []WorktreeCleanupRow, indexes []int) {
+	const localWorkers = 4
+	type job struct {
+		row    int
+		owners []chan struct{}
+	}
+	// The Manager's exclusive reservation still protects against startup or
+	// input. Serialize rows that share an owner within this preview so it
+	// doesn't report contention caused by the preview itself.
+	owners := map[string]chan struct{}{}
+	queue := make([]job, 0, len(indexes))
+	for _, i := range indexes {
+		j := job{row: i}
+		if n := latestWorktree(records, rows[i].Dir); n >= 0 {
+			rec := records[n]
+			names := []string{rec.Owner, rec.CleanupOwner, WorktreeDecisionFor(board, rec).owner}
+			slices.Sort(names)
+			for _, name := range slices.Compact(names) {
+				if name == "" {
+					continue
+				}
+				if owners[name] == nil {
+					owners[name] = make(chan struct{}, 1)
+				}
+				j.owners = append(j.owners, owners[name])
+			}
+		}
+		queue = append(queue, j)
+	}
+	inspect := func(j job) {
+		row := &rows[j.row]
+		for _, owner := range j.owners {
+			select {
+			case owner <- struct{}{}:
+				defer func() { <-owner }()
+			case <-ctx.Done():
+				row.Reason = previewTimedOut
+				return
+			}
+		}
+		if ctx.Err() == nil {
+			*row = s.desktopBulkWorktree(ctx, y, records, board, workers, row.Worktree, false, false)
+		}
+		if ctx.Err() != nil {
+			row.observation.Close()
+			row.Reason, row.Detail = previewTimedOut, ""
+		}
+	}
+	var group sync.WaitGroup
+	jobs := make(chan job)
+	for range min(localWorkers, len(queue)) {
+		group.Go(func() {
+			for j := range jobs {
+				inspect(j)
+			}
+		})
+	}
+	for _, j := range queue {
+		jobs <- j
+	}
+	close(jobs)
+	group.Wait()
 }
 
 func (s *Server) desktopBulkWorktree(ctx context.Context, y yesmen.Yesman, records []yesmen.WorktreeRecord, board yesmen.Board, workers []yesmen.Worker, w pool.Worktree, orphan, remove bool) WorktreeCleanupRow {

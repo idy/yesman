@@ -60,7 +60,7 @@ func (p *Pool) CheckWorkspaceDeletion(ctx context.Context, workspace string) err
 }
 
 func (p *Pool) checkWorkspaceRegistrations(ctx context.Context, workspace string, allowed func(Repo, string) bool) error {
-	repos, err := p.List()
+	repos, err := p.repositoryPaths(ctx)
 	if err != nil {
 		return err
 	}
