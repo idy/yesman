@@ -333,6 +333,13 @@ async function run(engine, name, lang) {
     await deleteRemaining.click();
     await interrupted.waitFor({state:'detached'});
     await page.evaluate(() => rpc('VerifyRecovery'));
+    if (partialGit) {
+      assert.equal(await count('ForceDeleteWorkspace'), commitsBeforeRetry + 2);
+      assert.deepEqual(await page.evaluate(() => unexpected), []);
+      assert.deepEqual(errors, []);
+      console.log(`${name} ${lang} passed partial Git retry, cancellation, late-file refusal, and fresh confirmation`);
+      return;
+    }
     await page.locator('[data-agent="interrupted-build/lead"]').click({button:'right'});
     await ok.click();
     await dialog.waitFor({state:'detached'});
