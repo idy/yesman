@@ -246,7 +246,7 @@ func (p *Pool) DesktopDiscard(ctx context.Context, workspace string, w Worktree,
 		if err := discardWalk(ctx, parent, root, rootMarker, false, false); err != nil {
 			return err
 		}
-		return checkDesktopWorktreeUse(ctx, path)
+		return checkDesktopWorktreeUse(ctx, path, !remove)
 	}
 	err = prepare()
 	if admin != nil {

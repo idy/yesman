@@ -7,5 +7,5 @@ import (
 	"os"
 )
 
-func checkDesktopWorktreeUse(ctx context.Context, _ string) error { return ctx.Err() }
-func checkDiscardSharing(*os.File, string) error                  { return nil }
+func visitDesktopOpenFiles(ctx context.Context, _ func(string) bool) error { return ctx.Err() }
+func checkDiscardSharing(*os.File, string) error                           { return nil }

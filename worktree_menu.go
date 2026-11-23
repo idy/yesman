@@ -24,10 +24,16 @@ func worktreeMenuItems(row bool, item func(string, string, ...func(*mygo.MenuIte
 	return []*mygo.MenuItem{item("reveal", revealLabel()), mygo.Separator(), item("remove", tr("Remove Worktree…"))}
 }
 
-func (s *service) PreviewWorktreeCleanup(ctx context.Context, name string, since time.Time, row *pool.Worktree, keep []string) (server.WorktreeCleanupPreview, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	return s.app.desktopWorktrees.Preview(ctx, name, since, row, keep)
+// PrepareWorktreeCleanup reserves a one-use check ticket before the frontend
+// sends the slower Check call through the concurrently dispatched bridge.
+func (s *service) PrepareWorktreeCleanup(name string, since time.Time, row *pool.Worktree) (string, error) {
+	return s.app.desktopWorktrees.Prepare(name, since, row)
+}
+
+// CheckWorktreeCleanup lets the dialog cancel an in-flight check before a
+// confirmation token exists.
+func (s *service) CheckWorktreeCleanup(ctx context.Context, name string, since time.Time, row *pool.Worktree, keep []string, request string) (server.WorktreeCleanupPreview, error) {
+	return s.app.desktopWorktrees.PreviewRequest(ctx, name, since, row, keep, request)
 }
 
 func (s *service) CancelWorktreeCleanup(token string) { s.app.desktopWorktrees.Cancel(token) }
