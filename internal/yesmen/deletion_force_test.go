@@ -208,17 +208,17 @@ func TestCheckoutScanPartial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deep := filepath.Join(y.MetaDir(), "tmp", "too-deep")
+	deep := filepath.Join(y.Path, "too-deep")
 	for range checkoutDepthLimit {
 		deep = filepath.Join(deep, "d")
 	}
-	for _, dir := range []string{deep, filepath.Join(y.MetaDir(), "tmp", "visible", ".git")} {
+	for _, dir := range []string{deep, filepath.Join(y.MetaDir(), "evidence", "tmp", "visible", ".git")} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	scan, err := s.InspectCheckouts(t.Context(), want)
-	if err != nil || scan.Problem == "" || len(scan.Entries) != 1 || scan.Entries[0].Path != ".yesman/tmp/visible" {
+	if err != nil || scan.Problem == "" || len(scan.Entries) != 1 || scan.Entries[0].Path != ".yesman/evidence/tmp/visible" {
 		t.Fatal(scan, err)
 	}
 }

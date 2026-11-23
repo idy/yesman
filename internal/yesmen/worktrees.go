@@ -40,6 +40,18 @@ type WorktreeRecord struct {
 	// without it (older ones, or a file system with no creation time) get
 	// no write/edit grant through the managed entry.
 	Root *WorktreeRoot `json:"root,omitempty"`
+	// DiscardRetry identifies a bulk-confirmed directory whose final unlink
+	// may have been interrupted. It grants no managed write or auto cleanup.
+	DiscardRetry *WorktreeDiscardRetry `json:"discardRetry,omitempty"`
+}
+
+// WorktreeDiscardRetry is written before unlinking the checkout's gitfile.
+// A fresh desktop preview still verifies the path, owners and Git state.
+type WorktreeDiscardRetry struct {
+	Root    WorktreeRoot `json:"root"`
+	Head    string       `json:"head"`
+	Gitfile string       `json:"gitfile"`
+	Orphan  bool         `json:"orphan,omitempty"`
 }
 
 type WorktreeCreation struct {

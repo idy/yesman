@@ -59,17 +59,50 @@ func checkIndexFile(d *safefs.Dir, oidWidth int) error {
 // ordinary clean entries. Treat diagnostics, including a skipped extension,
 // as an unreadable index. Keep output memory constant for both streams.
 func checkIndexRecovery(ctx context.Context, path, private string) error {
-	var stages, diagnostics outputPresent
-	cmd := gitCommand(ctx, path, "--git-dir="+private, "--work-tree="+path, "--no-optional-locks", "-c", "core.fsmonitor=false", "ls-files", "--resolve-undo", "-z")
-	cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+filepath.Join(private, "index"))
-	cmd.Stdout, cmd.Stderr = &stages, &diagnostics
-	if err := cmd.Run(); err != nil || diagnostics {
-		return ErrWorktreeIndex
+	var stages outputPresent
+	if err := readIndexRecovery(ctx, path, private, &stages); err != nil {
+		return err
 	}
 	if stages {
 		return ErrWorktreeResolveUndo
 	}
 	return nil
+}
+
+func readIndexRecovery(ctx context.Context, path, private string, stages io.Writer) error {
+	var diagnostics outputPresent
+	cmd := gitCommand(ctx, path, "--git-dir="+private, "--work-tree="+path, "--no-optional-locks", "-c", "core.fsmonitor=false", "ls-files", "--resolve-undo", "-z")
+	cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+filepath.Join(private, "index"))
+	cmd.Stdout, cmd.Stderr = stages, &diagnostics
+	if err := cmd.Run(); err != nil || diagnostics {
+		return ErrWorktreeIndex
+	}
+	return nil
+}
+
+// Digest only resolve-undo output. Ordinary edits and staging remain allowed.
+func observeDiscardIndex(ctx context.Context, d *safefs.Dir, path, private string, oidWidth int) ([sha256.Size]byte, bool, error) {
+	if err := checkIndexFile(d, oidWidth); err != nil {
+		return [sha256.Size]byte{}, false, err
+	}
+	digest := &resolveUndoDigest{Hash: sha256.New()}
+	if err := readIndexRecovery(ctx, path, private, digest); err != nil {
+		return [sha256.Size]byte{}, false, err
+	}
+	return [sha256.Size]byte(digest.Sum(nil)), digest.size != 0, nil
+}
+
+type resolveUndoDigest struct {
+	hash.Hash
+	size int
+}
+
+func (d *resolveUndoDigest) Write(data []byte) (int, error) {
+	if len(data) > (64<<20)-d.size {
+		return 0, ErrWorktreeIndex
+	}
+	d.size += len(data)
+	return d.Hash.Write(data)
 }
 
 type outputPresent bool

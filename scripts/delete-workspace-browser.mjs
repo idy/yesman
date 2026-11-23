@@ -128,13 +128,19 @@ async function run(engine, name, lang) {
     assert.equal(await worktrees.getByText(/No worktrees yet|还没有工作树|尚无工作树/).count(),0);
     await page.evaluate(() => { window.partialScan = true; window.holdScan = false; releaseScan(); });
     await worktrees.getByText('Fixture scan incomplete').waitFor();
-    const row = worktrees.getByText(bazelPath, {exact:true});
+    const row = worktrees.getByText('old-root-checkout', {exact:true});
     await row.waitFor();
     assert.equal(await row.locator('..').getByRole('button').count(),0);
     await page.evaluate(() => { window.partialScan = false; });
     await worktrees.getByRole('button', {name:/Refresh the worktrees|刷新工作树/}).click();
     await worktrees.getByText('Fixture scan incomplete').waitFor({state:'detached'});
-    await worktrees.getByText(/Local Git checkout scan is incomplete|本地 Git 工作树扫描未完成/).waitFor();
+    await row.waitFor();
+    if (process.env.YESMAN_T300_BASELINE === '1') {
+      await worktrees.getByText(/Local Git checkout scan is incomplete|本地 Git 工作树扫描未完成/).waitFor();
+    } else {
+      assert.equal(await worktrees.getByText(bazelPath, {exact:true}).count(), 0);
+      assert.equal(await worktrees.getByText(/Local Git checkout scan is incomplete|本地 Git 工作树扫描未完成/).count(), 0);
+    }
     await screenshot('local-checkout');
     await bazel.click({button:'right'});
     await dialog.getByText(/may be used by another checkout|可能仍被其他工作树使用/).waitFor();
@@ -147,11 +153,21 @@ async function run(engine, name, lang) {
     assert.equal(await count('ForceDeleteWorkspace'),0);
     assert.equal(await count('DeleteWorkspace'),0);
     await page.evaluate(() => rpc('PreserveBazelGitData'));
+    if (process.env.YESMAN_T300_BASELINE === '1') {
+      await bazel.click({button:'right'});
+      await dialog.getByText(/Cannot verify the Git entry|无法验证/).waitFor();
+      assert(await ok.isDisabled());
+      assert.equal(await reviewForce.count(), 0);
+      await screenshot('v062-dangling-link-held');
+      console.log(`${name} ${lang} reproduced the v0.1.62 dangling Git symlink hold`);
+      return;
+    }
     const openForce = async () => {
       await bazel.click({button:'right'});
       await reviewForce.waitFor();
       assert(await ok.isDisabled());
       await dialog.getByText(`yesmen/bazel-builds/${bazelPath}`, {exact:true}).waitFor();
+      await dialog.getByText(`yesmen/bazel-builds/${bazelPath}/.git`, {exact:true}).waitFor();
       assert(await cancel.evaluate(n => n === document.activeElement));
     };
     await openForce();
@@ -175,6 +191,7 @@ async function run(engine, name, lang) {
     await screenshot('force-confirmation');
     await commitForce.click();
     await dialog.waitFor({state:'detached'}); await bazel.waitFor({state:'detached'});
+    await page.evaluate(() => rpc('VerifyBazelRemoval'));
     await hideInfo.click();
     assert.equal(await count('ForceDeleteWorkspace'),2);
 

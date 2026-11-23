@@ -84,8 +84,8 @@ func TestWorkspaceForceDeleteBazelCheckout(t *testing.T) {
 	}
 	local, err := s.WorkspaceCheckouts(t.Context(), y.Name, y.HiredAt)
 	must(t, err)
-	if local.Problem != "" || len(local.Entries) != 2 || local.Entries[0].Path != bazelCheckout || local.Entries[1].Path != ".yesman/tmp/z-external-pointer" {
-		t.Fatalf("local inventory: %+v", local)
+	if local.Problem != "" || len(local.Entries) != 0 {
+		t.Fatalf("sidebar must skip workspace temp: %+v", local)
 	}
 	gitDataHold := "Git data at " + filepath.Join(dir, ".git") + " may be used by another checkout."
 	if err := s.DeleteWorkspace(t.Context(), target); err == nil || !strings.Contains(err.Error(), gitDataHold) {

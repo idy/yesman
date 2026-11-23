@@ -26,13 +26,15 @@ type DesktopWorktrees struct {
 
 type WorktreeCleanupRow struct {
 	pool.Worktree
-	Reason      string `json:"reason,omitempty"`
-	Detail      string `json:"detail,omitempty"`
-	Removed     bool   `json:"removed,omitempty"`
-	KeepWarning string `json:"keepWarning,omitempty"`
-	Task        string `json:"task,omitempty"`
-	TaskStatus  string `json:"taskStatus,omitempty"`
-	observation *pool.CheckoutObservation
+	Reason           string `json:"reason,omitempty"`
+	Detail           string `json:"detail,omitempty"`
+	Removed          bool   `json:"removed,omitempty"`
+	KeepWarning      string `json:"keepWarning,omitempty"`
+	Task             string `json:"task,omitempty"`
+	TaskStatus       string `json:"taskStatus,omitempty"`
+	ConflictRecovery bool   `json:"conflictRecovery,omitempty"`
+	Interrupted      bool   `json:"interrupted,omitempty"`
+	observation      *pool.CheckoutObservation
 }
 
 type WorktreeCleanupPreview struct {
@@ -56,22 +58,24 @@ type desktopCandidate struct {
 	decision    WorktreeTaskDecision
 	authority   checkoutAuthority
 	observation *pool.CheckoutObservation
+	orphan      bool
 }
 
 const (
-	unverifiedMerge = "The merged pull request could not be verified for this branch and commit."
-	staleDecision   = "The task or its worktree decision changed. Open a new preview."
-	keepWarning     = "The Board says to keep this worktree. Removing it here overrides that choice."
-	boardKeep       = "The Board says to keep this worktree."
-	staleReturn     = "The saved return no longer matches the Board. Review this worktree again."
-	resolveUndo     = "Git has saved versions of a resolved conflict in this worktree."
-	indexHold       = "The Git index could not be verified. The worktree will stay here."
-	staleCheckout   = "The checkout changed. Refresh Worktrees and review it again."
-	unknownOwner    = "Yes Man has no matching temporary checkout record for this directory."
-	unknownInstance = "The private Git marker or its link to this directory is missing or has changed."
-	noRegistration  = "Git has no current registration for this recorded directory."
-	unsavedFiles    = "The Files pane has unsaved edits in this worktree."
-	unverified      = "Yes Man could not verify this checkout."
+	unverifiedMerge    = "The merged pull request could not be verified for this branch and commit."
+	staleDecision      = "The task or its worktree decision changed. Open a new preview."
+	keepWarning        = "The Board says to keep this worktree. Removing it here overrides that choice."
+	boardKeep          = "The Board says to keep this worktree."
+	staleReturn        = "The saved return no longer matches the Board. Review this worktree again."
+	resolveUndo        = "Git has saved versions of a resolved conflict in this worktree."
+	resolveUndoChanged = "Git conflict recovery data changed. Open a new preview."
+	indexHold          = "The Git index could not be verified. The worktree will stay here."
+	staleCheckout      = "The checkout changed. Refresh Worktrees and review it again."
+	unknownOwner       = "Yes Man has no matching temporary checkout record for this directory."
+	unknownInstance    = "The private Git marker or its link to this directory is missing or has changed."
+	noRegistration     = "Git has no current registration for this recorded directory."
+	unsavedFiles       = "The Files pane has unsaved edits in this worktree."
+	unverified         = "Yes Man could not verify this checkout."
 )
 
 func sameCheckout(a, b pool.Worktree) bool {
@@ -110,6 +114,12 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 			seen[w.Dir]++
 		}
 		for _, w := range wts {
+			if plan.bulk {
+				i := latestWorktree(records, w.Dir)
+				if i >= 0 && !records[i].Removed && records[i].DiscardRetry != nil {
+					continue // review through the durable, identity-bound retry below
+				}
+			}
 			if selected != nil && w.Dir != selected.Dir {
 				continue
 			}
@@ -121,17 +131,16 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 				row.Worktree, row.Reason = *selected, staleCheckout
 			case slices.Contains(keep, w.Dir):
 				row.Reason = unsavedFiles
+			case plan.bulk:
+				row = s.desktopBulkWorktree(ctx, y, records, board, workers, w, false, false)
 			default:
-				row = s.desktopWorktree(ctx, y, records, board, workers, w, plan.bulk, false)
+				row = s.desktopWorktree(ctx, y, records, board, workers, w, false)
 			}
 			if row.Reason == "" {
 				rec := records[latestWorktree(records, w.Dir)]
 				c := desktopCandidate{row: len(out.Rows), worktree: row.Worktree, record: rec,
 					decision: WorktreeDecisionFor(board, rec), observation: row.observation}
 				c.authority.decision = c.decision
-				if plan.bulk {
-					c.authority, _ = bulkAuthority(y, rec, board, workers)
-				}
 				candidates = append(candidates, c)
 			}
 			if i := latestWorktree(records, w.Dir); i >= 0 && records[i].ID == w.CleanupID && !records[i].Removed {
@@ -144,10 +153,24 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 		}
 		if plan.bulk {
 			for i, r := range records {
-				if !r.Removed && seen[r.Dir] == 0 && dirRE.MatchString(r.Dir) && i == latestWorktree(records, r.Dir) {
+				if !r.Removed && (seen[r.Dir] == 0 || r.DiscardRetry != nil) && dirRE.MatchString(r.Dir) && i == latestWorktree(records, r.Dir) {
 					path := filepath.Join(y.Path, r.Dir)
 					if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-						out.Rows = append(out.Rows, WorktreeCleanupRow{Worktree: pool.Worktree{Dir: r.Dir, Path: path, Repo: r.Repo}, Reason: noRegistration, Task: r.Task, TaskStatus: WorktreeDecisionFor(board, r).status})
+						w := expectedWorktree(r)
+						w.Path = path
+						orphan := true
+						if r.DiscardRetry != nil {
+							orphan, w.Head = r.DiscardRetry.Orphan, r.DiscardRetry.Head
+						}
+						row := WorktreeCleanupRow{Worktree: w, Reason: unsavedFiles, Task: r.Task, TaskStatus: WorktreeDecisionFor(board, r).status}
+						if !slices.Contains(keep, w.Dir) {
+							row = s.desktopBulkWorktree(ctx, y, records, board, workers, w, orphan, false)
+						}
+						if row.Reason == "" {
+							decision := WorktreeDecisionFor(board, r)
+							candidates = append(candidates, desktopCandidate{row: len(out.Rows), worktree: row.Worktree, record: r, decision: decision, authority: checkoutAuthority{decision: decision}, observation: row.observation, orphan: orphan})
+						}
+						out.Rows = append(out.Rows, row)
 					}
 				}
 			}
@@ -280,6 +303,13 @@ func (d *DesktopWorktrees) Confirm(ctx context.Context, name string, since time.
 				row.Reason = staleDecision
 				return nil
 			}
+			// A retry can lack a gitfile and therefore a display registration.
+			// The pool verifies the complete registration list and both pointers
+			// independently before it mutates anything.
+			if plan.bulk && c.record.DiscardRetry != nil {
+				row = s.desktopBulkWorktree(ctx, y, records, board, workers, w, c.orphan, true)
+				return nil
+			}
 			// A second registration may have appeared during confirmation. A
 			// fresh complete inventory also rejects a missing or changed row.
 			wts, err := s.Pool.Worktrees(ctx, y.Path)
@@ -296,11 +326,15 @@ func (d *DesktopWorktrees) Confirm(ctx context.Context, name string, since time.
 					matches++
 				}
 			}
-			if matches != 1 {
+			if c.orphan && matches != 0 || !c.orphan && matches != 1 {
 				row.Reason = staleCheckout
 				return nil
 			}
-			row = s.desktopWorktree(ctx, y, records, board, workers, w, plan.bulk, true)
+			if plan.bulk {
+				row = s.desktopBulkWorktree(ctx, y, records, board, workers, w, c.orphan, true)
+			} else {
+				row = s.desktopWorktree(ctx, y, records, board, workers, w, true)
+			}
 			return nil
 		})
 		l.Unlock()
@@ -316,7 +350,7 @@ func (d *DesktopWorktrees) Confirm(ctx context.Context, name string, since time.
 	return results, nil
 }
 
-func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records []yesmen.WorktreeRecord, board yesmen.Board, workers []yesmen.Worker, w pool.Worktree, bulk, remove bool) WorktreeCleanupRow {
+func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records []yesmen.WorktreeRecord, board yesmen.Board, workers []yesmen.Worker, w pool.Worktree, remove bool) WorktreeCleanupRow {
 	row := WorktreeCleanupRow{Worktree: w}
 	retain := func(reason, detail string) WorktreeCleanupRow { row.Reason, row.Detail = reason, detail; return row }
 	i := latestWorktree(records, w.Dir)
@@ -343,17 +377,6 @@ func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records [
 	}
 	decision := WorktreeDecisionFor(board, rec)
 	row.Task, row.TaskStatus = rec.Task, decision.status
-	var authority checkoutAuthority
-	if bulk {
-		var reason string
-		authority, reason = bulkAuthority(y, rec, board, workers)
-		if reason != "" {
-			return retain(reason, "")
-		}
-		if c := authority.completion; c != nil && (c.SavedAt.IsZero() || c.Head != w.Head) {
-			return retain("The saved completion does not cover this checkout and commit.", "")
-		}
-	}
 	if reason, detail := worktreeTaskHold(y, board, workers, rec); reason != "" {
 		return retain(reason, detail)
 	}
@@ -367,7 +390,7 @@ func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records [
 			return nil
 		}
 		if err := s.Pool.TryReclaimTemporary(ctx, y.Path, w, func() error {
-			return s.saveCleanupReceipt(ctx, y, &rec, authority, w.Head)
+			return s.saveCleanupReceipt(ctx, y, &rec, checkoutAuthority{}, w.Head)
 		}); err != nil {
 			return err
 		}
@@ -397,7 +420,7 @@ func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records [
 			return retain(unverified, err.Error())
 		}
 	}
-	if !bulk && !remove && decision.KeepsCheckout() {
+	if !remove && decision.KeepsCheckout() {
 		row.KeepWarning = keepWarning
 	}
 	return row

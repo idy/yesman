@@ -66,10 +66,11 @@ func TestDesktopWorktreeCanceledTaskWithoutPR(t *testing.T) {
 	cleanupGit(t, wt.Path, "commit", "--allow-empty", "-qm", "Only local")
 	wt.Head = cleanupGit(t, wt.Path, "rev-parse", "HEAD")
 	refs := cleanupGit(t, f.repo.Path, "for-each-ref", "--format=%(refname) %(objectname)")
-	p := previewTree(t, d, f.y, nil, false)
-	if p.Rows[0].Reason != canceledTask || p.Rows[0].Task != "t1" || p.Rows[0].TaskStatus != yesmen.TaskDropped || p.Rows[0].Detail != "" {
+	p := previewTree(t, d, f.y, nil, true)
+	if p.Rows[0].Reason != "" || p.Rows[0].Task != "t1" || p.Rows[0].TaskStatus != yesmen.TaskDropped {
 		t.Fatal(p)
 	}
+	d.Cancel(p.Token)
 	p = previewTree(t, d, f.y, &wt, true)
 	d.Cancel(p.Token)
 	if _, err := d.Confirm(t.Context(), f.y.Name, f.y.HiredAt, p.Token, nil); err == nil {
@@ -272,15 +273,12 @@ func TestDesktopWorktreeBulkAndAlternateSourceBranch(t *testing.T) {
 				if res.Removed || !strings.Contains(res.Reason, "handed off") {
 					t.Fatal(res)
 				}
+				// A known open pull request still holds manual bulk cleanup.
 				p := previewTree(t, d, f.y, nil, true)
-				read := f.s.ReadPullMerge
-				f.s.ReadPullMerge = func(c context.Context, repo string, n int) (github.PullMerge, error) {
-					pr, err := read(c, repo, n)
-					pr.Merged = false
-					return pr, err
-				}
+				read := f.s.HasOpenPull
+				f.s.HasOpenPull = func(context.Context, string, string, string) (bool, error) { return true, nil }
 				confirmTree(t, d, f.y, p.Token, false)
-				f.s.ReadPullMerge = read
+				f.s.HasOpenPull = read
 				p = previewTree(t, d, f.y, nil, true)
 				confirmTree(t, d, f.y, p.Token, true)
 			} else {
@@ -296,8 +294,11 @@ func TestDesktopWorktreeBulkAndAlternateSourceBranch(t *testing.T) {
 			if got := cleanupGit(t, f.repo.Path, "rev-parse", "refs/heads/"+branch); got != wt.Head {
 				t.Fatal("lost local branch", got)
 			}
-			if got := cleanupGit(t, f.repo.Path, "rev-parse", "refs/yesman/worktrees/"+wt.CleanupID); got != f.head {
-				t.Fatal("lost source", got)
+			if _, err := os.Lstat(wt.Path); !os.IsNotExist(err) {
+				t.Fatal("directory remains", err)
+			}
+			if out := cleanupGit(t, f.repo.Path, "for-each-ref", "refs/yesman/worktrees/"+wt.CleanupID); out != "" {
+				t.Fatal("bulk cleanup created a checkpoint", out)
 			}
 		})
 	}

@@ -130,6 +130,17 @@ func (s *Store) TryWorktreeCommit(y Yesman, fn func() error) error {
 	return fn()
 }
 
+// SaveWorktreeDiscardRetry persists the exact bulk removal boundary before
+// the root gitfile is unlinked. Callers hold TryWorktreeCommit.
+func (s *Store) SaveWorktreeDiscardRetry(y Yesman, before WorktreeRecord, retry WorktreeDiscardRetry) error {
+	after := before
+	after.DiscardRetry = &retry
+	if err := s.CommitWorktreeRecord(y, before, after); err != nil {
+		return err
+	}
+	return s.withWorktreeMeta(y, syncRelocationDirectory)
+}
+
 // CommitWorktreeRecord updates just this checkout. Reload under the caller's
 // lifecycle lock so unrelated history stays intact and a changed record or
 // future schema fails closed, including after an interrupted removal.

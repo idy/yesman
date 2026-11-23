@@ -66,6 +66,10 @@ func openPrivate(repo, path string) (*safefs.Dir, string, error) {
 // repository's worktrees directory, reached from the repository's handle
 // without following a link, whose gitdir file points back at path's .git.
 func openPrivateFrom(repo, path string, data []byte) (*safefs.Dir, string, error) {
+	return openPrivateWithBackpointer(repo, path, data, false)
+}
+
+func openPrivateWithBackpointer(repo, path string, data []byte, missingMarker bool) (*safefs.Dir, string, error) {
 	dir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: ")
 	if !ok {
 		return nil, "", errors.New("not a linked worktree")
@@ -100,7 +104,11 @@ func openPrivateFrom(repo, path string, data []byte) (*safefs.Dir, string, error
 	if !filepath.IsAbs(backPath) {
 		backPath = filepath.Join(dir, backPath)
 	}
-	if realPath(backPath) != realPath(filepath.Join(path, ".git")) {
+	matches := realPath(backPath) == realPath(filepath.Join(path, ".git"))
+	if missingMarker {
+		matches = filepath.Base(backPath) == ".git" && realPath(filepath.Dir(backPath)) == realPath(path)
+	}
+	if !matches {
 		pd.Close()
 		return nil, "", errors.New("private Git directory belongs to another worktree")
 	}
