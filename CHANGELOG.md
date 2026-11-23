@@ -2,6 +2,11 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.64
+
+- **Delete Yes Man…** reports the exact path of a Git blocker as soon as the review finds it, even in a large workspace. After addressing the blocker, use **Check again** to run a fresh review.
+- **Clean up worktrees…** limits how long the preview waits for checks. It keeps worktrees whose eligibility could not be verified. You can retry the checks, cancel the preview, or review and confirm removal of just the eligible worktrees.
+
 ## 0.1.63
 
 - **Clean up worktrees…** can permanently remove eligible idle temporary checkouts after you review the list and confirm, including dropped-task and older checkouts with uncommitted files. The preview identifies saved conflicts that would be discarded. Worktrees in use, linked to an open pull request, or marked to keep stay in place.
