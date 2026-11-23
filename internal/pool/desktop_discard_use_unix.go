@@ -154,7 +154,7 @@ func validLsofFD(fd string) bool {
 	// The macOS dialect uses these labels for nonnumeric file records.
 	// Error records (err and NOFD) do not verify that files are unused.
 	switch fd {
-	case "cwd", "twd", "rtd", "txt", "mem", "mmap":
+	case "cwd", "twd", "rtd", "txt", "mem", "mmap", "fp.":
 		return true
 	}
 	if fd == "" {

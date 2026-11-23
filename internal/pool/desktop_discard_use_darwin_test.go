@@ -20,7 +20,7 @@ func TestDesktopLsofOutput(t *testing.T) {
 		name, script string
 		clean        bool
 	}{
-		{"clean", `printf 'p31415\0\nfcwd\0n/somewhere\0\nf3\0n\0\n'`, true},
+		{"clean", `printf 'p31415\0\nfcwd\0n/somewhere\0\nf3\0n\0\nffp.\0n/file-port\0\n'`, true},
 		{"unnamed-cwd", `printf 'p31415\0\nfcwd\0n\0\n'`, false},
 		{"no-pid", `printf 'n/tree\0\n'`, false},
 		{"truncated-entry", `printf 'p31415\0\nfcwd\0n/tree'`, false},
@@ -47,7 +47,7 @@ func TestDesktopLsofOutput(t *testing.T) {
 				return false
 			})
 			if tc.clean {
-				if err != nil || !reflect.DeepEqual(observed, []string{"/somewhere"}) {
+				if err != nil || !reflect.DeepEqual(observed, []string{"/somewhere", "/file-port"}) {
 					t.Fatalf("valid listing: %q %v", observed, err)
 				}
 			} else if !errors.Is(err, errLsofIncomplete) {
