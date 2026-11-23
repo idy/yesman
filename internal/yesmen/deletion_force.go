@@ -32,12 +32,17 @@ func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget,
 		return CheckoutScan{}, nil, err
 	}
 	defer ws.Close()
-	scan := scanCheckouts(ctx, ws, true)
+	if err := checkStagedGitHold(ws); err != nil {
+		return CheckoutScan{}, nil, err
+	}
+	scan, hold := scanCheckouts(ctx, ws, func(dir *os.Root, checkout checkoutObservation) error {
+		return checkCheckoutGit(ws, dir, checkout, checkout.Path)
+	})
+	if hold != nil {
+		return scan, nil, hold
+	}
 	if scan.Problem != "" {
 		return scan, nil, nil
-	}
-	if err := checkStagedGitHold(ws); err != nil {
-		return scan, nil, err
 	}
 	if !target.Pending && len(scan.Entries) == 0 {
 		return scan, nil, nil

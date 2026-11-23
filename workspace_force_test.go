@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -93,7 +94,7 @@ func TestWorkspaceForceDeleteBazelCheckout(t *testing.T) {
 	}
 	held, err := s.CheckWorkspaceForceDeletion(t.Context(), target)
 	must(t, err)
-	if held.Token != "" || len(held.Entries) != 2 || !strings.Contains(held.Problem, gitDataHold) {
+	if held.Token != "" || len(held.Entries) != 1 || held.Entries[0].Path != bazelCheckout || !strings.Contains(held.Problem, gitDataHold) {
 		t.Fatalf("legacy Git data should hold at its live path: %+v", held)
 	}
 	// The test owns this repository and all its consumers. A user can make
@@ -124,9 +125,45 @@ func TestWorkspaceForceDeleteBazelCheckout(t *testing.T) {
 	}
 }
 
+func TestWorkspaceForceReportsGitHoldBeforeLateScanLimit(t *testing.T) {
+	s, y, target := deletionFixture(t)
+	marker := filepath.Join(y.Path, filepath.FromSlash(bazelCheckout), ".git")
+	must(t, os.MkdirAll(filepath.Dir(marker), 0700))
+	linktest.Symlink(t, filepath.Join(y.Path, "gizos-display-pr", ".git"), marker)
+	repo := filepath.Join(y.MetaDir(), "tmp", "t12", "display-fw", "host-jieli-sdk")
+	must(t, os.MkdirAll(repo, 0700))
+	initFixtureCheckout(t, repo)
+	outside := filepath.Join(t.TempDir(), "dependent")
+	fixtureGit(t, repo, "worktree", "add", "-b", "dependent", outside)
+	head := fixtureGit(t, outside, "rev-parse", "HEAD")
+
+	// A deterministic substitute for a slow build tree: the old scanner
+	// exhausts its result limit in this later subtree before reporting the
+	// earlier protected store. The ordinary route stops at the Bazel link.
+	tail := filepath.Join(y.MetaDir(), "tmp", "t20")
+	for i := range 256 {
+		base := filepath.Join(tail, fmt.Sprintf("checkout-%03d", i))
+		must(t, os.MkdirAll(base, 0700))
+		must(t, os.WriteFile(filepath.Join(base, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git")+"\n"), 0600))
+	}
+	if err := s.DeleteWorkspace(t.Context(), target); err == nil || !strings.Contains(err.Error(), bazelCheckout+" contains a Git checkout") {
+		t.Fatalf("ordinary deletion did not stop at the Bazel checkout: %v", err)
+	}
+	result, err := s.ReviewWorkspaceForceDeletion(t.Context(), target, strings.Repeat("a", 36))
+	must(t, err)
+	if result.Token != "" || !strings.Contains(result.Problem, filepath.Join(repo, ".git")) || len(result.Entries) != 2 {
+		t.Fatalf("expected only the discovered paths and an actionable protected-store hold, got %d entries, token present %t, problem %q", len(result.Entries), result.Token != "", result.Problem)
+	}
+	got, err := os.Readlink(marker)
+	must(t, err)
+	if got != filepath.Join(y.Path, "gizos-display-pr", ".git") || fixtureGit(t, outside, "rev-parse", "HEAD") != head {
+		t.Fatal("ordinary deletion or review modified the checkout or its external consumer")
+	}
+}
+
 func TestWorkspaceForceCannotBypassRegisteredWorktree(t *testing.T) {
 	s, y, target := deletionFixture(t)
-	fixtureLocalCheckout(t, y, bazelCheckout)
+	fixtureExternalGitfile(t, y, bazelCheckout)
 	p, _ := poolWith(t, "project")
 	s.app.pool = p
 	repos, err := p.List()
