@@ -1,0 +1,157 @@
+//go:build darwin
+
+package main
+
+import (
+	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	"github.com/idy/yesman/internal/pool"
+	"github.com/idy/yesman/internal/yesmen"
+)
+
+// Run as a root-package test using a Go overlay. The host only sets and clears
+// one user-immutable flag on a regular file created by this fixture.
+func TestT328OwnedUnlinkRefusal(t *testing.T) {
+	service, workspace, target := deletionFixture(t)
+	origin, independent := seedSevenLocalGitRoots(t, workspace.Path)
+	outside := func() string {
+		return fixtureGit(t, origin, "show-ref") + fixtureGit(t, independent, "show-ref") + fixtureGit(t, independent, "cat-file", "-p", "HEAD")
+	}
+	prior := outside()
+	relative := filepath.Join(sevenLocalGitRoots[0], ".git", "config")
+	live := filepath.Join(workspace.Path, relative)
+	root, archive := service.app.home.Yesmen(), service.app.home.Archive()
+	entry := ".deleting-v1-" + target.Instance + "." + target.Entry
+	stage := filepath.Join(root, entry)
+	retained := filepath.Join(stage, relative)
+	cfg, err := os.ReadFile(live)
+	must(t, err)
+	flags := func(flag, p string) {
+		t.Helper()
+		out, err := exec.CommandContext(t.Context(), "/usr/bin/chflags", flag, p).CombinedOutput()
+		if err != nil {
+			t.Fatalf("chflags %s: %s %v", flag, out, err)
+		}
+	}
+	flags("uchg", live)
+	defer func() {
+		for _, p := range []string{live, retained} {
+			if _, e := os.Lstat(p); e == nil {
+				_ = exec.Command("/usr/bin/chflags", "nouchg", p).Run()
+			}
+		}
+	}()
+	registrations := service.app.pool.CheckWorkspaceDeletion
+	gate := func(s *yesmen.Store, target yesmen.DeletionTarget) *yesmen.ForceDeletion {
+		scan, plan, err := s.PrepareForceDeletion(t.Context(), target, registrations, nil, pool.WorkspaceGitDeletionChecks())
+		if plan == nil || err != nil {
+			t.Fatalf("force review: %+v %v", scan, err)
+		}
+		return plan
+	}
+	initial := gate(service.app.yesmen, target)
+	detached, err := service.app.yesmen.DeleteWithCheckoutConfirmation(t.Context(), target, initial, registrations, func(yesmen.Yesman) error { return nil }, nil)
+	if !detached || !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("expected permission denial after staging: detached=%t error=%v", detached, err)
+	}
+	if got, err := os.ReadFile(retained); err != nil || string(got) != string(cfg) {
+		t.Fatalf("protected file changed: %v", err)
+	}
+	if _, err := os.Lstat(live); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("live source remained: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(stage, filepath.FromSlash(bazelCheckout), "output-00", ".git")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expected an earlier Bazel marker removed before locked config: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(retained), "HEAD")); err != nil {
+		t.Fatalf("expected remaining Git HEAD beside the protected config: %v", err)
+	}
+	if outside() != prior {
+		t.Fatal("outside controls changed during unlink refusal")
+	}
+	t.Log("owned immutable Git config stopped the real staged purge with a Bazel marker removed and HEAD still present")
+	flags("nouchg", retained)
+	cold := yesmen.New(root, archive)
+	rows, err := cold.StoredWorkspaces()
+	must(t, err)
+	if len(rows) != 1 || rows[0].Entry != entry || !rows[0].Pending {
+		t.Fatalf("cold rows: %+v", rows)
+	}
+	if _, err := cold.DeleteWithCheckoutConfirmation(t.Context(), rows[0], initial, registrations, nil, nil); err == nil {
+		t.Fatal("old authorization was accepted")
+	}
+	retry := gate(cold, rows[0])
+	detached, err = cold.DeleteWithCheckoutConfirmation(context.Background(), rows[0], retry, registrations, nil, nil)
+	if detached || err != nil {
+		t.Fatalf("cold retry detached=%t err=%v", detached, err)
+	}
+	if _, err := os.Lstat(stage); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stage retained: %v", err)
+	}
+	if outside() != prior {
+		t.Fatal("outside controls changed on retry")
+	}
+	t.Log("fresh cold review purged the staged workspace and left both outside repositories intact")
+}
+
+func TestT328ExactPythonFixtureColdReplay(t *testing.T) {
+	root := t.TempDir()
+	kit, err := filepath.Abs("qa/t328/fixtures")
+	must(t, err)
+	python, err := exec.LookPath("python3")
+	must(t, err)
+	profile := filepath.Join(root, "fixture.noindex")
+	run := func(name string, args ...string) {
+		t.Helper()
+		command := exec.CommandContext(t.Context(), python, append([]string{"-B", filepath.Join(kit, name)}, args...)...)
+		command.Env = append(os.Environ(), "T304_SANDBOX="+root)
+		if out, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("%s %v: %s: %v", name, args, out, err)
+		}
+	}
+	run("delete_seed.py", profile)
+	run("seven.py", "seed", profile, filepath.Join(kit, "links.json"))
+	run("recovery.py", "seed", profile)
+	defer run("recovery.py", "restore-on-error", profile)
+	run("recovery.py", "live", profile)
+	yesmenRoot, archive := filepath.Join(profile, "yesmen"), filepath.Join(profile, "archive")
+	registration := pool.New(filepath.Join(profile, "repos")).CheckWorkspaceDeletion
+	checks := pool.WorkspaceGitDeletionChecks()
+	current := yesmen.New(yesmenRoot, archive)
+	workspace, err := current.Get("yesman-5")
+	must(t, err)
+	target, err := current.PrepareDeletion(workspace.Name, workspace.HiredAt)
+	must(t, err)
+	scan, approval, err := current.PrepareForceDeletion(t.Context(), target, registration, nil, checks)
+	if err != nil || approval == nil || len(scan.LocalGitStores) != 7 || len(scan.LinkMarkers) != 10 {
+		t.Fatalf("first review: %+v %v", scan, err)
+	}
+	detached, err := current.DeleteWithCheckoutConfirmation(t.Context(), target, approval, registration, func(yesmen.Yesman) error { return nil }, nil)
+	if !detached || !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("unlink refusal: detached=%t %v", detached, err)
+	}
+	run("recovery.py", "interrupted", profile)
+	run("recovery.py", "release-fault", profile)
+	cold := yesmen.New(yesmenRoot, archive)
+	run("recovery.py", "pending", profile)
+	rows, err := cold.StoredWorkspaces()
+	if err != nil || len(rows) != 1 || !rows[0].Pending {
+		t.Fatalf("cold rows: %+v %v", rows, err)
+	}
+	scan, approval, err = cold.PrepareForceDeletion(t.Context(), rows[0], registration, nil, checks)
+	if err != nil || approval == nil {
+		t.Fatalf("cold review: %+v %v", scan, err)
+	}
+	detached, err = cold.DeleteWithCheckoutConfirmation(t.Context(), rows[0], approval, registration, nil, nil)
+	if detached || err != nil {
+		t.Fatalf("cold retry: detached=%t %v", detached, err)
+	}
+	run("recovery.py", "complete", profile)
+	t.Log("exact Python fixture, real Go authorization and both numbered disk-phase oracles passed")
+}

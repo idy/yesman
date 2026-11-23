@@ -1,144 +1,171 @@
+# Use this workflow only on the fixed acceptance ref for the new draft.
 name: macOS draft startup
-
-# Publication gate: run on main after the immutable tag and draft assets exist.
-# Download jobs never execute repository/app code; startup jobs remain read-only.
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Draft tag to verify, e.g. v0.1.31"
-        required: true
+        description: Fixed draft tag from the adopted QA contract
         type: string
-
-permissions:
-  contents: read
+        required: true
+      episode:
+        description: Exact reviewed scenario selector
+        type: string
+        required: true
+      contract_sha256:
+        description: SHA-256 of the independently reviewed final draft contract
+        type: string
+        required: true
+permissions: {}
+concurrency:
+  group: t328-draft-package-serial
+  cancel-in-progress: false
 
 jobs:
   download:
+    if: ${{ github.run_attempt == 1 }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
     permissions:
-      # Actual GITHUB_TOKEN contents:read gets 403 for unpublished releases and
-      # assets. This GET-only job needs write scope; macOS jobs do not receive it.
-      contents: write
+      contents: write # Unpublished draft assets require this scope. All requests here are GETs.
     outputs:
-      tag: ${{ steps.validate.outputs.tag }}
-      source: ${{ steps.download.outputs.source }}
+      source: ${{ steps.lock.outputs.source }}
     steps:
-      - name: Validate release tag before resolving any ref
-        id: validate
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          python3 - <<'PY'
-          import os, re
-          tag = os.environ['RELEASE_TAG']
-          assert re.fullmatch(r'v0\.1\.(0|[1-9][0-9]*)', tag), 'Expected a canonical v0.1.x release tag'
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('tag=' + tag + '\n')
-          PY
-      - name: Download the exact draft archives
-        id: download
+      - name: Download only the reviewed contract data and its two numeric assets
+        id: lock
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.validate.outputs.tag }}
+          EXPECTED_TAG: ${{ inputs.release_tag }}
+          EPISODE: ${{ inputs.episode }}
+          CONTRACT_SHA256: ${{ inputs.contract_sha256 }}
         run: |
           python3 - <<'PY'
           import hashlib, json, os, pathlib, re, subprocess
-          tag, repo = os.environ['RELEASE_TAG'], os.environ['GITHUB_REPOSITORY']
-          def gh(*args):
-              return json.loads(subprocess.check_output(['gh', *args]))
-          def tag_commit():
-              obj = gh('api', f'repos/{repo}/git/ref/tags/{tag}')['object']
+          e = os.environ
+          assert e['GITHUB_REPOSITORY'] == 'idy/yesman' and e['GITHUB_REF'] == 'refs/heads/qa/t328-v0.1.65-deletion-r3'
+          assert e['GITHUB_RUN_ATTEMPT'] == '1' and e['EPISODE'] == 'deletion-only'
+          qa = e['GITHUB_SHA']
+          tag = e['EXPECTED_TAG']
+          assert re.fullmatch(r'[0-9a-f]{40}', qa) and tag == 'v0.1.65'
+          assert re.fullmatch(r'[0-9a-f]{64}', e['CONTRACT_SHA256'])
+          def get(path, raw=False):
+              args = ['gh','api','--method','GET','repos/idy/yesman/'+path]
+              if raw:
+                  args.extend(['-H','Accept: application/octet-stream' if path.startswith('releases/') else 'Accept: application/vnd.github.raw+json'])
+              data = subprocess.check_output(args, timeout=90, stderr=subprocess.PIPE)
+              return data if raw else json.loads(data)
+          contract_bytes = get(f'contents/qa/t328/contract.json?ref={qa}', True)
+          assert hashlib.sha256(contract_bytes).hexdigest() == e['CONTRACT_SHA256']
+          c = json.loads(contract_bytes)
+          assert (c['schema'],c['mode'],c['repository'],c['tag'],c['arch'],c['qaRef']) == (
+              4,'candidate','idy/yesman',tag,'arm64',e['GITHUB_REF'])
+          assert c['base']=='6222162b926882c41637fe5337731a3b37a46e06' and c['priorPackageAcceptanceReused'] is False
+          forbidden_revisions = {'68811d382ad5eac649d429630c21332c53f5cb59', c['base'],
+                                 'acea9a4018e2530db9af63a5aead8705ba1fe266','a2e15720e8823089dcefba817458a6ffb928a92e'}
+          assert all(re.fullmatch(r'[0-9a-f]{40}', x) and x not in forbidden_revisions for x in (qa,c['source'],c['tree']))
+          ids = [c[k] for k in ('releaseID','assetID','manifestID')]
+          assert all(type(x) is int and x > 0 for x in ids+[c['archiveBytes'],c['manifestBytes']])
+          assert len(set(ids))==3 and not {455729493,783812678,783812889} & set(ids)
+          qa_commit = get(f'git/commits/{qa}')
+          assert qa_commit['sha']==qa and [p['sha'] for p in qa_commit['parents']]==[c['source']]
+          def source():
+              obj = get('git/ref/tags/'+tag)['object']
               for _ in range(8):
-                  assert re.fullmatch(r'[0-9a-f]{40}', obj['sha']), 'Invalid object ID'
-                  if obj['type'] == 'commit': return obj['sha']
-                  assert obj['type'] == 'tag', 'Release ref is not a commit or annotated tag'
-                  obj = gh('api', f'repos/{repo}/git/tags/{obj["sha"]}')['object']
-              raise AssertionError('Tag chain is too deep')
-          source = tag_commit() # Explicit refs/tags lookup: never a branch or moving main.
-          meta = gh('release', 'view', tag, '--repo', repo, '--json', 'databaseId,tagName,isDraft,assets')
-          assert meta['isDraft'] and meta['tagName'] == tag, 'Expected the requested unpublished draft'
-          folder = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft-download'
+                  assert re.fullmatch(r'[0-9a-f]{40}',obj['sha'])
+                  if obj['type']=='commit': return obj['sha']
+                  assert obj['type']=='tag'
+                  obj = get('git/tags/'+obj['sha'])['object']
+              raise AssertionError('Tag chain exceeded bound')
+          assert source()==c['source']
+          assert get('git/commits/'+c['source'])['tree']['sha']==c['tree']
+          release=get(f'releases/{c["releaseID"]}')
+          assert (release['id'],release['draft'],release['prerelease'],release['tag_name'],release['published_at'])==(
+              c['releaseID'],True,False,tag,None)
+          rows = sorted(({k:a[k] for k in ('id','node_id','name','url','size','digest','state')} for a in release['assets']),key=lambda a:a['name'])
+          assert len({a['id'] for a in rows})==len({a['name'] for a in rows})==len(rows)
+          assert hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest()==c['assetSetSHA256']
+          folder=pathlib.Path(e['RUNNER_TEMP'])/'input'
           folder.mkdir()
-          for arch in ('arm64', 'amd64'):
-              name = f'yesman-{tag[1:]}-darwin-{arch}.tar.gz'
-              matches = [a for a in meta['assets'] if a['name'] == name]
-              assert len(matches) == 1, 'Expected one exact architecture archive'
-              asset = matches[0]
-              subprocess.run(['gh', 'release', 'download', tag, '--repo', repo, '--pattern', name, '--dir', str(folder)], check=True)
-              digest = hashlib.sha256((folder / name).read_bytes()).hexdigest()
-              assert asset.get('digest') == 'sha256:' + digest, 'Draft asset digest differs'
-              assert (folder / name).stat().st_size == asset['size'] > 0
-              (folder / f'draft-asset-{arch}.json').write_text(json.dumps({'tag': tag, 'arch': arch, 'source': source, 'releaseID': meta['databaseId'], 'asset': asset, 'sha256': digest}, indent=2))
-          assert tag_commit() == source, 'Release tag moved during download'
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('source=' + source + '\n')
+          name = f'yesman-{tag[1:]}-darwin-arm64.tar.gz'
+          for asset_id, filename, key in [(c['assetID'],name,'archiveSHA256'),(c['manifestID'],'update-darwin-arm64.json','manifestSHA256')]:
+              row, = [row for row in release['assets'] if row['id']==asset_id and row['name']==filename]
+              data = get(f'releases/assets/{asset_id}', True)
+              assert len(data)==row['size'] and 'sha256:'+hashlib.sha256(data).hexdigest()==row['digest']=='sha256:'+c[key]
+              assert len(data)==c['archiveBytes' if asset_id==c['assetID'] else 'manifestBytes']
+              (folder/filename).write_bytes(data)
+              if asset_id==c['assetID']:
+                  assert len(data)==c['archiveBytes']
+                  asset = {k:row[k] for k in ('id','name','size','digest')}
+          assert source()==c['source']
+          (folder/'receipt.json').write_text(json.dumps(dict(tag=tag,arch='arm64',source=c['source'],releaseID=c['releaseID'],
+              manifestID=c['manifestID'],asset=asset,sha256=c['archiveSHA256'],draft=True,qaHead=qa,
+              contractSHA256=hashlib.sha256(contract_bytes).hexdigest(),runID=e['GITHUB_RUN_ID'],runAttempt=e['GITHUB_RUN_ATTEMPT'],
+              episode=e['EPISODE'],qaRef=e['GITHUB_REF'])))
+          with open(e['GITHUB_OUTPUT'],'a') as out: out.write('source='+c['source']+'\n')
           PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: verified-draft-download
-          path: ${{ runner.temp }}/draft-download
+          name: verified-t328-draft-download
+          path: ${{ runner.temp }}/input
           if-no-files-found: error
 
-  startup:
-    needs: download # Neither matrix job can bypass tag validation/download.
+  acceptance:
+    if: ${{ github.run_attempt == 1 }}
+    needs: download
+    runs-on: macos-latest
+    timeout-minutes: 18
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-latest, arch: arm64 }
-          - { os: macos-15-intel, arch: amd64 }
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: qa-source
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.download.outputs.source }}
+          path: release-source
+          fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version-file: go.mod
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+          go-version-file: release-source/go.mod
+          cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: verified-draft-download
-          path: ${{ runner.temp }}/draft-download
-      - name: Recheck and extract the selected archive
-        env:
-          RELEASE_TAG: ${{ needs.download.outputs.tag }}
-          RELEASE_SOURCE: ${{ needs.download.outputs.source }}
-          TARGET_ARCH: ${{ matrix.arch }}
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, os, pathlib, shutil, subprocess, tarfile
-          tag, source, arch = os.environ['RELEASE_TAG'], os.environ['RELEASE_SOURCE'], os.environ['TARGET_ARCH']
-          folder = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft-download'
-          proof = json.loads((folder / f'draft-asset-{arch}.json').read_text())
-          name = f'yesman-{tag[1:]}-darwin-{arch}.tar.gz'
-          assert (proof['tag'], proof['source'], proof['arch'], proof['asset']['name']) == (tag, source, arch, name)
-          assert subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip() == source
-          assert 'sha256:' + hashlib.sha256((folder / name).read_bytes()).hexdigest() == proof['asset']['digest'] == 'sha256:' + proof['sha256']
-          target = pathlib.Path(os.environ['RUNNER_TEMP']) / 'draft'
-          target.mkdir()
-          with tarfile.open(folder / name) as archive:
-              archive.extractall(target, filter='data')
-          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'startup-evidence'
-          evidence.mkdir()
-          shutil.copyfile(folder / f'draft-asset-{arch}.json', evidence / 'draft-asset.json')
-          PY
-      - name: Verify unchanged final app startup
+          name: verified-t328-draft-download
+          path: ${{ runner.temp }}/input
+      - name: Exercise the selected acceptance episode via production WebKit and Go
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          RELEASE_TAG: ${{ needs.download.outputs.tag }}
-          RELEASE_SOURCE: ${{ needs.download.outputs.source }}
-          TARGET_ARCH: ${{ matrix.arch }}
-        run: python3 scripts/check_macos_startup.py "$RUNNER_TEMP/draft/yesman.app" web "$RUNNER_TEMP/startup-evidence" --release-tag "$RELEASE_TAG" --arch "$TARGET_ARCH" --source "$RELEASE_SOURCE"
-      - name: Save the draft gate evidence
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          EPISODE: ${{ inputs.episode }}
+          CONTRACT_SHA256: ${{ inputs.contract_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/qa/t328-v0.1.65-deletion-r3
+          test "$RELEASE_TAG" = v0.1.65
+          test "$EPISODE" = deletion-only
+          kit="$GITHUB_WORKSPACE/qa-source/qa/t328"
+          source="$GITHUB_WORKSPACE/release-source"
+          input="$RUNNER_TEMP/input"
+          test "$(git -C "$GITHUB_WORKSPACE/qa-source" rev-parse HEAD)" = "$GITHUB_SHA"
+          qa_parents=$(git -C "$GITHUB_WORKSPACE/qa-source" cat-file commit HEAD | awk '/^$/{body=1} !body && /^parent /{print $2}')
+          test "$qa_parents" = "$(git -C "$source" rev-parse HEAD)"
+          python=$(command -v python3)
+          mkdir "$RUNNER_TEMP/t328-build-cache"
+          env -i HOME="$HOME" PATH="$PATH" TMPDIR="$RUNNER_TEMP" GOCACHE="$RUNNER_TEMP/t328-build-cache" \
+            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_TEMP="$RUNNER_TEMP" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REF="$GITHUB_REF" \
+            "$python" -B "$kit/hosted.py" replay --episode "$EPISODE" --contract "$kit/contract.json" --source-dir "$source" \
+              --contract-sha256 "$CONTRACT_SHA256" \
+              --archive "$input/yesman-${RELEASE_TAG#v}-darwin-arm64.tar.gz" --manifest "$input/update-darwin-arm64.json" \
+              --receipt "$input/receipt.json" --scratch "$RUNNER_TEMP/t328-scratch" --evidence "$RUNNER_TEMP/t328-proof"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: draft-startup-${{ matrix.arch }}
-          path: ${{ runner.temp }}/startup-evidence
+          name: t328-${{ inputs.episode }}-acceptance
+          path: ${{ runner.temp }}/t328-proof
           if-no-files-found: error
