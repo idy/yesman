@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/idy/yesman/internal/safefs"
@@ -62,6 +64,76 @@ func newLocalGitReview(ctx context.Context, ws *os.Root) (*localGitReview, error
 		return nil, errCheckoutPreviewChanged
 	}
 	return &localGitReview{ctx: ctx, ws: ws, root: root, volume: id, stores: map[string]localGitBinding{}, paths: map[string]localGitBinding{}, moduleCheckout: map[string]string{}}, nil
+}
+
+func (f *ForceDeletion) reviewApprovedGit(ctx context.Context, ws *os.Root) (*localGitReview, error) {
+	review, err := newLocalGitReview(ctx, ws)
+	if err != nil {
+		return nil, err
+	}
+	review.expected = make(map[string]localGitBinding, len(f.git))
+	for _, binding := range f.git {
+		review.expected[binding.admin] = binding
+	}
+	return review, nil
+}
+
+// The process probe runs after the staged inventory. Recheck the approved
+// stores and their intact module pointers before the first unlink.
+func (f *ForceDeletion) recheckLocalGit(ctx context.Context, ws *os.Root) error {
+	if f == nil || len(f.git) == 0 {
+		return nil
+	}
+	review, err := f.reviewApprovedGit(ctx, ws)
+	if err != nil {
+		return err
+	}
+	defer review.root.Close()
+	for _, admin := range slices.Sorted(maps.Keys(review.expected)) {
+		binding := review.expected[admin]
+		if err := review.recheckAdmin(binding); err != nil {
+			return err
+		}
+	}
+	for checkout, binding := range f.git {
+		if !binding.module || checkout == binding.admin {
+			continue
+		}
+		if err := f.recheckModulePointer(review, checkout, binding); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *ForceDeletion) recheckModulePointer(review *localGitReview, checkout string, binding localGitBinding) error {
+	if err := review.ctx.Err(); err != nil {
+		return err
+	}
+	dir, err := review.open(checkout)
+	if err != nil {
+		return holdGitData(review.ws, binding.admin)
+	}
+	defer dir.Close()
+	id, err := dir.Identity()
+	if err != nil || id != f.paths[checkout].directory {
+		return holdGitData(review.ws, binding.admin)
+	}
+	pointer, err := review.read(dir, ".git", gitDeletionFileLimit)
+	if err != nil || sha256.Sum256(pointer) != binding.pointer {
+		return holdGitData(review.ws, binding.admin)
+	}
+	return nil
+}
+
+func (r *localGitReview) recheckAdmin(binding localGitBinding) error {
+	if _, _, err := r.inspect(binding.admin, binding.bare, binding.module); err != nil {
+		if ctxErr := r.ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return holdGitData(r.ws, binding.admin)
+	}
+	return nil
 }
 
 // Follow only ordinary, directly opened directories on the workspace mount.
@@ -265,7 +337,7 @@ func (r *localGitReview) inspect(admin string, bare, module bool) (localGitBindi
 	if err != nil || !id.Usable() {
 		return localGitBinding{}, "", errCheckoutPreviewChanged
 	}
-	for _, name := range []string{"worktrees", "commondir", "gitdir", "config.worktree", "shallow.lock", "index.lock", "packed-refs.lock", "HEAD.lock"} {
+	for _, name := range []string{"worktrees", "commondir", "gitdir", "config.worktree", "config.lock", "shallow.lock", "index.lock", "packed-refs.lock", "HEAD.lock"} {
 		if !absentGitEntry(dir, name) {
 			return localGitBinding{}, "", errCheckoutPreviewChanged
 		}

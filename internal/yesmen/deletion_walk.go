@@ -33,16 +33,12 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 		return err
 	}
 	var git *localGitReview
-	if force != nil && force.approval == nil && force.git != nil && phase != purgeDeletion {
-		git, err = newLocalGitReview(ctx, ws)
+	if force != nil && force.approval == nil && len(force.git) != 0 {
+		git, err = force.reviewApprovedGit(ctx, ws)
 		if err != nil {
 			return err
 		}
 		defer git.root.Close()
-		git.expected = make(map[string]localGitBinding, len(force.git))
-		for _, binding := range force.git {
-			git.expected[binding.admin] = binding
-		}
 	}
 	admins := map[string]bool{}
 	var approvedGit map[string]string
@@ -53,7 +49,7 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 		for _, admin := range approvedGit {
 			admins[admin] = true
 		}
-		if phase == purgeDeletion && len(admins) > 0 {
+		if phase == purgeDeletion && force.approval != nil {
 			configs = force.approvedGitConfigs()
 			removalReview, err = newLocalGitReview(ctx, ws)
 			if err != nil {
@@ -80,8 +76,16 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 		if !sameMount(id, volume) {
 			return deletionIssue("Unmount %s before deleting this workspace.", rel)
 		}
-		if removalReview != nil && admins[rel] {
-			if err := removalReview.checkRemovalDependencies(rel, configs[rel], force.approval != nil); err != nil {
+		if admins[rel] && phase == purgeDeletion {
+			if git != nil {
+				binding := git.expected[rel]
+				if id != binding.id {
+					return errCheckoutPreviewChanged
+				}
+				if err := git.recheckAdmin(binding); err != nil {
+					return err
+				}
+			} else if err := removalReview.checkRemovalDependencies(rel, configs[rel], true); err != nil {
 				return err
 			}
 		}
@@ -105,7 +109,7 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 			if err != nil {
 				return err
 			}
-			if git != nil {
+			if git != nil && phase != purgeDeletion {
 				if !force.paths[rel].matches(current) {
 					return errCheckoutPreviewChanged
 				}
@@ -139,7 +143,7 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 			}
 		}
 		var handle *os.File
-		sharing := len(admins) != 0 && force.checks.Entry != nil
+		sharing := len(admins) != 0 && force.checks.Entry != nil && (phase != purgeDeletion || inGit)
 		inventory := coverage.input != nil || coverage.output != nil
 		if !listing.empty() && (sharing || inventory) {
 			handle, err = dir.Open(".")
@@ -230,6 +234,24 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 				}
 			}
 			if phase == purgeDeletion {
+				if name == ".git" && st.Mode().IsRegular() {
+					if git != nil {
+						if module := force.git[rel]; module.module {
+							if err := git.recheckAdmin(module); err != nil {
+								return err
+							}
+							if err := force.recheckModulePointer(git, rel, module); err != nil {
+								return err
+							}
+						}
+					} else if removalReview != nil {
+						if admin := approvedGit[rel]; admin != "" {
+							if err := removalReview.checkRemovalDependencies(admin, configs[admin], true); err != nil {
+								return err
+							}
+						}
+					}
+				}
 				now, err := dir.Lstat(name)
 				if err != nil || !sameDeletionEntry(st, now) {
 					return fmt.Errorf("%s changed during deletion", child)

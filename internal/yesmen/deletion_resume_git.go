@@ -69,7 +69,7 @@ func (r *localGitReview) checkRemovalDependencies(admin string, config [32]byte,
 	} else if !partial || !errors.Is(err, fs.ErrNotExist) {
 		return holdGitData(r.ws, path.Join(admin, "config"))
 	}
-	for _, name := range []string{"worktrees", "commondir", "gitdir", "config.worktree", "shallow.lock", "index.lock", "packed-refs.lock", "HEAD.lock"} {
+	for _, name := range []string{"worktrees", "commondir", "gitdir", "config.worktree", "config.lock", "shallow.lock", "index.lock", "packed-refs.lock", "HEAD.lock"} {
 		if !absentGitEntry(dir, name) {
 			return holdGitData(r.ws, path.Join(admin, name))
 		}

@@ -131,13 +131,26 @@ async function run(engine, name, lang) {
         return;
       }
       await reviewForce.waitFor();
-      assert.equal(await stores.locator('li').count(), 7);
-      assert.match(await stores.innerText(), /sdk-inspect\.git/);
+      const expectedStores = [
+        '.yesman/tmp/t12/display-fw/host-jieli-sdk/.git',
+        '.yesman/tmp/t14/h106-app/host/idf/.git',
+        '.yesman/tmp/t14/h106-app/host-config-check/idf/.git',
+        '.yesman/tmp/t14/h106-app/host-fix/idf/.git',
+        '.yesman/tmp/t15/bk-rgb-opt/sdk-inspect.git',
+        '.yesman/tmp/t23/bk-rgb-opt/firmware-build-src/.git',
+        '.yesman/tmp/t3/display-fw/host-esp/idf/.git',
+      ].map(path => `yesmen/seven-local-git-roots/${path}`).sort();
+      assert.deepEqual((await stores.locator('li').allTextContents()).sort(), expectedStores);
       assert.equal(await dialog.locator('ul').filter({hasText:/output-09\/\.git/}).locator('li').count(), 10);
       assert(await ok.isDisabled());
       await reviewForce.click();
       await commitForce.waitFor();
-      await dialog.getByText(/without a Git registration|未登记的检出/).waitFor();
+      const warning = dialog.locator('p.danger').filter({hasText: lang === 'en' ? 'local Git history, branches, tags and objects' : '本地 Git 历史、分支、标签和对象'});
+      await warning.waitFor();
+      assert.match(await warning.innerText(), lang === 'en'
+        ? /Outside repositories, including bare repositories, may also stop working if they borrow Git objects from these stores\./
+        : /借用这些仓库 Git 对象的外部仓库（包括裸仓库）也可能无法继续使用。/);
+      assert.equal(await stores.locator('li').count(), 7);
       assert(await cancel.evaluate(n => n === document.activeElement));
       await screenshot('seven-stores-confirmation');
       await page.keyboard.press('Escape');
@@ -307,7 +320,7 @@ async function run(engine, name, lang) {
     await dialog.getByText(/\.interrupted-build\/build-output$/).waitFor();
     if (partialGit) {
       await dialog.getByText(/A-checkout\/\.git$/).waitFor();
-      await dialog.getByText(/without a Git registration|未登记的检出/).waitFor();
+      await dialog.getByText(/Outside repositories, including bare repositories|外部仓库，包括裸仓库/).waitFor();
     }
     assert(await cancel.evaluate(n => n === document.activeElement));
     await screenshot('storage-retry');

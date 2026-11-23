@@ -146,6 +146,72 @@ func TestForceLocalGitDeletionPartialBareStage(t *testing.T) {
 	mustReadFile(t, filepath.Join(stage, ".yesman", "tmp", "partial.git", "HEAD"))
 }
 
+func TestForceLocalGitDeletionRechecksStagedDependencies(t *testing.T) {
+	for _, mode := range []string{"core-worktree", "alternate", "registered-worktree", "busy"} {
+		t.Run(mode, func(t *testing.T) {
+			s, y, target := deletionFixture(t)
+			rel := filepath.FromSlash(".yesman/tmp/source")
+			repo := fixtureLocalCheckout(t, y, rel)
+			head := fixtureGit(t, repo, "rev-parse", "HEAD")
+			refs := fixtureGit(t, repo, "show-ref")
+			outside := filepath.Join(t.TempDir(), "kept")
+			initFixtureCheckout(t, outside)
+			outsideRefs := fixtureGit(t, outside, "show-ref")
+			consumer := filepath.Join(t.TempDir(), "consumer")
+			stage := filepath.Join(s.app.home.Yesmen(), ".deleting-"+target.Instance+"."+target.Entry)
+			stagedRepo := filepath.Join(stage, rel)
+			admin := filepath.Join(stagedRepo, ".git")
+			stagedProbe := false
+			checks := pool.WorkspaceGitDeletionChecks()
+			idle := checks.Idle
+			checks.Idle = func(ctx context.Context, current string) error {
+				if err := idle(ctx, current); err != nil {
+					return err
+				}
+				if current != stage {
+					return nil
+				}
+				stagedProbe = true
+				switch mode {
+				case "core-worktree":
+					fixtureGit(t, stagedRepo, "config", "core.worktree", outside)
+				case "alternate":
+					must(t, os.WriteFile(filepath.Join(admin, "objects", "info", "alternates"), []byte(filepath.ToSlash(filepath.Join(outside, ".git", "objects"))+"\n"), 0600))
+				case "registered-worktree":
+					fixtureGit(t, stagedRepo, "worktree", "add", "--detach", consumer, head)
+				case "busy":
+					return errors.New("fixture reports attached process")
+				}
+				return nil
+			}
+			registrations := s.app.pool.CheckWorkspaceDeletion
+			_, plan, err := s.app.yesmen.PrepareForceDeletion(t.Context(), target, registrations, nil, checks)
+			must(t, err)
+			if plan == nil {
+				t.Fatal("missing initial confirmation")
+			}
+			detached, err := s.app.yesmen.DeleteWithCheckoutConfirmation(t.Context(), target, plan, registrations, func(yesmen.Yesman) error { return nil }, nil)
+			want := "may be used by another checkout"
+			if mode == "busy" {
+				want = "is idle"
+			}
+			if !detached || !stagedProbe || err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected a staged hold: detached=%t checked=%t err=%v", detached, stagedProbe, err)
+			}
+			if fixtureGit(t, stagedRepo, "rev-parse", "HEAD") != head || fixtureGit(t, stagedRepo, "show-ref") != refs || fixtureGit(t, stagedRepo, "cat-file", "-t", head) != "commit" {
+				t.Fatal("staged Git history changed")
+			}
+			if mode == "registered-worktree" && fixtureGit(t, consumer, "rev-parse", "HEAD") != head {
+				t.Fatal("outside linked worktree lost its commit")
+			}
+			if fixtureGit(t, outside, "show-ref") != outsideRefs || string(mustReadFile(t, filepath.Join(outside, "untracked.txt"))) != "dirty workspace content" {
+				t.Fatal("outside independent checkout changed")
+			}
+			mustReadFile(t, filepath.Join(stagedRepo, "untracked.txt"))
+		})
+	}
+}
+
 func TestForceLocalGitDeletionRechecksDrainAndIdentity(t *testing.T) {
 	for _, mode := range []string{"late-process", "replaced-store", "new-registration"} {
 		t.Run(mode, func(t *testing.T) {

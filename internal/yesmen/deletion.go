@@ -552,8 +552,20 @@ func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string
 	if err := force.checkIdle(ctx, ws); err != nil {
 		return err
 	}
-	if err := force.checkGitRemoval(ctx, ws); err != nil {
-		return err
+	if force != nil && (len(force.git) != 0 || force.approval != nil) {
+		if now, err := parent.Lstat(entry); err != nil || !os.SameFile(st, now) {
+			return errors.New("the detached directory changed")
+		}
+		if err := checkStagedGitHold(ws); err != nil {
+			return err
+		}
+		if force.approval == nil {
+			if err := force.recheckLocalGit(ctx, ws); err != nil {
+				return err
+			}
+		} else if err := force.checkGitRemoval(ctx, ws); err != nil {
+			return err
+		}
 	}
 	var purge deletionCoverage
 	if reset != nil {
