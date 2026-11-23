@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func checkDesktopWorktreeUse(ctx context.Context, _ string) error { return ctx.Err() }
+func visitDesktopOpenFiles(ctx context.Context, _ func(string) bool) error { return ctx.Err() }
 
 // Ask NTFS whether an existing handle prevents deletion, before unlinking
 // any files. Use the open parent and open the entry itself, including links.

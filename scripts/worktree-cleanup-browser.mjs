@@ -14,6 +14,8 @@ const scratch = await mkdtemp(join(tmpdir(), 'worktree-browser-'));
 const exe = join(scratch, `fixture${process.platform === 'win32' ? '.exe' : ''}`);
 const output = process.env.YESMAN_WORKTREE_SCREENSHOTS;
 const baseline = process.env.YESMAN_WORKTREE_BASELINE === '1';
+const latency = process.env.YESMAN_TEST_WORKTREE_LATENCY === '1';
+const queued = process.env.YESMAN_TEST_WORKTREE_QUEUED === '1';
 
 async function run(engine, name, language) {
   const child = spawn(exe, ['-test.run=^TestWorktreeCleanupBrowser$', '-test.timeout=2m'], {
@@ -79,7 +81,31 @@ async function run(engine, name, language) {
             }
             return value;
           }
-          case 'Usage': case 'PreviewWorktreeCleanup': case 'CancelWorktreeCleanup': case 'ConfirmWorktreeCleanup': return api(m, ...args);
+          case 'CheckWorktreeCleanup': {
+            if (window.busyCheck) {
+              window.busyCheck = false;
+              return api('CheckBusyWorkspace', ...args);
+            }
+            if (!window.holdCheck) return api(m, ...args);
+            window.holdCheck = false;
+            // Let Cancel and the retry reach the service before delivering
+            // this invocation. MyGo uses a goroutine per bridge call.
+            await new Promise(resolve => { window.releaseCheck = resolve; });
+            try {
+              const value = await api(m, ...args);
+              window.oldCheckIssuedToken = !!value.token;
+              return value;
+            } catch (err) {
+              window.oldCheckError = err.message;
+              throw err;
+            }
+          }
+          case 'CancelWorktreeCleanup': {
+            await api(m, ...args);
+            (window.canceledChecks ??= []).push(args[0]);
+            return;
+          }
+          case 'Usage': case 'PrepareWorktreeCleanup': case 'ConfirmWorktreeCleanup': return api(m, ...args);
           case 'Settings': return { appearance: zh ? 'dark' : 'light', autoFetch: 0 };
           case 'Pulls': return [{ dir: 'review-a', pull: { state: 'merged', number: 42, repo: 'demo/repo', title: 'Reviewed change', additions: 1, deletions: 0 } }];
           case 'Models': return {models:[], agent:{id:args[0]}};
@@ -99,6 +125,94 @@ async function run(engine, name, language) {
     await page.goto(url);
     const info = page.locator('#yesman-info');
     const title = info.getByRole('heading', { name: zh ? '工作树' : 'Worktrees', exact: true });
+    if (queued) {
+      const open = async bulk => {
+        const target = bulk ? title.locator('button') : info.locator('.info-row-main').filter({hasText: 'gizmoth-artifact-rows'});
+        await target.click({button: 'right'});
+        const dialog = page.locator('dialog.worktree-cleanup[open]');
+        await dialog.waitFor();
+        return dialog;
+      };
+      await page.evaluate(() => { window.busyCheck = true; });
+      const busy = await open(false);
+      await busy.getByText(zh ? '工作区正忙。请重试。' : 'The workspace is busy. Try again.').waitFor();
+      assert.equal(await busy.locator('[data-confirm]').isVisible(), false);
+      await busy.locator('[data-retry]').click();
+      await busy.locator('[data-confirm]').waitFor();
+      await busy.locator('[data-close]').click();
+      await busy.waitFor({state: 'detached'});
+      for (const bulk of [false, true]) {
+        await page.evaluate(() => {
+          window.holdCheck = true;
+          window.releaseCheck = undefined;
+          window.oldCheckError = undefined;
+          window.oldCheckIssuedToken = undefined;
+        });
+        let dialog = await open(bulk);
+        await page.waitForFunction(() => !!window.releaseCheck);
+        const queuedID = await page.evaluate(() => calls.filter(([m]) => m === 'CheckWorktreeCleanup').at(-1).at(-1));
+        if (bulk) {
+          const error = zh ? '未能在时限内完成工作树检查。' : 'The worktree check did not finish within the time limit.';
+          await dialog.getByText(error).waitFor({timeout: 20000});
+        } else {
+          await page.keyboard.press('Escape');
+          await dialog.waitFor({state: 'detached'});
+        }
+        await page.waitForFunction(id => window.canceledChecks?.includes(id), queuedID);
+        if (bulk) await dialog.locator('[data-retry]').click();
+        else dialog = await open(false);
+        const confirm = dialog.locator('[data-confirm]');
+        await confirm.waitFor();
+        const before = await page.evaluate(() => api('Verify'));
+        await page.evaluate(() => window.releaseCheck());
+        await page.waitForFunction(() => window.oldCheckError || window.oldCheckIssuedToken !== undefined);
+        const late = await page.evaluate(() => ({token: window.oldCheckIssuedToken, error: window.oldCheckError}));
+        assert.deepEqual(await page.evaluate(() => api('Verify')), before);
+        await confirm.click();
+        await dialog.waitFor({state: 'detached'});
+        const after = await page.evaluate(() => api('Verify'));
+        assert.ok((after.present?.length ?? 0) < before.present.length);
+        assert.equal(late.token, undefined);
+        assert.match(late.error, /This preview expired/);
+        console.log(JSON.stringify({engine: name, language, mode: bulk ? 'bulk' : 'single', lateRejected: true, removed: before.present.length - (after.present?.length ?? 0)}));
+      }
+      assert.deepEqual(errors, []);
+      return;
+    }
+    if (latency) {
+      const action = title.locator('button');
+      await action.waitFor();
+      const started = Date.now();
+      await action.click({button: 'right'});
+      const dialog = page.locator('dialog.worktree-cleanup[open]');
+      await dialog.waitFor();
+      const shown = Date.now();
+      const ready = dialog.locator('[data-confirm]');
+      await ready.waitFor({timeout: 100_000});
+      const elapsed = Date.now() - started;
+      const metrics = await page.evaluate(() => api('PreviewMetrics'));
+      console.log(JSON.stringify({engine: name, language, clickToDialogMs: shown - started, clickToResultsMs: elapsed, ...metrics}));
+      if (output) await dialog.screenshot({path: join(output, `latency-${name}-${language}.png`)});
+      if (!baseline) {
+        assert.ok(elapsed < 17_000);
+        assert.ok(metrics.peak > 1 && metrics.peak <= 4);
+        await dialog.locator('summary').click();
+        assert.match(await dialog.innerText(), zh ? /未能在时限内/ : /within the time limit/);
+        const openBranch = dialog.locator('.cleanup-kept li').filter({hasText: 'latency-01'});
+        assert.match(await openBranch.innerText(), zh ? /开放拉取请求|有进程正在使用/ : /open pull request|A process is using/);
+        assert.ok(+(await ready.textContent()).match(/\d+/)[0] <= 28);
+        const retry = dialog.locator('[data-retry]');
+        await retry.waitFor();
+        await retry.click();
+        await dialog.getByText(zh ? '正在检查工作树…' : 'Checking worktrees…').waitFor();
+        assert.equal(await ready.isVisible(), false);
+        assert.equal(await retry.isVisible(), false);
+      }
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({state: 'detached'});
+      assert.deepEqual(errors, []);
+      return;
+    }
     const row = dir => info.locator('.info-row-main').filter({hasText:dir});
     const giz = row('gizmoth-artifact-rows');
     await giz.waitFor();
@@ -347,5 +461,6 @@ try {
   assert.equal(build.status,0,build.stderr);
   for (const [name, engine] of Object.entries({ chromium, webkit })) {
     for (const language of baseline ? ['en'] : ['en','zh-Hans']) await run(engine,name,language);
+    if (baseline && latency) break;
   }
 } finally { await rm(scratch,{recursive:true,force:true}); }

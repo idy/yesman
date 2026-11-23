@@ -212,28 +212,27 @@ func sameCleanupRoot(expected, actual safefs.Identity) bool {
 	return !actual.Usable() && expected.Dev != 0 && expected.Dev == actual.Dev
 }
 
-// InspectTemporaryWorktree leaves refs and the directory intact. The caller
-// closes the observation at confirmation, cancellation, replacement or expiry.
+// InspectTemporaryWorktree leaves refs and the directory intact. A desktop
+// preview never waits for a repository or editor operation. The caller closes
+// the observation at confirmation, cancellation, replacement or expiry.
 func (p *Pool) InspectTemporaryWorktree(ctx context.Context, workspace string, expected Worktree) (*CheckoutObservation, error) {
-	return p.observeTemporaryWorktree(ctx, workspace, expected, true, false)
+	return p.observeTemporaryWorktree(ctx, workspace, expected, true)
 }
 
 // ObserveReclaim binds the directory and tracking ref without waiting for a
 // repository or editor operation. An explicit return can be certified before
 // the removal attempt checks for dirty content, as in earlier versions.
 func (p *Pool) ObserveReclaim(ctx context.Context, workspace string, expected Worktree, checkContents bool) (*CheckoutObservation, error) {
-	return p.observeTemporaryWorktree(ctx, workspace, expected, checkContents, true)
+	return p.observeTemporaryWorktree(ctx, workspace, expected, checkContents)
 }
 
-func (p *Pool) observeTemporaryWorktree(ctx context.Context, workspace string, expected Worktree, checkContents, try bool) (*CheckoutObservation, error) {
+func (p *Pool) observeTemporaryWorktree(ctx context.Context, workspace string, expected Worktree, checkContents bool) (*CheckoutObservation, error) {
 	r, err := p.RecordedRepo(ctx, expected.Repo)
 	if err != nil {
 		return nil, err
 	}
 	l := p.lock(r.Name)
-	if !try {
-		l.Lock()
-	} else if !l.TryLock() {
+	if !l.TryLock() {
 		return nil, fmt.Errorf("repository is in use")
 	}
 	defer l.Unlock()
@@ -241,9 +240,7 @@ func (p *Pool) observeTemporaryWorktree(ctx context.Context, workspace string, e
 	if err != nil {
 		return nil, err
 	}
-	if !try {
-		tl.RLock()
-	} else if !tl.TryRLock() {
+	if !tl.TryRLock() {
 		return nil, fmt.Errorf("checkout is in use")
 	}
 	defer tl.RUnlock()

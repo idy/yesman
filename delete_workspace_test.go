@@ -128,7 +128,7 @@ func TestDeleteAfterDesktopWorktreeCleanup(t *testing.T) {
 	if err := s.DeleteWorkspace(t.Context(), target); err == nil || !strings.Contains(err.Error(), w.Dir) {
 		t.Fatalf("expected checkout blocker: %v", err)
 	}
-	preview, err := s.PreviewWorktreeCleanup(t.Context(), y.Name, y.HiredAt, &w, nil)
+	preview, err := s.app.desktopWorktrees.Preview(t.Context(), y.Name, y.HiredAt, &w, nil)
 	must(t, err)
 	if preview.Token == "" || len(preview.Rows) != 1 || preview.Rows[0].Reason != "" {
 		t.Fatalf("cleanup preview: %+v", preview)
