@@ -320,7 +320,7 @@ async function run(engine, name, lang) {
     await dialog.getByText(/\.interrupted-build\/build-output$/).waitFor();
     if (partialGit) {
       await dialog.getByText(/A-checkout\/\.git$/).waitFor();
-      await dialog.getByText(/Outside repositories, including bare repositories|外部仓库，包括裸仓库/).waitFor();
+      await dialog.getByText(/Outside repositories, including bare repositories|外部仓库（包括裸仓库）/).waitFor();
     }
     assert(await cancel.evaluate(n => n === document.activeElement));
     await screenshot('storage-retry');

@@ -151,6 +151,27 @@ func TestForceWorkspaceColdApprovedGit(t *testing.T) {
 				t.Fatal(err)
 			}
 			mustDeletionBytes(t, filepath.Join(stagePath, witness), "remaining Git bytes")
+			// The final pool/registration check must also occur after the
+			// staged process probe returns, even on a cold retry.
+			lateRegistration := checkReview()
+			checkCount = 0
+			registered := false
+			lateRegistration.checks.Idle = func(context.Context, string) error {
+				checkCount++
+				registered = checkCount == 2
+				return nil
+			}
+			registrationHold := errors.New("late shared-pool registration")
+			checkRegistrations := func(context.Context, string) error {
+				if registered {
+					return registrationHold
+				}
+				return nil
+			}
+			if _, err := cold.DeleteWithCheckoutConfirmation(t.Context(), pending, lateRegistration, checkRegistrations, nil, nil); !errors.Is(err, registrationHold) {
+				t.Fatal(err)
+			}
+			mustDeletionBytes(t, filepath.Join(stagePath, witness), "remaining Git bytes")
 			// Admit a new supported external relationship at the last idle
 			// probe, after the complete cold scope was already compared.
 			// Test both rewriting and recreating a Git configuration.

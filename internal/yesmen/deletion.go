@@ -543,13 +543,13 @@ func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string
 	if target.Pending && coverage.output != nil && coverage.output.digest() != force.scope {
 		return errCheckoutPreviewChanged
 	}
+	if err := force.checkIdle(ctx, ws); err != nil {
+		return err
+	}
 	if err := registrations(ctx, ws.Name()); err != nil {
 		return err
 	}
 	if err := s.checkWorktreeRecords(ctx, parent, ws, target, relocated, true); err != nil {
-		return err
-	}
-	if err := force.checkIdle(ctx, ws); err != nil {
 		return err
 	}
 	if force != nil && (len(force.git) != 0 || force.approval != nil) {
