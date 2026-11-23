@@ -289,14 +289,24 @@ func TestForceWorkspaceColdMillionEntries(t *testing.T) {
 	stage := filepath.Join(s.root, prefix+target.Instance+"."+target.Entry)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	armed := false
+	registrations := func(_ context.Context, workspace string) error {
+		if workspace == stage {
+			armed = true
+		}
+		return nil
+	}
 	fault := interruptDeletion{ctx, func() {
-		if _, err := os.Stat(stage); err == nil {
+		// The last staged registration check follows the read-only walk.
+		// Poll only during the final admission and purge, when an unlink
+		// can actually happen, so the fixture stays within its budget.
+		if armed {
 			if _, err := os.Stat(filepath.Join(stage, missing)); errors.Is(err, fs.ErrNotExist) {
 				cancel()
 			}
 		}
 	}}
-	if detached, err := s.DeleteWithCheckoutConfirmation(fault, target, initial, check, func(Yesman) error { return nil }, nil); !detached || !errors.Is(err, context.Canceled) {
+	if detached, err := s.DeleteWithCheckoutConfirmation(fault, target, initial, registrations, func(Yesman) error { return nil }, nil); !detached || !errors.Is(err, context.Canceled) {
 		t.Fatal(detached, err)
 	}
 	cold := New(s.root, s.archive)
