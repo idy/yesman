@@ -2,6 +2,13 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.65
+
+- **Delete Yes Man…** reports the exact Git paths blocking deletion as it finds them. After addressing a blocker, choose **Check again** to review the workspace again.
+- **Force Delete…** lists eligible Git stores owned by the workspace and checks for outside dependencies. Review the listed paths, then confirm separately to permanently delete the local Git history, branches, tags, objects, and internal submodules at those paths. Git data stored outside the workspace and the shared repository pool are preserved.
+- After an interrupted deletion, open **Settings › Storage › Stored workspaces**. Choose **Review remaining files…** and confirm again to finish the deletion, including after restarting Yes Man.
+- **Clean up worktrees…** checks independent worktrees in parallel within a time-limited preview. You can retry, cancel, or confirm the eligible removals. Yes Man rechecks eligibility before removing each worktree and keeps worktrees that are in use, have an open pull request, or could not be verified.
+
 ## 0.1.64
 
 - **Delete Yes Man…** reports the exact path of a Git blocker as soon as the review finds it, even in a large workspace. After addressing the blocker, use **Check again** to run a fresh review.
