@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/idy/yesman/internal/github"
 	"github.com/idy/yesman/internal/safefs/linktest"
 	"github.com/idy/yesman/internal/yesmen"
 )
@@ -28,8 +27,10 @@ func TestDesktopBulkReturnDuringRemoteVerification(t *testing.T) {
 			s := x.f.srv
 			d := &DesktopWorktrees{Server: s}
 			plan := previewTree(t, d, x.y, nil, true)
-			read := s.ReadPullMerge
-			s.ReadPullMerge = func(ctx context.Context, target string, n int) (github.PullMerge, error) {
+			read := s.HasOpenPull
+			changes := 0
+			s.HasOpenPull = func(ctx context.Context, target, owner, branch string) (bool, error) {
+				changes++
 				e := yesmen.TaskEdit{ID: cert.Task}
 				switch change {
 				case "keep":
@@ -43,12 +44,15 @@ func TestDesktopBulkReturnDuringRemoteVerification(t *testing.T) {
 					e.Note = &note
 				}
 				changeDesktopTask(t, s.Yesmen, x.y, e)
-				return read(ctx, target, n)
+				return read(ctx, target, owner, branch)
 			}
 			row := confirmTree(t, d, x.y, plan.Token, change == "note")
+			if changes == 0 {
+				t.Fatal("confirmation did not make a fresh open PR query")
+			}
 			if change == "note" {
-				if err := s.Pool.CheckWorktreeCheckpoint(t.Context(), w); err != nil {
-					t.Fatal(err)
+				if refs := cleanupGit(t, x.cf.repo.Path, "for-each-ref", "refs/yesman/worktrees/"+w.CleanupID); refs != "" {
+					t.Fatal("bulk cleanup created a recovery reference", refs)
 				}
 				return
 			}
@@ -56,12 +60,12 @@ func TestDesktopBulkReturnDuringRemoteVerification(t *testing.T) {
 				t.Fatal(row)
 			}
 			assertRetained(t, x, w)
-			s.ReadPullMerge = read
+			s.HasOpenPull = read
 			// A new service and Store on the same hire must also see the withdrawal.
 			coldStore := yesmen.New(filepath.Dir(x.y.Path), filepath.Dir(x.y.Path)+"-archive")
-			cold := &DesktopWorktrees{Server: &Server{Pool: s.Pool, Yesmen: coldStore, Agents: s.Agents, ReadPullMerge: read, HasOpenPull: s.HasOpenPull}}
-			p := previewTree(t, cold, x.y, nil, false)
+			cold := &DesktopWorktrees{Server: &Server{Pool: s.Pool, Yesmen: coldStore, Agents: s.Agents, ReadPullMerge: s.ReadPullMerge, HasOpenPull: read}}
 			if change == "keep" {
+				p := previewTree(t, cold, x.y, nil, false)
 				if p.Rows[0].Reason != boardKeep {
 					t.Fatal(p.Rows)
 				}
@@ -70,8 +74,12 @@ func TestDesktopBulkReturnDuringRemoteVerification(t *testing.T) {
 					t.Fatal(single.Rows)
 				}
 				confirmTree(t, cold, x.y, single.Token, true)
-			} else if !strings.Contains(p.Rows[0].Reason, "unfinished") {
-				t.Fatal(p.Rows)
+			} else {
+				p := previewTree(t, cold, x.y, nil, true)
+				cold.Cancel(p.Token)
+				if one := previewTree(t, cold, x.y, &w, false); !strings.Contains(one.Rows[0].Reason, "unfinished") {
+					t.Fatal(one.Rows)
+				}
 			}
 		})
 	}
@@ -140,13 +148,22 @@ func TestDesktopIndexChangeDuringDialog(t *testing.T) {
 			cleanupGit(t, w.Path, "switch", "--merge", w.Branch)
 			cleanupGit(t, w.Path, "checkout", "--ours", "--", "README")
 			cleanupGit(t, w.Path, "add", "README")
+			index := filepath.Join(cleanupGit(t, w.Path, "rev-parse", "--absolute-git-dir"), "index")
+			recoveryIndex, err := os.ReadFile(index)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if status := cleanupGit(t, w.Path, "status", "--porcelain=v1", "--ignored"); status != "" {
 				t.Fatal(status)
 			}
-			if row := confirmTree(t, d, f.y, p.Token, false); row.Reason != resolveUndo {
+			reason := resolveUndo
+			if mode == "bulk" {
+				reason = resolveUndoChanged
+			}
+			if row := confirmTree(t, d, f.y, p.Token, false); row.Reason != reason {
 				t.Fatal(row)
 			}
-			if again := previewTree(t, d, f.y, selected, false); again.Rows[0].Reason != resolveUndo {
+			if again := previewTree(t, d, f.y, &w, false); again.Rows[0].Reason != resolveUndo {
 				t.Fatal(again)
 			}
 			cleanupGit(t, f.repo.Path, "reflog", "expire", "--expire=now", "--all")
@@ -154,6 +171,27 @@ func TestDesktopIndexChangeDuringDialog(t *testing.T) {
 			cleanupGit(t, w.Path, "checkout", "-m", "--", "README")
 			if text := cleanupGit(t, w.Path, "show", ":3:README"); text != "Handwritten edit" {
 				t.Fatal(text)
+			}
+			if mode == "bulk" {
+				if err := os.WriteFile(index, recoveryIndex, 0600); err != nil {
+					t.Fatal(err)
+				}
+				again := previewTree(t, d, f.y, nil, true)
+				if !again.Rows[0].ConflictRecovery {
+					t.Fatal("fresh preview did not identify conflict recovery data", again)
+				}
+				cleanupGit(t, w.Path, "update-index", "--clear-resolve-undo")
+				if row := confirmTree(t, d, f.y, again.Token, false); row.Reason != resolveUndoChanged {
+					t.Fatal("changed recovery data was accepted", row)
+				}
+				if err := os.WriteFile(index, recoveryIndex, 0600); err != nil {
+					t.Fatal(err)
+				}
+				fresh := previewTree(t, d, f.y, nil, true)
+				if !fresh.Rows[0].ConflictRecovery {
+					t.Fatal("fresh preview did not identify restored conflict recovery data", fresh)
+				}
+				confirmTree(t, d, f.y, fresh.Token, true)
 			}
 		})
 	}

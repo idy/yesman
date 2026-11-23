@@ -94,10 +94,18 @@ func TestCreatingTaskRecloseChecksPublishedAlias(t *testing.T) {
 				p = previewTree(t, d, x.y, nil, true)
 				confirmTree(t, d, x.y, p.Token, true)
 			}
-			if rec := recordOf(t, x, w.Dir); !rec.Removed || rec.Completion != nil || rec.CleanupHead != w.Head {
+			wantHead := ""
+			if mode == "automatic" {
+				wantHead = w.Head
+			}
+			if rec := recordOf(t, x, w.Dir); !rec.Removed || rec.Completion != nil || rec.CleanupHead != wantHead || rec.DiscardRetry != nil {
 				t.Fatalf("ordinary cleanup receipt: %+v", rec)
 			}
-			assertCleanupRefsPreserved(t, x.cf, refs, w)
+			if mode == "automatic" {
+				assertCleanupRefsPreserved(t, x.cf, refs, w)
+			} else if got := cleanupGit(t, x.cf.repo.Path, "for-each-ref", "--format=%(refname) %(objectname)"); got != refs {
+				t.Fatal("bulk cleanup changed refs", got)
+			}
 		})
 	}
 }

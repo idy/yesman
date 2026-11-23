@@ -140,9 +140,14 @@ async function run(engine, name, language) {
       console.log(`${name} ${language} reproduced v0.1.62 bulk holds on canceled and ended legacy checkouts`);
       return;
     }
-    assert.match(await button.textContent(), /4/);
+    assert.match(await button.textContent(), /5/);
     assert.equal((await menuCalls()).at(-1)[1],false);
-    assert.equal(await dialog.locator('code[title]').count(), 4);
+    assert.equal(await dialog.locator('code[title]').count(), 5);
+    const conflictNotice = dialog.locator('#worktree-cleanup-warning');
+    assert.match(await conflictNotice.textContent(), zh ? /冲突恢复数据也将永久删除/ : /conflict recovery data.*permanently deleted/);
+    assert.equal(await button.getAttribute('aria-describedby'), await conflictNotice.getAttribute('id'));
+    const conflictRow = dialog.locator('.cleanup-rows > li').filter({hasText:'saved-conflict'});
+    assert.match(await conflictRow.innerText(), zh ? /已保存的 Git 冲突恢复数据/ : /Saved Git conflict recovery data/);
     assert.ok(await dialog.locator('code[title]').evaluateAll(nodes => nodes.every(el => el.textContent === el.title && /^[a-f0-9]{40}$/.test(el.textContent))));
     const paths = await dialog.locator('.cleanup-path').allTextContents();
     assert.ok(paths.some(path => path.endsWith('/gizmoth-artifact-rows')));
@@ -161,6 +166,7 @@ async function run(engine, name, language) {
     await page.keyboard.press('Enter');
     await dialog.waitFor({state:'detached'});
     assert.equal(await commits(),0);
+    await page.evaluate(() => api('KeepConflictAndCloseReview'));
     for (const [dir, hold] of [['saved-conflict', zh ? /还原冲突的文件版本/ : /versions of a resolved conflict/], ['unverified-index', zh ? /无法验证 Git 索引/ : /Git index could not be verified/]]) {
       await row(dir).click({button:'right'});
       await dialog.getByText(hold).waitFor();

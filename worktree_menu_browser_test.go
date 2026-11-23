@@ -84,7 +84,7 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 	}
 	var records []yesmen.WorktreeRecord
 	str := func(v string) *string { return &v }
-	var gizmoTask string
+	var gizmoTask, conflictTask, blockedTask string
 	var lateEditor func()
 	defer func() {
 		if lateEditor != nil {
@@ -127,7 +127,13 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			r.Purpose, r.Root, r.CreatedFor, r.OwnerSince = "author", nil, nil, time.Time{}
 		}
 		var worktrees *[]yesmen.WorktreeReturn
-		if dir == "saved-conflict" || dir == "unverified-index" {
+		if dir == "saved-conflict" {
+			conflictTask = task.ID
+		}
+		if dir == "review-a" {
+			blockedTask, status = task.ID, yesmen.TaskBlocked
+		}
+		if dir == "unverified-index" {
 			keep := []yesmen.WorktreeReturn{}
 			worktrees = &keep
 		}
@@ -190,6 +196,12 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 				}
 			}
 			value, err = a.pool.AddWorktree(r.Context(), repo, pool.WorktreeOptions{Dest: dest, Ref: "origin/replacement"})
+		case "KeepConflictAndCloseReview":
+			keep := []yesmen.WorktreeReturn{}
+			_, err = a.yesmen.ChangeBoard(y.Name, yesmen.BoardChange{Update: []yesmen.TaskEdit{
+				{ID: conflictTask, Status: str(yesmen.TaskDone), Worktrees: &keep},
+				{ID: blockedTask, Status: str(yesmen.TaskDone)},
+			}})
 		case "KeepGizmo":
 			keep := []yesmen.WorktreeReturn{}
 			_, err = a.yesmen.ChangeBoard(y.Name, yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: gizmoTask, Status: str(yesmen.TaskDone), Worktrees: &keep}}})

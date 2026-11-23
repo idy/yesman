@@ -55,7 +55,7 @@ func TestDesktopBulkWorktreeDirtyAndLegacy(t *testing.T) {
 			var staleAdmin string
 			if kind == "dead-pointer" {
 				if recs[0].Root == nil {
-					t.Skip("filesystem cannot verify a legacy directory birth time")
+					t.Fatal("fixture requires a recorded directory identity")
 				}
 				staleAdmin = filepath.Join(t.TempDir(), "kept-admin")
 				if err := os.Rename(privatePath, staleAdmin); err != nil {
@@ -66,8 +66,10 @@ func TestDesktopBulkWorktreeDirtyAndLegacy(t *testing.T) {
 			}
 			before := cleanupGit(t, f.repo.Path, "for-each-ref", "--format=%(refname) %(objectname)")
 			p := previewTree(t, d, f.y, nil, true)
-			if p.Rows[0].Path != w.Path || p.Rows[0].TaskStatus != status {
-				t.Fatal(p)
+			previewDir, err := os.Stat(p.Rows[0].Path)
+			actualDir, actualErr := os.Stat(w.Path)
+			if err != nil || actualErr != nil || !os.SameFile(previewDir, actualDir) || p.Rows[0].TaskStatus != status {
+				t.Fatalf("preview selected a different physical checkout: %+v, %v, %v", p, err, actualErr)
 			}
 			if _, err := os.Stat(filepath.Join(w.Path, "ignored")); err != nil {
 				t.Fatal("preview wrote files", err)

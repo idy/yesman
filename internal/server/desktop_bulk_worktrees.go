@@ -9,8 +9,8 @@ import (
 	"github.com/idy/yesman/internal/yesmen"
 )
 
-// Only the explicit desktop batch may discard local data. The Board still
-// has to identify ended work, and every current app claim remains a hold.
+// Only the explicit desktop batch may discard local data. The Board supplies
+// provenance and retention decisions. The Manager and pool leases check use.
 func desktopBulkHold(y yesmen.Yesman, board yesmen.Board, workers []yesmen.Worker, rec yesmen.WorktreeRecord) (string, string) {
 	d := WorktreeDecisionFor(board, rec)
 	if rec.Owner == "" {
@@ -22,22 +22,16 @@ func desktopBulkHold(y yesmen.Yesman, board yesmen.Board, workers []yesmen.Worke
 	if d.paused {
 		return "The creating task is paused.", rec.Task
 	}
-	finished := false
+	associated := false
 	for _, task := range board.Tasks {
 		if task.ID == rec.Task {
 			if rec.CreatedFor != nil && !boundCreatingTask(y, rec, task) || rec.CreatedFor == nil && task.Owner != rec.Owner {
 				return unprovenCreation, task.ID
 			}
-			if task.Open() {
-				return unfinishedTask, task.ID
-			}
-			finished = task.Status == yesmen.TaskDone || task.Status == yesmen.TaskDropped
+			associated = true
 		}
-		if (task.Owner == rec.Owner || rec.CleanupOwner != "" && task.Owner == rec.CleanupOwner) && task.Open() {
-			return "The owner has an unfinished task.", task.ID
-		}
-		if rec.Task == "" && rec.CreatedFor == nil && task.Owner == rec.Owner && (task.OwnerSince.IsZero() || task.OwnerSince.Equal(rec.OwnerSince)) && !task.Paused() && (task.Status == yesmen.TaskDone || task.Status == yesmen.TaskDropped) {
-			finished = true
+		if rec.Task == "" && rec.CreatedFor == nil && task.Owner == rec.Owner && (task.OwnerSince.IsZero() || task.OwnerSince.Equal(rec.OwnerSince)) && !task.Open() {
+			associated = true
 		}
 	}
 	for _, worker := range workers {
@@ -46,11 +40,11 @@ func desktopBulkHold(y yesmen.Yesman, board yesmen.Board, workers []yesmen.Worke
 				return "The owner is paused.", worker.Name
 			}
 			if rec.Task == "" && rec.CreatedFor == nil && worker.Name == rec.Owner && !rec.OwnerSince.IsZero() && rec.OwnerSince.Equal(worker.StartedAt) && !worker.FinishedAt.IsZero() {
-				finished = true
+				associated = true
 			}
 		}
 	}
-	if !finished {
+	if !associated {
 		return missingTask, rec.Task
 	}
 	return "", ""
@@ -101,7 +95,17 @@ func (s *Server) desktopBulkWorktree(ctx context.Context, y yesmen.Yesman, recor
 				return &pool.RemovalHold{Reason: "The owner is paused.", Detail: worker.Name}
 			}
 		}
-		observation, removed, err := s.Pool.DesktopDiscard(ctx, y.Path, w, orphan, remove)
+		var saveRetry func(yesmen.WorktreeDiscardRetry) error
+		if remove {
+			saveRetry = func(retry yesmen.WorktreeDiscardRetry) error {
+				if err := s.Yesmen.SaveWorktreeDiscardRetry(y, rec, retry); err != nil {
+					return err
+				}
+				rec.DiscardRetry = &retry
+				return nil
+			}
+		}
+		observation, removed, err := s.Pool.DesktopDiscard(ctx, y.Path, w, orphan, rec.DiscardRetry, saveRetry)
 		row.Removed = removed
 		if err != nil {
 			return err
@@ -109,9 +113,15 @@ func (s *Server) desktopBulkWorktree(ctx context.Context, y yesmen.Yesman, recor
 		if !remove {
 			row.observation = observation
 			row.Worktree = observation.Bind(w)
+			row.ConflictRecovery = observation.DiscardHasResolveUndo()
+			row.Interrupted = rec.DiscardRetry != nil
 			return nil
 		}
-		return s.recordWorktreeRemoval(y, rec, "Permanently removed from the Worktrees panel without a new recovery reference.")
+		after := rec
+		after.Removed = true
+		after.DiscardRetry = nil
+		after.RetiredReason = "Permanently removed from the Worktrees panel without a new recovery reference."
+		return s.Yesmen.CommitWorktreeRecord(y, rec, after)
 	})
 	if err != nil {
 		var hold *pool.RemovalHold
@@ -120,6 +130,10 @@ func (s *Server) desktopBulkWorktree(ctx context.Context, y yesmen.Yesman, recor
 			return retain("The directory was removed. Its Git registration or checkout record may still need attention.", err.Error())
 		case !entered:
 			return retain("The recorded owner could not be reserved for cleanup.", err.Error())
+		case errors.Is(err, pool.ErrWorktreeResolveUndo):
+			return retain(resolveUndoChanged, "")
+		case errors.Is(err, pool.ErrWorktreeIndex):
+			return retain(indexHold, "")
 		case errors.As(err, &hold):
 			return retain(hold.Reason, hold.Detail)
 		default:

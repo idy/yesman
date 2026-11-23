@@ -235,7 +235,15 @@ func TestCreatingTaskBulkReopenKeepAndReassign(t *testing.T) {
 				}
 			}
 			switch which {
-			case "legacy-rootless", "stale-task", "stale-hire", "open-pr", "failed", "moved", "keep":
+			case "legacy-rootless", "failed":
+				s.reconcileCheckout(t.Context(), x.y, w.CleanupID)
+				assertRetained(t, x, w)
+				p := previewTree(t, d, x.y, nil, true)
+				confirmTree(t, d, x.y, p.Token, true)
+				if rec := recordOf(t, x, w.Dir); !rec.Removed || rec.Completion != nil || rec.CleanupHead != "" || rec.DiscardRetry != nil {
+					t.Fatal(rec)
+				}
+			case "stale-task", "stale-hire", "open-pr", "moved", "keep":
 				p := previewTree(t, d, x.y, nil, false)
 				s.reconcileCheckout(t.Context(), x.y, w.CleanupID)
 				if which == "moved" {
@@ -258,7 +266,7 @@ func TestCreatingTaskBulkReopenKeepAndReassign(t *testing.T) {
 			default:
 				p := previewTree(t, d, x.y, nil, true)
 				confirmTree(t, d, x.y, p.Token, true)
-				if rec := recordOf(t, x, w.Dir); rec.Completion != nil || !rec.Removed || rec.CleanupHead != w.Head {
+				if rec := recordOf(t, x, w.Dir); rec.Completion != nil || !rec.Removed || rec.CleanupHead != "" || rec.DiscardRetry != nil {
 					t.Fatalf("removal provenance: %+v", rec)
 				}
 			}

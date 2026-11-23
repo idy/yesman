@@ -74,6 +74,11 @@ export function createWorktreeMenu(host) {
             ? 'Git saves each commit in the shared repository and keeps your branches and tags.'
             : 'This permanently deletes the listed directories, including uncommitted edits, untracked and ignored files, and build output. No recovery reference is created.');
           listing.append(rowList(ready));
+          if (!selected && ready.some(row => row.conflictRecovery)) {
+            const warning = h('p', { id: 'worktree-cleanup-warning', class: 'cleanup-warning', role: 'status' }, t('Saved Git conflict recovery data in the marked worktrees will also be permanently deleted.'));
+            listing.append(warning);
+            confirm.setAttribute('aria-describedby', warning.id);
+          }
           if (selected && ready[0]?.keepWarning) {
             const warning = h('p', { id: 'worktree-cleanup-warning', class: 'cleanup-warning', role: 'status' }, t(ready[0].keepWarning));
             listing.append(warning);
@@ -141,6 +146,8 @@ function rowList(rows) {
       h('div', { class: 'cleanup-path', dir: 'auto' }, row.path.endsWith(row.dir) && row.dir
         ? [h('span', { class: 'cleanup-parent' }, row.path.slice(0, -row.dir.length)), h('span', null, row.dir)] : row.path),
       !row.reason ? h('div', { class: 'cleanup-source' }, row.branch ? `${row.branch} · ` : '', h('code', { title: row.head }, row.head)) : null,
+      row.conflictRecovery ? h('div', { class: 'cleanup-source' }, t('Saved Git conflict recovery data')) : null,
+      row.interrupted ? h('div', { class: 'cleanup-source' }, t('Interrupted removal')) : null,
       row.reason ? h('div', { class: 'cleanup-reason' }, t(row.reason), detail ? ` ${detail}` : '') : null);
   }));
 }
