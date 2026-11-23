@@ -3,8 +3,11 @@ package pool
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/idy/yesman/internal/yesmen"
 )
 
 // DesktopDiscardPreview shares one process listing across a single preview.
@@ -34,6 +37,18 @@ type discardPreviewKey struct{}
 type discardPreviewUse struct {
 	root string
 	open func() (map[string]bool, error)
+}
+
+func WorkspaceGitDeletionChecks() yesmen.LocalGitDeletionChecks {
+	checks := yesmen.LocalGitDeletionChecks{
+		Idle: func(ctx context.Context, workspace string) error {
+			return checkDesktopWorktreeUse(ctx, workspace, false)
+		},
+	}
+	if runtime.GOOS == "windows" {
+		checks.Entry = checkDiscardSharing
+	}
+	return checks
 }
 
 func checkDesktopWorktreeUse(ctx context.Context, path string, preview bool) error {

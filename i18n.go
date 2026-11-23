@@ -77,6 +77,7 @@ var zhHans = map[string]string{
 	"Grant write access to directory %s or move its contents to safety before deleting the workspace.":                         "请先为目录 %s 授予写权限，或将其中的文件移到安全位置，再删除工作区。",
 
 	// Local Git data is held unless it already lives outside the deletion scope.
+	"Could not verify that %s is idle.": "无法确认 %s 当前未被使用。",
 	"Git data at %s may be used by another checkout. Check its dependencies before removing it, or move the complete repository and its dependent worktrees to safety with Git. Then check again.": "位于 %s 的 Git 数据可能仍被其他工作树使用。请在移除前核实依赖，或使用 Git 将完整仓库及其关联工作树移至安全位置，然后再次检查。",
 	"Cannot verify the Git entry at %s. Check where it points and use Git or managed cleanup to move the checkout to safety. Then check again.":                                                    "无法验证 %s 的 Git 条目。请检查它的指向，使用 Git 或受管回收流程妥善处理该工作树，然后再次检查。",
 	"The interrupted deletion at %s still has a Git recovery record at %s. Preserve the remaining Git data and check its dependencies before retrying in Storage.":                                 "位于 %s 的中断删除仍有 Git 恢复记录 %s。请保留剩余 Git 数据并核实依赖，然后在「存储」中重试。",

@@ -114,6 +114,51 @@ async function run(engine, name, lang) {
     const hideInfo = page.getByRole('button', {name: /^(Hide the info|隐藏信息)/});
     const reviewForce = dialog.getByRole('button', {name:/^(Force Delete…|强制删除…)$/});
     const commitForce = dialog.getByRole('button', {name:/^(Force Delete|强制删除)$/});
+    if (process.env.YESMAN_TEST_SEVEN_LOCAL_GIT === '1') {
+      const workspace = page.locator('[data-agent="seven-local-git-roots/lead"][data-sidebar-entry="yesman"]');
+      const stores = dialog.locator('ul').filter({hasText:/host-jieli-sdk\/\.git/});
+      const open = async () => {
+        await workspace.click({button:'right'});
+        await dialog.getByText(/Checking workspace files and Git checkouts|正在检查工作区文件和 Git 工作树/).waitFor({state:'hidden'});
+      };
+      await open();
+      if (process.env.YESMAN_SEVEN_BASELINE === '1') {
+        await dialog.locator('.danger').getByText(/host-jieli-sdk.*\.git/).waitFor();
+        assert.equal(await reviewForce.count(), 0);
+        await page.evaluate(() => rpc('VerifySevenGitRoots'));
+        await cancel.click();
+        console.log(`${name} ${lang} held the seven-root fixture on the baseline`);
+        return;
+      }
+      await reviewForce.waitFor();
+      assert.equal(await stores.locator('li').count(), 7);
+      assert.match(await stores.innerText(), /sdk-inspect\.git/);
+      assert.equal(await dialog.locator('ul').filter({hasText:/output-09\/\.git/}).locator('li').count(), 10);
+      assert(await ok.isDisabled());
+      await reviewForce.click();
+      await commitForce.waitFor();
+      await dialog.getByText(/without a Git registration|未登记的检出/).waitFor();
+      assert(await cancel.evaluate(n => n === document.activeElement));
+      await screenshot('seven-stores-confirmation');
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({state:'detached'});
+      assert.equal(await count('ForceDeleteWorkspace'), 0);
+      await page.evaluate(() => rpc('VerifySevenGitRoots'));
+      await open();
+      await reviewForce.click();
+      await commitForce.click();
+      const closeOrError = dialog.getByRole('alert').or(page.getByText(lang === 'en' ? 'Deleted “Seven Local Git Roots”.' : '已删除“Seven Local Git Roots”。', {exact:true}));
+      await closeOrError.waitFor({timeout: 30_000});
+      if (await dialog.getByRole('alert').count()) throw Error(await dialog.getByRole('alert').innerText());
+      await workspace.waitFor({state:'detached'});
+      const target = await page.evaluate(() => calls.find(c => c[0] === 'ForceDeleteWorkspace')[1]);
+      await page.evaluate(target => rpc('VerifySevenGitRemoval', {target}), target);
+      assert.equal(await count('ForceDeleteWorkspace'), 1);
+      assert.deepEqual(await page.evaluate(() => unexpected), []);
+      assert.deepEqual(errors, []);
+      console.log(`${name} ${lang} confirmed deletion of seven stores, 112 submodules and ten Git links`);
+      return;
+    }
     await bazel.click();
     if (!baseline) await page.evaluate(() => { window.holdScan = true; });
     await openInfo.click();

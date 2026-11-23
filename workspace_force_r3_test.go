@@ -10,9 +10,11 @@ import (
 	"github.com/idy/yesman/internal/yesmen"
 )
 
-// Keep both the external separate-Git case and the indistinguishable legacy
-// embedded checkout in the same matrix. Neither local layout proves ownership.
-func TestWorkspaceForceProtectsGitDataAtItsLivePath(t *testing.T) {
+// Private data, local separate Git layouts and registrations are held.
+// A complete embedded or bare store can be listed for explicit review. An
+// outside-only gitfile is not visible in the selected workspace, so even an
+// otherwise complete store needs a confirmation that states this limitation.
+func TestWorkspaceForceClassifiesGitDataAtItsLivePath(t *testing.T) {
 	for _, mode := range []string{"external-gitfile", "embedded", "local-gitfile", "local-registration", "worktree-config", "bare", "private"} {
 		t.Run(mode, func(t *testing.T) {
 			s, y, target := deletionFixture(t)
@@ -67,7 +69,12 @@ func TestWorkspaceForceProtectsGitDataAtItsLivePath(t *testing.T) {
 			}
 			preflight, err := s.CheckWorkspaceForceDeletion(t.Context(), target)
 			must(t, err)
-			if preflight.Token != "" || len(preflight.Entries) == 0 || !strings.Contains(preflight.Problem, gitDir) || !strings.Contains(preflight.Problem, "may be used by another checkout") {
+			if mode == "external-gitfile" || mode == "embedded" || mode == "bare" {
+				if preflight.Token == "" || preflight.Problem != "" || len(preflight.LocalGitStores) != 1 {
+					t.Fatalf("expected the local store and a force confirmation: %+v", preflight)
+				}
+				s.CancelWorkspaceForceDeletion(preflight.Token)
+			} else if preflight.Token != "" || len(preflight.Entries) == 0 || !strings.Contains(preflight.Problem, gitDir) || !strings.Contains(preflight.Problem, "may be used by another checkout") {
 				t.Fatalf("missing live Git hold at %s: %+v", gitDir, preflight)
 			}
 			if err := s.DeleteWorkspace(t.Context(), target); err == nil || !strings.Contains(err.Error(), gitDir) {

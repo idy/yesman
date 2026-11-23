@@ -32,16 +32,17 @@ type checkoutObservation struct {
 // CheckoutScan may have rows even when coverage is incomplete. Only a complete
 // scan with an unchanged target can be used to prepare force deletion.
 type CheckoutScan struct {
-	Entries     []CheckoutEntry `json:"entries"`
-	Paths       []string        `json:"paths,omitempty"`
-	LinkMarkers []string        `json:"linkMarkers,omitempty"`
-	Problem     string          `json:"problem,omitempty"`
-	observed    []checkoutObservation
+	Entries        []CheckoutEntry `json:"entries"`
+	Paths          []string        `json:"paths,omitempty"`
+	LinkMarkers    []string        `json:"linkMarkers,omitempty"`
+	LocalGitStores []string        `json:"localGitStores,omitempty"`
+	Problem        string          `json:"problem,omitempty"`
+	observed       []checkoutObservation
 }
 
 func gitMarkers(rel string, entries []os.DirEntry) (CheckoutEntry, []string) {
 	var dotGit, bare []string
-	var head, objects, worktrees, private bool
+	var head, objects, worktrees, private, config, refs bool
 	for _, entry := range entries {
 		name := entry.Name()
 		switch strings.ToLower(name) {
@@ -53,6 +54,10 @@ func gitMarkers(rel string, entries []os.DirEntry) (CheckoutEntry, []string) {
 		case "objects":
 			objects = true
 			bare = append(bare, name)
+		case "config":
+			config = true
+		case "refs", "packed-refs":
+			refs = true
 		case "worktrees":
 			worktrees = true
 		case "commondir", "gitdir":
@@ -62,7 +67,7 @@ func gitMarkers(rel string, entries []os.DirEntry) (CheckoutEntry, []string) {
 	}
 	// Private Git data can be separated from its common directory. A .git
 	// directory is already covered by the enclosing checkout's marker.
-	if (objects && (head || worktrees) || head && private) && !strings.EqualFold(path.Base(rel), ".git") {
+	if (objects && (head || worktrees) || head && private || config && (head || objects) && refs) && !strings.EqualFold(path.Base(rel), ".git") {
 		return CheckoutEntry{Path: rel, Bare: true}, append(bare, dotGit...)
 	}
 	if len(dotGit) > 0 {

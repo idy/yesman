@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/idy/yesman/internal/pool"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -112,7 +113,7 @@ func (s *service) CheckWorkspaceForceDeletion(ctx context.Context, target yesmen
 	a := s.app
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	scan, plan, err := a.yesmen.PrepareForceDeletion(ctx, target, a.pool.CheckWorkspaceDeletion, a.pool.RelocatedPrimary)
+	scan, plan, err := a.yesmen.PrepareForceDeletion(ctx, target, a.pool.CheckWorkspaceDeletion, a.pool.RelocatedPrimary, pool.WorkspaceGitDeletionChecks())
 	out := WorkspaceDeletionCheck{CheckoutScan: scan}
 	if err != nil {
 		out.Problem = workspaceDeletionError(err).Error()
