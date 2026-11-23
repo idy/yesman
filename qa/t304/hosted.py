@@ -18,12 +18,20 @@ import threading
 import time
 from uuid import uuid4
 
+from cleanup_diagnostics import bulk_preview_matches, checked_path, fixture_journal
+
 KIT = Path(__file__).resolve().parent
 KEY = 'yrQPn0gg1/gASLxIQiUCIiUQ/csWENI0+up1cs3KWO0='
 CALL = b'const call = (method, ...args) => mygo.call(`Yesman.${method}`, ...args);'
 OBSERVER_CALL = b'const call = (method, ...args) => window.__t304Call(mygo, method, ...args);'
 EXECUTION_FILES = ('hosted.py','observer.js','signature.go','windows.swift','fixtures/cleanup.py',
-                   'fixtures/delete_seed.py','fixtures/delete_verify.py','fixtures/links.json','fixtures/seven.py')
+                   'fixtures/delete_seed.py','fixtures/delete_verify.py','fixtures/links.json','fixtures/seven.py',
+                   'cleanup_diagnostics.py')
+EPISODE = 'cleanup-only'
+QA_REF = 'refs/heads/qa/t322-v0.1.64-cleanup'
+QA_BASE = 'acea9a4018e2530db9af63a5aead8705ba1fe266'
+RELEASE_SOURCE = '68811d382ad5eac649d429630c21332c53f5cb59'
+T319_VERDICT_SHA = '65be470d2920e354c9ff460efdaddb9ea9a6f56f1d4cdfa763b45f418d4081fa'
 COMBINATION = {
     '#141': {
         'originalHead': '10b269b22a88ba0f0e9df5ce4e86d8ffce3fec98',
@@ -70,6 +78,7 @@ LOSS_WARNINGS = {
         'This permanently deletes the listed directories, including uncommitted edits, untracked and ignored files, and build output. No recovery reference is created.'),
 }
 BULK = sorted(['latency-00'] + [f'latency-{n:02d}' for n in range(3, 29)])
+BULK_OFFER = frozenset(BULK + ['latency-02'])
 
 
 def write(path, data):
@@ -146,8 +155,26 @@ def require_first_attempt(attempt):
     assert attempt == '1', 'Hosted acceptance permits only Actions attempt 1'
 
 
+def require_episode(episode, ref, contract=None):
+    assert episode == EPISODE and ref == QA_REF, 'Explicit cleanup-only episode and exact QA ref required'
+    if contract is not None:
+        assert (contract['schema'], contract['mode'], contract['episode'], contract['qaBase']) == (3, 'candidate', EPISODE, QA_BASE)
+        assert (contract['tag'], contract['source'], contract['releaseID'], contract['assetID'], contract['manifestID']) == (
+            'v0.1.64', RELEASE_SOURCE, 455729493, 783812678, 783812889), 'Different release operands'
+        verdict_path = KIT / 't319-verdict.json'
+        reuse = contract['reuse']
+        assert reuse['verdictSHA256'] == digest(verdict_path) == T319_VERDICT_SHA
+        verdict = load(verdict_path)
+        assert (verdict['source'], verdict['draft'], verdict['qaHead'], verdict['standardRun'], verdict['customRun']) == (
+            RELEASE_SOURCE, 455729493, QA_BASE, 45225972788, 45228181690)
+        assert (verdict['ordinary'], verdict['seven'], verdict['standardStartup'], verdict['customResult']) == ('PASS','PASS','PASS','FAIL')
+        assert reuse['completedScenarios'] == ['ordinary', 'seven'] and reuse['standardRun'] == verdict['standardRun']
+        assert reuse['failedCustomRun'] == verdict['customRun'] and reuse['overallPackageAcceptance'] is False
+
+
 def verify_inputs(args, root, evidence):
     contract = load(args.contract)
+    require_episode(args.episode, QA_REF, contract)
     assert contract['repository'] == 'idy/yesman'
     tag, source, arch = (contract[k] for k in ('tag', 'source', 'arch'))
     assert arch == 'arm64' and re.fullmatch(r'v0\.1\.(0|[1-9][0-9]*)', tag)
@@ -155,7 +182,6 @@ def verify_inputs(args, root, evidence):
         assert re.fullmatch(r'[0-9a-f]{40}', revision), revision
     assert contract['mode'] in ('published-control', 'candidate')
     if contract['mode'] == 'candidate':
-        assert contract['schema'] == 2
         assert contract['features'] == {pr: row['head'] for pr, row in COMBINATION.items()}
         verify_combination(contract['inclusion'], args.adoption, contract['leadAdoptionSHA256'], args.review)
         verify_release_source(args.source_dir.resolve(), source, contract['tree'], contract['inclusion'])
@@ -176,6 +202,7 @@ def verify_inputs(args, root, evidence):
         assert downloaded['draft'] is True and downloaded['manifestID'] == contract['manifestID']
         assert downloaded['contractSHA256']==digest(args.contract)
         require_first_attempt(downloaded['runAttempt'])
+        assert (downloaded['episode'], downloaded['qaRef']) == (EPISODE, QA_REF)
         if args.operation == 'replay':
             assert (downloaded['qaHead'],downloaded['runID'],downloaded['runAttempt']) == (os.environ['GITHUB_SHA'], os.environ['GITHUB_RUN_ID'],os.environ['GITHUB_RUN_ATTEMPT'])
     manifest = load(args.manifest)
@@ -247,13 +274,25 @@ class Replay:
         self.removed, self.preserved = [], False
         self.payload_baseline = None
         self.token = uuid4().hex
+        self.fixture_rows = {}
+        self.timings = {'seedMS': None, 'verifyMS': []}
+        self.teardown_errors = []
+        self.child_receipt = None
 
     def fixture(self, script, *args):
         return json.loads(run([sys.executable,'-B',str(KIT/'fixtures'/script), *map(str,args)], self.env))
 
     def seed(self):
         if self.scenario == 'cleanup':
-            return self.fixture('cleanup.py','seed',self.profile)
+            start = time.monotonic_ns()
+            try:
+                result = self.fixture('cleanup.py','seed',self.profile)
+                records = load(self.profile / 'yesmen/cleanup-latency/.yesman/worktrees.json')
+                self.fixture_rows = {row['dir']: row for row in records}
+                assert len(records) == len(self.fixture_rows) == result['worktrees'] == 32
+                return result
+            finally:
+                self.timings['seedMS'] = (time.monotonic_ns()-start)/1e6
         result = self.fixture('delete_seed.py',self.profile,'--files','25000' if self.scenario=='seven' else '0')
         if self.scenario == 'seven':
             result['seven'] = self.fixture('seven.py','seed',self.profile,KIT/'fixtures/links.json')
@@ -278,7 +317,11 @@ class Replay:
 
     def verify(self):
         if self.scenario == 'cleanup':
-            return self.fixture('cleanup.py','verify',self.profile,'--removed',*self.removed)
+            start = time.monotonic_ns()
+            try:
+                return self.fixture('cleanup.py','verify',self.profile,'--removed',*self.removed)
+            finally:
+                self.timings['verifyMS'].append((time.monotonic_ns()-start)/1e6)
         workspaces = {'yesman-5','plain-delete','bazel-links'} - set(self.removed)
         actual = {p.name for p in (self.profile/'yesmen').iterdir()}
         assert actual == workspaces, ('Unexpected workspace or staged remainder', actual, workspaces)
@@ -358,6 +401,12 @@ class Replay:
                 assert self.preserved and event['view']['focus'] == 'Cancel'
                 assert any(row['step']=='button-click' and row['data']['label']=='Force Delete…' for row in event['data']['events'])
             if step == 'bulk-before-commit':
+                terminal = [row for row in event['data']['rpc'] if row['method'] == 'CheckWorktreeCleanup'
+                            and row.get('preview', {}).get('target') == 'heading' and row.get('ok') is True]
+                assert len(terminal) == 1 and bulk_preview_matches(terminal[0]['preview'], self.fixture_rows, BULK_OFFER, LABELS), 'Exact bulk checkout identities are required'
+                timing = [row['data'] for row in event['data']['events'] if row['step'] == 'bulk-terminal']
+                assert len(timing) == 1 and timing[0]['offered'] == 28 and timing[0]['exact'] is True
+                assert 0 <= timing[0]['elapsedMs'] <= LIMITS['bulkMs']
                 intent['lateUse'] = self.late_user()
             intent['approval'] = {'method':method,'target':target}
         write(self.result/f'{event["occurrence"]:02}.disk.json', {'step':step,'disk':disk,'retainedPayloadSHA256':retained,'intent':intent})
@@ -407,8 +456,10 @@ class Replay:
                     result = replay.accept(json.loads(self.rfile.read(size)))
                 except Exception as error:
                     replay.failed = str(error) or type(error).__name__
-                    write(replay.result/'failure.json', {'position':replay.position,'error':replay.failed})
-                    replay.finished.set()
+                    try:
+                        write(replay.result/'failure.json', {'position':replay.position,'error':replay.failed})
+                    finally:
+                        replay.finished.set()
                     self.reply(422)
                     return
                 self.reply(200,result)
@@ -418,11 +469,64 @@ class Replay:
             try:
                 yield f'http://127.0.0.1:{server.server_port}'
             finally:
-                server.shutdown()
-                thread.join(timeout=5)
-                if self.child and self.child.poll() is None:
-                    self.child.terminate()
-                    self.child.wait(timeout=5)
+                self.teardown('collector-stop', server.shutdown)
+                self.teardown('collector-join', lambda: thread.join(timeout=5))
+                if thread.is_alive():
+                    self.teardown_errors.append({'phase': 'collector-join', 'type': 'ThreadStillRunning'})
+                if self.child is not None:
+                    self.teardown('late-use-child-stop', self.stop_late_child)
+
+    def teardown(self, phase, action):
+        try:
+            action()
+        except Exception as error:
+            self.teardown_errors.append({'phase': phase, 'type': type(error).__name__})
+
+    def stop_late_child(self):
+        code = stop(self.child)
+        assert self.child.poll() == code
+        self.child_receipt = {'pid': self.child.pid, 'returncode': code, 'joined': True}
+
+    def collect_diagnostics(self):
+        diagnostic = {'episode': EPISODE, 'timings': self.timings, 'lastAcceptedCheckpoint': self.position,
+                      'expectedRemovedFromAcceptedRecords': self.removed, 'childTeardown': self.child_receipt}
+        profile = None
+        try:
+            profile = checked_path(self.scope, 'fixture.noindex')
+            diagnostic['gh'] = fixture_journal(profile)
+        except (OSError, ValueError) as error:
+            diagnostic['gh'] = {'status': 'unavailable', 'errorType': type(error).__name__, 'records': []}
+        if profile is not None and self.fixture_rows:
+            try:
+                diagnostic['terminalDisk'] = {'verified': True, 'disk': self.verify(), 'retainedPayloadSHA256': self.retained_payload()}
+            except Exception as error:
+                diagnostic['terminalDisk'] = {'verified': False, 'errorType': type(error).__name__}
+        diagnostic['teardownErrors'] = self.teardown_errors
+        write(self.result/'diagnostics.json', diagnostic)
+        return diagnostic
+
+    @contextmanager
+    def preserve_diagnostics(self):
+        primary = None
+        try:
+            yield
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            try:
+                diagnostic = self.collect_diagnostics()
+                if primary is None:
+                    assert not self.teardown_errors, self.teardown_errors
+                    assert diagnostic['terminalDisk']['verified'] and diagnostic['gh']['status'] == 'recorded'
+                    inquiries = diagnostic['gh']['records']
+                    assert any(row['branch']=='fixture:latency-01' and row['delaySeconds']==.2 and row['phase']=='response-written' for row in inquiries)
+                    assert any(row['branch']=='fixture:latency-29' and row['delaySeconds']==30 and row['phase']=='start' for row in inquiries)
+                    assert self.child_receipt and self.child_receipt['joined']
+            except Exception as diagnostic_error:
+                if primary is None:
+                    raise
+                primary.add_note(f'Cleanup evidence error: {type(diagnostic_error).__name__}')
 
 
 def fixture_env(scope):
@@ -453,28 +557,28 @@ def stop(process):
 
 
 def launch(args, root, evidence, contract, executable, bundle_files):
+    require_episode(args.episode, os.environ.get('GITHUB_REF'), contract)
+    scenario = 'cleanup'
     helper = root/'window-info'
     run(['xcrun','swiftc',str(KIT/'windows.swift'),'-o',str(helper)])
-    for scenario in SCENARIOS:
-        scope, result = root/scenario, evidence/scenario
-        scope.mkdir()
-        result.mkdir()
-        profile = scope/'fixture.noindex'
-        env = fixture_env(scope)
-        replay = Replay(scenario,scope,profile,result,env,contract)
+    scope, result = root/scenario, evidence/scenario
+    scope.mkdir()
+    result.mkdir()
+    profile = scope/'fixture.noindex'
+    env = fixture_env(scope)
+    replay = Replay(scenario,scope,profile,result,env,contract)
+    with replay.preserve_diagnostics():
         write(result/'seed.json', replay.seed())
         write(result/'initial-disk.json',{'disk':replay.verify(),'retainedPayloadSHA256':replay.retained_payload()})
         with replay.serve() as endpoint:
-            config = dict(scenario=scenario, source=contract['source'], profile=str(profile), endpoint=endpoint+'/'+replay.token,
-                          labels=LABELS, limits=LIMITS, markers=sorted(row['marker'] for row in load(KIT/'fixtures/links.json')['markers']),
-                          hires=['cleanup-latency'] if scenario=='cleanup' else ['bazel-links','plain-delete','yesman-5'])
+            config = dict(scenario=scenario, episode=EPISODE, source=contract['source'], profile=str(profile), endpoint=endpoint+'/'+replay.token,
+                          labels=LABELS, limits=LIMITS, hires=['cleanup-latency'])
             web = scope/'observer-web'
             write(result/'instrumentation.json',instrument(args.source_dir/'web',web,config))
             env.update(YESMAN_HOME=str(profile),YESMAN_PI='/usr/bin/false',PI_CODING_AGENT_DIR=str(scope/'pi'),
                        YESMAN_WEB_DIR=str(web),HTTP_PROXY=endpoint,HTTPS_PROXY=endpoint,ALL_PROXY=endpoint,NO_PROXY='localhost,127.0.0.1,::1',
                        PATH=str(profile/'fixture-bin')+':'+env['PATH'])
             process = None
-            code = None
             try:
                 with (result/'app.log').open('x') as log:
                     process = subprocess.Popen([str(executable)],cwd=scope,env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -496,23 +600,26 @@ def launch(args, root, evidence, contract, executable, bundle_files):
                     assert replay.finished.wait(380), 'Replay timed out'
                     assert replay.failed is None, replay.failed
                     assert replay.position==len(SCENARIOS[scenario])
-                    if scenario=='cleanup':
-                        inquiries = [json.loads(line) for line in (profile/'fixture-gh.log').read_text().splitlines()]
-                        assert any(row['branch']=='fixture:latency-01' and row['delaySeconds']==.2 for row in inquiries)
-                        assert any(row['branch']=='fixture:latency-29' and row['delaySeconds']==30 for row in inquiries)
-                        shutil.copyfile(profile/'fixture-gh.log',result/'fixture-gh.jsonl')
             finally:
                 if process:
-                    code = stop(process)
-                    write(result/'exit.json', {'pid':process.pid,'exitCode':code})
-            assert code==0 and not json.loads(run([str(helper),str(process.pid)],timeout=5))
-        assert files(executable.parents[2]) == bundle_files
-        run(['codesign','--verify','--deep','--strict',str(executable.parents[2])])
-        write(result/'pass.json',{'scenario':scenario,'source':contract['source'],'releaseID':contract['releaseID'],
-              'assetID':contract['assetID'],'binarySHA256':contract['binarySHA256'],'runID':os.getenv('GITHUB_RUN_ID'),
-              'runSHA':os.getenv('GITHUB_SHA'),'runAttempt':os.getenv('GITHUB_RUN_ATTEMPT'),
-              **SCOPE,
-              'stages':list(SCENARIOS[scenario])})
+                    def stop_app():
+                        code = stop(process)
+                        write(result/'exit.json', {'pid':process.pid,'exitCode':code})
+                        windows = json.loads(run([str(helper),str(process.pid)],timeout=5))
+                        write(result/'postexit-windows.json', {'pid':process.pid,'windows':windows})
+                        assert code==0 and not windows
+                    replay.teardown('app-stop', stop_app)
+                def check_bundle():
+                    assert files(executable.parents[2]) == bundle_files
+                    run(['codesign','--verify','--deep','--strict',str(executable.parents[2])])
+                    write(result/'postexit-bundle.json', {'inventoryUnchanged':True,'strictSignatureVerified':True})
+                replay.teardown('bundle-recheck', check_bundle)
+    write(result/'pass.json',{'scenario':scenario,'episode':EPISODE,'completedScenarios':[scenario],
+          'overallPackageAcceptance':False,'source':contract['source'],'releaseID':contract['releaseID'],
+          'assetID':contract['assetID'],'binarySHA256':contract['binarySHA256'],'runID':os.getenv('GITHUB_RUN_ID'),
+          'runSHA':os.getenv('GITHUB_SHA'),'runAttempt':os.getenv('GITHUB_RUN_ATTEMPT'),
+          **SCOPE,
+          'stages':list(SCENARIOS[scenario])})
 
 
 def main():
@@ -520,12 +627,14 @@ def main():
         raise RuntimeError('Acceptance assertions must be enabled')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('operation',choices=['verify-only','replay'])
+    parser.add_argument('--episode', required=True, choices=[EPISODE])
     for field in ('contract','source-dir','archive','manifest','receipt','scratch','evidence'):
         parser.add_argument('--'+field,type=Path,required=True)
     parser.add_argument('--adoption', type=Path)
     parser.add_argument('--review', type=Path)
     args = parser.parse_args()
     if args.operation=='replay':
+        require_episode(args.episode, os.environ.get('GITHUB_REF'))
         hosted_guard()
         assert args.scratch.resolve().is_relative_to(Path(os.environ['RUNNER_TEMP']).resolve())
         assert args.evidence.resolve().is_relative_to(Path(os.environ['RUNNER_TEMP']).resolve())
@@ -540,7 +649,10 @@ def main():
             launch(args,args.scratch,args.evidence,contract,executable,bundle_files)
     except Exception as error:
         detail = error.stderr if isinstance(error,subprocess.CalledProcessError) else None
-        write(args.evidence/'failure.json',{'type':type(error).__name__,'error':str(error),'stderr':detail})
+        try:
+            write(args.evidence/'failure.json',{'type':type(error).__name__,'error':str(error),'stderr':detail})
+        except OSError as evidence_error:
+            error.add_note(f'Primary failure receipt write error: {type(evidence_error).__name__}')
         raise
 
 

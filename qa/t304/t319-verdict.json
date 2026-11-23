@@ -1,0 +1,53 @@
+{
+  "task": "t319",
+  "verdict": "HOLD \u2014 PACKAGE ACCEPTANCE INCOMPLETE",
+  "source": "68811d382ad5eac649d429630c21332c53f5cb59",
+  "draft": 455729493,
+  "qaHead": "acea9a4018e2530db9af63a5aead8705ba1fe266",
+  "standardRun": 45225972788,
+  "standardAttempt": 1,
+  "standardStartup": "PASS",
+  "customRun": 45228181690,
+  "customAttempt": 1,
+  "customResult": "FAIL",
+  "customMacJob": 137880358192,
+  "ordinary": "PASS",
+  "seven": "PASS",
+  "cleanup": "FAIL: exact28 preview not reached",
+  "expectedOffers": 28,
+  "actualOffers": 20,
+  "rpcMilliseconds": 11035,
+  "unexpectedBusy": [
+    "latency-12"
+  ],
+  "unexpectedTimeouts": [
+    "latency-22",
+    "latency-23",
+    "latency-24",
+    "latency-25",
+    "latency-26",
+    "latency-27",
+    "latency-28"
+  ],
+  "intendedTimeout": "latency-29",
+  "openPRRow": "latency-01 retained correctly",
+  "bulkCommitObserved": false,
+  "lateUseProbeReached": false,
+  "rootCause": "UNKNOWN: no local/remote phase timings or lsof PID/fd operand; gh journal absent on failure",
+  "findings": [
+    {
+      "id": "QA064-3",
+      "scope": "QA failure evidence",
+      "summary": "Persist gh journal and raw preview/classification operands on failure, preserve primary error, and collect targeted timing/use diagnostics before choosing repair."
+    }
+  ],
+  "productDefectProven": false,
+  "packageAcceptance": false,
+  "publicationAuthorized": false,
+  "executionAuthorized": false,
+  "nativeMenuSelection": false,
+  "remoteRequestsThisReview": 0,
+  "managedCheckout": null,
+  "report": "report.md",
+  "nextPlan": "diagnostic-plan.md"
+}

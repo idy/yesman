@@ -7,6 +7,10 @@ on:
         description: Fixed draft tag from the adopted QA contract
         type: string
         required: true
+      episode:
+        description: Exact reviewed scenario selector
+        type: string
+        required: true
 permissions: {}
 
 jobs:
@@ -24,15 +28,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_TAG: ${{ inputs.release_tag }}
+          EPISODE: ${{ inputs.episode }}
         run: |
           python3 - <<'PY'
           import hashlib, json, os, pathlib, re, subprocess
           e = os.environ
-          assert e['GITHUB_REPOSITORY'] == 'idy/yesman' and e['GITHUB_REF'].startswith('refs/heads/qa/t304-')
-          assert e['GITHUB_RUN_ATTEMPT'] == '1'
+          assert e['GITHUB_REPOSITORY'] == 'idy/yesman' and e['GITHUB_REF'] == 'refs/heads/qa/t322-v0.1.64-cleanup'
+          assert e['GITHUB_RUN_ATTEMPT'] == '1' and e['EPISODE'] == 'cleanup-only'
           qa = e['GITHUB_SHA']
           tag = e['EXPECTED_TAG']
-          assert re.fullmatch(r'[0-9a-f]{40}', qa) and re.fullmatch(r'v0\.1\.[1-9][0-9]*', tag)
+          assert re.fullmatch(r'[0-9a-f]{40}', qa) and tag == 'v0.1.64'
           def get(path, raw=False):
               args = ['gh','api','--method','GET','repos/idy/yesman/'+path]
               if raw:
@@ -41,8 +46,11 @@ jobs:
               return data if raw else json.loads(data)
           contract_bytes = get(f'contents/qa/t304/contract.json?ref={qa}', True)
           c = json.loads(contract_bytes)
-          assert c['schema'] == 2
-          assert (c['mode'],c['repository'],c['tag'],c['arch']) == ('candidate','idy/yesman',tag,'arm64')
+          assert c['schema'] == 3
+          assert (c['mode'],c['repository'],c['tag'],c['arch'],c['episode'],c['qaBase']) == (
+              'candidate','idy/yesman',tag,'arm64',e['EPISODE'],'acea9a4018e2530db9af63a5aead8705ba1fe266')
+          assert (c['releaseID'],c['assetID'],c['manifestID']) == (455729493,783812678,783812889)
+          assert c['source'] == '68811d382ad5eac649d429630c21332c53f5cb59'
           assert all(type(c[k]) is int and c[k] > 0 for k in ('releaseID','assetID','manifestID','archiveBytes'))
           def source():
               obj = get('git/ref/tags/'+tag)['object']
@@ -70,12 +78,13 @@ jobs:
           assert source()==c['source']
           (folder/'receipt.json').write_text(json.dumps(dict(tag=tag,arch='arm64',source=c['source'],releaseID=c['releaseID'],
               manifestID=c['manifestID'],asset=asset,sha256=c['archiveSHA256'],draft=True,qaHead=qa,
-              contractSHA256=hashlib.sha256(contract_bytes).hexdigest(),runID=e['GITHUB_RUN_ID'],runAttempt=e['GITHUB_RUN_ATTEMPT'])))
+              contractSHA256=hashlib.sha256(contract_bytes).hexdigest(),runID=e['GITHUB_RUN_ID'],runAttempt=e['GITHUB_RUN_ATTEMPT'],
+              episode=e['EPISODE'],qaRef=e['GITHUB_REF'])))
           with open(e['GITHUB_OUTPUT'],'a') as out: out.write('source='+c['source']+'\n')
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: verified-t304-draft-download
+          name: verified-t322-draft-download
           path: ${{ runner.temp }}/input
           if-no-files-found: error
 
@@ -104,31 +113,38 @@ jobs:
           cache: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: verified-t304-draft-download
+          name: verified-t322-draft-download
           path: ${{ runner.temp }}/input
-      - name: Exercise the isolated package via production WebKit and Go
+      - name: Exercise only the full cleanup scenario via production WebKit and Go
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          EPISODE: ${{ inputs.episode }}
         run: |
           set -euo pipefail
           test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/qa/t322-v0.1.64-cleanup
+          test "$RELEASE_TAG" = v0.1.64
+          test "$EPISODE" = cleanup-only
           kit="$GITHUB_WORKSPACE/qa-source/qa/t304"
           source="$GITHUB_WORKSPACE/release-source"
           input="$RUNNER_TEMP/input"
           test "$(git -C "$GITHUB_WORKSPACE/qa-source" rev-parse HEAD)" = "$GITHUB_SHA"
+          qa_parents=$(git -C "$GITHUB_WORKSPACE/qa-source" cat-file commit HEAD | awk '/^$/{body=1} !body && /^parent /{print $2}')
+          test "$qa_parents" = acea9a4018e2530db9af63a5aead8705ba1fe266
           python=$(command -v python3)
           mkdir "$RUNNER_TEMP/t304-build-cache"
           env -i HOME="$HOME" PATH="$PATH" TMPDIR="$RUNNER_TEMP" GOCACHE="$RUNNER_TEMP/t304-build-cache" \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_TEMP="$RUNNER_TEMP" \
-            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_SHA="$GITHUB_SHA" \
-            "$python" -B "$kit/hosted.py" replay --contract "$kit/contract.json" --source-dir "$source" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_REF="$GITHUB_REF" \
+            "$python" -B "$kit/hosted.py" replay --episode "$EPISODE" --contract "$kit/contract.json" --source-dir "$source" \
               --adoption "$kit/lead-adoption-141.json" --review "$kit/t311-readiness.json" \
               --archive "$input/yesman-${RELEASE_TAG#v}-darwin-arm64.tar.gz" --manifest "$input/update-darwin-arm64.json" \
               --receipt "$input/receipt.json" --scratch "$RUNNER_TEMP/t304-scratch" --evidence "$RUNNER_TEMP/t304-proof"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: t304-package-acceptance
+          name: t322-cleanup-only-acceptance
           path: ${{ runner.temp }}/t304-proof
           if-no-files-found: error

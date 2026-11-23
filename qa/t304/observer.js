@@ -22,8 +22,47 @@
   const rpcRows = [];
   let pendingMenu = null;
   let permit = null;
+  let bulkProbe = null;
+  let reviewToken = null;
   let loaded = false;
   let serial = 0;
+  const fixtureDir = /^(?:latency-[0-2][0-9]|keep-primary|safe-review)$/;
+  const heldReasons = new Set([
+    'This branch has an open pull request.',
+    'This checkout is primary or has no recorded temporary purpose.',
+    'A process is using this worktree.',
+    'This worktree could not be checked within the time limit.',
+  ]);
+  const bulkNames = ['latency-00', ...Array.from({length: 27}, (_, i) => `latency-${String(i+2).padStart(2, '0')}`)];
+
+  function capturePreview(result, target) {
+    const workspace = `${config.profile}/yesmen/cleanup-latency/`;
+    let invalid = !Array.isArray(result?.rows) || result.rows.length > 32;
+    const rows = (Array.isArray(result?.rows) ? result.rows.slice(0, 32) : []).map(row => {
+      const dir = typeof row?.dir === 'string' && fixtureDir.test(row.dir) ? row.dir : '';
+      const instance = typeof row?.cleanupId === 'string' && /^[0-9a-f]{32}$/.test(row.cleanupId) ? row.cleanupId : '';
+      const head = typeof row?.head === 'string' && /^[0-9a-f]{40}$/.test(row.head) ? row.head : '';
+      const reason = row?.reason === undefined || row.reason === '' ? '' : heldReasons.has(row.reason) ? row.reason : '[unrecorded reason]';
+      const rawDetail = row?.detail;
+      const detail = rawDetail === undefined || rawDetail === '' ? '' :
+        rawDetail === workspace+dir && dir ? dir :
+        rawDetail === 'primary' || rawDetail === `fixture/cleanup-latency · ${dir}` ? rawDetail : '[unrecorded detail]';
+      invalid ||= !dir || reason === '[unrecorded reason]' || (!reason && (!instance || !head || row.path !== workspace+dir));
+      return {dir, instance, head, reason, detail};
+    });
+    return {target, rows, invalid, tokenPresent: typeof result?.token === 'string' && result.token.length > 0,
+      partial: result?.partial === true, retryable: result?.retryable === true};
+  }
+
+  async function tokenHash(token) {
+    try {
+      if (typeof token !== 'string' || token.length > 128 || !globalThis.crypto?.subtle) return null;
+      const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+      return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
+    } catch (_) {
+      return null;
+    }
+  }
 
   async function until(pred, detail, ms = 10000) {
     const end = performance.now() + ms;
@@ -78,8 +117,13 @@
     if (isCommit) {
       const actualTarget = method === 'ConfirmWorktreeCleanup' ? args[0] : args[0]?.entry;
       assert(permit?.method === method && permit.target === actualTarget, `Commit outside approved fixture step: ${method} ${actualTarget}`);
+      if (method === 'ConfirmWorktreeCleanup') {
+        assert(typeof permit.token === 'string' && permit.token && permit.token === args[2], 'Cleanup confirmation token differs from the approved preview');
+      }
       permit = null;
     }
+    const selected = method === 'CheckWorktreeCleanup' ? args[2] : undefined;
+    const requestProbe = method === 'CheckWorktreeCleanup' && selected == null ? bulkProbe : null;
     const observed = isCommit || /Workspace.*(?:Delet|Review)|(?:Prepare|Preview|Check|Cancel|Confirm)WorktreeCleanup/.test(method);
     const row = {method, started: performance.now()};
     if (observed) rpcRows.push(row);
@@ -92,11 +136,20 @@
         if (method === 'ReviewWorkspaceForceDeletion') row.review = {
           hasToken: !!result.token, problem: result.problem, markers: result.linkMarkers ?? [],
         };
+        if (method === 'CheckWorktreeCleanup') {
+          row.preview = capturePreview(result, selected == null ? 'heading' : fixtureDir.test(selected.dir) ? selected.dir : 'unknown');
+          // A promise never enters the checkpoint. The raw token stays in this closure.
+          const digest = tokenHash(result?.token);
+          previewDigests.set(row, digest);
+          if (requestProbe) Object.assign(requestProbe, {row, token: result?.token});
+          if (selected?.dir === 'safe-review') reviewToken = result?.token;
+        }
         if (method === 'ConfirmWorktreeCleanup') row.rows = result.map(({dir, reason, removed}) => ({dir, reason, removed}));
       }
       return result;
     } catch (error) {
       if (observed) Object.assign(row, {finished: performance.now(), ok: false, error: errorText(error)});
+      if (requestProbe) requestProbe.row = row;
       throw error;
     }
   }
@@ -108,8 +161,14 @@
     mark('button-click', {label, source: 'DOM click()'});
     control.click();
   }
+  const previewDigests = new WeakMap();
   async function checkpoint(name, data = {}) {
-    return post(name, {...data, events: events.splice(0), rpc: rpcRows.splice(0)});
+    const rpc = rpcRows.splice(0);
+    const trace = events.splice(0);
+    await Promise.all(rpc.filter(row => row.preview).map(async row => {
+      row.preview.tokenSHA256 = await previewDigests.get(row);
+    }));
+    return post(name, {...data, events: trace, rpc});
   }
   function sidebar(name) {
     return document.querySelector(`#yesmen [data-sidebar-entry="yesman"][data-agent^="${name}/"]`);
@@ -130,21 +189,28 @@
     assert(commitCount() === 0, 'Cancellation made a commit call');
     await checkpoint(step);
   }
-  function authorize(result, method, target) {
+  function authorize(result, method, target, token) {
     assert(result?.method === method && result?.target === target && permit === null, 'Host approval receipt differs');
-    permit = {method, target};
+    permit = {method, target, token};
   }
-  async function confirmWithWarning(step, method, target, label) {
+  function checkBulkOffer(probe) {
+    const preview = probe?.row?.preview;
+    return preview?.target === 'heading' && !preview.invalid && preview.tokenPresent &&
+      JSON.stringify(preview.rows.filter(row => !row.reason).map(row => row.dir).sort()) === JSON.stringify(bulkNames) &&
+      visible(button('Permanently remove 28 worktrees'));
+  }
+  async function confirmWithWarning(step, method, target, label, probe) {
     const current = dialog();
     function checkWarning() {
       assert(current && dialog() === current, `Confirmation dialog changed for ${step}`);
+      if (probe) assert(probe === bulkProbe && checkBulkOffer(probe), 'Exact bulk offer changed before confirmation');
       const observed = lossWarning(step);
       assert(observed?.visible && observed.text === warnings[step][1], `Missing exact visible loss warning for ${step}`);
     }
     checkWarning();
     const approval = await checkpoint(step);
     checkWarning();
-    authorize(approval, method, target);
+    authorize(approval, method, target, probe?.token);
     pressControl(label);
   }
   async function ordinary() {
@@ -191,6 +257,7 @@
   async function worktreeMenu(target) {
     const source = target === 'heading' ? '#yesman-info [data-info-entry="worktrees"]' : `#yesman-info [data-info-entry^="worktree:${target}:"]`;
     const row = await until(() => visible(selector(source)) && selector(source), `worktree entry ${target}`);
+    if (target === 'heading') bulkProbe = {};
     pendingMenu = {method:'WorktreeMenu', row: target !== 'heading', target, action: target === 'heading' ? 'cleanup' : 'remove'};
     const started = performance.now();
     row.dispatchEvent(new MouseEvent('contextmenu', {bubbles:true,cancelable:true,button:2}));
@@ -239,21 +306,26 @@
     await cancel('review-cancel');
     const reopen = await worktreeMenu('safe-review');
     await waitTree(reopen, () => visible(button('Remove worktree')), limits.singleMs, 'safe-review');
-    authorize(await checkpoint('review-before-commit'), 'ConfirmWorktreeCleanup', 'cleanup-latency');
+    const token = reviewToken;
+    authorize(await checkpoint('review-before-commit'), 'ConfirmWorktreeCleanup', 'cleanup-latency', token);
     pressControl('Remove worktree');
     await until(() => lastCall('ConfirmWorktreeCleanup')?.rows && !dialog(), 'single cleanup commit', limits.cleanupCommitMs);
     let removed = lastCall('ConfirmWorktreeCleanup').rows.filter(row => row.removed).map(row => row.dir);
     assert(JSON.stringify(removed) === '["safe-review"]' && permit === null && commitCount() === 1, 'Single cleanup differed');
     await checkpoint('review-after-commit', {removed});
     const bulk = await worktreeMenu('heading');
-    await waitTree(bulk, () => visible(button('Permanently remove 28 worktrees')), limits.bulkMs, 'heading');
+    const probe = bulkProbe;
+    await waitTree(bulk, () => probe.row && visible(dialog()) && selector('#worktree-cleanup-hint')?.textContent !== 'Checking worktrees…', limits.bulkMs, 'heading');
+    const offered = probe.row.preview?.rows.filter(row => !row.reason).length ?? 0;
+    mark('bulk-terminal', {offered, exact: !!checkBulkOffer(probe), elapsedMs: performance.now()-bulk});
+    assert(checkBulkOffer(probe), `Expected exact 28 bulk offers. Observed ${offered}.`);
     assert(visible(button('Try again')) && visible(button('Cancel')), 'Partial preview lacks retry or cancel');
     const kept = [...(dialog().querySelector('details.cleanup-kept')?.querySelectorAll('li') ?? [])];
     for (const [name, reason] of [['latency-01', labels.openPR], ['latency-29', labels.timeout], ['keep-primary', labels.primary]]) {
       assert(kept.some(row => row.textContent.includes(name) && reason.test(row.textContent)), `Missing keep reason ${name}`);
     }
     assert([...dialog().querySelectorAll('li')].some(row => !row.closest('details') && row.textContent.includes('latency-02')), 'Late-use control was not eligible');
-    await confirmWithWarning('bulk-before-commit', 'ConfirmWorktreeCleanup', 'cleanup-latency', 'Permanently remove 28 worktrees');
+    await confirmWithWarning('bulk-before-commit', 'ConfirmWorktreeCleanup', 'cleanup-latency', 'Permanently remove 28 worktrees', probe);
     await until(() => lastCall('ConfirmWorktreeCleanup')?.rows && view().title === 'Cleanup results', 'partial cleanup receipt', limits.cleanupCommitMs);
     const rows = lastCall('ConfirmWorktreeCleanup').rows;
     const late = rows.find(row => row.dir === 'latency-02');
@@ -266,6 +338,7 @@
 
   async function run() {
     for (const key of Object.keys(labels)) labels[key] = new RegExp(labels[key], 'i');
+    assert(config.episode === 'cleanup-only' && scenario === 'cleanup', 'Explicit cleanup-only episode required');
     assert(config.source && window.mygo?.platform === 'darwin' && window.webkit?.messageHandlers?.mygo, 'Expected actual macOS MyGo bridge');
     assert(navigator.userAgent.includes('AppleWebKit/') && document.visibilityState === 'visible', 'Expected visible WebKit page');
     const state = await window.mygo.call('Yesman.State');

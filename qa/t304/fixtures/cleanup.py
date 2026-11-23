@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import stat
 import subprocess
 import sys
 
@@ -106,7 +107,7 @@ commands = profile / 'fixture-bin'
 commands.mkdir()
 shim = commands / 'gh'
 shim.write_text(r'''#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, re, signal, stat, sys, time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 args = sys.argv[1:]
@@ -119,12 +120,51 @@ if len(args) == 2 and args[0] == 'api':
     head = query.get('head', [''])[0]
     if url.path == 'repos/fixture/cleanup-latency/pulls' and query.get('state') == ['open'] and head.startswith('fixture:latency-'):
         delay = 30 if head == 'fixture:latency-29' else .20
-        with (Path(__file__).resolve().parent.parent / 'fixture-gh.log').open('a') as log:
-            log.write(json.dumps({'branch': head, 'delaySeconds': delay, 'pid': os.getpid()}) + '\n')
+        response = '[{"number":1}]' if head == 'fixture:latency-01' else '[]'
+        # Log only the exact fixture branches. Production still receives the original answer.
+        valid = re.fullmatch(r'fixture:latency-[0-2][0-9]', head)
+        def record(phase):
+            if not valid:
+                return
+            row = dict(branch=head, delaySeconds=delay, pid=os.getpid(), ppid=parent,
+                       responseClass='open-pr' if head == 'fixture:latency-01' else 'empty',
+                       phase=phase, monotonicNS=time.monotonic_ns())
+            path = Path(__file__).resolve().parent.parent / 'fixture-gh.log'
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+                try:
+                    info = os.fstat(fd)
+                    if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid() and info.st_size < 128 * 1024:
+                        os.write(fd, (json.dumps(row, separators=(',', ':')) + '\n').encode())
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass  # Evidence collection reports missing rows without affecting the fixture answer.
+
+        parent = os.getppid()
+        def interrupted(number, _frame):
+            record('interrupted')
+            signal.signal(number, signal.SIG_DFL)
+            os.kill(os.getpid(), number)
+
+        signal.signal(signal.SIGTERM, interrupted)
+        record('start')
         time.sleep(delay)
-        print('[{"number":1}]' if head == 'fixture:latency-01' else '[]')
+        print(response, flush=True)
+        record('response-written')
         sys.exit(0)
 print('[]')
 ''')
 shim.chmod(0o755)
-print(json.dumps({'profile': str(profile), 'workspace': str(workspace), 'repo': str(repo), 'worktrees': len(worktrees), 'gh_shim': str(shim)}))
+counts = {'regular': 0, 'directories': 0, 'symlinks': 0}
+for path in profile.rglob('*'):
+    mode = path.lstat().st_mode
+    if stat.S_ISREG(mode):
+        counts['regular'] += 1
+    elif stat.S_ISDIR(mode):
+        counts['directories'] += 1
+    elif stat.S_ISLNK(mode):
+        counts['symlinks'] += 1
+print(json.dumps({'profile': str(profile), 'workspace': str(workspace), 'repo': str(repo),
+                  'worktrees': len(worktrees), 'gh_shim': str(shim), 'fixtureEntries': counts,
+                  'gitVersion': git(origin, '--version'), 'pythonVersion': sys.version.split()[0]}))

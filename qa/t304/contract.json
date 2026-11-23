@@ -10,7 +10,7 @@
   "archiveSHA256": "7ccfc2a7e8489eaf648013b3799281e7e1741c13327887c3491d801b45e6d3a5",
   "manifestSHA256": "a74d7d4a4d7b348f0cd03a2ebd72775e89bed9b184d0e7a83530351ab16566db",
   "binarySHA256": "eb08d73b8d70f9907e0bc4a0c3f4c8e93edfa3d7fda3e4226637a18c7ec2f2f8",
-  "schema": 2,
+  "schema": 3,
   "mode": "candidate",
   "arch": "arm64",
   "features": {
@@ -37,15 +37,16 @@
   "leadAdoptionSHA256": "e4805e9fe5d67fbcfff3c5da7776a86fa2b65d45741a9f8b4e12d2b30934fe9d",
   "independentBindingSHA256": "a120c02605007e41cf7c9bcc9550ab1d1e17a86f6265edf90570a90e26129e04",
   "kitFiles": {
-    "hosted.py": "9335dd74c820220664a56f23c1100c82b2772d37261ccbf994468b4c0c57d030",
-    "observer.js": "bfffe9a5b84a7f660691b38d1ff466bb865de07000623a477c2058ed66d30da0",
+    "hosted.py": "d657f06be53476842ee43e812d28940f5e68f8368fb95088212c31188082b3b6",
+    "observer.js": "4b982d62e8d75ccf0883956d591f682f9f94078d6e0323a5bafda49f2da64616",
     "signature.go": "dd7d0e145c583ebf2a6db72b9ac3e510930f6a2bb83e74782c37beeb11160dd3",
     "windows.swift": "15b38f3ad55c42800290d620ca79e458cc0dc0386082384dcff406f47d963fb4",
-    "fixtures/cleanup.py": "4c4a89c70792a57a01c9bdbcb360195d5a8ed57600a2b6e136f8da3f6c395ed2",
+    "fixtures/cleanup.py": "706a6f5cca84e8eb8c34db1a505a5d3e57dab7f06a048b50c58deb6bf49de97f",
     "fixtures/delete_seed.py": "a6fbd1ef54fecf1e611162de94d24fae38f6e1cbe64056d1c82a7e96c952689b",
     "fixtures/delete_verify.py": "aaa18836ba4607cdff6e7fb9c4534b003cecb35ce7752254cb42b39a82367c59",
     "fixtures/links.json": "d13ee3d051f7b70543e5a10823f0aa11d6c94063c941287ff7bb9047070c5046",
-    "fixtures/seven.py": "654fa4bbc8792839594abef0b1d8485c91f5abc902acb4f34c0ec4d324b60f82"
+    "fixtures/seven.py": "654fa4bbc8792839594abef0b1d8485c91f5abc902acb4f34c0ec4d324b60f82",
+    "cleanup_diagnostics.py": "221d600acf4e26bbd32bb28cad5527c75a0d7b62a917d87a64a3fe1095280d9e"
   },
   "webFiles": {
     "actions.js": {
@@ -496,5 +497,18 @@
       "mode": 420,
       "sha256": "61c6543334d433796ea5f0d7b51dfc2f1d9973ebedc1e3e422237dad7094c7d1"
     }
+  },
+  "episode": "cleanup-only",
+  "qaBase": "acea9a4018e2530db9af63a5aead8705ba1fe266",
+  "reuse": {
+    "completedScenarios": [
+      "ordinary",
+      "seven"
+    ],
+    "standardRun": 45225972788,
+    "failedCustomRun": 45228181690,
+    "overallPackageAcceptance": false,
+    "verdictSHA256": "65be470d2920e354c9ff460efdaddb9ea9a6f56f1d4cdfa763b45f418d4081fa",
+    "reviewManifestSHA256": "d264ec4c11808cb9c464936683339e603c87c3133f379c9d15374f1126bb208a"
   }
 }
