@@ -116,6 +116,8 @@ export function workspaceDeletion({ call, errorText, onLiveDeleted, toast, secti
         warning.replaceChildren(...[
           entries.length ? h('p', null, t('Git checkouts in this workspace')) : null,
           entries.length ? pathList(entries.map(e => e.path)) : null,
+          result.linkMarkers?.length ? h('p', null, t('Git symbolic links to remove')) : null,
+          result.linkMarkers?.length ? pathList(result.linkMarkers) : null,
           folders.length ? h('p', null, t(retrying ? 'Remaining paths in the interrupted deletion' : 'Directories that will also be deleted')) : null,
           folders.length ? pathList(folders) : null,
           token ? h('p', { class: 'danger', id: 'force-deletion-risk' }, t(retrying ? 'This permanently removes the remaining files and local changes at the listed paths.' : 'Force Delete permanently removes these local checkouts and the rest of this workspace, including uncommitted changes and untracked files. Git data stored outside the workspace is kept.')) : null,

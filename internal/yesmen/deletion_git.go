@@ -23,7 +23,9 @@ func holdGitMarker(ws *os.Root, rel string) error {
 // A local pointer or registration can establish one consumer of a Git store.
 // Git can also open that store through unregistered pointers that exist only
 // outside the workspace. Nothing about the local layout proves exclusivity.
-// Allow only unlinking a verified gitfile. Its referent is never opened.
+// A force-confirmed symbolic link is only a local directory entry. The rooted
+// walker unlinks it without opening its referent. Embedded stores, junctions
+// and unfamiliar reparse points still require independent verification.
 func checkCheckoutGit(ws, dir *os.Root, checkout checkoutObservation, rel string) error {
 	if checkout.Bare {
 		return holdGitData(ws, rel)
@@ -32,6 +34,9 @@ func checkCheckoutGit(ws, dir *os.Root, checkout checkoutObservation, rel string
 		marker := path.Join(rel, name)
 		if st.IsDir() {
 			return holdGitData(ws, marker)
+		}
+		if _, link := checkout.links[name]; link {
+			continue
 		}
 		if !st.Mode().IsRegular() {
 			return holdGitMarker(ws, marker)

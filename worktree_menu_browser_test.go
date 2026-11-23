@@ -85,7 +85,13 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 	var records []yesmen.WorktreeRecord
 	str := func(v string) *string { return &v }
 	var gizmoTask string
-	for _, dir := range []string{"gizmoth-artifact-rows", "review-a", "review-b", "locked", "legacy", "saved-conflict", "unverified-index"} {
+	var lateEditor func()
+	defer func() {
+		if lateEditor != nil {
+			lateEditor()
+		}
+	}()
+	for _, dir := range []string{"gizmoth-artifact-rows", "review-a", "review-b", "locked", "legacy", "legacy-integrate", "saved-conflict", "unverified-index"} {
 		since := time.Now().UTC()
 		if err := a.yesmen.AddWorker(y.Name, yesmen.Worker{Name: dir, StartedAt: since}); err != nil {
 			t.Fatal(err)
@@ -97,6 +103,8 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 		opts := pool.WorktreeOptions{Dest: filepath.Join(y.Path, dir), Ref: "origin/main"}
 		if dir == "gizmoth-artifact-rows" {
 			opts.Ref, opts.Branch = "", "fix/artifact-row-actions"
+		} else if dir == "legacy-integrate" {
+			opts.Ref, opts.Branch = "", "integrate/old-local"
 		}
 		w, err := a.pool.AddWorktree(t.Context(), repo, opts)
 		if err != nil {
@@ -112,10 +120,18 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			r.Root = &yesmen.WorktreeRoot{Ino: w.Root.Ino, Birth: w.Root.Birth}
 			r.CreatedFor = &yesmen.WorktreeCreation{Workspace: y.Name, HiredAt: y.HiredAt, TaskAt: task.CreatedAt}
 		}
-		if !w.Detached {
+		if dir == "gizmoth-artifact-rows" {
 			r.Purpose, gizmoTask, status = "author", r.Task, yesmen.TaskDropped
 		}
-		if _, err := a.yesmen.ChangeBoard(y.Name, yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: task.ID, Status: &status}}}); err != nil {
+		if dir == "legacy-integrate" {
+			r.Purpose, r.Root, r.CreatedFor, r.OwnerSince = "author", nil, nil, time.Time{}
+		}
+		var worktrees *[]yesmen.WorktreeReturn
+		if dir == "saved-conflict" || dir == "unverified-index" {
+			keep := []yesmen.WorktreeReturn{}
+			worktrees = &keep
+		}
+		if _, err := a.yesmen.ChangeBoard(y.Name, yesmen.BoardChange{Update: []yesmen.TaskEdit{{ID: task.ID, Status: &status, Worktrees: worktrees}}}); err != nil {
 			t.Fatal(err)
 		}
 		switch dir {
@@ -180,12 +196,16 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 		case "FaultAfterGit":
 			// After success Git removes the checkout and its private directory.
 			// A reference hook injects an independent registry failure into this fixture.
-			err = os.Remove(filepath.Join(y.Path, "review-b", "keep"))
-			if err == nil {
-				err = installFixtureRegistryFault(repo.Path, y.MetaDir())
-			}
+			err = installFixtureRegistryFault(repo.Path, y.MetaDir())
 		case "DirtyReview":
-			err = os.WriteFile(filepath.Join(y.Path, "review-b", "keep"), []byte("Still in use"), 0600)
+			err = os.WriteFile(filepath.Join(y.Path, "review-a", "keep"), []byte("Discard this local file"), 0600)
+			if err == nil {
+				lateEditor, err = a.pool.HoldWorktreeEditor(filepath.Join(y.Path, "review-b"), "", "")
+			}
+		case "ReleaseLateEditor":
+			if lateEditor != nil {
+				lateEditor()
+			}
 		case "Verify":
 			wts, e := a.pool.Worktrees(r.Context(), y.Path)
 			var refs []string
@@ -194,7 +214,13 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 					refs = append(refs, rec.Dir)
 				}
 			}
-			value, err = map[string]any{"trees": wts, "checkpoints": refs}, e
+			var present []string
+			for _, rec := range records {
+				if _, e := os.Lstat(filepath.Join(y.Path, rec.Dir)); e == nil {
+					present = append(present, rec.Dir)
+				}
+			}
+			value, err = map[string]any{"trees": wts, "checkpoints": refs, "present": present}, e
 		default:
 			if !slices.Contains([]string{"State", "Info", "WorkspaceCheckouts", "Usage", "ListFiles", "ReadFile", "ReadWorktreeFile", "WriteWorktreeFile", "BeginWorktreeEdit", "EndWorktreeEdit", "PreviewWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
 				http.Error(w, "method", 400)

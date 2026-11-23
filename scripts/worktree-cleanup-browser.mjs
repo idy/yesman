@@ -130,25 +130,43 @@ async function run(engine, name, language) {
     await page.keyboard.press('Shift+F10');
     await button.waitFor();
     assert.ok(await focused(cancel));
-    assert.match(await button.textContent(), /2/);
+    if (process.env.YESMAN_T300_BASELINE === '1') {
+      await dialog.locator('summary').click();
+      assert.match(await dialog.innerText(), zh ? /任务已取消/ : /creating task was dropped/);
+      assert.match(await dialog.innerText(), /legacy-integrate/);
+      if (output) await dialog.screenshot({path:join(output, `v062-bulk-${name}-${language}.png`)});
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({state:'detached'});
+      console.log(`${name} ${language} reproduced v0.1.62 bulk holds on canceled and ended legacy checkouts`);
+      return;
+    }
+    assert.match(await button.textContent(), /4/);
     assert.equal((await menuCalls()).at(-1)[1],false);
-    assert.equal(await dialog.locator('code[title]').count(), 2);
+    assert.equal(await dialog.locator('code[title]').count(), 4);
     assert.ok(await dialog.locator('code[title]').evaluateAll(nodes => nodes.every(el => el.textContent === el.title && /^[a-f0-9]{40}$/.test(el.textContent))));
+    const paths = await dialog.locator('.cleanup-path').allTextContents();
+    assert.ok(paths.some(path => path.endsWith('/gizmoth-artifact-rows')));
+    assert.ok(paths.some(path => path.endsWith('/legacy-integrate')));
+    assert.match(await dialog.locator('#worktree-cleanup-hint').textContent(), zh ? /永久删除.*构建产物.*恢复引用/ : /permanently deletes.*build output.*No recovery reference/);
     await dialog.locator('summary').click();
-    assert.match(await dialog.innerText(), zh ? /任务已取消/ : /creating task was dropped/);
-    const keptTask = dialog.locator('.cleanup-reason').filter({ hasText: 't1 ·' });
-    assert.equal(await keptTask.count(), 1);
-    assert.match(await keptTask.innerText(), zh ? /t1 · 已放弃$/ : /t1 · Dropped$/);
-    assert.equal(await keptTask.getByText(/t1 · dropped/).count(), 0);
-    assert.match(await dialog.innerText(), zh ? /锁定/ : /Git has locked/);
+    assert.match(await dialog.innerText(), zh ? /进行中的操作或私有状态/ : /Git lock, operation or private state/);
     assert.match(await dialog.innerText(), zh ? /临时工作树/ : /temporary checkout record/);
-    assert.match(await dialog.innerText(), zh ? /还原冲突的文件版本/ : /versions of a resolved conflict/);
-    assert.match(await dialog.innerText(), zh ? /无法验证 Git 索引/ : /Git index could not be verified/);
     if (output) await dialog.screenshot({path:join(output, `bulk-${name}-${language}.png`)});
     await page.keyboard.press('Escape');
     await dialog.waitFor({state:'detached'});
     assert.equal(await commits(),0);
     assert.ok(await focused(headingButton));
+    await headingButton.press('Shift+F10');
+    await button.waitFor();
+    await page.keyboard.press('Enter');
+    await dialog.waitFor({state:'detached'});
+    assert.equal(await commits(),0);
+    for (const [dir, hold] of [['saved-conflict', zh ? /还原冲突的文件版本/ : /versions of a resolved conflict/], ['unverified-index', zh ? /无法验证 Git 索引/ : /Git index could not be verified/]]) {
+      await row(dir).click({button:'right'});
+      await dialog.getByText(hold).waitFor();
+      assert.equal(await button.isVisible(),false);
+      await cancel.click();
+    }
     await giz.click({button:'right'});
     await button.waitFor();
     assert.equal((await menuCalls()).at(-1)[1],true);
@@ -236,10 +254,12 @@ async function run(engine, name, language) {
     await button.waitFor();
     await page.evaluate(() => api('DirtyReview'));
     await button.click();
-    await dialog.getByText(zh ? /未提交的改动/ : /uncommitted changes/).waitFor();
+    await dialog.getByText(zh ? /文件编辑器/ : /A file editor is open/).waitFor();
     const actual = await verify();
-    assert.deepEqual(actual.checkpoints.sort(),['gizmoth-artifact-rows','review-a']);
+    assert.deepEqual(actual.checkpoints.sort(),['gizmoth-artifact-rows']);
     assert.deepEqual(actual.trees.map(w => w.dir).sort(),['legacy','locked','review-b','saved-conflict','unverified-index']);
+    assert.deepEqual(actual.present.sort(), ['locked','review-b','saved-conflict','unverified-index']);
+    await page.evaluate(() => api('ReleaseLateEditor'));
     assert.equal(await commits(),3);
     assert.equal(await info.locator('.info-merged-toggle').count(), 0);
     assert.equal(await row('review-b').count(),1);

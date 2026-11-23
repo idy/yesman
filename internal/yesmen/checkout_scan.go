@@ -26,15 +26,17 @@ type checkoutObservation struct {
 	CheckoutEntry
 	directory safefs.Identity
 	markers   map[string]fs.FileInfo
+	links     map[string]string // literal symlink destinations, never resolved
 }
 
 // CheckoutScan may have rows even when coverage is incomplete. Only a complete
 // scan with an unchanged target can be used to prepare force deletion.
 type CheckoutScan struct {
-	Entries  []CheckoutEntry `json:"entries"`
-	Paths    []string        `json:"paths,omitempty"`
-	Problem  string          `json:"problem,omitempty"`
-	observed []checkoutObservation
+	Entries     []CheckoutEntry `json:"entries"`
+	Paths       []string        `json:"paths,omitempty"`
+	LinkMarkers []string        `json:"linkMarkers,omitempty"`
+	Problem     string          `json:"problem,omitempty"`
+	observed    []checkoutObservation
 }
 
 func gitMarkers(rel string, entries []os.DirEntry) (CheckoutEntry, []string) {
@@ -77,6 +79,20 @@ func observeCheckout(dir *os.Root, entry CheckoutEntry, id safefs.Identity, name
 			return o, err
 		}
 		o.markers[name] = st
+		if st.Mode().Type() == fs.ModeSymlink {
+			target, err := dir.Readlink(name)
+			if err != nil {
+				return o, err
+			}
+			now, err := dir.Lstat(name)
+			if err != nil || !sameDeletionEntry(st, now) {
+				return o, errCheckoutPreviewChanged
+			}
+			if o.links == nil {
+				o.links = make(map[string]string)
+			}
+			o.links[name] = target
+		}
 	}
 	return o, nil
 }
@@ -87,7 +103,7 @@ func (a checkoutObservation) matches(b checkoutObservation) bool {
 	}
 	for name, x := range a.markers {
 		y := b.markers[name]
-		if y == nil || !os.SameFile(x, y) || x.Mode().Type() != y.Mode().Type() {
+		if y == nil || !os.SameFile(x, y) || x.Mode().Type() != y.Mode().Type() || a.links[name] != b.links[name] {
 			return false
 		}
 		// A regular gitfile (including a linked-worktree pointer) can also
@@ -227,7 +243,10 @@ func scanCheckouts(ctx context.Context, ws *os.Root, review bool) CheckoutScan {
 				return
 			}
 			name := entry.Name()
-			if !entry.IsDir() || (objects && name == "objects") {
+			childPath := path.Join(rel, name)
+			// Agent build outputs are not sidebar discoveries. Deletion review
+			// still has to account for every entry, including this subtree.
+			if !entry.IsDir() || (!review && childPath == ".yesman/tmp") || (objects && name == "objects") {
 				continue
 			}
 			child, err := directDir(dir, name)
@@ -235,7 +254,7 @@ func scanCheckouts(ctx context.Context, ws *os.Root, review bool) CheckoutScan {
 				problem(err)
 				continue
 			}
-			visit(child, path.Join(rel, name), depth+1, slices.Contains(markers, name) && strings.EqualFold(name, ".git"))
+			visit(child, childPath, depth+1, slices.Contains(markers, name) && strings.EqualFold(name, ".git"))
 			child.Close()
 		}
 	}

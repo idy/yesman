@@ -56,6 +56,7 @@ type desktopCandidate struct {
 	decision    WorktreeTaskDecision
 	authority   checkoutAuthority
 	observation *pool.CheckoutObservation
+	orphan      bool
 }
 
 const (
@@ -121,17 +122,16 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 				row.Worktree, row.Reason = *selected, staleCheckout
 			case slices.Contains(keep, w.Dir):
 				row.Reason = unsavedFiles
+			case plan.bulk:
+				row = s.desktopBulkWorktree(ctx, y, records, board, workers, w, false, false)
 			default:
-				row = s.desktopWorktree(ctx, y, records, board, workers, w, plan.bulk, false)
+				row = s.desktopWorktree(ctx, y, records, board, workers, w, false)
 			}
 			if row.Reason == "" {
 				rec := records[latestWorktree(records, w.Dir)]
 				c := desktopCandidate{row: len(out.Rows), worktree: row.Worktree, record: rec,
 					decision: WorktreeDecisionFor(board, rec), observation: row.observation}
 				c.authority.decision = c.decision
-				if plan.bulk {
-					c.authority, _ = bulkAuthority(y, rec, board, workers)
-				}
 				candidates = append(candidates, c)
 			}
 			if i := latestWorktree(records, w.Dir); i >= 0 && records[i].ID == w.CleanupID && !records[i].Removed {
@@ -147,7 +147,17 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 				if !r.Removed && seen[r.Dir] == 0 && dirRE.MatchString(r.Dir) && i == latestWorktree(records, r.Dir) {
 					path := filepath.Join(y.Path, r.Dir)
 					if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-						out.Rows = append(out.Rows, WorktreeCleanupRow{Worktree: pool.Worktree{Dir: r.Dir, Path: path, Repo: r.Repo}, Reason: noRegistration, Task: r.Task, TaskStatus: WorktreeDecisionFor(board, r).status})
+						w := expectedWorktree(r)
+						w.Path = path
+						row := WorktreeCleanupRow{Worktree: w, Reason: unsavedFiles, Task: r.Task, TaskStatus: WorktreeDecisionFor(board, r).status}
+						if !slices.Contains(keep, w.Dir) {
+							row = s.desktopBulkWorktree(ctx, y, records, board, workers, w, true, false)
+						}
+						if row.Reason == "" {
+							decision := WorktreeDecisionFor(board, r)
+							candidates = append(candidates, desktopCandidate{row: len(out.Rows), worktree: row.Worktree, record: r, decision: decision, authority: checkoutAuthority{decision: decision}, observation: row.observation, orphan: true})
+						}
+						out.Rows = append(out.Rows, row)
 					}
 				}
 			}
@@ -296,11 +306,15 @@ func (d *DesktopWorktrees) Confirm(ctx context.Context, name string, since time.
 					matches++
 				}
 			}
-			if matches != 1 {
+			if c.orphan && matches != 0 || !c.orphan && matches != 1 {
 				row.Reason = staleCheckout
 				return nil
 			}
-			row = s.desktopWorktree(ctx, y, records, board, workers, w, plan.bulk, true)
+			if plan.bulk {
+				row = s.desktopBulkWorktree(ctx, y, records, board, workers, w, c.orphan, true)
+			} else {
+				row = s.desktopWorktree(ctx, y, records, board, workers, w, true)
+			}
 			return nil
 		})
 		l.Unlock()
@@ -316,7 +330,7 @@ func (d *DesktopWorktrees) Confirm(ctx context.Context, name string, since time.
 	return results, nil
 }
 
-func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records []yesmen.WorktreeRecord, board yesmen.Board, workers []yesmen.Worker, w pool.Worktree, bulk, remove bool) WorktreeCleanupRow {
+func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records []yesmen.WorktreeRecord, board yesmen.Board, workers []yesmen.Worker, w pool.Worktree, remove bool) WorktreeCleanupRow {
 	row := WorktreeCleanupRow{Worktree: w}
 	retain := func(reason, detail string) WorktreeCleanupRow { row.Reason, row.Detail = reason, detail; return row }
 	i := latestWorktree(records, w.Dir)
@@ -343,17 +357,6 @@ func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records [
 	}
 	decision := WorktreeDecisionFor(board, rec)
 	row.Task, row.TaskStatus = rec.Task, decision.status
-	var authority checkoutAuthority
-	if bulk {
-		var reason string
-		authority, reason = bulkAuthority(y, rec, board, workers)
-		if reason != "" {
-			return retain(reason, "")
-		}
-		if c := authority.completion; c != nil && (c.SavedAt.IsZero() || c.Head != w.Head) {
-			return retain("The saved completion does not cover this checkout and commit.", "")
-		}
-	}
 	if reason, detail := worktreeTaskHold(y, board, workers, rec); reason != "" {
 		return retain(reason, detail)
 	}
@@ -367,7 +370,7 @@ func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records [
 			return nil
 		}
 		if err := s.Pool.TryReclaimTemporary(ctx, y.Path, w, func() error {
-			return s.saveCleanupReceipt(ctx, y, &rec, authority, w.Head)
+			return s.saveCleanupReceipt(ctx, y, &rec, checkoutAuthority{}, w.Head)
 		}); err != nil {
 			return err
 		}
@@ -397,7 +400,7 @@ func (s *Server) desktopWorktree(ctx context.Context, y yesmen.Yesman, records [
 			return retain(unverified, err.Error())
 		}
 	}
-	if !bulk && !remove && decision.KeepsCheckout() {
+	if !remove && decision.KeepsCheckout() {
 		row.KeepWarning = keepWarning
 	}
 	return row

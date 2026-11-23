@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/i18n"
+	"github.com/idy/yesman/internal/safefs/linktest"
 	"github.com/idy/yesman/internal/yesmen"
 )
 
@@ -39,9 +40,11 @@ func TestDeletionBrowserBridge(t *testing.T) {
 	must(t, os.Mkdir(filepath.Join(other.Path, "unfinished-checkout"), 0700))
 	bazel, err := s.HireNamed(t.Context(), "Bazel Builds")
 	must(t, err)
-	fixtureLocalCheckout(t, bazel, bazelCheckout)
+	bazelRoot := fixtureLocalCheckout(t, bazel, bazelCheckout)
+	fixtureExternalGitfile(t, bazel, "old-root-checkout")
 	must(t, os.MkdirAll(filepath.Join(bazel.Path, filepath.FromSlash(deepBuildPath())), 0700))
 	var pendingPath, freshPath, externalPath, externalHead string
+	var bazelGit, bazelHead string
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /fixture", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -80,7 +83,19 @@ func TestDeletionBrowserBridge(t *testing.T) {
 		case "ForceDeleteWorkspace":
 			err = s.ForceDeleteWorkspace(r.Context(), req.Target, req.Token)
 		case "PreserveBazelGitData":
-			separateFixtureGitData(t, filepath.Join(bazel.Path, filepath.FromSlash(bazelCheckout)))
+			separateFixtureGitData(t, bazelRoot)
+			bazelGit = fixtureGit(t, bazelRoot, "rev-parse", "--absolute-git-dir")
+			bazelHead = fixtureGit(t, bazelRoot, "rev-parse", "HEAD")
+			marker := filepath.Join(bazelRoot, ".git")
+			must(t, os.Remove(marker))
+			linktest.Symlink(t, filepath.Join(bazel.Path, "gizos-display-pr", ".git"), marker)
+		case "VerifyBazelRemoval":
+			if _, e := os.Lstat(bazel.Path); !errors.Is(e, fs.ErrNotExist) {
+				t.Error("Bazel workspace remains", e)
+			}
+			if fixtureGit(t, bazelGit, "rev-parse", "HEAD") != bazelHead {
+				t.Error("relocated Bazel Git data changed")
+			}
 		case "AddLateCheckout":
 			fixtureExternalGitfile(t, bazel, deepBuildPath()+"/second-checkout")
 		case "RootCheckout":

@@ -70,17 +70,19 @@ export function createWorktreeMenu(host) {
         const ready = result.rows.filter(row => !row.reason);
         const kept = result.rows.filter(row => row.reason);
         if (ready.length) {
-          hint.textContent = t('Git saves each commit in the shared repository and keeps your branches and tags.');
+          hint.textContent = t(selected
+            ? 'Git saves each commit in the shared repository and keeps your branches and tags.'
+            : 'This permanently deletes the listed directories, including uncommitted edits, untracked and ignored files, and build output. No recovery reference is created.');
           listing.append(rowList(ready));
           if (selected && ready[0]?.keepWarning) {
             const warning = h('p', { id: 'worktree-cleanup-warning', class: 'cleanup-warning', role: 'status' }, t(ready[0].keepWarning));
             listing.append(warning);
             confirm.setAttribute('aria-describedby', warning.id);
           }
-          confirm.textContent = selected ? t('Remove worktree') : tn(ready.length, 'Remove 1 worktree', 'Remove {n} worktrees');
+          confirm.textContent = selected ? t('Remove worktree') : tn(ready.length, 'Permanently remove 1 worktree', 'Permanently remove {n} worktrees');
           confirm.hidden = false;
         } else {
-          end(selected ? t('Worktree kept') : t('No worktrees to remove'), kept.length ? t('These directories will stay in the workspace.') : t('This workspace has no registered worktrees.'));
+          end(selected ? t('Worktree kept') : t('No worktrees to remove'), kept.length ? t('These directories will stay in the workspace.') : t('This workspace has no recorded worktrees to clean up.'));
         }
         if (kept.length) {
           const keptList = rowList(kept);

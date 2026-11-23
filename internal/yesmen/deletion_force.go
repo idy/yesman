@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/fs"
 	"os"
+	"path"
 	"slices"
 	"strings"
 )
@@ -50,7 +51,11 @@ func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget,
 			return scan, nil, deletionIssue("Cannot verify the Git checkout directory at %s.", o.Path)
 		}
 		plan.paths[o.Path] = o
+		for name := range o.links {
+			scan.LinkMarkers = append(scan.LinkMarkers, path.Join(o.Path, name))
+		}
 	}
+	slices.Sort(scan.LinkMarkers)
 	if err := plan.observeTop(ctx, ws); err != nil {
 		return scan, nil, err
 	}
@@ -114,7 +119,7 @@ func (f *ForceDeletion) observeTop(ctx context.Context, ws *os.Root) error {
 
 func sameDeletionEntry(want, got fs.FileInfo) bool {
 	return want != nil && got != nil && want.Mode().Type() == got.Mode().Type() && os.SameFile(want, got) &&
-		(!want.Mode().IsRegular() || want.Size() == got.Size() && want.ModTime().Equal(got.ModTime()))
+		(!(want.Mode().IsRegular() || want.Mode().Type() == fs.ModeSymlink) || want.Size() == got.Size() && want.ModTime().Equal(got.ModTime()))
 }
 
 func (f *ForceDeletion) observeRemaining(rel string, st fs.FileInfo) error {

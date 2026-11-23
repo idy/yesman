@@ -91,7 +91,7 @@ func TestWorkspaceForceReviewsDeepBuildAndRoot(t *testing.T) {
 				must(t, os.MkdirAll(filepath.Dir(deepGitfile), 0700))
 				sidebar, err := s.WorkspaceCheckouts(t.Context(), y.Name, y.HiredAt)
 				must(t, err)
-				if sidebar.Problem == "" || len(sidebar.Entries) != 1 || sidebar.Entries[0].Path != bazelCheckout {
+				if sidebar.Problem != "" || len(sidebar.Entries) != 0 {
 					t.Fatal(sidebar)
 				}
 			} else {

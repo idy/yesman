@@ -56,6 +56,10 @@ func (e *RegisteredWorktreeError) Error() string {
 // snapshot intentionally omits those registrations. Git's NUL format preserves
 // names containing whitespace or newlines. This operation changes no Git state.
 func (p *Pool) CheckWorkspaceDeletion(ctx context.Context, workspace string) error {
+	return p.checkWorkspaceRegistrations(ctx, workspace, nil)
+}
+
+func (p *Pool) checkWorkspaceRegistrations(ctx context.Context, workspace string, allowed func(Repo, string) bool) error {
 	repos, err := p.List()
 	if err != nil {
 		return err
@@ -68,7 +72,7 @@ func (p *Pool) CheckWorkspaceDeletion(ctx context.Context, workspace string) err
 		}
 		for field := range strings.SplitSeq(text, "\x00") {
 			path, ok := strings.CutPrefix(field, "worktree ")
-			if ok && (within(path, workspace) || within(path, root) || within(realPath(path), root)) {
+			if ok && (within(path, workspace) || within(path, root) || within(realPath(path), root)) && (allowed == nil || !allowed(r, path)) {
 				return &RegisteredWorktreeError{r.Name, path}
 			}
 		}
@@ -162,12 +166,14 @@ type CheckoutObservation struct {
 	Identity safefs.Identity
 	Tracking string
 	pin      *safefs.Dir
+	discard  *desktopDiscardObservation
 }
 
 // Bind carries the locally observed directory and tracking branch through the
 // confirmation. A different tracking ref needs its own open-PR verification.
 func (o *CheckoutObservation) Bind(w Worktree) Worktree {
 	w.Root = &o.Identity
+	w.observedDiscard = o.discard
 	if !w.Detached {
 		w.observedTracking = &o.Tracking
 	}

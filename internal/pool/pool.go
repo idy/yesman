@@ -85,6 +85,7 @@ type Worktree struct {
 	// Set only by a desktop preview. The final local check requires the same
 	// tracking branch that was included in the open pull request lookup.
 	observedTracking *string
+	observedDiscard  *desktopDiscardObservation
 }
 
 // NameFromURL derives a pool name from a remote URL: host and path without
