@@ -30,9 +30,23 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 	if err != nil {
 		return err
 	}
+	var git *localGitReview
+	if force != nil && len(force.git) != 0 {
+		git, err = force.reviewApprovedGit(ctx, ws)
+		if err != nil {
+			return err
+		}
+		defer git.root.Close()
+	}
+	var admins map[string]localGitBinding
+	if git != nil {
+		admins = git.expected
+	}
 	seen, seenTop, seenRemaining := 0, 0, 0
-	var visit func(*os.Root, string) error
-	visit = func(dir *os.Root, rel string) error {
+	var visit func(*os.Root, string, bool) error
+	visit = func(dir *os.Root, rel string, inGit bool) error {
+		binding, isAdmin := admins[rel]
+		inGit = inGit || isAdmin
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -56,8 +70,20 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 			if err != nil {
 				return err
 			}
-			if err := checkCheckoutGit(ws, dir, current, rel); err != nil {
-				return err
+			if git != nil && phase != purgeDeletion {
+				if !force.paths[rel].matches(current) {
+					return errCheckoutPreviewChanged
+				}
+				if err := git.validate(dir, current); err != nil {
+					return err
+				}
+				if git.paths[rel] != force.git[rel] {
+					return errCheckoutPreviewChanged
+				}
+			} else if force == nil || force.git[rel].admin == "" {
+				if err := checkCheckoutGit(ws, dir, current, rel); err != nil {
+					return err
+				}
 			}
 			if force == nil {
 				return deletionIssue("%s contains a Git checkout. Move it with Git or finish its managed cleanup first.", rel)
@@ -88,8 +114,33 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 				return errCheckoutPreviewChanged
 			}
 		}
+		if inGit {
+			for _, e := range entries {
+				if heldLocalGitEntry(rel, e.Name(), isAdmin) {
+					return holdGitData(ws, path.Join(rel, e.Name()))
+				}
+			}
+		}
 		if len(entries) > 0 {
 			if err := deletionDirectoryAccess(dir, rel, phase != inspectDeletion); err != nil {
+				return err
+			}
+		}
+		var sharing *os.File
+		if len(admins) != 0 && force.checks.Entry != nil && (phase != purgeDeletion || inGit) {
+			sharing, err = dir.Open(".")
+			if err != nil {
+				return err
+			}
+			defer sharing.Close()
+		}
+		if isAdmin && phase == purgeDeletion {
+			// Module checkout markers may already be gone by this point.
+			// Verify the still-intact admin directory before removing any of it.
+			if id != binding.id {
+				return errCheckoutPreviewChanged
+			}
+			if err := git.recheckAdmin(binding); err != nil {
 				return err
 			}
 		}
@@ -102,6 +153,14 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 			st, err := dir.Lstat(name)
 			if err != nil {
 				return err
+			}
+			if inGit && st.Mode().Type() != fs.ModeDir && !st.Mode().IsRegular() {
+				return holdGitData(ws, child)
+			}
+			if sharing != nil {
+				if err := force.checks.Entry(sharing, name); err != nil {
+					return &DeletionIssue{Message: "Could not verify that %s is idle.", Args: []any{child}, Cause: err}
+				}
 			}
 			if expected := verified[name]; expected != nil && !sameDeletionEntry(expected, st) {
 				return errCheckoutPreviewChanged
@@ -136,7 +195,7 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 					d.Close()
 					return fmt.Errorf("%s changed during deletion", child)
 				}
-				err = visit(d, child)
+				err = visit(d, child, inGit)
 				d.Close()
 				if err != nil {
 					return err
@@ -156,6 +215,16 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 				}
 			}
 			if phase == purgeDeletion {
+				if git != nil && name == ".git" {
+					if module := force.git[rel]; module.module {
+						if err := git.recheckAdmin(module); err != nil {
+							return err
+						}
+						if err := force.recheckModulePointer(git, rel, module); err != nil {
+							return err
+						}
+					}
+				}
 				now, err := dir.Lstat(name)
 				if err != nil || !sameDeletionEntry(st, now) {
 					return fmt.Errorf("%s changed during deletion", child)
@@ -167,7 +236,7 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 		}
 		return nil
 	}
-	if err := visit(ws, "."); err != nil {
+	if err := visit(ws, ".", false); err != nil {
 		return err
 	}
 	if force != nil && (seen != len(force.paths) || seenTop != len(force.top) || seenRemaining != len(force.remaining)) {

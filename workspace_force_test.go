@@ -62,6 +62,9 @@ func separateFixtureGitData(t *testing.T, dir string) {
 func TestWorkspaceForceDeleteBazelCheckout(t *testing.T) {
 	s, y, target := deletionFixture(t)
 	dir := fixtureLocalCheckout(t, y, bazelCheckout)
+	fixtureGit(t, dir, "worktree", "add", "-b", "dependent", filepath.Join(t.TempDir(), "dependent"))
+	dependent := filepath.Join(t.TempDir(), "second-dependent")
+	fixtureGit(t, dir, "worktree", "add", "-b", "second-dependent", dependent)
 	external, err := s.HireNamed(t.Context(), "External checkout")
 	must(t, err)
 	outside := fixtureLocalCheckout(t, external, "keep")
@@ -97,9 +100,13 @@ func TestWorkspaceForceDeleteBazelCheckout(t *testing.T) {
 	if held.Token != "" || len(held.Entries) != 1 || held.Entries[0].Path != bazelCheckout || !strings.Contains(held.Problem, gitDataHold) {
 		t.Fatalf("legacy Git data should hold at its live path: %+v", held)
 	}
-	// The test owns this repository and all its consumers. A user can make
-	// the same transition using Git after establishing those dependencies.
+	dependentHead := fixtureGit(t, dependent, "rev-parse", "HEAD")
+	// Git retains the known dependent and its registrations outside the workspace.
 	separateFixtureGitData(t, dir)
+	fixtureGit(t, dir, "worktree", "repair", dependent)
+	if fixtureGit(t, dependent, "rev-parse", "HEAD") != dependentHead {
+		t.Fatal("dependent checkout changed")
+	}
 	kept := fixtureGit(t, dir, "rev-parse", "--absolute-git-dir")
 	keptHead := mustReadFile(t, filepath.Join(kept, "HEAD"))
 	plan, err := s.CheckWorkspaceForceDeletion(t.Context(), target)

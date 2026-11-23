@@ -350,9 +350,15 @@ func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, regist
 			if err := s.checkWorktreeRecords(ctx, parent, ws, want, relocated, true); err != nil {
 				return err
 			}
-			return walkWorkspaceDeletion(ctx, ws, phase, force)
+			if err := walkWorkspaceDeletion(ctx, ws, phase, force); err != nil {
+				return err
+			}
+			return force.checkIdle(ctx, ws)
 		}
 		if err := walkWorkspaceDeletion(ctx, ws, phase, force); err != nil {
+			return err
+		}
+		if err := force.checkIdle(ctx, ws); err != nil {
 			return err
 		}
 		return s.checkWorktreeRecords(ctx, parent, ws, want, relocated, true)
@@ -436,6 +442,20 @@ func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string
 	// A Git data hold must leave the entire staged instance recoverable.
 	if err := walkWorkspaceDeletion(ctx, ws, inspectDeletion, force); err != nil {
 		return err
+	}
+	if err := force.checkIdle(ctx, ws); err != nil {
+		return err
+	}
+	if force != nil && len(force.git) != 0 {
+		if now, err := parent.Lstat(entry); err != nil || !os.SameFile(st, now) {
+			return errors.New("the detached directory changed")
+		}
+		if err := checkStagedGitHold(ws); err != nil {
+			return err
+		}
+		if err := force.recheckLocalGit(ctx, ws); err != nil {
+			return err
+		}
 	}
 	if err := walkWorkspaceDeletion(ctx, ws, purgeDeletion, force); err != nil {
 		return err

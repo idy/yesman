@@ -41,6 +41,16 @@ func TestDeletionBrowserBridge(t *testing.T) {
 	bazel, err := s.HireNamed(t.Context(), "Bazel Builds")
 	must(t, err)
 	bazelRoot := fixtureLocalCheckout(t, bazel, bazelCheckout)
+	bazelDependent := filepath.Join(t.TempDir(), "bazel-dependent")
+	fixtureGit(t, bazelRoot, "worktree", "add", "-qb", "dependent", bazelDependent)
+	var seven yesmen.Yesman
+	var sevenOutside map[string]string
+	if os.Getenv("YESMAN_TEST_SEVEN_LOCAL_GIT") == "1" {
+		seven, err = s.HireNamed(t.Context(), "Seven Local Git Roots")
+		must(t, err)
+		origin, independent := seedSevenLocalGitRoots(t, seven.Path)
+		sevenOutside = map[string]string{origin: fixtureGit(t, origin, "show-ref"), independent: fixtureGit(t, independent, "show-ref")}
+	}
 	fixtureExternalGitfile(t, bazel, "old-root-checkout")
 	must(t, os.MkdirAll(filepath.Join(bazel.Path, filepath.FromSlash(deepBuildPath())), 0700))
 	var pendingPath, freshPath, externalPath, externalHead string
@@ -83,6 +93,7 @@ func TestDeletionBrowserBridge(t *testing.T) {
 		case "ForceDeleteWorkspace":
 			err = s.ForceDeleteWorkspace(r.Context(), req.Target, req.Token)
 		case "PreserveBazelGitData":
+			fixtureGit(t, bazelRoot, "worktree", "remove", "--force", bazelDependent)
 			separateFixtureGitData(t, bazelRoot)
 			bazelGit = fixtureGit(t, bazelRoot, "rev-parse", "--absolute-git-dir")
 			bazelHead = fixtureGit(t, bazelRoot, "rev-parse", "HEAD")
@@ -95,6 +106,23 @@ func TestDeletionBrowserBridge(t *testing.T) {
 			}
 			if fixtureGit(t, bazelGit, "rev-parse", "HEAD") != bazelHead {
 				t.Error("relocated Bazel Git data changed")
+			}
+		case "VerifySevenGitRoots":
+			for _, rel := range sevenLocalGitRoots {
+				if _, statErr := os.Lstat(filepath.Join(seven.Path, filepath.FromSlash(rel))); statErr != nil {
+					t.Error("cancel or refusal changed a repository", rel, statErr)
+				}
+			}
+		case "VerifySevenGitRemoval":
+			for _, p := range []string{seven.Path, filepath.Join(s.app.home.Yesmen(), ".deleting-"+req.Target.Instance+"."+seven.Name)} {
+				if _, e := os.Lstat(p); !errors.Is(e, fs.ErrNotExist) {
+					t.Error("workspace or stage remains", p, e)
+				}
+			}
+			for p, refs := range sevenOutside {
+				if fixtureGit(t, p, "show-ref") != refs || string(mustReadFile(t, filepath.Join(p, "untracked.txt"))) != "dirty workspace content" {
+					t.Error("outside refs or bytes changed", p)
+				}
 			}
 		case "AddLateCheckout":
 			fixtureExternalGitfile(t, bazel, deepBuildPath()+"/second-checkout")

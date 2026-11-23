@@ -21,8 +21,9 @@ import (
 // asked. Symbolic links, junctions and every other reparse point are refused
 // by that open, not by a separate look at the name.
 type Dir struct {
-	h    windows.Handle
-	name string
+	h       windows.Handle
+	name    string
+	listing *os.File
 }
 
 const dirAccess = windows.FILE_LIST_DIRECTORY | windows.FILE_TRAVERSE | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE
@@ -49,18 +50,24 @@ func Open(path string) (*Dir, error) {
 	return &Dir{h: h, name: path}, nil
 }
 
-func (d *Dir) Close() error { return windows.CloseHandle(d.h) }
-
-// ReadNames reads up to n names through this directory's handle. Use a fresh
-// directory handle for each inventory.
-func (d *Dir) ReadNames(n int) ([]string, error) {
-	dup, err := d.Dup()
-	if err != nil {
-		return nil, err
+func (d *Dir) Close() error {
+	if d.listing != nil {
+		return errors.Join(d.listing.Close(), windows.CloseHandle(d.h))
 	}
-	f := os.NewFile(uintptr(dup.h), d.name)
-	defer f.Close()
-	return f.Readdirnames(n)
+	return windows.CloseHandle(d.h)
+}
+
+// ReadNames advances through one directory listing. Go keeps the enumeration
+// cursor on the os.File, so retain that file until the directory is closed.
+func (d *Dir) ReadNames(n int) ([]string, error) {
+	if d.listing == nil {
+		dup, err := d.Dup()
+		if err != nil {
+			return nil, err
+		}
+		d.listing = os.NewFile(uintptr(dup.h), d.name)
+	}
+	return d.listing.Readdirnames(n)
 }
 
 // Stat describes the directory d is open on.
