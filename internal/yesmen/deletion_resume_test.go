@@ -238,8 +238,9 @@ func TestForceWorkspaceColdApprovedGit(t *testing.T) {
 // modest disk space, and one fixture covers genuine interruption, late scope
 // drift beyond the old cap and completing a cold retry.
 func TestForceWorkspaceColdMillionEntries(t *testing.T) {
-	if os.Getenv("YESMAN_TEST_LARGE_DELETION") != "1" {
-		t.Skip("set YESMAN_TEST_LARGE_DELETION=1 to create a million-entry fixture")
+	mode := os.Getenv("YESMAN_TEST_LARGE_DELETION")
+	if mode != "1" && mode != "local" {
+		t.Skip("set YESMAN_TEST_LARGE_DELETION=1 or local to create a million-entry fixture")
 	}
 	s := waitStore(t)
 	y, err := s.Get("alice")
@@ -264,23 +265,33 @@ func TestForceWorkspaceColdMillionEntries(t *testing.T) {
 	t.Logf("created %d generated files including %d in one directory in %v", groups*entries+wideEntries, wideEntries, time.Since(start))
 	// Give the large workspace an admitted checkout and a first ordinary file
 	// whose real unlink deterministically interrupts before the generated tree.
-	outside := filepath.Join(t.TempDir(), "outside.git")
-	deleteFixtureGit(t, filepath.Dir(outside), "init", "--bare", "-q", outside)
-	mustDeletion(t, writeExternalTestGitfile(filepath.Join(y.Path, "checkout"), outside))
+	missing := "!first"
+	prefix := deletingPrefix
+	var localChecks []LocalGitDeletionChecks
+	check := func(context.Context, string) error { return nil }
+	if mode == "local" {
+		// Interrupt within the bare store before reaching the generated tree.
+		deleteFixtureGit(t, y.Path, "init", "--bare", "-q", "!repo.git")
+		missing, prefix = "!repo.git/config", managedDeletingPrefix
+		localChecks = []LocalGitDeletionChecks{{Idle: check}}
+	} else {
+		outside := filepath.Join(t.TempDir(), "outside.git")
+		deleteFixtureGit(t, filepath.Dir(outside), "init", "--bare", "-q", outside)
+		mustDeletion(t, writeExternalTestGitfile(filepath.Join(y.Path, "checkout"), outside))
+	}
 	mustDeletion(t, os.WriteFile(filepath.Join(y.Path, "!first"), nil, 0600))
 	target, err := s.PrepareDeletion(y.Name, y.HiredAt)
 	mustDeletion(t, err)
-	check := func(context.Context, string) error { return nil }
-	_, initial, err := s.PrepareForceDeletion(t.Context(), target, check, nil)
+	_, initial, err := s.PrepareForceDeletion(t.Context(), target, check, nil, localChecks...)
 	if err != nil || initial == nil {
 		t.Fatal(initial, err)
 	}
-	stage := filepath.Join(s.root, deletingPrefix+target.Instance+"."+target.Entry)
+	stage := filepath.Join(s.root, prefix+target.Instance+"."+target.Entry)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	fault := interruptDeletion{ctx, func() {
 		if _, err := os.Stat(stage); err == nil {
-			if _, err := os.Stat(filepath.Join(stage, "!first")); errors.Is(err, fs.ErrNotExist) {
+			if _, err := os.Stat(filepath.Join(stage, missing)); errors.Is(err, fs.ErrNotExist) {
 				cancel()
 			}
 		}
@@ -295,13 +306,18 @@ func TestForceWorkspaceColdMillionEntries(t *testing.T) {
 	}
 	far := filepath.Join(stage, output, "zz-wide", fmt.Sprintf("%05d", wideEntries-1))
 	mustDeletionBytes(t, far, "")
+	if mode == "local" {
+		if _, err := os.Stat(filepath.Join(stage, "!repo.git", "HEAD")); err != nil {
+			t.Fatal(err)
+		}
+	}
 	review := func() *ForceDeletion {
 		t.Helper()
 		started := time.Now()
 		rctx, done := context.WithTimeout(t.Context(), 2*time.Minute)
 		defer done()
-		scan, plan, err := cold.PrepareForceDeletion(rctx, rows[0], check, nil)
-		if err != nil || plan == nil {
+		scan, plan, err := cold.PrepareForceDeletion(rctx, rows[0], check, nil, localChecks...)
+		if err != nil || plan == nil || mode == "local" && !slices.Contains(scan.LocalGitStores, "!repo.git") {
 			t.Fatal(scan, plan, err)
 		}
 		t.Logf("cold review took %v", time.Since(started))
