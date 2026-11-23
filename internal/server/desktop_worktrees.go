@@ -210,6 +210,7 @@ func (d *DesktopWorktrees) PreviewRequest(parent context.Context, name string, s
 			for _, w := range wts {
 				seen[w.Dir]++
 			}
+			var bulkChecks []int
 			for _, w := range wts {
 				if plan.bulk {
 					i := latestWorktree(records, w.Dir)
@@ -230,28 +231,28 @@ func (d *DesktopWorktrees) PreviewRequest(parent context.Context, name string, s
 					row.Reason = unsavedFiles
 				case local.Err() != nil:
 					row.Reason = previewTimedOut
+				case plan.bulk:
+					bulkChecks = append(bulkChecks, len(out.Rows))
 				default:
-					if plan.bulk {
-						row = s.desktopBulkWorktree(local, y, records, board, workers, w, false, false)
-					} else {
-						row = s.desktopWorktree(local, y, records, board, workers, w, false)
-					}
+					row = s.desktopWorktree(local, y, records, board, workers, w, false)
 					if local.Err() != nil {
 						row.observation.Close()
 						row.Reason, row.Detail, row.KeepWarning = previewTimedOut, "", ""
 					}
 				}
-				if row.Reason == "" {
-					rec := records[latestWorktree(records, w.Dir)]
-					c := desktopCandidate{row: len(out.Rows), worktree: row.Worktree, record: rec,
-						decision: WorktreeDecisionFor(board, rec), observation: row.observation}
-					c.authority.decision = c.decision
-					candidates = append(candidates, c)
-				}
 				if i := latestWorktree(records, w.Dir); i >= 0 && records[i].ID == w.CleanupID && !records[i].Removed {
 					row.Task, row.TaskStatus = records[i].Task, WorktreeDecisionFor(board, records[i]).status
 				}
 				out.Rows = append(out.Rows, row)
+			}
+			s.inspectBulkRows(local, y, records, board, workers, out.Rows, bulkChecks)
+			for i, row := range out.Rows {
+				if row.Reason == "" {
+					rec := records[latestWorktree(records, row.Dir)]
+					decision := WorktreeDecisionFor(board, rec)
+					candidates = append(candidates, desktopCandidate{row: i, worktree: row.Worktree, record: rec,
+						decision: decision, authority: checkoutAuthority{decision: decision}, observation: row.observation})
+				}
 			}
 			if selected != nil && len(out.Rows) == 0 {
 				out.Rows = append(out.Rows, WorktreeCleanupRow{Worktree: *selected, Reason: noRegistration})

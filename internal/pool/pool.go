@@ -37,7 +37,7 @@ type Pool struct {
 	root string
 
 	mu      sync.Mutex
-	locks   map[string]*sync.Mutex
+	locks   map[string]*sync.RWMutex
 	trees   map[string]*sync.RWMutex // treeLock
 	edits   map[*sync.RWMutex]int    // editor leases, under mu and treeLock
 	fetched map[string]time.Time
@@ -45,7 +45,7 @@ type Pool struct {
 
 // New returns the pool at root.
 func New(root string) *Pool {
-	return &Pool{root: root, locks: map[string]*sync.Mutex{}, fetched: map[string]time.Time{}}
+	return &Pool{root: root, locks: map[string]*sync.RWMutex{}, fetched: map[string]time.Time{}}
 }
 
 // Root is the pool's directory.
@@ -161,12 +161,12 @@ func (p *Pool) dir(name string) string {
 	return filepath.Join(p.root, filepath.FromSlash(name)) + ".git"
 }
 
-func (p *Pool) lock(name string) *sync.Mutex {
+func (p *Pool) lock(name string) *sync.RWMutex {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	l := p.locks[name]
 	if l == nil {
-		l = &sync.Mutex{}
+		l = &sync.RWMutex{}
 		p.locks[name] = l
 	}
 	return l
