@@ -28,15 +28,21 @@ with tempfile.TemporaryDirectory(prefix='yesman-release-gate-') as temporary:
         results.append({'case': 'tag-format', 'tag': tag, 'accepted': valid})
     if len(sys.argv) > 1:
         app, tag, source, arch, report = sys.argv[1:]
-        for name, requested_tag, requested_source, requested_arch, expected_error in [
-            ('correct-signed-bundle', tag, source, arch, None),
-            ('wrong-version', 'v0.1.999999', source, arch, 'Bundle version differs'),
-            ('wrong-architecture', tag, source, 'amd64' if arch == 'arm64' else 'arm64', 'Binary GOARCH differs'),
-            ('wrong-source', tag, '0' * 40, arch, 'Binary source differs'),
-            ('invalid-tag', 'main', source, arch, 'Expected a canonical'),
+        for name, requested_tag, requested_source, requested_arch, expected_error, extra in [
+            ('correct-signed-bundle', tag, source, arch, None, []),
+            ('wrong-version', 'v0.1.999999', source, arch, 'Bundle version differs', []),
+            ('wrong-architecture', tag, source, 'amd64' if arch == 'arm64' else 'arm64', 'Binary GOARCH differs', []),
+            ('wrong-source', tag, '0' * 40, arch, 'Binary source differs', []),
+            ('invalid-tag', 'main', source, arch, 'Expected a canonical', []),
+            # An ad-hoc build must not pass where a Developer ID team is expected.
+            ('adhoc-where-developer-id-expected', tag, source, arch, 'Expected a Developer ID signature', ['--expect-team-id', 'ABCDE12345']),
+            ('malformed-team-id', tag, source, arch, 'Expected a 10-character Apple Team ID', ['--expect-team-id', 'idy']),
+            # A source without a Team ID expects exactly an ad-hoc build.
+            ('adhoc-expected', tag, source, arch, None, ['--expect-adhoc']),
+            ('both-expectations', tag, source, arch, 'not both', ['--expect-adhoc', '--expect-team-id', 'ABCDE12345']),
         ]:
             target = pathlib.Path(temporary) / (name + '.json')
-            process = subprocess.run([sys.executable, str(scripts / 'check_macos_bundle.py'), app, str(target), '--release-tag', requested_tag, '--arch', requested_arch, '--source', requested_source], capture_output=True)
+            process = subprocess.run([sys.executable, str(scripts / 'check_macos_bundle.py'), app, str(target), '--release-tag', requested_tag, '--arch', requested_arch, '--source', requested_source, *extra], capture_output=True)
             if expected_error:
                 assert process.returncode != 0 and expected_error in process.stderr.decode(), (name, process.stderr.decode())
                 assert not target.exists(), 'Failed inspection must not create success evidence'
@@ -44,6 +50,7 @@ with tempfile.TemporaryDirectory(prefix='yesman-release-gate-') as temporary:
                 assert process.returncode == 0, process.stderr.decode()
                 checked = json.loads(target.read_text())
                 assert checked['expectedRelease'] == {'tag': tag, 'arch': arch, 'source': source}
+                assert checked['signature']['identifier'] == 'dev.idy.yesman' and checked['signature']['designatedRequirement'], checked['signature']
             results.append({'case': name, 'accepted': expected_error is None, 'expectedFailure': expected_error})
         pathlib.Path(report).parent.mkdir(parents=True, exist_ok=True)
         pathlib.Path(report).write_text(json.dumps(results, indent=2))

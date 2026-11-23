@@ -164,6 +164,19 @@ jobs:
         run: |
           version=$(python3 -c 'import json; print(json.load(open("mygo.json"))["version"])')
           python3 scripts/test_macos_release_gate.py "$RUNNER_TEMP/production/darwin-$(go env GOARCH)/yesman.app" "v$version" "$(git rev-parse HEAD)" "$(go env GOARCH)" "$RUNNER_TEMP/startup-evidence/release-gate-tests.json"
+      # No certificate, secret or Apple service: stand-in Apple tools around
+      # the real MyGo build, and real keychain tools refusing a synthetic
+      # self-signed identity on this disposable runner.
+      - name: Check Developer ID release signing without credentials
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          GOCACHE: ${{ runner.temp }}/signing-go/cache
+          GOMODCACHE: ${{ runner.temp }}/signing-go/mod
+          GOPATH: ${{ runner.temp }}/signing-go/path
+          GOTMPDIR: ${{ runner.temp }}/signing-go/tmp
+        run: |
+          mkdir -p "$GOTMPDIR"
+          python3 scripts/test_macos_signing.py --mygo --real-keychain --report "$RUNNER_TEMP/startup-evidence/signing-tests.json"
       - name: Verify native window and production page bridge
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
