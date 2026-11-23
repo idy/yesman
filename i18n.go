@@ -74,6 +74,7 @@ var zhHans = map[string]string{
 	"Use Git to move the primary worktree %q outside %s before deleting it.":                                                   "请先用 Git 将主工作树 %q 移到 %s 以外，再删除工作区。",
 	"Could not verify the new location of primary worktree %q. Move it with Git and keep its registration.":                    "无法确认主工作树 %q 的新位置。请用 Git 移动工作树并保留登记。",
 	"Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.": "无法保存工作树 %q 的迁移记录。请确认对 %s 有写入权限，且文件系统支持同步，然后重试。",
+	"The worktree relocation proof changed. Check the relocated checkout, then review the deletion again.":                     "工作树迁移凭据已更改。请检查迁移后的检出，然后重新检查删除范围。",
 	"Grant write access to directory %s or move its contents to safety before deleting the workspace.":                         "请先为目录 %s 授予写权限，或将其中的文件移到安全位置，再删除工作区。",
 
 	// Local Git data is held unless it already lives outside the deletion scope.
@@ -95,6 +96,9 @@ var zhHans = map[string]string{
 	"the workspace changed since confirmation. Reopen its menu":                                                                             "工作区在确认期间已更改，请重新打开菜单。",
 	"the workspace was replaced. Reopen its menu":                                                                                           "工作区已被替换，请重新打开菜单。",
 	"Cannot verify the Git checkout directory at %s.":                                                                                       "无法验证 %s 下的 Git 工作树目录。",
+	"The interrupted deletion's approval record is missing or changed. Preserve the remaining files and Git data.":                          "中断删除的批准记录缺失或已更改。请保留剩余文件和 Git 数据。",
+	"The workspace deletion inventory is too large. Move some files out before trying again.":                                               "要删除的工作区文件清单过大。请先移出部分文件，再重试。",
+	"The workspace is too deeply nested to review for deletion.":                                                                            "工作区的目录层级过深，无法检查删除范围。",
 	"The workspace Git scan reached its limit.":                                                                                             "工作区 Git 扫描已达到上限。",
 	"Workspace files or Git checkout paths changed. Review a fresh deletion confirmation.":                                                  "工作区文件或 Git 工作树路径已更改。请重新检查并确认删除。",
 	"Too many paths to show in a deletion confirmation. Move some files or directories out before trying again.":                            "要确认删除的路径过多。请先移出部分文件或目录，再重试。",

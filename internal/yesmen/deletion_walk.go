@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
-	"slices"
 	"strings"
 )
 
@@ -19,34 +19,53 @@ const (
 	purgeDeletion
 )
 
-// Walk one verified directory handle at a time. A file or link is unlinked as
-// an entry. Only an empty directory is ever removed.
-func walkWorkspaceDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *ForceDeletion) error {
-	return walkDeletion(ctx, ws, phase, force, false)
+type deletionCoverage struct {
+	output *deletionInventory
+	input  *deletionCursor
+	subset bool
 }
 
-func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *ForceDeletion, snapshot bool) error {
+// Walk one verified directory handle at a time. A file or link is unlinked as
+// an entry. Only an empty directory is ever removed.
+func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *ForceDeletion, coverage deletionCoverage) error {
 	volume, err := directoryIdentity(ws)
 	if err != nil {
 		return err
 	}
 	var git *localGitReview
-	if force != nil && len(force.git) != 0 {
+	if force != nil && force.approval == nil && len(force.git) != 0 {
 		git, err = force.reviewApprovedGit(ctx, ws)
 		if err != nil {
 			return err
 		}
 		defer git.root.Close()
 	}
-	var admins map[string]localGitBinding
-	if git != nil {
-		admins = git.expected
+	admins := map[string]bool{}
+	var approvedGit map[string]string
+	var configs map[string][32]byte
+	var removalReview *localGitReview
+	if force != nil {
+		approvedGit = force.approvedGit()
+		for _, admin := range approvedGit {
+			admins[admin] = true
+		}
+		if phase == purgeDeletion && force.approval != nil {
+			configs = force.approvedGitConfigs()
+			removalReview, err = newLocalGitReview(ctx, ws)
+			if err != nil {
+				return err
+			}
+			defer removalReview.root.Close()
+		}
 	}
-	seen, seenTop, seenRemaining := 0, 0, 0
-	var visit func(*os.Root, string, bool) error
-	visit = func(dir *os.Root, rel string, inGit bool) error {
-		binding, isAdmin := admins[rel]
-		inGit = inGit || isAdmin
+	seen, seenTop := 0, 0
+	legacyStage := isLegacyDeletionStage(ws)
+	var visit func(*os.Root, string, bool, int) error
+	visit = func(dir *os.Root, rel string, inGit bool, depth int) error {
+		if depth > deletionDepthLimit {
+			return deletionIssue("The workspace is too deeply nested to review for deletion.")
+		}
+		inGit = inGit || admins[rel]
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -57,13 +76,33 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 		if !sameMount(id, volume) {
 			return deletionIssue("Unmount %s before deleting this workspace.", rel)
 		}
-		limit := -1
-		entries, err := readDeletionEntries(ctx, dir, &limit)
+		if admins[rel] && phase == purgeDeletion {
+			if git != nil {
+				binding := git.expected[rel]
+				if id != binding.id {
+					return errCheckoutPreviewChanged
+				}
+				if err := git.recheckAdmin(binding); err != nil {
+					return err
+				}
+			} else if err := removalReview.checkRemovalDependencies(rel, configs[rel], true); err != nil {
+				return err
+			}
+		}
+		var checkEntry func(string) error
+		if inGit {
+			checkEntry = func(name string) error {
+				if heldLocalGitEntry(rel, name, admins[rel]) {
+					return holdGitData(ws, path.Join(rel, name))
+				}
+				return nil
+			}
+		}
+		listing, err := readDeletionDirectory(ctx, dir, checkEntry)
 		if err != nil {
 			return err
 		}
-		slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
-		entry, markers := gitMarkers(rel, entries)
+		entry, markers := deletionGitMarkers(dir, rel, listing.markers, legacyStage)
 		var verified map[string]fs.FileInfo
 		if len(markers) > 0 {
 			current, err := observeCheckout(dir, entry, id, markers)
@@ -80,7 +119,7 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 				if git.paths[rel] != force.git[rel] {
 					return errCheckoutPreviewChanged
 				}
-			} else if force == nil || force.git[rel].admin == "" {
+			} else if approvedGit[rel] == "" {
 				if err := checkCheckoutGit(ws, dir, current, rel); err != nil {
 					return err
 				}
@@ -93,58 +132,30 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 			}
 			verified = current.markers
 			seen++
-			if phase == purgeDeletion {
-				// Keep the marker until the ordinary files have been removed.
-				// An interrupted purge can then show it again on retry.
-				other := make([]os.DirEntry, 0, len(entries))
-				for _, e := range entries {
-					if verified[e.Name()] == nil {
-						other = append(other, e)
-					}
-				}
-				for _, e := range entries {
-					if verified[e.Name()] != nil {
-						other = append(other, e)
-					}
-				}
-				entries = other
-			}
 		} else if force != nil {
 			if _, approved := force.paths[rel]; approved {
 				return errCheckoutPreviewChanged
 			}
 		}
-		if inGit {
-			for _, e := range entries {
-				if heldLocalGitEntry(rel, e.Name(), isAdmin) {
-					return holdGitData(ws, path.Join(rel, e.Name()))
-				}
-			}
-		}
-		if len(entries) > 0 {
+		if !listing.empty() {
 			if err := deletionDirectoryAccess(dir, rel, phase != inspectDeletion); err != nil {
 				return err
 			}
 		}
-		var sharing *os.File
-		if len(admins) != 0 && force.checks.Entry != nil && (phase != purgeDeletion || inGit) {
-			sharing, err = dir.Open(".")
+		var handle *os.File
+		sharing := len(admins) != 0 && force.checks.Entry != nil && (phase != purgeDeletion || inGit)
+		inventory := coverage.input != nil || coverage.output != nil
+		if !listing.empty() && (sharing || inventory) {
+			handle, err = dir.Open(".")
 			if err != nil {
 				return err
 			}
-			defer sharing.Close()
+			defer handle.Close()
 		}
-		if isAdmin && phase == purgeDeletion {
-			// Module checkout markers may already be gone by this point.
-			// Verify the still-intact admin directory before removing any of it.
-			if id != binding.id {
-				return errCheckoutPreviewChanged
-			}
-			if err := git.recheckAdmin(binding); err != nil {
+		for e, err := range listing.sorted(ctx) {
+			if err != nil {
 				return err
 			}
-		}
-		for _, e := range entries {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -157,8 +168,8 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 			if inGit && st.Mode().Type() != fs.ModeDir && !st.Mode().IsRegular() {
 				return holdGitData(ws, child)
 			}
-			if sharing != nil {
-				if err := force.checks.Entry(sharing, name); err != nil {
+			if sharing {
+				if err := force.checks.Entry(handle, name); err != nil {
 					return &DeletionIssue{Message: "Could not verify that %s is idle.", Args: []any{child}, Cause: err}
 				}
 			}
@@ -171,15 +182,23 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 				}
 				seenTop++
 			}
-			if force != nil && force.remaining != nil {
-				if snapshot {
-					if err := force.observeRemaining(child, st); err != nil {
+			if inventory {
+				gitData := admins[rel] && (name == "HEAD" || name == "config") ||
+					approvedGit[rel] != "" && strings.EqualFold(name, ".git")
+				fingerprint, err := deletionFingerprint(dir, handle, name, st, volume, gitData)
+				if err != nil {
+					return err
+				}
+				if coverage.input != nil {
+					if err := coverage.input.match(ctx, child, fingerprint, coverage.subset); err != nil {
 						return err
 					}
-				} else if !sameDeletionEntry(force.remaining[child], st) {
-					return errCheckoutPreviewChanged
 				}
-				seenRemaining++
+				if coverage.output != nil {
+					if err := coverage.output.add(child, fingerprint); err != nil {
+						return err
+					}
+				}
 			}
 			switch {
 			case st.Mode().Type() == fs.ModeDir:
@@ -195,7 +214,7 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 					d.Close()
 					return fmt.Errorf("%s changed during deletion", child)
 				}
-				err = visit(d, child, inGit)
+				err = visit(d, child, inGit, depth+1)
 				d.Close()
 				if err != nil {
 					return err
@@ -215,13 +234,21 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 				}
 			}
 			if phase == purgeDeletion {
-				if git != nil && name == ".git" {
-					if module := force.git[rel]; module.module {
-						if err := git.recheckAdmin(module); err != nil {
-							return err
+				if name == ".git" && st.Mode().IsRegular() {
+					if git != nil {
+						if module := force.git[rel]; module.module {
+							if err := git.recheckAdmin(module); err != nil {
+								return err
+							}
+							if err := force.recheckModulePointer(git, rel, module); err != nil {
+								return err
+							}
 						}
-						if err := force.recheckModulePointer(git, rel, module); err != nil {
-							return err
+					} else if removalReview != nil {
+						if admin := approvedGit[rel]; admin != "" {
+							if err := removalReview.checkRemovalDependencies(admin, configs[admin], true); err != nil {
+								return err
+							}
 						}
 					}
 				}
@@ -236,11 +263,16 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 		}
 		return nil
 	}
-	if err := visit(ws, ".", false); err != nil {
+	if err := visit(ws, ".", false, 0); err != nil {
 		return err
 	}
-	if force != nil && (seen != len(force.paths) || seenTop != len(force.top) || seenRemaining != len(force.remaining)) {
+	if force != nil && (seen != len(force.paths) || seenTop != len(force.top)) {
 		return errCheckoutPreviewChanged
+	}
+	if coverage.input != nil && !coverage.subset {
+		if err := coverage.input.next(); !errors.Is(err, io.EOF) {
+			return errCheckoutPreviewChanged
+		}
 	}
 	return nil
 }
