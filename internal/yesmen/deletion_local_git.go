@@ -28,6 +28,7 @@ type localGitBinding struct {
 	admin    string
 	id       safefs.Identity
 	sum      [32]byte
+	config   [32]byte
 	pointer  [32]byte
 	worktree string
 	module   bool
@@ -314,7 +315,7 @@ func (r *localGitReview) inspect(admin string, bare, module bool) (localGitBindi
 	if err != nil {
 		return localGitBinding{}, "", err
 	}
-	binding := localGitBinding{admin: admin, id: id, sum: sha256.Sum256(append(append(head, 0), config...)), module: module, bare: bare}
+	binding := localGitBinding{admin: admin, id: id, sum: sha256.Sum256(append(append(head, 0), config...)), config: sha256.Sum256(config), module: module, bare: bare}
 	if r.expected != nil {
 		want, ok := r.expected[admin]
 		if !ok || want.id != binding.id || want.sum != binding.sum || want.bare != bare || want.module != module {

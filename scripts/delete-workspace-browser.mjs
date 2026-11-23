@@ -285,12 +285,30 @@ async function run(engine, name, lang) {
     await page.evaluate(() => rpc('MakeInterruptedWorkspace'));
     await page.reload();
     await openStorage(); await list.click();
-    const interrupted = stored.getByRole('button', {name:/\.deleting-[0-9a-f]+\.interrupted-build/});
+    const interrupted = stored.getByRole('button', {name:/\.deleting-(?:v1-)?[0-9a-f]+\.interrupted-build/});
     const reviewRemaining = dialog.getByRole('button', {name:/^(Review remaining files…|检查剩余文件…)$/});
     const deleteRemaining = dialog.getByRole('button', {name:/^(Delete remaining files|删除剩余文件)$/});
+    const partialGit = process.env.YESMAN_TEST_PARTIAL_LOCAL_GIT === '1';
+    const commitsBeforeRetry = await count('ForceDeleteWorkspace');
+    const verifyCancel = async key => {
+      await interrupted.click();
+      await reviewRemaining.click();
+      assert(await cancel.evaluate(n => n === document.activeElement));
+      if (key) await page.keyboard.press(key); else await cancel.click();
+      await dialog.waitFor({state:'detached'});
+      assert.equal(await count('ForceDeleteWorkspace'), commitsBeforeRetry);
+      if (partialGit) await page.evaluate(() => rpc('VerifyRemainingGit'));
+    };
+    await verifyCancel('Escape');
+    await verifyCancel('Enter');
+    await verifyCancel(null);
     await interrupted.click();
     await reviewRemaining.click();
-    await dialog.getByText(/\.interrupted-build\/build-output/).waitFor();
+    await dialog.getByText(/\.interrupted-build\/build-output$/).waitFor();
+    if (partialGit) {
+      await dialog.getByText(/A-checkout\/\.git$/).waitFor();
+      await dialog.getByText(/without a Git registration|未登记的检出/).waitFor();
+    }
     assert(await cancel.evaluate(n => n === document.activeElement));
     await screenshot('storage-retry');
     await page.evaluate(() => rpc('AddLateStagedFile'));
