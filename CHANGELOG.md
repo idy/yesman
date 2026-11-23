@@ -2,6 +2,12 @@
 
 Each release's section is what installed copies show as its release notes.
 
+## 0.1.63
+
+- **Clean up worktrees…** can permanently remove eligible idle temporary checkouts after you review the list and confirm, including dropped-task and older checkouts with uncommitted files. The preview identifies saved conflicts that would be discarded. Worktrees in use, linked to an open pull request, or marked to keep stay in place.
+- The **Worktrees** list and refresh skip the workspace’s `.yesman/tmp` directory so large temporary build trees do not slow down discovery elsewhere in the workspace.
+- **Force Delete…** can remove verified dangling Git links left by Bazel inside the workspace after you confirm the listed paths. It removes the links themselves and leaves external Git data intact.
+
 ## 0.1.62
 
 - Lead and Worker get a short project brief at the start of a new Pi run. The Lead gets relevant Topic and task context for linked submissions. Workers can pick up a focused brief from their dispatch.
