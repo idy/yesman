@@ -118,7 +118,7 @@ export function workspaceDeletion({ call, errorText, onLiveDeleted, toast, secti
           entries.length ? pathList(entries.map(e => e.path)) : null,
           token && result.localGitStores?.length ? h('p', null, t('Local Git stores to delete, including their internal submodules')) : null,
           token && result.localGitStores?.length ? pathList(result.localGitStores) : null,
-          token && result.localGitStores?.length ? h('p', { class: 'danger' }, t('This deletes local Git history, branches, tags and objects at these paths. A checkout that points here from elsewhere without a Git registration may stop working.')) : null,
+          token && result.localGitStores?.length ? h('p', { class: 'danger' }, t('This deletes local Git history, branches, tags and objects at these paths. Other checkouts that point here may stop working. Outside repositories, including bare repositories, may also stop working if they borrow Git objects from these stores.')) : null,
           result.linkMarkers?.length ? h('p', null, t('Git symbolic links to remove')) : null,
           result.linkMarkers?.length ? pathList(result.linkMarkers) : null,
           folders.length ? h('p', null, t(retrying ? 'Remaining paths in the interrupted deletion' : 'Directories that will also be deleted')) : null,

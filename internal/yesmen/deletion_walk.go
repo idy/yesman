@@ -31,27 +31,22 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 		return err
 	}
 	var git *localGitReview
-	if force != nil && force.git != nil && phase != purgeDeletion {
-		git, err = newLocalGitReview(ctx, ws)
+	if force != nil && len(force.git) != 0 {
+		git, err = force.reviewApprovedGit(ctx, ws)
 		if err != nil {
 			return err
 		}
 		defer git.root.Close()
-		git.expected = make(map[string]localGitBinding, len(force.git))
-		for _, binding := range force.git {
-			git.expected[binding.admin] = binding
-		}
 	}
-	admins := map[string]bool{}
-	if force != nil {
-		for _, binding := range force.git {
-			admins[binding.admin] = true
-		}
+	var admins map[string]localGitBinding
+	if git != nil {
+		admins = git.expected
 	}
 	seen, seenTop, seenRemaining := 0, 0, 0
 	var visit func(*os.Root, string, bool) error
 	visit = func(dir *os.Root, rel string, inGit bool) error {
-		inGit = inGit || admins[rel]
+		binding, isAdmin := admins[rel]
+		inGit = inGit || isAdmin
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -75,7 +70,7 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 			if err != nil {
 				return err
 			}
-			if git != nil {
+			if git != nil && phase != purgeDeletion {
 				if !force.paths[rel].matches(current) {
 					return errCheckoutPreviewChanged
 				}
@@ -121,7 +116,7 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 		}
 		if inGit {
 			for _, e := range entries {
-				if heldLocalGitEntry(rel, e.Name(), admins[rel]) {
+				if heldLocalGitEntry(rel, e.Name(), isAdmin) {
 					return holdGitData(ws, path.Join(rel, e.Name()))
 				}
 			}
@@ -132,12 +127,22 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 			}
 		}
 		var sharing *os.File
-		if phase != purgeDeletion && len(admins) != 0 && force.checks.Entry != nil {
+		if len(admins) != 0 && force.checks.Entry != nil && (phase != purgeDeletion || inGit) {
 			sharing, err = dir.Open(".")
 			if err != nil {
 				return err
 			}
 			defer sharing.Close()
+		}
+		if isAdmin && phase == purgeDeletion {
+			// Module checkout markers may already be gone by this point.
+			// Verify the still-intact admin directory before removing any of it.
+			if id != binding.id {
+				return errCheckoutPreviewChanged
+			}
+			if err := git.recheckAdmin(binding); err != nil {
+				return err
+			}
 		}
 		for _, e := range entries {
 			if err := ctx.Err(); err != nil {
@@ -210,6 +215,16 @@ func walkDeletion(ctx context.Context, ws *os.Root, phase deletionWalk, force *F
 				}
 			}
 			if phase == purgeDeletion {
+				if git != nil && name == ".git" {
+					if module := force.git[rel]; module.module {
+						if err := git.recheckAdmin(module); err != nil {
+							return err
+						}
+						if err := force.recheckModulePointer(git, rel, module); err != nil {
+							return err
+						}
+					}
+				}
 				now, err := dir.Lstat(name)
 				if err != nil || !sameDeletionEntry(st, now) {
 					return fmt.Errorf("%s changed during deletion", child)

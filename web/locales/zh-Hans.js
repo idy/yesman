@@ -963,7 +963,7 @@ export default {
   "Could not check local Git checkouts.": "无法检查本地 Git 工作树。",
   "Git checkouts in this workspace": "此工作区中的 Git 工作树",
   "Local Git stores to delete, including their internal submodules": "将删除的本地 Git 仓库及其内部子模块",
-  "This deletes local Git history, branches, tags and objects at these paths. A checkout that points here from elsewhere without a Git registration may stop working.": "这些路径中的本地 Git 历史、分支、标签和对象将被删除。若其他位置有未登记的检出指向这些仓库，该检出可能无法继续使用。",
+  "This deletes local Git history, branches, tags and objects at these paths. Other checkouts that point here may stop working. Outside repositories, including bare repositories, may also stop working if they borrow Git objects from these stores.": "这些路径中的本地 Git 历史、分支、标签和对象将被删除。指向这些路径的其他检出可能无法继续使用。借用这些仓库 Git 对象的外部仓库（包括裸仓库）也可能无法继续使用。",
   "Git symbolic links to remove": "将删除的 Git 符号链接",
   "Force Delete permanently removes these local checkouts and the rest of this workspace, including uncommitted changes and untracked files. Git data stored outside the workspace is kept.": "强制删除会永久移除这些本地工作树和工作区的其余文件，包括未提交的修改和未跟踪的文件。存放在工作区外的 Git 数据会保留。",
   "The checkout changed. Refresh Worktrees and review it again.": "检出状态已改变。请刷新工作树列表后重新检查。",
