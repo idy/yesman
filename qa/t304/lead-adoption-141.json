@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "repository": "idy/yesman",
+  "pr": 141,
+  "reviewTask": "t311",
+  "decision": "adopted",
+  "recordedAt": "2026-11-23T16:39:25.611089+00:00",
+  "authority": "Lead dispatch in this conversation",
+  "reviewSHA256": "9e59b245858a7f467627a13c285cbf4c7a6f381f2a5ce0c5f68f7705c16778cc",
+  "reviewPath": ".yesman/evidence/t311/workspace-deletion-review/terminal-closeout/at-1633/READY-FOR-INTEGRATION.json",
+  "combination": {
+    "originalHead": "10b269b22a88ba0f0e9df5ce4e86d8ffce3fec98",
+    "head": "acd8b81e31588cf566df18ee4e7eaea64144b8b9",
+    "base": "cec767fcea6f70e65936632b91e79f8434ada786",
+    "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+    "tree": "0712bb215528160e1c10f112f74b233cd86e019a"
+  },
+  "previewParents": [
+    "cec767fcea6f70e65936632b91e79f8434ada786",
+    "acd8b81e31588cf566df18ee4e7eaea64144b8b9"
+  ],
+  "lastMacJob": 137830718434,
+  "lastMacAttempt": 1,
+  "lastMacCompletedAt": "2026-11-23T16:29:23Z",
+  "workerRun": 45214209202,
+  "nativeReview": 6025134875,
+  "scope": [
+    "one guarded #141 squash",
+    "one verified metadata branch push and PR open"
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "markers": [
+    {
+      "kind": "symlink",
+      "marker": ".yesman/tmp/t12/display-fw/bazel-output/execroot/_main/.git",
+      "target": "gizos-display-pr/.git"
+    },
+    {
+      "kind": "symlink",
+      "marker": ".yesman/tmp/t15/bk-rgb-opt/host-bazel/873926ea9533cc5e89b6a6ea0233a22a/execroot/_main/.git",
+      "target": "gizos-bk-rgb-opt/.git"
+    },
+    {
+      "kind": "symlink",
+      "marker": ".yesman/tmp/t18/display-code/bazel-output/execroot/_main/.git",
+      "target": "gizos-tiga-layout-cleanup/.git"
+    },
+    {
+      "kind": "symlink",
+      "marker": ".yesman/tmp/t20/layout-audit/bazel-host/87bb07f20e10874ce20de5a571bdfd16/execroot/_main/.git",
+      "target": "firmwares-tiga-e2e-h2loader/.git"
+    },
+    {
+      "kind": "symlink",
+      "marker": ".yesman/tmp/t20/layout-audit/bazel-host-native/87bb07f20e10874ce20de5a571bdfd16/execroot/_main/.git",
+      "target": "firmwares-tiga-e2e-h2loader/.git"
+    },
+    {
+      "kind": "symlink",
+      "marker": ".yesman/tmp/t22/layout-audit/bazel-host/2f8e6ab1c5f65693e90fc57b1cd18f4f/execroot/_main/.git",
+      "target": "firmwares-zero-esp-h2loader/.git"
+    },
+    {
+      "kind": "symlink",
+      "marker": ".yesman/tmp/t22/layout-audit/bazel-host-native/2f8e6ab1c5f65693e90fc57b1cd18f4f/execroot/_main/.git",
+      "target": "firmwares-zero-esp-h2loader/.git"
+    },
+    {
+      "kind": "symlink",
+      "marker": ".yesman/tmp/t22/layout-audit/gizos-bazel/bb558c693a4d1f38fb9e0301a0b66527/execroot/_main/.git",
+      "target": "gizos-zero-esp-layout-cleanup/.git"
+    },
+    {
+      "kind": "symlink",
+      "marker": ".yesman/tmp/t23/bk-rgb-opt/host-bazel/0874fd433bee6794c8ccbbf4422dc713/execroot/_main/.git",
+      "target": "gizos-zero-bk-layout-cleanup/.git"
+    },
+    {
+      "kind": "symlink",
+      "marker": ".yesman/tmp/t23/bk-rgb-opt/host-bazel/372d4899099c19f8fe619a574f8a41ac/execroot/_main/.git",
+      "target": ".yesman/tmp/t23/bk-rgb-opt/firmware-build-src/.git"
+    }
+  ]
+}

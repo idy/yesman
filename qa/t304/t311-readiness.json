@@ -1,0 +1,461 @@
+{
+  "pr": {
+    "id": 5455572637,
+    "number": 141,
+    "repository": "idy/yesman",
+    "title": "fix: Report workspace deletion blockers during review",
+    "body_sha256": "d93d6be51568fefee84be9f8a0a948d584155913979d5a43d4063c19ff755503",
+    "url": "https://github.com/idy/yesman/pull/141",
+    "opened_by": "idy",
+    "opened_at": "2026-11-23T15:03:23Z",
+    "opening_event_run": 45200907553,
+    "opener_id": 687349,
+    "node_id": "PR_kwDOVqqT_s8AAAABRS1unQ",
+    "repository_id": 1454019582
+  },
+  "source": "acd8b81e31588cf566df18ee4e7eaea64144b8b9",
+  "source_verdict": "PASS",
+  "main": "cec767fcea6f70e65936632b91e79f8434ada786",
+  "preview": {
+    "sha": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+    "tree": "0712bb215528160e1c10f112f74b233cd86e019a",
+    "parents": [
+      "cec767fcea6f70e65936632b91e79f8434ada786",
+      "acd8b81e31588cf566df18ee4e7eaea64144b8b9"
+    ]
+  },
+  "platform": [
+    {
+      "id": 137830718470,
+      "name": "Packaged process (macos-15-intel)",
+      "run": 45214176923,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:17:27Z",
+      "checkout_line": 199,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830718470.log",
+      "bytes": 38359,
+      "sha256": "931fced0280d1f0276f3b57fc9b32f7e2b9cb28455531b2e4d07eac017f8209c",
+      "proof_line": 385
+    },
+    {
+      "id": 137830718882,
+      "name": "Production-source upgrade (ubuntu-latest)",
+      "run": 45214176923,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:17:00Z",
+      "checkout_line": 212,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830718882.log",
+      "bytes": 88654,
+      "sha256": "b853825bc0d728deefc2adb84505c7b0e96cc2d79df453fd13f702e50d3a5a06",
+      "proof_line": 877
+    },
+    {
+      "id": 137830718886,
+      "name": "Packaged process (macos-latest)",
+      "run": 45214176923,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:19:24Z",
+      "checkout_line": 200,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830718886.log",
+      "bytes": 37904,
+      "sha256": "0f4983c74ba6775f6328f32f9b2a3031b440b209af00502549d346db4e1d970f",
+      "proof_line": 378
+    },
+    {
+      "id": 137830718924,
+      "name": "Production-source upgrade (macos-latest)",
+      "run": 45214176923,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:18:36Z",
+      "checkout_line": 214,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830718924.log",
+      "bytes": 37924,
+      "sha256": "15e7524afbbd8d239a41bd43412fdcf4f9440c11cb392415e63093c4e0989db3",
+      "proof_line": 361
+    },
+    {
+      "id": 137830718934,
+      "name": "Production-source upgrade (windows-latest)",
+      "run": 45214176923,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:17:49Z",
+      "checkout_line": 199,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830718934.log",
+      "bytes": 37425,
+      "sha256": "d420c8794337a2edad83dc4ebcebaf45fe6df2249fc3ad2f6bcd3d6d75cf14ba",
+      "proof_line": 341
+    },
+    {
+      "id": 137830718972,
+      "name": "Packaged process (ubuntu-latest)",
+      "run": 45214176923,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:16:22Z",
+      "checkout_line": 216,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830718972.log",
+      "bytes": 117957,
+      "sha256": "4a45edba75eaf18df76ef079b7c60ffaf2371c20028988bd0870ee1855b2cc3f",
+      "proof_line": 996
+    },
+    {
+      "id": 137830719033,
+      "name": "Production-source upgrade (macos-15-intel)",
+      "run": 45214176923,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:23:19Z",
+      "checkout_line": 195,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830719033.log",
+      "bytes": 37024,
+      "sha256": "0ee1331e6b02718a7ea40b9a229a9426b1e73f0a4cc1e56a4a2135fdfd433700",
+      "proof_line": 346
+    },
+    {
+      "id": 137830719137,
+      "name": "Packaged process (windows-latest)",
+      "run": 45214176923,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:16:56Z",
+      "checkout_line": 203,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830719137.log",
+      "bytes": 42933,
+      "sha256": "36ab6542c5f7a691e81a6205f915e695b69ba8810f771d73b184687cec6d5957",
+      "proof_line": 424
+    },
+    {
+      "id": 137830716260,
+      "name": "Native restart (windows-latest)",
+      "run": 45214176647,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:15:26Z",
+      "checkout_line": 124,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830716260.log",
+      "bytes": 31650,
+      "sha256": "508234a5f7e8e51b8ab99331ef6dabf738b9626e677feeb5e03fa931467d66ea",
+      "proof_line": 322
+    },
+    {
+      "id": 137830717223,
+      "name": "Native restart (macos-latest)",
+      "run": 45214176647,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:15:21Z",
+      "checkout_line": 121,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830717223.log",
+      "bytes": 30694,
+      "sha256": "855c55e01f5e221014d14fcbc1d927c6af8b69fcd972e726051b55066e58efd9",
+      "proof_line": 322
+    },
+    {
+      "id": 137830717681,
+      "name": "Production startup (macos-15-intel)",
+      "run": 45214176658,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:19:09Z",
+      "checkout_line": 187,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830717681.log",
+      "bytes": 33925,
+      "sha256": "46c75ba6d70827ceda670cb397d2603876b34f5d223ab272f1d2e4de6692934d",
+      "proof_line": 395
+    },
+    {
+      "id": 137830718037,
+      "name": "test (ubuntu-latest)",
+      "run": 45214176658,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:21:13Z",
+      "checkout_line": 135,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830718037.log",
+      "bytes": 69096,
+      "sha256": "fa17242fdae6dfaf8338cd3d9681327e11f2e3c136ae99c36a838de9d5432b3f",
+      "go": {
+        "command": "go test -race ./...",
+        "source_branch_line": 450,
+        "test_completed": "2026-11-23T16:20:38Z",
+        "packages": {
+          "github.com/idy/yesman": {
+            "line": 459,
+            "result": "74.724s"
+          },
+          "github.com/idy/yesman/internal/yesmen": {
+            "line": 479,
+            "result": "192.416s"
+          },
+          "github.com/idy/yesman/internal/server": {
+            "line": 476,
+            "result": "136.881s"
+          }
+        }
+      }
+    },
+    {
+      "id": 137830718286,
+      "name": "Production startup (macos-latest)",
+      "run": 45214176658,
+      "attempt": 1,
+      "completed_at": "2026-11-23T16:16:48Z",
+      "checkout_line": 116,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "file": "gates/platform/137830718286.log",
+      "bytes": 28961,
+      "sha256": "d8f5bf669a119b49eb7b29b127c9a8e973e905a803cb5ae79817fb9b744927f0",
+      "proof_line": 314
+    },
+    {
+      "id": 137830717164,
+      "name": "Native restart (ubuntu-latest)",
+      "run": 45214176647,
+      "attempt": 1,
+      "url": "https://github.com/idy/yesman/actions/runs/45214176647/job/137830717164",
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-11-23T16:25:53Z",
+      "bytes": 86301,
+      "sha256": "2f4f61a8a28dfc90b34ee2e0eccdd22f81c355e78ee05d3b26cab835cafe2153",
+      "file": "terminal-closeout/job-137830717164.log",
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "checkout_line": 137,
+      "proof_lines": {
+        "\"the original prompt was sent once, never replayed\": true": 801,
+        "\"the lead resumed in a new pi with --continue\": true": 805,
+        "\"no agent started after a plain quit\": true": 878
+      }
+    },
+    {
+      "id": 137830718338,
+      "name": "test (windows-latest)",
+      "run": 45214176658,
+      "attempt": 1,
+      "url": "https://github.com/idy/yesman/actions/runs/45214176658/job/137830718338",
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-11-23T16:27:13Z",
+      "bytes": 68314,
+      "sha256": "6eaaa438c9abe025ef5f56136491ebce63ad5f36da581400ea86cbae1b1cbd2e",
+      "file": "terminal-closeout/job-137830718338.log",
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "checkout_line": 122,
+      "go": {
+        "command": "go test ./...",
+        "line": 448,
+        "test_completed": "2026-11-23T16:26:37Z",
+        "packages": {
+          "github.com/idy/yesman": {
+            "line": 459,
+            "result": "55.052s"
+          },
+          "github.com/idy/yesman/internal/agent": {
+            "line": 461,
+            "result": "192.144s"
+          },
+          "github.com/idy/yesman/internal/server": {
+            "line": 476,
+            "result": "456.019s"
+          },
+          "github.com/idy/yesman/internal/yesmen": {
+            "line": 479,
+            "result": "24.746s"
+          }
+        }
+      }
+    },
+    {
+      "id": 137830718434,
+      "name": "test (macos-latest)",
+      "run": 45214176658,
+      "attempt": 1,
+      "url": "https://github.com/idy/yesman/actions/runs/45214176658/job/137830718434",
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-11-23T16:29:23Z",
+      "file": "terminal-closeout/at-1633/job-137830718434.log",
+      "bytes": 62339,
+      "sha256": "6808f862d9940a12607302e59c7f2e5a76677fbcb489298ea4479bc44ee38173",
+      "checkout_line": 119,
+      "preview": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+      "go": {
+        "command": "go test -race ./...",
+        "line": 388,
+        "test_started": "2026-11-23T16:19:31Z",
+        "test_completed": "2026-11-23T16:28:19Z",
+        "packages": {
+          "github.com/idy/yesman": {
+            "line": 399,
+            "result": "85.214s"
+          },
+          "github.com/idy/yesman/internal/agent": {
+            "line": 401,
+            "result": "254.717s"
+          },
+          "github.com/idy/yesman/internal/pool": {
+            "line": 410,
+            "result": "33.481s"
+          },
+          "github.com/idy/yesman/internal/server": {
+            "line": 416,
+            "result": "373.673s"
+          },
+          "github.com/idy/yesman/internal/yesmen": {
+            "line": 419,
+            "result": "206.442s"
+          }
+        }
+      }
+    }
+  ],
+  "platform_passed": 16,
+  "platform_total": 16,
+  "platform_pending": [],
+  "platform_failed": [],
+  "integration_ready": true,
+  "actual_review": {
+    "run": 45214209202,
+    "dispatcher": 45214172233,
+    "mode": "full",
+    "job_proofs": {
+      "dispatch": {
+        "id": 137830709589,
+        "completed_at": "2026-11-23T16:14:21Z",
+        "file": "gates/review/137830709589.log",
+        "bytes": 4408,
+        "sha256": "bc09e82e20e15533f871c7abf3fb12c2cc2731963341e88fda560c8736585d42"
+      },
+      "admission": {
+        "id": 137831141142,
+        "completed_at": "2026-11-23T16:17:00Z",
+        "file": "gates/review/137831141142.log",
+        "bytes": 178814,
+        "sha256": "965ea0388f34261d3c2a30466e103ddebe7540a394cc37457575698d0b2d80b5"
+      },
+      "publish": {
+        "id": 137832674953,
+        "completed_at": "2026-11-23T16:17:14Z",
+        "file": "gates/review/137832674953.log",
+        "bytes": 35796,
+        "sha256": "06a3bfbe30ae43f3806875e3f6605a2ef0c593b12d36c2d5d2ee1209c8771ea9"
+      },
+      "finalize": {
+        "id": 137832837119,
+        "completed_at": "2026-11-23T16:17:20Z",
+        "file": "gates/review/137832837119.log",
+        "bytes": 11271,
+        "sha256": "fdc424c1ebf44766dba15ffaa8aa91a182c071bbd54441bdf72dc5e19ef6fc3f"
+      }
+    },
+    "artifacts": {
+      "admission": {
+        "id": 14836369080,
+        "member_sha256": "86ddb4f924a3a2c5e1bcc43ff28fc121c8c196eeb6abaf49bfb20215d5494856",
+        "file": "gates/review/14836369080.zip",
+        "bytes": 977,
+        "sha256": "d645a0cebef1609df596e4da0cf5489d4b28c3cc8d0c82f37541dfa23b3fe40e"
+      },
+      "terminal": {
+        "id": 14837094022,
+        "member_sha256": "c5c5c9186f8365f7fc3c162a58c76ef2d16a5930269843f3153ee71c53e060d4",
+        "file": "gates/review/14837094022.zip",
+        "bytes": 1274,
+        "sha256": "b7757fd019d4247a716f8887f488b81bc0a1e57fd2f527988b46a9771bd05df4"
+      }
+    },
+    "checks": {
+      "pr": 137831105801,
+      "issue": 137831111968,
+      "code": 137831116941
+    },
+    "native": {
+      "id": 6025134875,
+      "html_url": "https://github.com/idy/yesman/pull/141#pullrequestreview-6025134875",
+      "commit_id": "acd8b81e31588cf566df18ee4e7eaea64144b8b9",
+      "state": "COMMENTED",
+      "submitted_at": "2026-11-23T16:17:05Z"
+    },
+    "readiness": {
+      "schema_version": 2,
+      "repository": "idy/yesman",
+      "pull_request_number": 141,
+      "base_sha": "cec767fcea6f70e65936632b91e79f8434ada786",
+      "head_sha": "acd8b81e31588cf566df18ee4e7eaea64144b8b9",
+      "snapshot_sha256": "86e6afb09b75a4001200465ee15751483a5557d0256bc000d703fba02bc12621",
+      "trusted_policy_sha256": "6e9efe2b97d3af1eb07f932b6e6e300698b303472288f1ec2994f482944dd230",
+      "workflow_source_sha": "b3c5b9c9d9a083a88ea1ca6cc9127750bb9b4b77",
+      "model": "gpt-6.1-sol",
+      "effort": "low",
+      "stage_verdicts": {
+        "pr_review": "pass",
+        "issue_review": "pass",
+        "code_review": "pass"
+      },
+      "verdict": "pass",
+      "blockers": []
+    }
+  },
+  "discussion": {
+    "141": {
+      "threads": 0,
+      "reviews": 4,
+      "inline": 0,
+      "issues": 0
+    },
+    "142": {
+      "threads": 1,
+      "reviews": 5,
+      "inline": 1,
+      "issues": 1,
+      "historical_finding": 4667833106,
+      "resolved": false,
+      "historical_finding_disposition": "Repair verified in the reviewed #142 source with identical combined-tree blobs"
+    }
+  },
+  "current_bugbot_checks": {
+    "141": 0,
+    "142": 0
+  },
+  "snapshot": {
+    "start": "2026-11-23T16:33:12Z",
+    "end": "2026-11-23T16:34:29Z"
+  },
+  "retained_checkout": {
+    "at": "2026-11-23T16:26:22.154634+00:00",
+    "dir": "yesman-delete-preflight-combination-review",
+    "task": "t311",
+    "cleanup_id": "ad79813c0457965933f9b27bc4b80885",
+    "head": "acd8b81e31588cf566df18ee4e7eaea64144b8b9",
+    "checkpoint": "refs/yesman/worktrees/ad79813c0457965933f9b27bc4b80885",
+    "removed": true,
+    "directory_absent": true,
+    "private_git_absent": true,
+    "registration_absent": true
+  },
+  "parent_manifest_sha256": "5635742589274968ee383332cf73aafadb475f884920cb5e030ae9f9ab1d772f",
+  "tree": "0712bb215528160e1c10f112f74b233cd86e019a",
+  "base": "cec767fcea6f70e65936632b91e79f8434ada786",
+  "platform_checked": 16,
+  "prior_manifests": {
+    "source": {
+      "sha256": "5635742589274968ee383332cf73aafadb475f884920cb5e030ae9f9ab1d772f",
+      "files": 98
+    },
+    "intermediate": {
+      "sha256": "2ec79ab494c799a7b27c57a0ec79eec5a14d58ebddcaba86c3826bc881e07469",
+      "files": 39
+    }
+  },
+  "actual_checkout": "7da4d7d477407201b44706ac2a4350b3dc84e85f",
+  "platform_runs": [
+    45214176647,
+    45214176658,
+    45214176923
+  ]
+}
