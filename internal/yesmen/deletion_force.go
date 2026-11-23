@@ -147,7 +147,7 @@ func (s *Store) PrepareForceDeletion(ctx context.Context, target DeletionTarget,
 	if err := plan.checkIdle(ctx, ws); err != nil {
 		return scan, nil, err
 	}
-	if err := s.checkWorktreeRecords(ctx, parent, ws, target, []RelocatedPrimary{relocated}, false); err != nil {
+	if err := s.checkWorktreeRecords(ctx, ws, []RelocatedPrimary{relocated}, nil); err != nil {
 		return scan, nil, err
 	}
 	if err := s.checkDeletionTarget(parent, target); err != nil {

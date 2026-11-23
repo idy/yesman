@@ -74,6 +74,7 @@ var zhHans = map[string]string{
 	"Use Git to move the primary worktree %q outside %s before deleting it.":                                                   "请先用 Git 将主工作树 %q 移到 %s 以外，再删除工作区。",
 	"Could not verify the new location of primary worktree %q. Move it with Git and keep its registration.":                    "无法确认主工作树 %q 的新位置。请用 Git 移动工作树并保留登记。",
 	"Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.": "无法保存工作树 %q 的迁移记录。请确认对 %s 有写入权限，且文件系统支持同步，然后重试。",
+	"The worktree relocation proof changed. Check the relocated checkout, then review the deletion again.":                     "工作树迁移凭据已更改。请检查迁移后的检出，然后重新检查删除范围。",
 	"Grant write access to directory %s or move its contents to safety before deleting the workspace.":                         "请先为目录 %s 授予写权限，或将其中的文件移到安全位置，再删除工作区。",
 
 	// Local Git data is held unless it already lives outside the deletion scope.

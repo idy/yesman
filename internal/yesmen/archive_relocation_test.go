@@ -2,6 +2,7 @@ package yesmen
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -87,6 +88,116 @@ func TestRelocationReceiptMustBeDurableBeforeArchiveDeletion(t *testing.T) {
 					t.Fatalf("published receipt replaced: %v", err)
 				}
 				published = info
+			}
+		})
+	}
+}
+
+func TestArchiveDeletionRechecksDurableRelocationProof(t *testing.T) {
+	for _, change := range []string{"destination", "record", "missing record", "missing receipt", "replaced receipt", "late registration"} {
+		t.Run(change, func(t *testing.T) {
+			s := waitStore(t)
+			record := WorktreeRecord{ID: "fixture", Purpose: "primary", Dir: "source", Owner: "lead"}
+			mustDeletion(t, s.SaveWorktreeRecords("alice", []WorktreeRecord{record}))
+			archive, err := s.Archive("alice", nil)
+			mustDeletion(t, err)
+			const note = "!sentinel"
+			mustDeletion(t, os.WriteFile(filepath.Join(archive, note), []byte("staged bytes"), 0600))
+			rows, err := s.StoredWorkspaces()
+			if err != nil || len(rows) != 1 {
+				t.Fatal(rows, err)
+			}
+			target := rows[0]
+			stage := filepath.Join(s.archive, deletingPrefix+target.Instance+"."+target.Entry)
+			folder := filepath.Join(s.archive, relocationFolder)
+			destination, other := t.TempDir(), t.TempDir()
+			for _, dir := range []string{destination, other} {
+				mustDeletion(t, os.WriteFile(filepath.Join(dir, note), []byte("outside checkout"), 0600))
+			}
+			proofCalls := 0
+			proof := func(_ context.Context, ws string, _ WorktreeRecord) (string, error) {
+				proofCalls++
+				if ws == stage && change == "destination" {
+					return other, nil
+				}
+				return destination, nil
+			}
+			flushes := 0
+			s.syncRelocationDir = func(dir *os.Root) error {
+				flushes++
+				return syncRelocationDirectory(dir)
+			}
+			late := errors.New("shared-pool registration appeared")
+			registrations := func(_ context.Context, ws string) error {
+				if ws != stage {
+					return nil
+				}
+				meta := filepath.Join(ws, ".yesman", "worktrees.json")
+				switch change {
+				case "record":
+					record.Owner = "different-owner"
+					data, err := json.Marshal([]WorktreeRecord{record})
+					mustDeletion(t, err)
+					return os.WriteFile(meta, data, 0600)
+				case "missing record":
+					return os.Remove(meta)
+				case "missing receipt", "replaced receipt":
+					files, err := os.ReadDir(folder)
+					if err != nil || len(files) != 1 {
+						t.Fatal(files, err)
+					}
+					file := filepath.Join(folder, files[0].Name())
+					if change == "missing receipt" {
+						return os.Remove(file)
+					}
+					data, err := os.ReadFile(file)
+					mustDeletion(t, err)
+					mustDeletion(t, os.Rename(file, filepath.Join(other, "original-receipt")))
+					return os.WriteFile(file, data, 0600)
+				case "late registration":
+					return late
+				}
+				return nil
+			}
+			wantErr := error(errRelocationReceiptChanged)
+			wantCalls := 3
+			switch change {
+			case "late registration":
+				wantErr, wantCalls = late, 2
+			case "missing record":
+				wantCalls = 2
+			}
+			if detached, err := s.Delete(t.Context(), target, registrations, nil, proof); detached || !errors.Is(err, wantErr) || flushes != 4 || proofCalls != wantCalls {
+				t.Fatalf("deletion detached=%v err=%v flushes=%d proof calls=%d", detached, err, flushes, proofCalls)
+			}
+			mustDeletionBytes(t, filepath.Join(stage, note), "staged bytes")
+			for _, dir := range []string{destination, other} {
+				mustDeletionBytes(t, filepath.Join(dir, note), "outside checkout")
+			}
+			if change != "late registration" {
+				return
+			}
+			// A new operation must establish durability again, even when the
+			// previous operation left an exact receipt alongside the stage.
+			cold := New(s.root, s.archive)
+			flushFailure := errors.New("could not establish durability this time")
+			cold.syncRelocationDir = func(*os.Root) error { return flushFailure }
+			pending, err := cold.StoredWorkspaces()
+			if err != nil || len(pending) != 1 || !pending[0].Pending {
+				t.Fatal(pending, err)
+			}
+			empty := func(context.Context, string) error { return nil }
+			if _, err := cold.Delete(t.Context(), pending[0], empty, nil, proof); !errors.Is(err, flushFailure) {
+				t.Fatal(err)
+			}
+			mustDeletionBytes(t, filepath.Join(stage, note), "staged bytes")
+			cold.syncRelocationDir = syncRelocationDirectory
+			mustDeletion(t, func() error {
+				_, err := cold.Delete(t.Context(), pending[0], empty, nil, proof)
+				return err
+			}())
+			if _, err := os.Lstat(stage); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatal(err)
 			}
 		})
 	}
