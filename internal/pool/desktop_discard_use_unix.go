@@ -4,6 +4,7 @@ package pool
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,13 +20,7 @@ import (
 
 func checkDiscardSharing(*os.File, string) error { return nil }
 
-func checkDesktopWorktreeUse(ctx context.Context, path string) error {
-	root := realPath(path)
-	matches := func(name string) bool {
-		name = strings.TrimSuffix(name, " (deleted)")
-		return filepath.IsAbs(name) && (name == root || within(name, root))
-	}
-	inUse := &RemovalHold{Reason: "A process is using this worktree.", Detail: path}
+func visitDesktopOpenFiles(ctx context.Context, visit func(string) bool) error {
 	if runtime.GOOS == "linux" {
 		processes, err := os.ReadDir("/proc")
 		if err != nil {
@@ -41,8 +36,8 @@ func checkDesktopWorktreeUse(ctx context.Context, path string) error {
 			base := filepath.Join("/proc", process.Name())
 			for _, field := range []string{"cwd", "exe", "root"} {
 				name, err := os.Readlink(filepath.Join(base, field))
-				if err == nil && matches(name) {
-					return inUse
+				if err == nil && visit(name) {
+					return nil
 				}
 			}
 			fds, _ := os.ReadDir(filepath.Join(base, "fd")) // processes outside our permissions are not observable
@@ -51,12 +46,12 @@ func checkDesktopWorktreeUse(ctx context.Context, path string) error {
 					return err
 				}
 				name, err := os.Readlink(filepath.Join(base, "fd", fd.Name()))
-				if err == nil && matches(name) {
-					return inUse
+				if err == nil && visit(name) {
+					return nil
 				}
 			}
 		}
-		return nil
+		return ctx.Err()
 	}
 	// Use the macOS system lsof. Query open files for the current user,
 	// not +D, which would recursively enumerate the worktree contents.
@@ -70,7 +65,8 @@ func checkDesktopWorktreeUse(ctx context.Context, path string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	reader := bufio.NewScanner(io.LimitReader(out, 32<<20))
+	limit := &io.LimitedReader{R: out, N: 32<<20 + 1}
+	reader := bufio.NewScanner(limit)
 	reader.Split(splitOpenFiles)
 	self, observed, held := "p"+strconv.Itoa(os.Getpid()), false, false
 	pid := ""
@@ -80,7 +76,7 @@ func checkDesktopWorktreeUse(ctx context.Context, path string) error {
 			pid = field
 			observed = true
 		}
-		if name, ok := strings.CutPrefix(field, "n"); ok && pid != self && matches(name) {
+		if name, ok := strings.CutPrefix(field, "n"); ok && pid != "" && pid != self && visit(name) {
 			held = true
 			break
 		}
@@ -88,20 +84,19 @@ func checkDesktopWorktreeUse(ctx context.Context, path string) error {
 	_ = out.Close()
 	waitErr := cmd.Wait()
 	if held {
-		return inUse
+		return nil
 	}
-	if !observed || reader.Err() != nil || waitErr != nil || ctx.Err() != nil {
+	if !observed || limit.N == 0 || reader.Err() != nil || waitErr != nil || ctx.Err() != nil {
 		return fmt.Errorf("could not verify open worktree files: %w", errors.Join(reader.Err(), waitErr, ctx.Err(), errors.New("incomplete process listing")))
 	}
 	return nil
 }
 
 func splitOpenFiles(data []byte, atEOF bool) (int, []byte, error) {
-	if _, field, ok := strings.Cut(string(data), "\x00"); ok {
-		length := len(data) - len(field) - 1
-		return length + 1, data[:length], nil
+	if end := bytes.IndexByte(data, 0); end >= 0 {
+		return end + 1, data[:end], nil
 	}
-	if atEOF && strings.TrimSpace(string(data)) != "" {
+	if atEOF && len(bytes.TrimSpace(data)) != 0 {
 		return 0, nil, errors.New("incomplete process entry")
 	}
 	return 0, nil, nil

@@ -211,6 +211,24 @@ func (s *Store) Use(name string, fn func(Yesman) error) error {
 	return fn(y)
 }
 
+// TryUse takes the same workspace lease as Use without waiting behind a
+// workspace mutation. An interactive preview can report the busy workspace.
+func (s *Store) TryUse(name string, fn func(Yesman) error) error {
+	if err := ValidName(name); err != nil {
+		return err
+	}
+	lock := s.lockFor(name)
+	if !lock.TryRLock() {
+		return errors.New("workspace is in use")
+	}
+	defer lock.RUnlock()
+	y, err := s.Get(name)
+	if err != nil {
+		return err
+	}
+	return fn(y)
+}
+
 // BeginUse protects a multi-phase workspace operation until release. The
 // release function is idempotent so callers can end the lease before waiting
 // for an RPC response while still deferring cleanup of early-return paths.

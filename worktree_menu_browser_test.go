@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,6 +52,35 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 	a := s.app
 	a.desktopWorktrees.Server = &server.Server{Pool: a.pool, Yesmen: a.yesmen, Agents: a.agents,
 		HasOpenPull: func(context.Context, string, string, string) (bool, error) { return false, nil }}
+	performance := os.Getenv("YESMAN_TEST_WORKTREE_LATENCY") == "1"
+	var timing struct {
+		sync.Mutex
+		started                    time.Time
+		first, reads, active, peak int64
+	}
+	if performance {
+		a.desktopWorktrees.Server.HasOpenPull = func(ctx context.Context, _, _, branch string) (bool, error) {
+			timing.Lock()
+			if timing.reads == 0 {
+				timing.first = time.Since(timing.started).Milliseconds()
+			}
+			timing.reads++
+			timing.active++
+			timing.peak = max(timing.peak, timing.active)
+			timing.Unlock()
+			defer func() { timing.Lock(); timing.active--; timing.Unlock() }()
+			delay := 500 * time.Millisecond
+			if branch == "latency-29" {
+				delay = 30 * time.Second
+			}
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(delay):
+				return branch == "latency-01", nil
+			}
+		}
+	}
 	y, err := a.yesmen.Hire("studio")
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +121,14 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			lateEditor()
 		}
 	}()
-	for _, dir := range []string{"gizmoth-artifact-rows", "review-a", "review-b", "locked", "legacy", "legacy-integrate", "saved-conflict", "unverified-index"} {
+	dirs := []string{"gizmoth-artifact-rows", "review-a", "review-b", "locked", "legacy", "legacy-integrate", "saved-conflict", "unverified-index"}
+	if performance {
+		dirs = nil
+		for i := range 30 {
+			dirs = append(dirs, fmt.Sprintf("latency-%02d", i))
+		}
+	}
+	for _, dir := range dirs {
 		since := time.Now().UTC()
 		if err := a.yesmen.AddWorker(y.Name, yesmen.Worker{Name: dir, StartedAt: since}); err != nil {
 			t.Fatal(err)
@@ -101,7 +138,9 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			t.Fatal(err)
 		}
 		opts := pool.WorktreeOptions{Dest: filepath.Join(y.Path, dir), Ref: "origin/main"}
-		if dir == "gizmoth-artifact-rows" {
+		if performance {
+			opts.Ref, opts.Branch = "", dir
+		} else if dir == "gizmoth-artifact-rows" {
 			opts.Ref, opts.Branch = "", "fix/artifact-row-actions"
 		} else if dir == "legacy-integrate" {
 			opts.Ref, opts.Branch = "", "integrate/old-local"
@@ -120,7 +159,9 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			r.Root = &yesmen.WorktreeRoot{Ino: w.Root.Ino, Birth: w.Root.Birth}
 			r.CreatedFor = &yesmen.WorktreeCreation{Workspace: y.Name, HiredAt: y.HiredAt, TaskAt: task.CreatedAt}
 		}
-		if dir == "gizmoth-artifact-rows" {
+		if performance {
+			r.Purpose = "author"
+		} else if dir == "gizmoth-artifact-rows" {
 			r.Purpose, gizmoTask, status = "author", r.Task, yesmen.TaskDropped
 		}
 		if dir == "legacy-integrate" {
@@ -187,6 +228,10 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 		var value any
 		var err error
 		switch req.Method {
+		case "PreviewMetrics":
+			timing.Lock()
+			value = map[string]int64{"firstPRMillis": timing.first, "reads": timing.reads, "peak": timing.peak, "active": timing.active}
+			timing.Unlock()
 		case "Recreate", "ReplaceAgain":
 			dest := filepath.Join(y.Path, "gizmoth-artifact-rows")
 			if req.Method == "ReplaceAgain" {
@@ -234,7 +279,7 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 			}
 			value, err = map[string]any{"trees": wts, "checkpoints": refs, "present": present}, e
 		default:
-			if !slices.Contains([]string{"State", "Info", "WorkspaceCheckouts", "Usage", "ListFiles", "ReadFile", "ReadWorktreeFile", "WriteWorktreeFile", "BeginWorktreeEdit", "EndWorktreeEdit", "PreviewWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
+			if !slices.Contains([]string{"State", "Info", "WorkspaceCheckouts", "Usage", "ListFiles", "ReadFile", "ReadWorktreeFile", "WriteWorktreeFile", "BeginWorktreeEdit", "EndWorktreeEdit", "PreviewWorktreeCleanup", "CheckWorktreeCleanup", "ConfirmWorktreeCleanup", "CancelWorktreeCleanup"}, req.Method) {
 				http.Error(w, "method", 400)
 				return
 			}
@@ -254,6 +299,11 @@ func TestWorktreeCleanupBrowser(t *testing.T) {
 					return
 				}
 				in = append(in, v.Elem())
+			}
+			if performance && (req.Method == "PreviewWorktreeCleanup" || req.Method == "CheckWorktreeCleanup") {
+				timing.Lock()
+				timing.started, timing.first, timing.reads, timing.peak = time.Now(), 0, 0, 0
+				timing.Unlock()
 			}
 			out := m.Call(in)
 			if len(out) > 0 {

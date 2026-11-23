@@ -9,6 +9,7 @@ export function worktreeEntry(w) {
 }
 
 export function createWorktreeMenu(host) {
+  const previewDeadline = 15_000; // The bridge itself may fail to answer.
   let opening = null;
   const current = y => host.isOpen() && host.yesman()?.name === y.name && host.yesman()?.hiredAt === y.hiredAt;
   const entry = w => $(`#yesman-info [data-info-entry="${CSS.escape(worktreeEntry(w))}"]`);
@@ -43,16 +44,26 @@ export function createWorktreeMenu(host) {
     const hint = h('p', { class: 'dialog-hint', id: 'worktree-cleanup-hint', role: 'status' }, t('Checking worktrees…'));
     const listing = h('div', { class: 'cleanup-listing' });
     const close = h('button', { class: 'mds-button', type: 'button', autofocus: true, 'data-close': true }, t('Cancel'));
+    const retry = h('button', { class: 'mds-button', type: 'button', hidden: true, 'data-retry': true }, t('Try again'));
     const confirm = h('button', { class: 'mds-button mds-button--primary', type: 'button', hidden: true, 'data-confirm': true });
     const dialog = h('dialog', { class: 'mds-dialog worktree-cleanup', 'aria-labelledby': heading.id, 'aria-describedby': hint.id },
-      heading, hint, listing, h('div', { class: 'mds-dialog-actions' }, close, confirm));
+      heading, hint, listing, h('div', { class: 'mds-dialog-actions' }, close, retry, confirm));
     request.dialog = dialog;
     document.body.append(dialog);
-    let token = '', committing = false;
+    let token = '', committing = false, check;
     const closed = openModal(dialog);
     close.onclick = () => dialog.close();
     dialog.oncancel = event => { if (committing) event.preventDefault(); };
     const cancelToken = id => { if (id) host.call('CancelWorktreeCleanup', id).catch(host.fail); };
+    function releaseCheck() {
+      if (check) {
+        clearTimeout(check.timer);
+        cancelToken(check.id);
+        check = null;
+      }
+      cancelToken(token);
+      token = '';
+    }
 
     function end(title, note) {
       heading.textContent = title;
@@ -63,10 +74,34 @@ export function createWorktreeMenu(host) {
       close.focus({ preventScroll: true });
     }
     async function preview() {
+      releaseCheck();
+      listing.replaceChildren();
+      retry.hidden = confirm.hidden = true;
+      confirm.removeAttribute('aria-describedby');
+      close.textContent = t('Cancel');
+      heading.textContent = selected ? t('Remove worktree?') : t('Clean up worktrees');
+      hint.textContent = t('Checking worktrees…');
+      close.focus({ preventScroll: true });
+      const id = [...crypto.getRandomValues(new Uint8Array(18))].map(b => b.toString(16).padStart(2, '0')).join('');
+      const attempt = {id};
+      check = attempt;
+      attempt.timer = setTimeout(() => {
+        if (check !== attempt || !dialog.open) return;
+        releaseCheck();
+        end(t('Could not check worktrees'), t('The worktree check did not finish within the time limit.'));
+        retry.hidden = false;
+      }, previewDeadline);
       try {
-        const result = await host.call('PreviewWorktreeCleanup', y.name, y.hiredAt, selected, host.unsaved(y));
-        if (!dialog.open || !current(y)) { cancelToken(result.token); dialog.close(); return; }
+        const result = await host.call('CheckWorktreeCleanup', y.name, y.hiredAt, selected, host.unsaved(y), attempt.id);
+        if (check !== attempt || !dialog.open || !current(y)) {
+          cancelToken(result.token);
+          if (check === attempt && dialog.open) dialog.close();
+          return;
+        }
+        clearTimeout(attempt.timer);
+        check = null;
         token = result.token;
+        retry.hidden = !result.retryable;
         const ready = result.rows.filter(row => !row.reason);
         const kept = result.rows.filter(row => row.reason);
         if (ready.length) {
@@ -89,14 +124,21 @@ export function createWorktreeMenu(host) {
         } else {
           end(selected ? t('Worktree kept') : t('No worktrees to remove'), kept.length ? t('These directories will stay in the workspace.') : t('This workspace has no recorded worktrees to clean up.'));
         }
+        if (result.partial) {
+          listing.prepend(h('p', { class: 'cleanup-warning', role: 'status' }, t('The check reached its time limit. Try again to check the remaining worktrees.')));
+        }
         if (kept.length) {
           const keptList = rowList(kept);
           listing.append(ready.length ? h('details', { class: 'cleanup-kept' }, h('summary', null, tn(kept.length, 'Keep 1 worktree', 'Keep {n} worktrees')), keptList) : keptList);
         }
       } catch (err) {
-        if (dialog.open) end(t('Could not check worktrees'), t(err?.message || String(err)));
+        if (check !== attempt || !dialog.open) return;
+        releaseCheck();
+        end(t('Could not check worktrees'), t(err?.message || String(err)));
+        retry.hidden = false;
       }
     }
+    retry.onclick = () => { if (!committing && current(y)) void preview(); };
     confirm.onclick = async () => {
       if (committing || !token || !dialog.open) return;
       if (!current(y)) { dialog.close(); return; }
@@ -104,6 +146,7 @@ export function createWorktreeMenu(host) {
       const id = token;
       token = '';
       confirm.disabled = close.disabled = true;
+      retry.hidden = true;
       hint.textContent = t('Checking again and removing directories…');
       try {
         const results = await host.call('ConfirmWorktreeCleanup', y.name, y.hiredAt, id, host.unsaved(y));
@@ -131,7 +174,7 @@ export function createWorktreeMenu(host) {
     };
     void preview();
     await closed;
-    cancelToken(token);
+    releaseCheck();
     dialog.remove();
   }
 

@@ -38,9 +38,18 @@ type WorktreeCleanupRow struct {
 }
 
 type WorktreeCleanupPreview struct {
-	Rows  []WorktreeCleanupRow `json:"rows"`
-	Token string               `json:"token,omitempty"`
+	Rows      []WorktreeCleanupRow `json:"rows"`
+	Token     string               `json:"token,omitempty"`
+	Partial   bool                 `json:"partial,omitempty"`
+	Retryable bool                 `json:"retryable,omitempty"`
 }
+
+const (
+	worktreePreviewBudget = 12 * time.Second
+	worktreeLocalBudget   = 8 * time.Second // leave time for the remote checks
+	worktreeSourceBudget  = 4 * time.Second
+	worktreeSourceWorkers = 4
+)
 
 type desktopPreview struct {
 	workspace yesmen.Yesman
@@ -49,6 +58,8 @@ type desktopPreview struct {
 	bulk      bool
 	eligible  []desktopCandidate
 	timer     *time.Timer
+	request   string // identifies cancellation of this check, never confirmation
+	cancel    context.CancelFunc
 }
 
 type desktopCandidate struct {
@@ -76,6 +87,10 @@ const (
 	noRegistration     = "Git has no current registration for this recorded directory."
 	unsavedFiles       = "The Files pane has unsaved edits in this worktree."
 	unverified         = "Yes Man could not verify this checkout."
+	previewBusy        = "The workspace is busy. Try again."
+	previewTimedOut    = "This worktree could not be checked within the time limit."
+	inventoryTimedOut  = "The worktree list could not be checked within the time limit. Try again."
+	previewRemoteError = "Open pull requests could not be checked. Try again when GitHub is available."
 )
 
 func sameCheckout(a, b pool.Worktree) bool {
@@ -86,8 +101,16 @@ func sameCheckout(a, b pool.Worktree) bool {
 // starts with all registrations under this hire and includes retained records
 // whose former Git registration vanished. No filesystem sweep supplies targets.
 func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.Time, selected *pool.Worktree, keep []string) (WorktreeCleanupPreview, error) {
+	return d.PreviewRequest(ctx, name, since, selected, keep, "")
+}
+
+func (d *DesktopWorktrees) PreviewRequest(parent context.Context, name string, since time.Time, selected *pool.Worktree, keep []string, request string) (WorktreeCleanupPreview, error) {
 	s := d.Server
-	plan := &desktopPreview{bulk: selected == nil, token: rand.Text()}
+	ctx, cancel := context.WithTimeout(parent, worktreePreviewBudget)
+	defer cancel()
+	local, stopLocal := context.WithTimeout(ctx, worktreeLocalBudget)
+	defer stopLocal()
+	plan := &desktopPreview{bulk: selected == nil, token: rand.Text(), request: request, cancel: cancel}
 	out := WorktreeCleanupPreview{Rows: []WorktreeCleanupRow{}}
 	d.mu.Lock()
 	d.pending.close()
@@ -95,103 +118,130 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 	d.mu.Unlock()
 	l := s.worktreeLock(name)
 	var candidates []desktopCandidate
-	l.Lock()
-	err := s.Yesmen.Use(name, func(y yesmen.Yesman) error {
-		if since.IsZero() || !y.HiredAt.Equal(since) {
-			return yesmen.ErrRehired
-		}
-		plan.workspace = y
-		records, board, workers, err := s.Yesmen.WorktreeState(y)
-		if err != nil {
-			return err
-		}
-		wts, err := s.Pool.Worktrees(ctx, y.Path)
-		if err != nil {
-			return err
-		}
-		seen := map[string]int{}
-		for _, w := range wts {
-			seen[w.Dir]++
-		}
-		for _, w := range wts {
+	var workspace yesmen.Yesman
+	inventoryReady := false
+	var err error
+	if !l.TryLock() {
+		err = errors.New(previewBusy)
+	} else {
+		err = s.Yesmen.TryUse(name, func(y yesmen.Yesman) error {
+			if since.IsZero() || !y.HiredAt.Equal(since) {
+				return yesmen.ErrRehired
+			}
+			workspace = y
+			records, board, workers, err := s.Yesmen.WorktreeState(y)
+			if err != nil {
+				return err
+			}
+			wts, err := s.Pool.Worktrees(local, y.Path)
+			if err != nil {
+				return err
+			}
+			inventoryReady = true
 			if plan.bulk {
-				i := latestWorktree(records, w.Dir)
-				if i >= 0 && !records[i].Removed && records[i].DiscardRetry != nil {
-					continue // review through the durable, identity-bound retry below
+				local = pool.DesktopDiscardPreview(local, y.Path)
+			}
+			seen := map[string]int{}
+			for _, w := range wts {
+				seen[w.Dir]++
+			}
+			for _, w := range wts {
+				if plan.bulk {
+					i := latestWorktree(records, w.Dir)
+					if i >= 0 && !records[i].Removed && records[i].DiscardRetry != nil {
+						continue // review through the durable, identity-bound retry below
+					}
 				}
+				if selected != nil && w.Dir != selected.Dir {
+					continue
+				}
+				row := WorktreeCleanupRow{Worktree: w}
+				switch {
+				case seen[w.Dir] != 1:
+					row.Reason = "Multiple Git registrations point to this directory."
+				case selected != nil && !sameCheckout(*selected, w):
+					row.Worktree, row.Reason = *selected, staleCheckout
+				case slices.Contains(keep, w.Dir):
+					row.Reason = unsavedFiles
+				case local.Err() != nil:
+					row.Reason = previewTimedOut
+				default:
+					if plan.bulk {
+						row = s.desktopBulkWorktree(local, y, records, board, workers, w, false, false)
+					} else {
+						row = s.desktopWorktree(local, y, records, board, workers, w, false)
+					}
+					if local.Err() != nil {
+						row.observation.Close()
+						row.Reason, row.Detail, row.KeepWarning = previewTimedOut, "", ""
+					}
+				}
+				if row.Reason == "" {
+					rec := records[latestWorktree(records, w.Dir)]
+					c := desktopCandidate{row: len(out.Rows), worktree: row.Worktree, record: rec,
+						decision: WorktreeDecisionFor(board, rec), observation: row.observation}
+					c.authority.decision = c.decision
+					candidates = append(candidates, c)
+				}
+				if i := latestWorktree(records, w.Dir); i >= 0 && records[i].ID == w.CleanupID && !records[i].Removed {
+					row.Task, row.TaskStatus = records[i].Task, WorktreeDecisionFor(board, records[i]).status
+				}
+				out.Rows = append(out.Rows, row)
 			}
-			if selected != nil && w.Dir != selected.Dir {
-				continue
+			if selected != nil && len(out.Rows) == 0 {
+				out.Rows = append(out.Rows, WorktreeCleanupRow{Worktree: *selected, Reason: noRegistration})
 			}
-			row := WorktreeCleanupRow{Worktree: w}
-			switch {
-			case seen[w.Dir] != 1:
-				row.Reason = "Multiple Git registrations point to this directory."
-			case selected != nil && !sameCheckout(*selected, w):
-				row.Worktree, row.Reason = *selected, staleCheckout
-			case slices.Contains(keep, w.Dir):
-				row.Reason = unsavedFiles
-			case plan.bulk:
-				row = s.desktopBulkWorktree(ctx, y, records, board, workers, w, false, false)
-			default:
-				row = s.desktopWorktree(ctx, y, records, board, workers, w, false)
-			}
-			if row.Reason == "" {
-				rec := records[latestWorktree(records, w.Dir)]
-				c := desktopCandidate{row: len(out.Rows), worktree: row.Worktree, record: rec,
-					decision: WorktreeDecisionFor(board, rec), observation: row.observation}
-				c.authority.decision = c.decision
-				candidates = append(candidates, c)
-			}
-			if i := latestWorktree(records, w.Dir); i >= 0 && records[i].ID == w.CleanupID && !records[i].Removed {
-				row.Task, row.TaskStatus = records[i].Task, WorktreeDecisionFor(board, records[i]).status
-			}
-			out.Rows = append(out.Rows, row)
-		}
-		if selected != nil && len(out.Rows) == 0 {
-			out.Rows = append(out.Rows, WorktreeCleanupRow{Worktree: *selected, Reason: noRegistration})
-		}
-		if plan.bulk {
-			for i, r := range records {
-				if !r.Removed && (seen[r.Dir] == 0 || r.DiscardRetry != nil) && dirRE.MatchString(r.Dir) && i == latestWorktree(records, r.Dir) {
-					path := filepath.Join(y.Path, r.Dir)
-					if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-						w := expectedWorktree(r)
-						w.Path = path
-						orphan := true
-						if r.DiscardRetry != nil {
-							orphan, w.Head = r.DiscardRetry.Orphan, r.DiscardRetry.Head
+			if plan.bulk {
+				for i, r := range records {
+					if !r.Removed && (seen[r.Dir] == 0 || r.DiscardRetry != nil) && dirRE.MatchString(r.Dir) && i == latestWorktree(records, r.Dir) {
+						if local.Err() != nil {
+							out.Partial = true
+							break // filesystem existence of remaining old records is still unknown
 						}
-						row := WorktreeCleanupRow{Worktree: w, Reason: unsavedFiles, Task: r.Task, TaskStatus: WorktreeDecisionFor(board, r).status}
-						if !slices.Contains(keep, w.Dir) {
-							row = s.desktopBulkWorktree(ctx, y, records, board, workers, w, orphan, false)
+						path := filepath.Join(y.Path, r.Dir)
+						if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+							w := expectedWorktree(r)
+							w.Path = path
+							orphan := true
+							if r.DiscardRetry != nil {
+								orphan, w.Head = r.DiscardRetry.Orphan, r.DiscardRetry.Head
+							}
+							row := WorktreeCleanupRow{Worktree: w, Reason: unsavedFiles, Task: r.Task, TaskStatus: WorktreeDecisionFor(board, r).status}
+							if !slices.Contains(keep, w.Dir) {
+								row = s.desktopBulkWorktree(local, y, records, board, workers, w, orphan, false)
+								if local.Err() != nil {
+									row.observation.Close()
+									row.Reason, row.Detail = previewTimedOut, ""
+								}
+							}
+							if row.Reason == "" {
+								decision := WorktreeDecisionFor(board, r)
+								candidates = append(candidates, desktopCandidate{row: len(out.Rows), worktree: row.Worktree, record: r, decision: decision, authority: checkoutAuthority{decision: decision}, observation: row.observation, orphan: orphan})
+							}
+							out.Rows = append(out.Rows, row)
 						}
-						if row.Reason == "" {
-							decision := WorktreeDecisionFor(board, r)
-							candidates = append(candidates, desktopCandidate{row: len(out.Rows), worktree: row.Worktree, record: r, decision: decision, authority: checkoutAuthority{decision: decision}, observation: row.observation, orphan: orphan})
-						}
-						out.Rows = append(out.Rows, row)
 					}
 				}
 			}
-		}
-		return ctx.Err()
-	})
-	l.Unlock()
-	// GitHub may be slow. No workspace, agent or pool lock spans a network
-	// read. Final admission compares the same certification under the lease.
-	var eligible []desktopCandidate
-	if err == nil {
-		for _, c := range candidates {
-			if hold := s.verifyCleanupSource(ctx, c.record, c.authority, c.observation.Tracking); hold != nil {
-				out.Rows[c.row].Reason, out.Rows[c.row].Detail, out.Rows[c.row].KeepWarning = hold.Reason, hold.Detail, ""
-				c.observation.Close()
-			} else {
-				eligible = append(eligible, c)
-			}
-		}
-		err = ctx.Err()
+			return nil
+		})
+		l.Unlock()
 	}
+	// No workspace, owner or pool lease spans a network read. Keep the row
+	// order from discovery and issue a token only for completed checks.
+	var eligible []desktopCandidate
+	if err == nil && inventoryReady {
+		eligible = s.verifyPreviewSources(ctx, &out, candidates)
+	}
+	if parent.Err() != nil || errors.Is(ctx.Err(), context.Canceled) {
+		err = context.Canceled
+	} else if !inventoryReady && errors.Is(local.Err(), context.DeadlineExceeded) {
+		err = errors.New(inventoryTimedOut)
+	}
+	out.Partial = out.Partial || slices.ContainsFunc(out.Rows, func(row WorktreeCleanupRow) bool { return row.Reason == previewTimedOut })
+	out.Retryable = out.Partial || slices.ContainsFunc(out.Rows, func(row WorktreeCleanupRow) bool {
+		return row.Reason == previewRemoteError || row.Reason == unverifiedMerge
+	})
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.pending != plan || err != nil || len(eligible) == 0 {
@@ -204,11 +254,43 @@ func (d *DesktopWorktrees) Preview(ctx context.Context, name string, since time.
 		d.pending = nil
 		return out, err
 	}
+	plan.cancel = nil
+	plan.workspace = workspace
 	plan.eligible = eligible
 	plan.expires = time.Now().Add(10 * time.Minute)
 	plan.timer = time.AfterFunc(time.Until(plan.expires), func() { d.Cancel(plan.token) })
 	out.Token = plan.token
 	return out, nil
+}
+
+func (s *Server) verifyPreviewSources(ctx context.Context, out *WorktreeCleanupPreview, candidates []desktopCandidate) []desktopCandidate {
+	var workers sync.WaitGroup
+	jobs := make(chan desktopCandidate)
+	for range min(worktreeSourceWorkers, len(candidates)) {
+		workers.Go(func() {
+			for c := range jobs {
+				check, stop := context.WithTimeout(ctx, worktreeSourceBudget)
+				var hold *pool.RemovalHold
+				if check.Err() == nil {
+					hold = s.verifyCleanupSource(check, c.record, c.authority, c.observation.Tracking)
+				}
+				if check.Err() != nil {
+					hold = &pool.RemovalHold{Reason: previewTimedOut}
+				}
+				stop()
+				if hold != nil {
+					out.Rows[c.row].Reason, out.Rows[c.row].Detail, out.Rows[c.row].KeepWarning = hold.Reason, hold.Detail, ""
+					c.observation.Close()
+				}
+			}
+		})
+	}
+	for _, c := range candidates {
+		jobs <- c
+	}
+	close(jobs)
+	workers.Wait()
+	return slices.DeleteFunc(slices.Clone(candidates), func(c desktopCandidate) bool { return out.Rows[c.row].Reason != "" })
 }
 
 func (s *Server) verifyCleanupSource(ctx context.Context, rec yesmen.WorktreeRecord, a checkoutAuthority, tracking string) *pool.RemovalHold {
@@ -227,7 +309,7 @@ func (s *Server) verifyCleanupSource(ctx context.Context, rec yesmen.WorktreeRec
 		if errors.As(err, &open) {
 			return &pool.RemovalHold{Reason: "This branch has an open pull request.", Detail: open.target + " · " + open.branch}
 		}
-		return &pool.RemovalHold{Reason: "Open pull requests could not be checked. Try again when GitHub is available.", Detail: err.Error()}
+		return &pool.RemovalHold{Reason: previewRemoteError, Detail: err.Error()}
 	}
 	return nil
 }
@@ -235,6 +317,9 @@ func (s *Server) verifyCleanupSource(ctx context.Context, rec yesmen.WorktreeRec
 func (p *desktopPreview) close() {
 	if p == nil {
 		return
+	}
+	if p.cancel != nil {
+		p.cancel()
 	}
 	if p.timer != nil {
 		p.timer.Stop()
@@ -247,7 +332,7 @@ func (p *desktopPreview) close() {
 func (d *DesktopWorktrees) Cancel(token string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.pending != nil && d.pending.token == token {
+	if d.pending != nil && token != "" && (d.pending.token == token || d.pending.request == token) {
 		d.pending.close()
 		d.pending = nil
 	}

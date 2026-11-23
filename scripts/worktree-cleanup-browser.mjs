@@ -14,6 +14,7 @@ const scratch = await mkdtemp(join(tmpdir(), 'worktree-browser-'));
 const exe = join(scratch, `fixture${process.platform === 'win32' ? '.exe' : ''}`);
 const output = process.env.YESMAN_WORKTREE_SCREENSHOTS;
 const baseline = process.env.YESMAN_WORKTREE_BASELINE === '1';
+const latency = process.env.YESMAN_TEST_WORKTREE_LATENCY === '1';
 
 async function run(engine, name, language) {
   const child = spawn(exe, ['-test.run=^TestWorktreeCleanupBrowser$', '-test.timeout=2m'], {
@@ -79,7 +80,7 @@ async function run(engine, name, language) {
             }
             return value;
           }
-          case 'Usage': case 'PreviewWorktreeCleanup': case 'CancelWorktreeCleanup': case 'ConfirmWorktreeCleanup': return api(m, ...args);
+          case 'Usage': case 'PreviewWorktreeCleanup': case 'CheckWorktreeCleanup': case 'CancelWorktreeCleanup': case 'ConfirmWorktreeCleanup': return api(m, ...args);
           case 'Settings': return { appearance: zh ? 'dark' : 'light', autoFetch: 0 };
           case 'Pulls': return [{ dir: 'review-a', pull: { state: 'merged', number: 42, repo: 'demo/repo', title: 'Reviewed change', additions: 1, deletions: 0 } }];
           case 'Models': return {models:[], agent:{id:args[0]}};
@@ -99,6 +100,40 @@ async function run(engine, name, language) {
     await page.goto(url);
     const info = page.locator('#yesman-info');
     const title = info.getByRole('heading', { name: zh ? '工作树' : 'Worktrees', exact: true });
+    if (latency) {
+      const action = title.locator('button');
+      await action.waitFor();
+      const started = Date.now();
+      await action.click({button: 'right'});
+      const dialog = page.locator('dialog.worktree-cleanup[open]');
+      await dialog.waitFor();
+      const shown = Date.now();
+      const ready = dialog.locator('[data-confirm]');
+      await ready.waitFor({timeout: 100_000});
+      const elapsed = Date.now() - started;
+      const metrics = await page.evaluate(() => api('PreviewMetrics'));
+      console.log(JSON.stringify({engine: name, language, clickToDialogMs: shown - started, clickToResultsMs: elapsed, ...metrics}));
+      if (output) await dialog.screenshot({path: join(output, `latency-${name}-${language}.png`)});
+      if (!baseline) {
+        assert.ok(elapsed < 17_000);
+        assert.ok(metrics.peak > 1 && metrics.peak <= 4);
+        await dialog.locator('summary').click();
+        assert.match(await dialog.innerText(), zh ? /未能在时限内/ : /within the time limit/);
+        const openBranch = dialog.locator('.cleanup-kept li').filter({hasText: 'latency-01'});
+        assert.match(await openBranch.innerText(), zh ? /开放拉取请求|有进程正在使用/ : /open pull request|A process is using/);
+        assert.ok(+(await ready.textContent()).match(/\d+/)[0] <= 28);
+        const retry = dialog.locator('[data-retry]');
+        await retry.waitFor();
+        await retry.click();
+        await dialog.getByText(zh ? '正在检查工作树…' : 'Checking worktrees…').waitFor();
+        assert.equal(await ready.isVisible(), false);
+        assert.equal(await retry.isVisible(), false);
+      }
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({state: 'detached'});
+      assert.deepEqual(errors, []);
+      return;
+    }
     const row = dir => info.locator('.info-row-main').filter({hasText:dir});
     const giz = row('gizmoth-artifact-rows');
     await giz.waitFor();
@@ -347,5 +382,6 @@ try {
   assert.equal(build.status,0,build.stderr);
   for (const [name, engine] of Object.entries({ chromium, webkit })) {
     for (const language of baseline ? ['en'] : ['en','zh-Hans']) await run(engine,name,language);
+    if (baseline && latency) break;
   }
 } finally { await rm(scratch,{recursive:true,force:true}); }
