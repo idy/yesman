@@ -136,7 +136,7 @@ func (s *Store) InspectCheckouts(ctx context.Context, target DeletionTarget) (Ch
 		return CheckoutScan{}, err
 	}
 	defer ws.Close()
-	scan := scanCheckouts(ctx, ws, false)
+	scan, _ := scanCheckouts(ctx, ws, nil)
 	if err := s.checkDeletionTarget(parent, target); err != nil {
 		return CheckoutScan{}, err
 	}
@@ -178,9 +178,10 @@ const (
 )
 
 // Only sidebar discovery has the short deadline and depth/entry budget.
-// Deletion review must account for the entire tree, including nested working
-// directories below an already-discovered checkout. It is cancellable.
-func scanCheckouts(ctx context.Context, ws *os.Root, review bool) CheckoutScan {
+// Deletion review checks every subtree before authorizing deletion. A
+// definitive Git hold can end the review as soon as it is encountered.
+func scanCheckouts(ctx context.Context, ws *os.Root, validate func(*os.Root, checkoutObservation) error) (CheckoutScan, error) {
+	review := validate != nil
 	remaining := -1
 	if !review {
 		var cancel context.CancelFunc
@@ -197,8 +198,9 @@ func scanCheckouts(ctx context.Context, ws *os.Root, review bool) CheckoutScan {
 	volume, err := directoryIdentity(ws)
 	if err != nil {
 		problem(err)
-		return scan
+		return scan, nil
 	}
+	var hold error
 	var visit func(*os.Root, string, int, bool)
 	visit = func(dir *os.Root, rel string, depth int, gitDir bool) {
 		if err := ctx.Err(); err != nil {
@@ -223,6 +225,11 @@ func scanCheckouts(ctx context.Context, ws *os.Root, review bool) CheckoutScan {
 			problem(err)
 		}
 		entry, markers := gitMarkers(rel, entries)
+		if review {
+			// Match the deletion walk's order so a protected store is
+			// reported consistently even when an earlier checkout was safe.
+			slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+		}
 		objects := !review && (entry.Bare || gitDir) && gitObjectStore(ctx, dir, volume)
 		if len(markers) > 0 {
 			scan.Entries = append(scan.Entries, entry)
@@ -231,6 +238,12 @@ func scanCheckouts(ctx context.Context, ws *os.Root, review bool) CheckoutScan {
 				problem(err)
 			} else {
 				scan.observed = append(scan.observed, o)
+				if review {
+					hold = validate(dir, o)
+					if hold != nil {
+						return
+					}
+				}
 			}
 		}
 		for _, entry := range entries {
@@ -256,11 +269,14 @@ func scanCheckouts(ctx context.Context, ws *os.Root, review bool) CheckoutScan {
 			}
 			visit(child, childPath, depth+1, slices.Contains(markers, name) && strings.EqualFold(name, ".git"))
 			child.Close()
+			if hold != nil {
+				return
+			}
 		}
 	}
 	visit(ws, ".", 0, false)
 	slices.SortFunc(scan.Entries, func(a, b CheckoutEntry) int { return strings.Compare(a.Path, b.Path) })
-	return scan
+	return scan, hold
 }
 
 func readDeletionEntries(ctx context.Context, dir *os.Root, remaining *int) ([]os.DirEntry, error) {

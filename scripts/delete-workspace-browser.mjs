@@ -49,7 +49,11 @@ async function run(engine, name, lang) {
             if (window.holdScan) await new Promise(r => window.releaseScan = r);
             return window.partialScan ? {...scan, problem:'Fixture scan incomplete'} : scan;
           }
-          case 'ReviewWorkspaceForceDeletion': return rpc(m,{target:args[0],review:args[1]});
+          case 'ReviewWorkspaceForceDeletion': {
+            const result = await rpc(m,{target:args[0],review:args[1]});
+            if (window.holdForceReview) await new Promise(resolve => window.releaseForceReview = resolve);
+            return result;
+          }
           case 'CancelWorkspaceForceReview': return rpc(m,{review:args[0]});
           case 'CancelWorkspaceForceDeletion': return rpc(m,{token:args[0]});
           case 'ForceDeleteWorkspace': return rpc(m,{target:args[0],token:args[1]});
@@ -152,6 +156,27 @@ async function run(engine, name, lang) {
     await dialog.waitFor({state:'detached'});
     assert.equal(await count('ForceDeleteWorkspace'),0);
     assert.equal(await count('DeleteWorkspace'),0);
+    // Replay an ordinary deletion error while the background review is
+    // pending. A retry must not appear until a fresh review can actually run.
+    const checkAgain = dialog.getByRole('button', {name:/^(Check again|再次检查)$/});
+    await page.evaluate(() => { window.holdForceReview = true; });
+    const checkCount = await count('ReviewWorkspaceForceDeletion');
+    const ordinaryCount = await count('DeleteWorkspace');
+    await bazel.click({button:'right'});
+    await page.waitForFunction(() => typeof window.releaseForceReview === 'function');
+    await ok.click();
+    await dialog.getByRole('alert').getByText(/may be used by another checkout|可能仍被其他工作树使用/).waitFor();
+    assert.equal(await checkAgain.isVisible(), false, 'do not offer an inert retry while a review is pending');
+    assert.equal(await count('ReviewWorkspaceForceDeletion'), checkCount + 1);
+    assert.equal(await count('DeleteWorkspace'), ordinaryCount + 1);
+    await page.evaluate(() => { window.holdForceReview = false; window.releaseForceReview(); });
+    await dialog.locator('#deletion-checkouts .danger').getByText(/may be used by another checkout|可能仍被其他工作树使用/).waitFor();
+    await checkAgain.click();
+    await dialog.locator('#deletion-checkouts .danger').getByText(/may be used by another checkout|可能仍被其他工作树使用/).waitFor();
+    assert.equal(await count('ReviewWorkspaceForceDeletion'), checkCount + 2);
+    await dialog.getByRole('button', {name:/^(Close|关闭|Cancel|取消)$/}).click();
+    await dialog.waitFor({state:'detached'});
+    await page.evaluate(() => { window.calls = window.calls.filter(([m]) => m !== 'DeleteWorkspace'); });
     await page.evaluate(() => rpc('PreserveBazelGitData'));
     if (process.env.YESMAN_T300_BASELINE === '1') {
       await bazel.click({button:'right'});

@@ -174,8 +174,7 @@ export function workspaceDeletion({ call, errorText, onLiveDeleted, toast, secti
           force.hidden = true;
           ok.hidden = false;
           refresh.hidden = false;
-        } else if (!record?.archived && !token) {
-          refresh.hidden = false;
+        } else if (!record?.archived && !token && !checking && refresh.hidden) {
           void checkForce();
         }
         if (stored !== null) loadStored(true);
