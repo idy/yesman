@@ -76,6 +76,50 @@ func gitMarkers(rel string, entries []os.DirEntry) (CheckoutEntry, []string) {
 	return CheckoutEntry{}, nil
 }
 
+func deletionGitMarkers(dir *os.Root, rel string, entries []os.DirEntry, legacyStage bool) (CheckoutEntry, []string) {
+	entry, markers := gitMarkers(rel, entries)
+	if !legacyStage || len(markers) != 0 || strings.EqualFold(path.Base(rel), ".git") {
+		return entry, markers
+	}
+	// Earlier purges had no approval inventory. Hold recognizable partial
+	// admin data when their original marker set is no longer available.
+	var config, refs, objects string
+	for _, e := range entries {
+		name := e.Name()
+		switch strings.ToLower(name) {
+		case "head":
+			data, _, err := readRegularEntry(dir, name, gitDeletionFileLimit, nil, true)
+			if err == nil && validLocalHEAD(data) {
+				return CheckoutEntry{Path: rel, Bare: true}, []string{name}
+			}
+		case "commondir", "gitdir":
+			return CheckoutEntry{Path: rel, Bare: true}, []string{name}
+		case "config":
+			config = name
+		case "refs", "packed-refs":
+			refs = name
+		case "objects":
+			objects = name
+		}
+	}
+	if refs != "" && objects != "" {
+		return CheckoutEntry{Path: rel, Bare: true}, []string{refs, objects}
+	}
+	if strings.HasSuffix(strings.ToLower(rel), ".git") {
+		for _, name := range []string{config, refs, objects} {
+			if name != "" {
+				return CheckoutEntry{Path: rel, Bare: true}, []string{name}
+			}
+		}
+	}
+	return entry, markers
+}
+
+func isLegacyDeletionStage(ws *os.Root) bool {
+	name := filepath.Base(ws.Name())
+	return strings.HasPrefix(name, deletingPrefix) && !recoverableDeletionName(name)
+}
+
 func observeCheckout(dir *os.Root, entry CheckoutEntry, id safefs.Identity, names []string) (checkoutObservation, error) {
 	o := checkoutObservation{CheckoutEntry: entry, directory: id, markers: make(map[string]fs.FileInfo, len(names))}
 	for _, name := range names {
@@ -180,6 +224,7 @@ const (
 	checkoutEntryLimit  = 1_000_000
 	checkoutDepthLimit  = 96
 	checkoutResultLimit = 256
+	deletionDepthLimit  = 256
 )
 
 // Only sidebar discovery has the short deadline and depth/entry budget.
@@ -206,13 +251,14 @@ func scanCheckouts(ctx context.Context, ws *os.Root, validate func(*os.Root, che
 		return scan, nil
 	}
 	var hold error
+	legacyStage := review && isLegacyDeletionStage(ws)
 	var visit func(*os.Root, string, int, bool)
 	visit = func(dir *os.Root, rel string, depth int, gitDir bool) {
 		if err := ctx.Err(); err != nil {
 			problem(err)
 			return
 		}
-		if remaining == 0 || (!review && depth > checkoutDepthLimit) || len(scan.Entries) >= checkoutResultLimit {
+		if remaining == 0 || depth > deletionDepthLimit || (!review && depth > checkoutDepthLimit) || len(scan.Entries) >= checkoutResultLimit {
 			problem(deletionIssue("The workspace Git scan reached its limit."))
 			return
 		}
@@ -225,16 +271,20 @@ func scanCheckouts(ctx context.Context, ws *os.Root, validate func(*os.Root, che
 			problem(deletionIssue("Unmount %s before deleting this workspace.", rel))
 			return
 		}
-		entries, err := readDeletionEntries(ctx, dir, &remaining)
+		var listing deletionDirectory
+		if review {
+			listing, err = readDeletionDirectory(ctx, dir, nil)
+		} else {
+			listing.entries, err = readDeletionEntries(ctx, dir, &remaining)
+			listing.markers = listing.entries
+		}
 		if err != nil {
 			problem(err)
+			if review {
+				return
+			}
 		}
-		entry, markers := gitMarkers(rel, entries)
-		if review {
-			// Match the deletion walk's order so a protected store is
-			// reported consistently even when an earlier checkout was safe.
-			slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
-		}
+		entry, markers := deletionGitMarkers(dir, rel, listing.markers, legacyStage)
 		objects := !review && (entry.Bare || gitDir) && gitObjectStore(ctx, dir, volume)
 		if len(markers) > 0 {
 			scan.Entries = append(scan.Entries, entry)
@@ -251,7 +301,11 @@ func scanCheckouts(ctx context.Context, ws *os.Root, validate func(*os.Root, che
 				}
 			}
 		}
-		for _, entry := range entries {
+		for entry, err := range listing.sorted(ctx) {
+			if err != nil {
+				problem(err)
+				return
+			}
 			if err := ctx.Err(); err != nil {
 				problem(err)
 				return

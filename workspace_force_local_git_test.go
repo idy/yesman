@@ -158,7 +158,7 @@ func TestForceLocalGitDeletionRechecksStagedDependencies(t *testing.T) {
 			initFixtureCheckout(t, outside)
 			outsideRefs := fixtureGit(t, outside, "show-ref")
 			consumer := filepath.Join(t.TempDir(), "consumer")
-			stage := filepath.Join(s.app.home.Yesmen(), ".deleting-"+target.Instance+"."+target.Entry)
+			stage := filepath.Join(s.app.home.Yesmen(), ".deleting-v1-"+target.Instance+"."+target.Entry)
 			stagedRepo := filepath.Join(stage, rel)
 			admin := filepath.Join(stagedRepo, ".git")
 			stagedProbe := false

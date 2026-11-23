@@ -114,7 +114,7 @@ func TestDeletionBrowserBridge(t *testing.T) {
 				}
 			}
 		case "VerifySevenGitRemoval":
-			for _, p := range []string{seven.Path, filepath.Join(s.app.home.Yesmen(), ".deleting-"+req.Target.Instance+"."+seven.Name)} {
+			for _, p := range []string{seven.Path, filepath.Join(s.app.home.Yesmen(), ".deleting-v1-"+req.Target.Instance+"."+seven.Name)} {
 				if _, e := os.Lstat(p); !errors.Is(e, fs.ErrNotExist) {
 					t.Error("workspace or stage remains", p, e)
 				}
@@ -151,6 +151,8 @@ func TestDeletionBrowserBridge(t *testing.T) {
 			must(t, os.WriteFile(filepath.Join(root.Path, ".git"), []byte("gitdir: "+filepath.Join(outsideRepo, ".git")+"\n"), 0600))
 		case "MakeInterruptedWorkspace":
 			pendingPath, freshPath = makeInterruptedBrowserWorkspace(t, s)
+		case "VerifyRemainingGit":
+			mustReadFile(t, filepath.Join(pendingPath, "build-output", "A-checkout", ".git", "HEAD"))
 		case "AddLateStagedFile":
 			err = os.WriteFile(filepath.Join(pendingPath, "build-output", "late.txt"), []byte("unapproved"), 0600)
 		case "RemoveLateStagedFile":
@@ -217,7 +219,14 @@ func makeInterruptedBrowserWorkspace(t *testing.T, s *service) (string, string) 
 	t.Helper()
 	y, err := s.HireNamed(t.Context(), "Interrupted Build")
 	must(t, err)
-	fixtureExternalGitfile(t, y, "build-output/A-checkout")
+	local := os.Getenv("YESMAN_TEST_PARTIAL_LOCAL_GIT") == "1"
+	missing := filepath.Join("build-output", "A-checkout", ".git")
+	if local {
+		fixtureLocalCheckout(t, y, "build-output/A-checkout")
+		missing = filepath.Join(missing, "config")
+	} else {
+		fixtureExternalGitfile(t, y, "build-output/A-checkout")
+	}
 	cache := filepath.Join("build-output", "Z-cache")
 	must(t, os.WriteFile(filepath.Join(y.Path, cache), []byte("staged build bytes"), 0600))
 	target, err := s.PrepareWorkspaceDeletion(y.Name, y.HiredAt)
@@ -227,18 +236,25 @@ func makeInterruptedBrowserWorkspace(t *testing.T, s *service) (string, string) 
 	if plan.Token == "" {
 		t.Fatal(plan)
 	}
-	pending := filepath.Join(s.app.home.Yesmen(), ".deleting-"+target.Instance+"."+target.Entry)
+	prefix := ".deleting-"
+	if local {
+		prefix += "v1-"
+	}
+	pending := filepath.Join(s.app.home.Yesmen(), prefix+target.Instance+"."+target.Entry)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	fault := browserDeletionFault{ctx, func() {
-		if _, err := os.Stat(filepath.Join(pending, cache)); err == nil {
-			if _, err := os.Stat(filepath.Join(pending, "build-output", "A-checkout", ".git")); errors.Is(err, fs.ErrNotExist) {
+		if _, e := os.Stat(pending); e == nil {
+			if _, err := os.Stat(filepath.Join(pending, missing)); errors.Is(err, fs.ErrNotExist) {
 				cancel()
 			}
 		}
 	}}
 	if err := s.ForceDeleteWorkspace(fault, target, plan.Token); err == nil || !strings.Contains(err.Error(), "context canceled") {
 		t.Fatal("interruption did not leave a verified stage", err)
+	}
+	if local {
+		mustReadFile(t, filepath.Join(pending, "build-output", "A-checkout", ".git", "HEAD"))
 	}
 	mustReadFile(t, filepath.Join(pending, cache))
 	fresh, err := s.HireNamed(t.Context(), "Interrupted Build")

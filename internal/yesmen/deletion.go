@@ -1,12 +1,14 @@
 package yesmen
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -65,6 +67,7 @@ const archiveStamp = "20060102-150405"
 func deletionEntry(entry string, archived bool) (original, name, stagedID string, ok bool) {
 	original = entry
 	if rest, pending := strings.CutPrefix(entry, deletingPrefix); pending {
+		rest = strings.TrimPrefix(rest, "v1-")
 		var found bool
 		stagedID, original, found = strings.Cut(rest, ".")
 		if !found || len(stagedID) != 32 {
@@ -334,6 +337,46 @@ func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, regist
 	if err := check(); err != nil {
 		return false, err
 	}
+	if recoverableDeletionName(want.Entry) && (force == nil || force.approval == nil) {
+		return false, errDeletionReceipt
+	}
+	var durableRelocations map[string]durableRelocationReceipt
+	saveWorktreeRecords := func(ws *os.Root) error {
+		durableRelocations = make(map[string]durableRelocationReceipt)
+		return s.checkWorktreeRecords(ctx, ws, relocated, func(r WorktreeRecord, record json.RawMessage, moved string) error {
+			receipt, err := newRelocationReceipt(want, record, moved)
+			if err == nil {
+				var proof durableRelocationReceipt
+				proof, err = s.recordPrimaryRelocation(parent, receipt)
+				if err == nil {
+					durableRelocations[receipt.name] = proof
+				}
+			}
+			if err != nil {
+				return &DeletionIssue{Message: "Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.", Args: []any{r.Dir, filepath.Join(parent.Name(), relocationFolder)}, Cause: err}
+			}
+			return nil
+		})
+	}
+	verifyWorktreeRecords := func(ws *os.Root) error {
+		if err := s.checkWorktreeRecords(ctx, ws, relocated, func(_ WorktreeRecord, record json.RawMessage, moved string) error {
+			receipt, err := newRelocationReceipt(want, record, moved)
+			if err != nil {
+				return err
+			}
+			if err := s.verifyRelocationReceipt(parent, receipt, durableRelocations[receipt.name]); err != nil {
+				return err
+			}
+			delete(durableRelocations, receipt.name)
+			return nil
+		}); err != nil {
+			return err
+		}
+		if len(durableRelocations) != 0 {
+			return errRelocationReceiptChanged
+		}
+		return nil
+	}
 	preflight := func(phase deletionWalk) error {
 		ws, err := openDeletionTarget(s, parent, want)
 		if err != nil {
@@ -346,22 +389,43 @@ func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, regist
 		if err := registrations(ctx, ws.Name()); err != nil {
 			return err
 		}
-		if phase == prepareDeletion {
-			if err := s.checkWorktreeRecords(ctx, parent, ws, want, relocated, true); err != nil {
+		coverage := deletionCoverage{}
+		if force != nil && want.Pending {
+			coverage.output = newDeletionInventory(nil)
+			if force.approval != nil {
+				f, cursor, err := force.openApproval(ctx, parent, want.Entry)
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				coverage.input, coverage.subset = cursor, true
+			}
+		}
+		walk := func() error {
+			if err := walkDeletion(ctx, ws, phase, force, coverage); err != nil {
 				return err
 			}
-			if err := walkWorkspaceDeletion(ctx, ws, phase, force); err != nil {
+			if coverage.output != nil && coverage.output.digest() != force.scope {
+				return errCheckoutPreviewChanged
+			}
+			return nil
+		}
+		if phase == prepareDeletion {
+			if err := saveWorktreeRecords(ws); err != nil {
+				return err
+			}
+			if err := walk(); err != nil {
 				return err
 			}
 			return force.checkIdle(ctx, ws)
 		}
-		if err := walkWorkspaceDeletion(ctx, ws, phase, force); err != nil {
+		if err := walk(); err != nil {
 			return err
 		}
 		if err := force.checkIdle(ctx, ws); err != nil {
 			return err
 		}
-		return s.checkWorktreeRecords(ctx, parent, ws, want, relocated, true)
+		return saveWorktreeRecords(ws)
 	}
 	if err := preflight(inspectDeletion); err != nil {
 		return false, err
@@ -375,7 +439,8 @@ func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, regist
 		}
 	}
 	entry := want.Entry
-	if staged == "" {
+	upgradeStage := want.Pending && !recoverableDeletionName(want.Entry) && force != nil && len(force.git) != 0
+	if staged == "" || upgradeStage {
 		// Recheck after draining. Prepare verified cache directories before
 		// detaching, so a permission refusal leaves the original recoverable.
 		if err := check(); err != nil {
@@ -385,6 +450,29 @@ func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, regist
 			return false, err
 		}
 		entry = deletingPrefix + want.Instance + "." + original
+		var receiptTemp string
+		if force != nil && len(force.git) != 0 {
+			entry = managedDeletingPrefix + want.Instance + "." + original
+			ws, err := openDeletionTarget(s, parent, want)
+			if err != nil {
+				return false, err
+			}
+			var digest [32]byte
+			receiptTemp, digest, err = s.buildDeletionApproval(ctx, parent, ws, entry, force)
+			if err == nil {
+				err = force.checkIdle(ctx, ws)
+			}
+			ws.Close()
+			if receiptTemp != "" {
+				defer parent.Remove(receiptTemp)
+			}
+			if err != nil {
+				return false, err
+			}
+			bound := *force
+			bound.approvalDigest = digest
+			force = &bound
+		}
 		// Hire, worker metadata and board transactions share this mutex. Keep
 		// their paths valid through the move, then release it before the purge.
 		err := func() error {
@@ -396,36 +484,44 @@ func (s *Store) deleteWorkspace(ctx context.Context, want DeletionTarget, regist
 			if err := check(); err != nil {
 				return err
 			}
+			if receiptTemp != "" {
+				if err := parent.Rename(receiptTemp, receiptName(entry)); err != nil {
+					return err
+				}
+				if err := syncRelocationDirectory(parent); err != nil {
+					return err
+				}
+			}
 			return parent.Rename(want.Entry, entry)
 		}()
 		if err != nil {
 			return false, err
 		}
-		detached = !want.Archived
+		detached = !want.Archived && !want.Pending
 		if release != nil {
 			release()
 		}
 	}
 	// Reopen and verify the moved object before touching any bytes, including
 	// on retry after process restart. Never RemoveAll a reusable name.
-	err = s.purgeDetached(ctx, parent, entry, want.Archived, force)
+	err = s.purgeDetached(ctx, parent, entry, want, force, registrations, verifyWorktreeRecords)
 	if err != nil {
 		return detached, &DeletionIssue{Message: "Deletion is incomplete at %s. Check the remaining files, then retry in Settings → Storage → Stored workspaces.", Args: []any{filepath.Join(parent.Name(), entry)}, Cause: err}
 	}
 	return detached, nil
 }
 
-func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string, archived bool, force *ForceDeletion) error {
+func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string, target DeletionTarget, force *ForceDeletion, registrations func(context.Context, string) error, verifyWorktreeRecords func(*os.Root) error) error {
 	ws, err := directDir(parent, entry)
 	if err != nil {
 		return err
 	}
 	defer ws.Close()
-	original, _, stageID, ok := deletionEntry(entry, archived)
+	original, _, stageID, ok := deletionEntry(entry, target.Archived)
 	if !ok || stageID == "" {
 		return errors.New("invalid interrupted deletion record")
 	}
-	if _, err := s.deletionIdentity(parent, ws, DeletionTarget{Archived: archived}, original, stageID); err != nil {
+	if _, err := s.deletionIdentity(parent, ws, DeletionTarget{Archived: target.Archived}, original, stageID); err != nil {
 		return err
 	}
 	st, err := ws.Stat(".")
@@ -438,39 +534,107 @@ func (s *Store) purgeDetached(ctx context.Context, parent *os.Root, entry string
 	if err := checkStagedGitHold(ws); err != nil {
 		return err
 	}
-	// Repeat the read-only walk after the rename and before the first unlink.
-	// A Git data hold must leave the entire staged instance recoverable.
-	if err := walkWorkspaceDeletion(ctx, ws, inspectDeletion, force); err != nil {
+	coverage := deletionCoverage{}
+	var reset func() (*deletionCursor, error)
+	managed := recoverableDeletionName(entry)
+	if managed {
+		if err := syncRelocationDirectory(parent); err != nil {
+			return err
+		}
+		f, _, digest, bodySize, err := readDeletionApproval(ctx, parent, entry)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if force == nil || digest != force.approvalDigest {
+			return errDeletionReceipt
+		}
+		reset = func() (*deletionCursor, error) { return approvalCursor(f, bodySize) }
+		coverage.input, err = reset()
+		if err != nil {
+			return err
+		}
+		coverage.subset = force.approval != nil
+	}
+	if force != nil && (!managed || target.Pending) {
+		f, name, err := openDeletionSpool(parent, target.Instance, "scope")
+		if err != nil {
+			return err
+		}
+		defer parent.Remove(name)
+		defer f.Close()
+		out := bufio.NewWriterSize(f, 64<<10)
+		coverage.output = newDeletionInventory(out)
+		reset = func() (*deletionCursor, error) {
+			if err := out.Flush(); err != nil {
+				return nil, err
+			}
+			return newDeletionCursor(io.NewSectionReader(f, 0, coverage.output.size)), nil
+		}
+	}
+	// Recheck the renamed object before any unlink. The first pass checks the
+	// full approved scope, and the purge verifies each entry as it reaches it.
+	if err := walkDeletion(ctx, ws, inspectDeletion, force, coverage); err != nil {
 		return err
+	}
+	if target.Pending && coverage.output != nil && coverage.output.digest() != force.scope {
+		return errCheckoutPreviewChanged
 	}
 	if err := force.checkIdle(ctx, ws); err != nil {
 		return err
 	}
-	if force != nil && len(force.git) != 0 {
+	if err := registrations(ctx, ws.Name()); err != nil {
+		return err
+	}
+	if err := verifyWorktreeRecords(ws); err != nil {
+		return err
+	}
+	if force != nil && (len(force.git) != 0 || force.approval != nil) {
 		if now, err := parent.Lstat(entry); err != nil || !os.SameFile(st, now) {
 			return errors.New("the detached directory changed")
 		}
 		if err := checkStagedGitHold(ws); err != nil {
 			return err
 		}
-		if err := force.recheckLocalGit(ctx, ws); err != nil {
+		if force.approval == nil {
+			if err := force.recheckLocalGit(ctx, ws); err != nil {
+				return err
+			}
+		} else if err := force.checkGitRemoval(ctx, ws); err != nil {
 			return err
 		}
 	}
-	if err := walkWorkspaceDeletion(ctx, ws, purgeDeletion, force); err != nil {
+	var purge deletionCoverage
+	if reset != nil {
+		purge.input, err = reset()
+		if err != nil {
+			return err
+		}
+	}
+	if err := walkDeletion(ctx, ws, purgeDeletion, force, purge); err != nil {
 		return err
 	}
 	if now, err := parent.Lstat(entry); err != nil || !os.SameFile(st, now) {
 		return errors.New("the detached directory changed")
 	}
-	return parent.Remove(entry) // empty directory only
+	if err := parent.Remove(entry); err != nil {
+		return err
+	} // empty directory only
+	if managed {
+		// Persist stage removal before discarding the only cold-recovery record.
+		// A crash can leave a stale receipt, never a stage without its receipt.
+		if syncRelocationDirectory(parent) == nil {
+			_ = parent.Remove(receiptName(entry))
+		}
+	}
+	return nil
 }
 
 // RelocatedPrimary proves the registered checkout now lives outside the selected
 // archive. Callers without access to the pool keep the original refusal.
 type RelocatedPrimary func(context.Context, string, WorktreeRecord) (string, error)
 
-func (s *Store) checkWorktreeRecords(ctx context.Context, parent, ws *os.Root, target DeletionTarget, relocated []RelocatedPrimary, save bool) error {
+func (s *Store) checkWorktreeRecords(ctx context.Context, ws *os.Root, relocated []RelocatedPrimary, recordRelocation func(WorktreeRecord, json.RawMessage, string) error) error {
 	meta, err := directDir(ws, ".yesman")
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -509,11 +673,10 @@ func (s *Store) checkWorktreeRecords(ctx context.Context, parent, ws *os.Root, t
 			if err != nil {
 				return &DeletionIssue{Message: "Could not verify the new location of primary worktree %q. Move it with Git and keep its registration.", Args: []any{r.Dir}, Cause: err}
 			}
-			if !save {
-				continue
-			}
-			if err := s.recordPrimaryRelocation(parent, target, record, moved); err != nil {
-				return &DeletionIssue{Message: "Could not save the relocation record for %q. Check write permissions and filesystem sync support for %s, then try again.", Args: []any{r.Dir, filepath.Join(parent.Name(), relocationFolder)}, Cause: err}
+			if recordRelocation != nil {
+				if err := recordRelocation(r, record, moved); err != nil {
+					return err
+				}
 			}
 			continue
 		}

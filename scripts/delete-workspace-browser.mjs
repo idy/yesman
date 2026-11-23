@@ -298,12 +298,30 @@ async function run(engine, name, lang) {
     await page.evaluate(() => rpc('MakeInterruptedWorkspace'));
     await page.reload();
     await openStorage(); await list.click();
-    const interrupted = stored.getByRole('button', {name:/\.deleting-[0-9a-f]+\.interrupted-build/});
+    const interrupted = stored.getByRole('button', {name:/\.deleting-(?:v1-)?[0-9a-f]+\.interrupted-build/});
     const reviewRemaining = dialog.getByRole('button', {name:/^(Review remaining files…|检查剩余文件…)$/});
     const deleteRemaining = dialog.getByRole('button', {name:/^(Delete remaining files|删除剩余文件)$/});
+    const partialGit = process.env.YESMAN_TEST_PARTIAL_LOCAL_GIT === '1';
+    const commitsBeforeRetry = await count('ForceDeleteWorkspace');
+    const verifyCancel = async key => {
+      await interrupted.click();
+      await reviewRemaining.click();
+      assert(await cancel.evaluate(n => n === document.activeElement));
+      if (key) await page.keyboard.press(key); else await cancel.click();
+      await dialog.waitFor({state:'detached'});
+      assert.equal(await count('ForceDeleteWorkspace'), commitsBeforeRetry);
+      if (partialGit) await page.evaluate(() => rpc('VerifyRemainingGit'));
+    };
+    await verifyCancel('Escape');
+    await verifyCancel('Enter');
+    await verifyCancel(null);
     await interrupted.click();
     await reviewRemaining.click();
-    await dialog.getByText(/\.interrupted-build\/build-output/).waitFor();
+    await dialog.getByText(/\.interrupted-build\/build-output$/).waitFor();
+    if (partialGit) {
+      await dialog.getByText(/A-checkout\/\.git$/).waitFor();
+      await dialog.getByText(/Outside repositories, including bare repositories|外部仓库（包括裸仓库）/).waitFor();
+    }
     assert(await cancel.evaluate(n => n === document.activeElement));
     await screenshot('storage-retry');
     await page.evaluate(() => rpc('AddLateStagedFile'));
@@ -315,6 +333,13 @@ async function run(engine, name, lang) {
     await deleteRemaining.click();
     await interrupted.waitFor({state:'detached'});
     await page.evaluate(() => rpc('VerifyRecovery'));
+    if (partialGit) {
+      assert.equal(await count('ForceDeleteWorkspace'), commitsBeforeRetry + 2);
+      assert.deepEqual(await page.evaluate(() => unexpected), []);
+      assert.deepEqual(errors, []);
+      console.log(`${name} ${lang} passed partial Git retry, cancellation, late-file refusal, and fresh confirmation`);
+      return;
+    }
     await page.locator('[data-agent="interrupted-build/lead"]').click({button:'right'});
     await ok.click();
     await dialog.waitFor({state:'detached'});
